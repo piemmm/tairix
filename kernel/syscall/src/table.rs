@@ -2089,29 +2089,6 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Move the kernel's framebuffer console off the firmware's memory onto a
-    /// block the kernel owns below the caller's device's DMA reach, writing
-    /// that surface into `(buf, len)` as one framebuffer
-    /// [`tairix_abi::hwtree::HwResource`] and answering the bytes written.
-    ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::MEM_DMA`] and that `buf` is a non-null `UserPtr`. The
-    /// implementation answers only the driver of a node discovery marked
-    /// [`tairix_abi::HwProperty::BootConsole`], resolved from its task id, and
-    /// parks it until the boot has handed the console on.
-    ///
-    /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`]; the real handler is installed in
-    /// `kernel/core`.
-    fn console_relocate(
-        &self,
-        _caller: &CallerContext<'_>,
-        _buf: u64,
-        _len: usize,
-    ) -> SyscallResult {
-        Err(Errno::NotImplemented)
-    }
-
     /// Allocate a message-signalled interrupt vector and report the
     /// architecture-built MSI doorbell for a PCI function.
     ///
@@ -2425,6 +2402,62 @@ pub trait SyscallHandlers {
         _out: u64,
         _out_cap: usize,
     ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Host the kernel's framebuffer console on the caller's display at
+    /// `width` × `height`, carved under the caller's `Dma` grant `handle` for
+    /// a device driving `reach` address bits, writing where the device
+    /// reaches it into `buf`.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::MEM_DMA`] and that `buf` is a non-null `UserPtr`. The
+    /// implementation answers only the driver of a node discovery marked
+    /// [`tairix_abi::HwProperty::ConsoleHost`], resolved from its task id, and
+    /// parks it while the boot still shows a console the firmware lit.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    #[allow(clippy::too_many_arguments)] // The six ABI arguments, decoded.
+    fn console_adopt(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _width: u32,
+        _height: u32,
+        _reach: DmaReach,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Take the rows the hosted console painted since the last take, writing
+    /// their rectangle into `buf`, or nothing when none are owed.
+    ///
+    /// The dispatcher gates nothing beyond `buf` being a non-null `UserPtr`;
+    /// the implementation answers only the driver instance the console is
+    /// hosted for.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn console_damage(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Give back the memory the console is hosted on, the caller vouching
+    /// that its device no longer reads it.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::MEM_DMA`]; the implementation answers only the live
+    /// driver of the hosting node.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn console_relinquish(&self, _caller: &CallerContext<'_>) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -4278,12 +4311,6 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::HW_NODE_SETTLE => self.handlers.hw_node_settle(caller),
             SyscallNumber::HW_NODE_KEY_SOURCE => self.handlers.hw_node_key_source(caller),
-            SyscallNumber::CONSOLE_RELOCATE => {
-                // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
-                // is the buffer capacity.
-                let len = decode_len(args.0[1])?;
-                self.handlers.console_relocate(caller, args.0[0], len)
-            }
             SyscallNumber::WAITSET_CLOSE => self.handlers.waitset_close(caller, args.0[0]),
             SyscallNumber::PORT_UNBIND => self.handlers.port_unbind(caller, args.0[0]),
             SyscallNumber::CALL_PEER_PORT => {
@@ -4426,6 +4453,30 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     out_cap,
                 )
             }
+            SyscallNumber::CONSOLE_ADOPT => {
+                // args[0] is the `Dma` grant handle; args[1]/args[2] the mode's
+                // width and height; args[3] the device's address bits; args[4]
+                // the non-null out `UserPtr` (dispatcher-checked) and args[5]
+                // its capacity.
+                let reach = decode_reach(args.0[3])?;
+                let len = decode_len(args.0[5])?;
+                self.handlers.console_adopt(
+                    caller,
+                    args.0[0],
+                    decode_u32(args.0[1]),
+                    decode_u32(args.0[2]),
+                    reach,
+                    args.0[4],
+                    len,
+                )
+            }
+            SyscallNumber::CONSOLE_DAMAGE => {
+                // args[0] is the non-null out `UserPtr` (dispatcher-checked);
+                // args[1] is its capacity.
+                let len = decode_len(args.0[1])?;
+                self.handlers.console_damage(caller, args.0[0], len)
+            }
+            SyscallNumber::CONSOLE_RELINQUISH => self.handlers.console_relinquish(caller),
             SyscallNumber::SYSINFO_INTROSPECT => {
                 // args[0] is the `IntrospectDomain` discriminant (validated by
                 // the handler); args[1] is the domain-specific selector/offset;
@@ -5649,13 +5700,6 @@ mod tests {
             Ok(0)
         }
 
-        fn console_relocate(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
-            self.record("console_relocate");
-            // Echo the capacity so the reachability test sees both arguments
-            // decoded.
-            Ok(len as u64)
-        }
-
         fn msi_alloc(&self, _c: &CallerContext<'_>, _out: u64, out_len: usize) -> SyscallResult {
             self.record("msi_alloc");
             // Echo the buffer length so the reachability test can assert the
@@ -6182,6 +6226,31 @@ mod tests {
         ) -> SyscallResult {
             self.record("fd_redeem_location");
             Ok(handle)
+        }
+
+        #[allow(clippy::too_many_arguments)] // Matches the trait declaration's justified count.
+        fn console_adopt(
+            &self,
+            _c: &CallerContext<'_>,
+            _handle: u64,
+            width: u32,
+            height: u32,
+            _reach: DmaReach,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("console_adopt");
+            Ok(u64::from(width) + u64::from(height) + len as u64)
+        }
+
+        fn console_damage(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+            self.record("console_damage");
+            Ok(len as u64)
+        }
+
+        fn console_relinquish(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("console_relinquish");
+            Ok(0)
         }
     }
 

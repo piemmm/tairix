@@ -1,5 +1,5 @@
-//! A register-level model of the HVS and its pixel valves, frames the HVS
-//! sees only once flushed, encoders answered by the real `encoder-v1` server,
+//! A register-level model of the HVS and its pixel valves, buffers the HVS
+//! reads where they lie, encoders answered by the real `encoder-v1` server,
 //! and a firmware core clock: what the engine's tests drive it over.
 
 use std::cell::{Cell, RefCell};
@@ -18,12 +18,12 @@ use tairix_abi::driver::mmio::RegisterBlock;
 use tairix_abi::hwlink::LinkRequest;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{Delay, DriverError, Errno, ProcId, PROC_ID_LEN};
+use tairix_display::{BufferMemory, DeviceBuffer, SharedBuffer};
 use tairix_drvrt::testkit::{FakeKernel, Records};
 use tairix_drvrt::Supplier;
 use tairix_encoder::{EncoderServer, Record as EncoderRecord};
 use tairix_linkclient::{ClockClient, EncoderClient, LinkCall};
 
-use crate::frames::{FrameAllocator, FrameMemory};
 use crate::regs::{hvs, pv};
 
 /// One write: the block (`None` for the HVS, else the valve), the offset and
@@ -86,6 +86,22 @@ impl Model {
         }
     }
 
+    /// `channel` finishes compositing a frame: its end is raised in the
+    /// status, and answered whether its interrupt is enabled.
+    pub fn frame_end(&self, channel: usize) -> bool {
+        let status = self.read(None, hvs::DISPSTAT) | hvs::dispstat_eof(channel);
+        self.set(None, hvs::DISPSTAT, status);
+        self.read(None, hvs::DISPCTRL) & hvs::dispctrl_dspeieof(channel) != 0
+    }
+
+    /// One whole frame on `channel`: it ends, and the next starts, latching
+    /// what it was told to. Answers whether the end raised an interrupt.
+    pub fn next_frame(&self, channel: usize) -> bool {
+        let raised = self.frame_end(channel);
+        self.frame(channel);
+        raised
+    }
+
     /// The word at `at` of display-list memory.
     pub fn list_word(&self, at: usize) -> u32 {
         self.read(None, hvs::DLIST + 4 * at)
@@ -101,6 +117,10 @@ impl Model {
 
     pub fn writes(&self) -> Vec<Write> {
         self.0.borrow().writes.clone()
+    }
+
+    pub fn write_count(&self) -> usize {
+        self.0.borrow().writes.len()
     }
 }
 
@@ -122,6 +142,8 @@ impl RegisterBlock for Block {
         state.writes.push((self.1, offset, value));
         match self.1 {
             None if (hvs::displact(0)..=hvs::displact(2)).contains(&offset) => {}
+            // Status bits are cleared by writing them as one.
+            None if offset == hvs::DISPSTAT => state.hvs[offset / 4] &= !value,
             None => state.hvs[offset / 4] = value,
             Some(index) => {
                 let stuck = state.stuck == Some(index) && offset == pv::V_CONTROL;
@@ -144,72 +166,93 @@ impl RegisterBlock for Block {
     }
 }
 
-/// A frame whose bytes the HVS sees only once flushed.
-pub struct ModelFrame {
+/// A buffer the HVS reads where it lies: the bytes a test and the HVS share.
+pub struct ModelBuffer {
     bus: u32,
-    cpu: Vec<u8>,
-    device: Rc<RefCell<Vec<u8>>>,
+    region: u64,
+    bytes: Rc<RefCell<Vec<u8>>>,
 }
 
-impl FrameMemory for ModelFrame {
-    fn bus(&self) -> u32 {
-        self.bus
+impl SharedBuffer for ModelBuffer {
+    fn id(&self) -> u64 {
+        self.region
     }
 
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        &mut self.cpu
-    }
-
-    fn flush(&self, offset: usize, len: usize) {
-        self.device.borrow_mut()[offset..offset + len]
-            .copy_from_slice(&self.cpu[offset..offset + len]);
+    fn with_bytes<R>(&self, read: impl FnOnce(&[u8]) -> R) -> R {
+        read(&self.bytes.borrow())
     }
 }
 
-/// The bytes of a frame the HVS sees.
-pub type DeviceView = Rc<RefCell<Vec<u8>>>;
+impl DeviceBuffer for ModelBuffer {
+    fn device_addr(&self) -> u64 {
+        u64::from(self.bus)
+    }
 
-/// Frames at bus addresses the model hands out, each one's device view kept.
+    fn with_bytes_mut<R>(&mut self, write: impl FnOnce(&mut [u8]) -> R) -> R {
+        write(&mut self.bytes.borrow_mut())
+    }
+}
+
+impl Drop for ModelBuffer {
+    fn drop(&mut self) {
+        // Given back: what the HVS would read there is no longer the
+        // presenter's.
+        self.bytes.borrow_mut().clear();
+    }
+}
+
+/// Every buffer's bytes, by bus address and region, and whether it has been
+/// given back.
+pub type Carved = Rc<RefCell<Vec<(u32, u64, Rc<RefCell<Vec<u8>>>)>>>;
+
+/// Buffers at bus addresses the model hands out.
 #[derive(Clone, Default)]
-pub struct ModelFrames {
-    pub frames: Rc<RefCell<Vec<(u32, DeviceView)>>>,
-    /// Frames the allocator gives before it runs out.
+pub struct ModelBuffers {
+    pub carved: Carved,
+    /// Buffers the allocator gives before it runs out.
     pub limit: Option<usize>,
 }
 
-/// Where the model's frames start on the bus: the legacy alias of RAM.
-const FRAMES_BUS: u32 = 0xC000_0000;
+/// Where the model's buffers start on the bus: the legacy alias of RAM.
+const BUFFERS_BUS: u32 = 0xC000_0000;
 
-impl ModelFrames {
-    /// What the HVS sees at `bus`.
-    pub fn seen(&self, bus: u32) -> Vec<u8> {
-        self.frames
+impl ModelBuffers {
+    /// Whether the buffer at `bus` is still held: its memory not given back.
+    pub fn live(&self, bus: u32) -> bool {
+        self.carved
             .borrow()
             .iter()
-            .find(|(at, _)| *at == bus)
-            .map(|(_, device)| device.borrow().clone())
-            .expect("a frame at that address")
+            .any(|(at, _, bytes)| *at == bus && !bytes.borrow().is_empty())
+    }
+
+    /// The buffer granted as `region`'s bus address.
+    pub fn bus_of(&self, region: u64) -> u32 {
+        self.carved
+            .borrow()
+            .iter()
+            .find(|(_, carved, _)| *carved == region)
+            .map(|(bus, _, _)| *bus)
+            .expect("a buffer granted as that region")
     }
 }
 
-impl FrameAllocator for ModelFrames {
-    type Memory = ModelFrame;
+impl BufferMemory for ModelBuffers {
+    type Region = ModelBuffer;
 
-    fn alloc(&self, len: usize) -> Result<ModelFrame, DriverError> {
-        let mut frames = self.frames.borrow_mut();
-        if self.limit.is_some_and(|limit| frames.len() >= limit) {
+    fn create(&mut self, len: usize) -> Result<ModelBuffer, DriverError> {
+        let mut carved = self.carved.borrow_mut();
+        if self.limit.is_some_and(|limit| carved.len() >= limit) {
             return Err(DriverError::OutOfMemory);
         }
-        let bus = frames.last().map_or(FRAMES_BUS, |(at, device)| {
-            at + u32::try_from(device.borrow().len()).expect("small")
+        let bus = carved.last().map_or(BUFFERS_BUS, |(at, _, bytes)| {
+            at + u32::try_from(bytes.borrow().capacity().max(4096)).expect("small")
         });
-        let device = Rc::new(RefCell::new(vec![0; len]));
-        frames.push((bus, device.clone()));
-        Ok(ModelFrame {
-            bus,
-            cpu: vec![0; len],
-            device,
-        })
+        // A given-back buffer's address is never handed out again here, so
+        // a list naming it is told apart from one naming its successor.
+        let region = 0x100 + carved.len() as u64;
+        let bytes = Rc::new(RefCell::new(vec![0; len]));
+        carved.push((bus, region, bytes.clone()));
+        Ok(ModelBuffer { bus, region, bytes })
     }
 }
 
@@ -483,12 +526,25 @@ impl LinkCall for Encoders {
 #[derive(Clone)]
 pub struct Core {
     pub state: Rc<RefCell<(u64, u64, Vec<u64>)>>,
+    beside: Rc<RefCell<Beside>>,
+    /// Every floor asked from now is refused, though still counted as asked.
+    refusing: Rc<core::cell::Cell<bool>>,
+}
+
+/// The registers a floor is asked beside, and how many writes they had seen
+/// at each.
+#[derive(Default)]
+struct Beside {
+    model: Option<Model>,
+    writes: Vec<usize>,
 }
 
 impl Core {
     pub fn new(hz: u64, max_hz: u64) -> Self {
         Self {
             state: Rc::new(RefCell::new((hz, max_hz, Vec::new()))),
+            beside: Rc::default(),
+            refusing: Rc::default(),
         }
     }
 
@@ -500,6 +556,30 @@ impl Core {
 
     pub fn floors(&self) -> Vec<u64> {
         self.state.borrow().2.clone()
+    }
+
+    /// Refuse every floor asked from now, or stop refusing.
+    pub fn refuse(&self, refusing: bool) {
+        self.refusing.set(refusing);
+    }
+
+    /// From now, note how many writes `model` had seen as each floor is
+    /// asked.
+    pub fn beside(&self, model: &Model) {
+        self.beside.borrow_mut().model = Some(model.clone());
+    }
+
+    /// The writes the model had seen at each floor asked since
+    /// [`Self::beside`].
+    pub fn asked_at(&self) -> Vec<usize> {
+        self.beside.borrow().writes.clone()
+    }
+
+    fn note(&self) {
+        let mut beside = self.beside.borrow_mut();
+        if let Some(writes) = beside.model.as_ref().map(Model::write_count) {
+            beside.writes.push(writes);
+        }
     }
 }
 
@@ -516,11 +596,16 @@ impl LinkCall for Core {
                 },
             ),
             ClockRequest::Floor { hz, .. } => {
+                self.note();
                 state.2.push(hz);
+                if self.refusing.get() {
+                    return Err(Errno::Busy);
+                }
                 state.0 = state.0.max(hz);
                 encode_run_reply(reply, state.0)
             }
             ClockRequest::Release(_) => {
+                self.note();
                 state.2.push(0);
                 encode_release_reply(reply)
             }
@@ -563,5 +648,18 @@ impl LinkCall for Link {
             Self::Encoder(link) => link.reap(ticket, reply),
             Self::Clock(link) => link.reap(ticket, reply),
         }
+    }
+}
+
+impl ModelBuffers {
+    /// Write `bytes` at `offset` of the buffer granted as `region`, as its
+    /// presenter does through its own mapping.
+    pub fn draw(&self, region: u64, offset: usize, bytes: &[u8]) {
+        let carved = self.carved.borrow();
+        let (_, _, held) = carved
+            .iter()
+            .find(|(_, at, _)| *at == region)
+            .expect("a buffer granted as that region");
+        held.borrow_mut()[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 }

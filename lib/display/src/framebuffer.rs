@@ -1,42 +1,36 @@
 //! The generic linear-framebuffer surface engine.
 //!
-//! Implements [`Display`] over a single firmware-provided linear pixel
-//! surface. The engine is platform-neutral: it copies a fully-rendered
-//! frame into a linear framebuffer whose physical base, geometry, and
-//! pixel encoding the hosting process discovered and handed in — the
-//! `drivers/display/framebuffer` `Run` binary resolves them from its
-//! kernel-issued device-resource grants (`sole_framebuffer`), and the
-//! framebuffer QEMU verticals hand-assemble them from the board they
-//! synthesise. The same engine serves every platform whose firmware
-//! exposes such a surface (the aarch64 Raspberry Pi mailbox framebuffer,
-//! the riscv64 `virt` board's `ramfb`, any UEFI GOP linear frame
-//! buffer); the wasm32 canvas target presents the same surface shape
-//! through the browser host.
-//!
-//! Compositing, damage tracking, and GPU acceleration live above this
-//! engine in `userland/gui/wm`; the engine itself only owns the final
-//! scan-out copy (`lib/abi/src/driver/display.rs`).
+//! Implements [`Display`] over a single linear pixel surface the hosting
+//! process discovered and mapped: the `drivers/display/framebuffer` `Run`
+//! binary from its kernel-issued grant (`sole_framebuffer`), the VESA driver
+//! from the VBE mode block, the QEMU verticals from the board they synthesise.
+//! A presenter fills a buffer the engine allocated in shared memory, and a
+//! present copies its damaged rows into the surface, so the buffer is free
+//! again when the present returns.
 //!
 //! # Capabilities
 //!
 //! Mapping the surface requires
 //! [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP): the
-//! framebuffer is device-visible memory and is reached only through the
+//! framebuffer is device-visible memory reached only through the
 //! capability-gated [`MmioMapper`], never through a pointer the engine
-//! synthesises itself (no ambient authority).
+//! synthesises itself.
 
-use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, SeatGate};
+use tairix_abi::display_ipc::DISPLAY_MAX_BUFFERS;
+use tairix_abi::driver::display::{
+    AllocatedBuffer, BufferId, DamageRect, Display, DisplayFormat, DisplayMode, Presented, SeatGate,
+};
 use tairix_abi::driver::mmio::{MmioMapError, WindowError};
 use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapper, RegisterWindow};
+use tairix_inline::ArrayVec;
+
+use crate::memory::{frames_budget, BufferIds, BufferMemory, SharedBuffer};
 
 /// Discovered description of a linear framebuffer.
 ///
 /// The hosting process fills this in from the platform's framebuffer
-/// hand-off (the kernel-granted
-/// [`Framebuffer`](tairix_abi::hwtree::HwResourceKind::Framebuffer)
-/// resource, UEFI GOP, the Pi mailbox, `ramfb`) and passes it to
-/// [`Framebuffer::open`]. The engine never invents these values; it only
-/// validates them and maps the region they describe.
+/// hand-off and passes it to [`Framebuffer::open`]. The engine never invents
+/// these values; it only validates them and maps the region they describe.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FramebufferConfig {
     /// Device-visible physical base address of scanline 0, pixel 0.
@@ -45,91 +39,79 @@ pub struct FramebufferConfig {
     pub width_px: u32,
     /// Surface height in pixels.
     pub height_px: u32,
-    /// Distance in bytes between the start of consecutive scanlines.
-    /// May exceed `width_px * format.bytes_per_pixel()` when the
-    /// firmware pads scanlines.
+    /// Distance in bytes between the start of consecutive scanlines; may
+    /// exceed `width_px * format.bytes_per_pixel()` where the firmware pads.
     pub stride_bytes: u32,
     /// Pixel encoding the firmware programmed the surface for.
     pub format: DisplayFormat,
 }
 
 impl FramebufferConfig {
-    /// Number of bytes the surface occupies
-    /// (`stride_bytes * height_px`), or [`DriverError::LengthOutOfRange`]
-    /// if the product overflows the host's address width.
-    fn surface_len(&self) -> Result<usize, DriverError> {
-        let bytes = u64::from(self.stride_bytes)
-            .checked_mul(u64::from(self.height_px))
-            .ok_or(DriverError::LengthOutOfRange)?;
-        usize::try_from(bytes).map_err(|_| DriverError::LengthOutOfRange)
-    }
-
-    /// Validate the geometry and return the surface length in bytes.
-    ///
-    /// Rejects a zero-sized surface and a stride that cannot hold one
-    /// scanline of `width_px` pixels in `format`. Failing closed here
-    /// keeps every later access inside the mapped window.
+    /// Validate the geometry and return the surface length in bytes:
+    /// refused for a zero-sized surface or a stride that cannot hold one
+    /// scanline, so every later access stays inside the mapped window.
     fn validate(&self) -> Result<usize, DriverError> {
-        if self.width_px == 0 || self.height_px == 0 {
-            return Err(DriverError::LengthOutOfRange);
-        }
         let min_stride = self
             .width_px
             .checked_mul(self.format.bytes_per_pixel())
             .ok_or(DriverError::LengthOutOfRange)?;
-        if self.stride_bytes < min_stride {
+        if self.width_px == 0 || self.height_px == 0 || self.stride_bytes < min_stride {
             return Err(DriverError::LengthOutOfRange);
         }
-        let len = self.surface_len()?;
-        if len == 0 {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        Ok(len)
+        bytes(self.stride_bytes, self.height_px)
     }
 }
 
-/// A linear framebuffer surface mapped through the host's
-/// [`MmioMapper`].
-///
-/// The engine owns the [`RegisterWindow`] for the whole load: dropping
-/// the [`Framebuffer`] drops the window, which is the hosting process's
-/// quiesce step (the kernel reclaims the mapping on unload).
-/// Reloading is simply calling [`Framebuffer::open`] again.
-///
-/// `'h` borrows the opening [`DriverHost`]: the engine captures the
-/// host's [`SeatGate`], so every present re-checks the presenting
-/// client's live seat lease before touching the surface. A host with no
-/// gate wired (headless bring-up, or a service that gates presents
-/// upstream through the display-protocol lease check) presents ungated
-/// here.
-pub struct Framebuffer<'h> {
-    window: RegisterWindow,
-    mode: DisplayMode,
-    surface_len: usize,
-    seat: Option<&'h dyn SeatGate>,
+/// `stride` × `rows` bytes, checked against the host's address width.
+fn bytes(stride: u32, rows: u32) -> Result<usize, DriverError> {
+    usize::try_from(u64::from(stride) * u64::from(rows)).map_err(|_| DriverError::LengthOutOfRange)
 }
 
-impl<'h> Framebuffer<'h> {
-    /// Map the firmware framebuffer described by `config` and bring the
-    /// surface online.
-    ///
-    /// Obtains the host's [`MmioMapper`], maps exactly
-    /// `stride_bytes * height_px` bytes at `config.phys_base`, and
-    /// returns an engine ready to [`present`](Display::present).
+/// One buffer the engine allocated.
+struct Buffer<R> {
+    id: BufferId,
+    region: R,
+    width_px: u32,
+    height_px: u32,
+    stride_bytes: u32,
+}
+
+/// A linear framebuffer surface mapped through the host's [`MmioMapper`],
+/// and the buffers its presenter fills.
+///
+/// `'h` borrows the opening [`DriverHost`]: the engine captures the host's
+/// [`SeatGate`], so every present re-checks the presenting client's live seat
+/// lease before touching the surface. A host with no gate wired (a service
+/// that gates presents through the display-protocol lease check) presents
+/// ungated here.
+pub struct Framebuffer<'h, M: BufferMemory> {
+    window: RegisterWindow,
+    mode: DisplayMode,
+    seat: Option<&'h dyn SeatGate>,
+    memory: M,
+    buffers: ArrayVec<Buffer<M::Region>, DISPLAY_MAX_BUFFERS>,
+    /// Bytes the buffers hold together, bounded by a few surfaces' worth.
+    held_bytes: usize,
+    ids: BufferIds,
+}
+
+impl<'h, M: BufferMemory> Framebuffer<'h, M> {
+    /// Map the framebuffer `config` describes and allocate its presenter's
+    /// buffers in `memory`.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::LengthOutOfRange`] if `config` describes a
-    ///   zero-sized surface or a stride too small for one scanline.
+    /// * [`DriverError::LengthOutOfRange`] if `config` describes a zero-sized
+    ///   surface or a stride too small for one scanline.
     /// * [`DriverError::PermissionDenied`] if the host did not grant
     ///   [`CapabilityId::MMIO_MAP`].
-    /// * [`DriverError::Unsupported`] if the host exposes no
-    ///   [`MmioMapper`], or the platform cannot map the region.
-    ///
-    /// # Capabilities
-    ///
-    /// Requires [`CapabilityId::MMIO_MAP`].
-    pub fn open(host: &'h dyn DriverHost, config: FramebufferConfig) -> Result<Self, DriverError> {
+    /// * [`DriverError::Unsupported`] if the host exposes no [`MmioMapper`],
+    ///   or the platform cannot map the region.
+    pub fn open(
+        host: &'h dyn DriverHost,
+        config: FramebufferConfig,
+        memory: M,
+    ) -> Result<Self, DriverError> {
         let surface_len = config.validate()?;
         if !host.has_capability(CapabilityId::MMIO_MAP) {
             return Err(DriverError::PermissionDenied);
@@ -146,77 +128,132 @@ impl<'h> Framebuffer<'h> {
                 stride_bytes: config.stride_bytes,
                 format: config.format,
             },
-            surface_len,
             seat: host.seat_gate(),
+            memory,
+            buffers: ArrayVec::new(),
+            held_bytes: 0,
+            ids: BufferIds::new(),
         })
     }
 
-    /// Copy `frame[..surface_len]` into the mapped window.
-    fn blit(&self, frame: &[u8]) -> Result<(), DriverError> {
-        self.blit_span(frame, 0, self.surface_len)
-    }
-
-    /// Copy `frame[offset..offset + len]` into the window at `offset` —
-    /// the one write path both the full and the region blit share.
-    ///
-    /// A scan-out surface is bulk pixel memory (the kernel maps it
-    /// non-cacheable Normal, not Device registers), so the span is copied in
-    /// one bounds-checked bulk write rather than a register at a time: filling
-    /// a whole frame one word at a time through per-access checked volatile
-    /// writes is pathologically slow (tens of seconds per frame under
-    /// emulation). A miscomputed offset still fails closed — the single bounds
-    /// check rejects a span that would escape the mapping.
-    fn blit_span(&self, frame: &[u8], offset: usize, len: usize) -> Result<(), DriverError> {
-        let end = offset.checked_add(len).ok_or(DriverError::BufferTooSmall)?;
-        let src = frame.get(offset..end).ok_or(DriverError::BufferTooSmall)?;
+    /// Copy `len` bytes of `source` from `from` into the window at `to`.
+    fn blit(&self, source: &[u8], from: usize, to: usize, len: usize) -> Result<(), DriverError> {
+        let end = from.checked_add(len).ok_or(DriverError::BufferTooSmall)?;
+        let src = source.get(from..end).ok_or(DriverError::BufferTooSmall)?;
         self.window
-            .write_bytes(offset, src)
+            .write_bytes(to, src)
             .map_err(WindowError::as_driver_error)
     }
 }
 
-impl Display for Framebuffer<'_> {
+impl<M: BufferMemory> Display for Framebuffer<'_, M> {
     fn output(&self) -> Option<DisplayMode> {
         Some(self.mode)
     }
 
-    fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-        // The present right is derived from the live seat lease, before any
-        // other validation or surface access: a client whose lease was
-        // revoked cannot scan out even though its mapping persists. A host
-        // with no seat wired (headless, boot bring-up) exposes no gate and
-        // the present proceeds ungated.
-        if let Some(gate) = self.seat {
-            gate.check_present()?;
-        }
-        if frame.len() < self.surface_len {
-            return Err(DriverError::BufferTooSmall);
-        }
-        self.blit(frame)
+    fn frame_count(&self) -> u32 {
+        1
     }
 
-    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
-        // Same order as the full present: the lease first, then every
-        // bound of the whole list, then the surface — so a bad rectangle
-        // late in the list refuses the present instead of leaving the ones
-        // before it on screen.
+    fn alloc_buffer(
+        &mut self,
+        width_px: u32,
+        height_px: u32,
+    ) -> Result<AllocatedBuffer, DriverError> {
+        if width_px == 0
+            || height_px == 0
+            || width_px > self.mode.width_px
+            || height_px > self.mode.height_px
+        {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let stride_bytes = width_px
+            .checked_mul(self.mode.format.bytes_per_pixel())
+            .ok_or(DriverError::LengthOutOfRange)?;
+        let len = bytes(stride_bytes, height_px)?;
+        let held = self.held_bytes.saturating_add(len);
+        if self.buffers.is_full() || held > frames_budget(&self.mode).unwrap_or(0) {
+            return Err(DriverError::NoSpace);
+        }
+        let taken = &self.buffers;
+        let id = self
+            .ids
+            .mint(|id| taken.iter().any(|buffer| buffer.id == id))
+            .ok_or(DriverError::NoSpace)?;
+        let region = self.memory.create(len)?;
+        let allocated = AllocatedBuffer {
+            id,
+            region: region.id(),
+            stride_bytes,
+        };
+        self.buffers
+            .try_push(Buffer {
+                id,
+                region,
+                width_px,
+                height_px,
+                stride_bytes,
+            })
+            .map_err(|_| DriverError::NoSpace)?;
+        self.held_bytes = held;
+        Ok(allocated)
+    }
+
+    fn free_buffer(&mut self, id: BufferId) -> Result<(), DriverError> {
+        // A present has finished with its buffer by the time it returns, so
+        // nothing the engine holds is still being read.
+        let at = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.id == id)
+            .ok_or(DriverError::NotFound)?;
+        if let Some(buffer) = self.buffers.swap_remove(at) {
+            let len = bytes(buffer.stride_bytes, buffer.height_px)?;
+            self.held_bytes = self.held_bytes.saturating_sub(len);
+        }
+        Ok(())
+    }
+
+    fn present(&mut self, id: BufferId, damage: &[DamageRect]) -> Result<Presented, DriverError> {
+        // The present right is derived from the live seat lease, before any
+        // other validation or surface access.
         if let Some(gate) = self.seat {
             gate.check_present()?;
         }
         DamageRect::validate_list(damage, &self.mode)?;
-        if frame.len() < self.surface_len {
-            return Err(DriverError::BufferTooSmall);
+        let buffer = self
+            .buffers
+            .iter()
+            .find(|buffer| buffer.id == id)
+            .ok_or(DriverError::NotFound)?;
+        if (buffer.width_px, buffer.height_px) != (self.mode.width_px, self.mode.height_px) {
+            return Err(DriverError::Stale);
         }
-        let stride = self.mode.stride_bytes as usize;
+        let (from_stride, to_stride) = (
+            buffer.stride_bytes as usize,
+            self.mode.stride_bytes as usize,
+        );
         let bpp = self.mode.format.bytes_per_pixel() as usize;
-        for rect in damage {
-            let x0 = rect.x as usize * bpp;
-            let span = rect.width_px as usize * bpp;
-            for row in 0..rect.height_px as usize {
-                let offset = (rect.y as usize + row) * stride + x0;
-                self.blit_span(frame, offset, span)?;
+        buffer.region.with_bytes(|source| {
+            for rect in damage {
+                let (x, y, rows) = (rect.x as usize, rect.y as usize, rect.height_px as usize);
+                let span = rect.width_px as usize * bpp;
+                if from_stride == to_stride && rect.width_px == self.mode.width_px {
+                    // Whole rows with matching strides are one span.
+                    let at = y * from_stride;
+                    self.blit(source, at, at, from_stride * (rows - 1) + span)?;
+                    continue;
+                }
+                for row in y..y + rows {
+                    self.blit(
+                        source,
+                        row * from_stride + x * bpp,
+                        row * to_stride + x * bpp,
+                        span,
+                    )?;
+                }
             }
-        }
-        Ok(())
+            Ok(Presented::Shown)
+        })
     }
 }

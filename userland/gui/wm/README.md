@@ -57,10 +57,10 @@ router**:
   pixels are a function of the whole backdrop beneath them, damage touching a
   visible frosted window whose frost must be **recomputed** promotes that
   window's full bounds into one recompose rectangle, iterated until nothing
-  grows; and `present_accelerated` takes the software
-  fallback outright while any visible window is frosted, because a
-  hardware layer is composed from its own pixels and cannot sample what is
-  already behind it.
+  grows; and a frosted window on a hardware layer is baked flattened — the
+  software composite of its footprint over everything beneath it —
+  because a layer is blended from its own pixels and cannot sample what
+  lies behind it.
 - Retained backdrops (`frost`): a **translucent or backdrop-blurred** window
   is composed over the picture beneath its rectangle, so every frame that
   touches it otherwise recomposes that whole stack. That backdrop is a
@@ -164,13 +164,12 @@ router**:
   A drag costs no per-motion copy of the window's pixels.
 - The `Compositor`: a z-ordered window stack composited over an opaque
   background into a `DisplayMode`-shaped byte frame, presented through a
-  `Display` seam. `present` composites and then moves only what changed:
-  **no damage means no driver call at all** (a wake that changed nothing
-  costs neither a scan-out copy nor a blit), damage that covers the screen
-  is one `Display::present`, and anything else is **one**
-  `Display::present_rects` naming every disjoint dirty rectangle the frame
-  touched — up to `MAX_DAMAGE_RECTS`, past which the list degrades to its
-  bounding box. A frame publishes itself once however scattered it is, and
+  `tairix_display::Presenter`. `present` composites and then moves only
+  what changed: **no damage means no display call at all** (a wake that
+  changed nothing costs neither a copy into a frame nor the driver's), and
+  a frame is **one** `Presenter::present` naming every disjoint dirty
+  rectangle it touched — up to `MAX_DAMAGE_RECTS`, past which the list
+  degrades to its bounding box. A frame publishes itself once however scattered it is, and
   a bounding box that merely *spans* the screen (two far-apart corners do)
   is not whole-screen damage: `tairix_display::damage_list` is the one
   place that tells those apart.
@@ -192,9 +191,10 @@ router**:
 - **Translucency stays in software.** A hardware layer is blended by the
   engine in the scan-out's own 8 bits with a fixed rounding, which is
   exactly what bands a picture under a translucent field, and no layer
-  stack can express a per-pixel dither. `present_accelerated` therefore
-  takes its software fallback when any visible window is translucent as a
-  whole, alongside the backdrop-blur and reveal cases below. A window's own
+  stack can express a per-pixel dither. A window translucent as a whole is
+  therefore baked flattened onto its layer, opaque over what lies beneath
+  it, as a frosted one is, and the layered path stands aside during a
+  reveal (below). A window's own
   anti-aliased corner is not this case: partial coverage on a few edge
   pixels has no gradient to band. Where the compositor *bakes* a window into
   a layer — over its footprint, so its shadow is baked with it, each row
@@ -215,10 +215,10 @@ router**:
   reveal short-circuits, so an unfaded screen costs one comparison per
   encoded pixel and is byte-identical to one that never heard of the
   reveal. A change damages the whole screen, a repeat damages nothing, and
-  a mode change carries the strength over. `present_accelerated` takes its
-  software fallback while a reveal is in flight, because a hardware layer
-  is scanned out as the driver was handed it and would show at full
-  strength while the fade ran.
+  a mode change carries the strength over. The layered path stands aside
+  while a reveal is in flight, because a hardware layer is scanned out as
+  the driver was handed it and would show at full strength while the fade
+  ran.
 - Transients (`add_transient_window`): an app-owned popup
   (`tairix_abi::window_ipc::WindowRequest::CreatePopup`) is an ordinary
   undecorated window that *belongs to* the one that opened it. It is
@@ -368,10 +368,9 @@ router**:
   (`desktop_bounds` reports the footprint either answers). It carries no
   `WindowId`, which is exactly why it can never be raised, focused, moved,
   or restacked through the ordinary window z-order — nothing in that
-  z-order can end up beneath it by accident, either. In
-  `present_accelerated` it is encoded as its own hardware layer, directly
-  on top of the background layer and beneath every window's, so the
-  accelerated and software paths agree pixel-for-pixel. Installing,
+  z-order can end up beneath it by accident, either. On the layered path
+  it is part of the base, composited with every window beneath the lowest
+  layer, so the layered and software paths agree pixel-for-pixel. Installing,
   clearing, or replacing it damages exactly its old and new footprints,
   precisely as a window's own surface replacement does. `repaint_desktop`
   repaints it in place, painting and marking only the rectangles of the

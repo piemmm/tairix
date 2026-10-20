@@ -339,9 +339,10 @@ under a running session.
   only then (D9), so its frames come back into use the moment the output runs
   their mode again, and the next `Configure` replaces them and lights the
   display. `QueryStats` reports the mode scanned out, or none.
-- **Frames, one way.** A client establishes frames through
-  `tairix_display::establish_frames`: the shared region, its grant, the
-  configure, and the ring, which owns the region and unmaps it when dropped.
+- **Frames, one way.** A client takes its frames through
+  `tairix_display::establish_display`: its event port, the configure that
+  has the driver allocate and grant the frames, and their mappings, which
+  the display it answers owns and unmaps when dropped.
 - **The session follows.** It parks on the topic. A present refused `Stale`
   (frames no longer the output's) or `NotFound` (a restarted service holding
   none) suspends presenting until the next announcement, which both a move
@@ -706,20 +707,17 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   (§2.2): the server engine (`DisplayServer`: decode → lease check via
   the `PeerFacts` seam over `call_peer_seat` on every request that acts for
   a seat, `Query` included — only the seat owner learns the mode → exact-mode
-  geometry
-  validation → map-once `ShmMapper` → blit through the `Display` trait;
+  validation → the driver-allocated frames granted to the configuring
+  caller → `Display::present` by buffer id;
   the configure state is bound to the granting lease's *generation*, so a
   revoked or re-acquired seat must reconfigure before it can present; only
   the lease's end or a newer `Configure` releases it, D9) and the client
   (`DisplayClient` over a `DisplayTransport` seam; `RemoteDisplay`
-  implements the *existing* `Display` trait over the client's mapping,
-  keeping each frame's outstanding damage as a disjoint, budgeted
-  `Region`, so `Compositor::present` is unchanged and a double-buffered
-  frame is always current). The in-place `Display::present_rects`
-  evolution landed with a full-blit default, a real partial blit in the
-  framebuffer driver, and the WM compositor naming a whole frame's
-  disjoint damage in one call — the ring advances once per frame and each
-  rectangle is copied at its own size, never as the box spanning them. The
+  implements `tairix_display::Presenter` over its mappings of the granted
+  frames, keeping each frame's outstanding damage as a disjoint, budgeted
+  `Region`, so a frame it draws next is always current). A present names
+  a whole frame's disjoint damage in one call, and each rectangle is
+  copied at its own size, never as the box spanning them. The
   surface-discovery contract landed as `HwResourceKind::Framebuffer`
   (the FDT `simple-framebuffer` model normalised into the hardware tree,
   §18.1): a geometry-carrying, `CAP_MMIO_MAP`-gated scan-out window with
@@ -990,14 +988,14 @@ What it guarantees:
   bring-up, park and serve loop both display services run, so the lease
   handling cannot differ between drivers; a driver's `main` is its surface.
 - **The Pi's power switch.** On a Pi 4 the boot console belongs to the
-  display engine's node (`BootConsole`), so the native engine
+  display engine's node (`ConsoleHost`), so the native engine
   (`drivers/display/bcm2711_hvs`) serves the seat's display and powers its
   outputs down itself (`plans/SOUND.md` §Native HDMI on the Pi 4); no
   firmware blank is involved.
 - **The console leaves the firmware's memory first.** A display engine that
-  takes the screen over from the firmware has the kernel move its
-  framebuffer console onto a block the kernel owns below the engine's DMA
-  reach (`console_relocate`) before it tells the firmware the display is the
+  takes the screen over from the firmware has the kernel host its
+  framebuffer console on a block the kernel owns below the engine's DMA
+  reach (`console_adopt`) before it tells the firmware the display is the
   ARM's, because the firmware may then take its own framebuffer back. The move
   waits until the boot has handed console 0 to `login`: the takeover's mode
   set blanks a sink while it re-locks, and must not land under the Supervisor

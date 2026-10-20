@@ -995,6 +995,63 @@ pub(crate) fn shared_line_input_args(spec: &Spec) -> Vec<OsString> {
 /// ([`Spec::with_runtime_ceiling`]). See [`Spec::runtime_ceiling`].
 const RUNTIME_CEILING_BUDGETS: u32 = 2;
 
+/// The QOM id a run's display device is attached under, which a screendump
+/// names: on x86_64 the board's own VGA beside a `ramfb` is console 0.
+pub const DISPLAY_ID: &str = "display0";
+
+/// The display device a run attaches, if any.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Display {
+    /// None: the guest's console is its serial line.
+    #[default]
+    None,
+    /// A QEMU `ramfb` device: a firmware-programmed linear framebuffer whose
+    /// scan-out surface lives in guest RAM, its geometry programmed over the
+    /// `fw_cfg` device the board carries.
+    Ramfb,
+    /// A virtio GPU offering a `width` × `height` mode, the board's only
+    /// display: on x86_64 the default VGA is removed and the board is `q35`.
+    VirtioGpu {
+        /// The width the device's display information states.
+        width: u32,
+        /// The height it states.
+        height: u32,
+    },
+}
+
+impl Display {
+    /// The `-device` argument attaching `self`: the virtio GPU on the PCI
+    /// transport with `pci` options where a board's virtio devices are PCI
+    /// functions, else on virtio-mmio. `None` for no display.
+    #[must_use]
+    pub fn device(self, pci: Option<&str>) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::Ramfb => Some(format!("ramfb,id={DISPLAY_ID}")),
+            Self::VirtioGpu { width, height } => {
+                let mode = format!("id={DISPLAY_ID},xres={width},yres={height}");
+                Some(match pci {
+                    Some(options) => format!("virtio-gpu-pci,{mode},{options}"),
+                    None => format!("virtio-gpu-device,{mode}"),
+                })
+            }
+        }
+    }
+
+    /// The monitor command dumping this display's screen to `path`: the
+    /// device is named, so the dump is of its console whatever else the board
+    /// shows.
+    #[must_use]
+    pub fn screendump(self, path: &Path) -> String {
+        match self {
+            Self::None => format!("screendump {}", path.display()),
+            Self::Ramfb | Self::VirtioGpu { .. } => {
+                format!("screendump {} {DISPLAY_ID}", path.display())
+            }
+        }
+    }
+}
+
 /// The optional emulated devices a run attaches beyond the board's own.
 ///
 /// Grouped because "which devices does this guest see" is one question a run
@@ -1002,11 +1059,8 @@ const RUNTIME_CEILING_BUDGETS: u32 = 2;
 /// each new device widened a type every vertical constructs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AttachedDevices {
-    /// A QEMU `ramfb` display device: a firmware-programmed linear
-    /// framebuffer whose scan-out surface lives in guest RAM, whose geometry
-    /// the guest programs over `fw_cfg`. The riscv64 and aarch64 `virt`
-    /// boards carry the `fw_cfg` device it rides on; x86_64 ignores it today.
-    pub ramfb: bool,
+    /// The display the guest draws on.
+    pub display: Display,
     /// A `virtio-crypto` device backed by QEMU's builtin cryptodev backend,
     /// for a vertical that drives a real offload engine. The backend offers
     /// AES-CBC, which is what the accelerator vertical checks the device's
@@ -1075,7 +1129,7 @@ impl PointingDevices {
 impl AttachedDevices {
     /// A run that attaches none of them: the board alone.
     pub const NONE: Self = Self {
-        ramfb: false,
+        display: Display::None,
         crypto_accelerator: false,
         message_sources: 0,
         pointing: PointingDevices::NONE,
@@ -1761,12 +1815,10 @@ impl Spec {
         self
     }
 
-    /// Attach a QEMU `ramfb` display device so the guest can program a
-    /// linear framebuffer over `fw_cfg`. Used by the framebuffer-display
-    /// vertical on the riscv64 `virt` board.
+    /// Attach `display` as the guest's display.
     #[must_use]
-    pub fn with_ramfb(mut self) -> Self {
-        self.devices.ramfb = true;
+    pub fn with_display(mut self, display: Display) -> Self {
+        self.devices.display = display;
         self
     }
 
@@ -3755,7 +3807,7 @@ impl InjectionState {
                 self.send(
                     monitor,
                     "screendump",
-                    &format!("screendump {}", dump.path.display()),
+                    &spec.devices.display.screendump(&dump.path),
                 )?;
                 self.dump_state = DumpState::Sent;
             }
@@ -4012,6 +4064,36 @@ pub fn workspace_relative(root: &Path, rel: impl AsRef<OsStr>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_screendump_names_the_display_device_it_attached() {
+        let path = std::path::Path::new("/tmp/screen.ppm");
+        assert_eq!(
+            Display::VirtioGpu {
+                width: 1024,
+                height: 768
+            }
+            .screendump(path),
+            "screendump /tmp/screen.ppm display0"
+        );
+        assert_eq!(
+            Display::Ramfb.screendump(path),
+            "screendump /tmp/screen.ppm display0"
+        );
+        assert_eq!(
+            Display::Ramfb.device(None),
+            Some("ramfb,id=display0".into())
+        );
+        assert_eq!(
+            Display::VirtioGpu {
+                width: 640,
+                height: 480
+            }
+            .device(Some("disable-legacy=on")),
+            Some("virtio-gpu-pci,id=display0,xres=640,yres=480,disable-legacy=on".into())
+        );
+        assert_eq!(Display::None.device(None), None);
+    }
 
     /// An ordinary pointer script must be exhausted, so a choreography that
     /// stopped part-way cannot pass on the guest's exit status; a *bounded*

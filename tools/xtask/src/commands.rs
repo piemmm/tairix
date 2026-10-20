@@ -1942,8 +1942,9 @@ type DriverBundleBuilder =
 /// the display's clocks, all over the same mailbox service. The native
 /// display engine binds the HVS node, which carries the boot console's
 /// surface, and drives each HDMI block through the transmitter driver bound
-/// to it, over `encoder-v1`; an emulated boot's `ramfb` surface binds the
-/// generic framebuffer service. The Broadcom DMA
+/// to it, over `encoder-v1`; an emulated boot's display binds the generic
+/// framebuffer service on a `ramfb` surface, or the virtio-gpu driver on a
+/// virtio GPU. The Broadcom DMA
 /// driver binds the discovered `brcm,bcm2835-dma` and `brcm,bcm2711-dma` nodes
 /// and serves their
 /// channels to the peripheral drivers whose nodes name request lines on it,
@@ -1991,6 +1992,10 @@ const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
     (
         image_drivers::FRAMEBUFFER_STORE_PATH,
         image_drivers::build_framebuffer_bundle,
+    ),
+    (
+        image_drivers::VIRTIO_GPU_STORE_PATH,
+        image_drivers::build_virtio_gpu_bundle,
     ),
     (
         image_drivers::BCM2711_HVS_STORE_PATH,
@@ -2379,7 +2384,7 @@ fn run_session_spec(kernel: &Path, disk_image: &Path, machine: RunMachine) -> ta
     let spec = tairix_qemu::Spec::for_aarch64_kernel(kernel)
         .with_cpus(machine.cpus)
         .with_virtio_blk(disk_image)
-        .with_ramfb()
+        .with_display(tairix_qemu::Display::Ramfb)
         .with_virtio_net_user(image_drivers::VIRT_SESSION_NIC_MAC)
         .windowed_interactive();
     match machine.ram_mib {

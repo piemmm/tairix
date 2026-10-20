@@ -192,7 +192,7 @@ guarantees:
   `Compositor::mutate_frame` helper every such mutation runs through; only a
   scale or theme change drops the whole cache.
 - The cache is an accelerator, never a correctness requirement: each pass
-  (`composite`, `present_accelerated`) first runs `ensure_chrome` under the
+  (`composite`, and a layered present's bakes) first runs `ensure_chrome` under the
   exclusive borrow, then reads with `peek` during the immutable row/column
   walk, and anything the cache refuses or evicts mid-pass is built for that
   pass alone. The composited frame is byte-identical warm, emptied, and with a
@@ -668,11 +668,9 @@ What it guarantees:
   row already skips the desktop, the background fill and every window below
   it, and a second occlusion mechanism beside that one is forbidden (§2.2,
   `plans/FIX-DESKTOP-SPEEDUP.md` Stage B).
-- **Promotion is not reached in production.** It lives on
-  `Compositor::present_accelerated`, and the live session presents every
-  frame through the software composite until
-  `plans/FIX-DISPLAY-ACCELERATION.md` carries a layer stack across the display
-  service; that plan owns reaching it. What the compositor did with each frame
+- **Promotion is reached where the display has a layer engine** (the Pi 4's
+  HVS, `plans/FIX-DISPLAY-ACCELERATION.md`); on one without (virtio-gpu, a
+  framebuffer) every frame is composited. What the compositor did with each frame
   is its own record (`Compositor::presentation`: composited, layered, or the
   one window promoted), which the session's `WINDOW_SIZED` witness states, so
   a vertical holds the path to the frame rather than assuming it.

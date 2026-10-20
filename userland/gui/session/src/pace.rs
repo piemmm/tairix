@@ -27,10 +27,16 @@
 //! or a drag — so there is no second frame-period constant, and an animated
 //! surface is never woken for a frame the pacer would then refuse. What the
 //! session animates is stepped only on a frame that is [due](FramePacer::due),
-//! so a burst of input between frames costs no animation step at all. Real vsync
-//! takes the deadline from the flip a display driver signals, in this same
-//! place (`plans/FIX-DISPLAY-ACCELERATION.md`); no driver reports a refresh
-//! today, so a mode field for one would be an ABI with no producer.
+//! so a burst of input between frames costs no animation step at all.
+//!
+//! # A display that flips paces the frames itself
+//!
+//! A display whose engine reads the frame it shows takes a present at its next
+//! frame start and posts the latch when it has. Until then it is not ready,
+//! and a frame produced meanwhile is held without a deadline: the latch is
+//! what wakes the session, and the next frame is admitted on that wake. Such
+//! a display presents at most one frame per refresh by construction, so the
+//! period no longer applies to it.
 
 use tairix_theme::Timeline;
 
@@ -51,6 +57,12 @@ pub struct FramePacer {
     /// Whether damage is being held for the next deadline. Drives
     /// [`park_deadline_ns`](Self::park_deadline_ns).
     held: bool,
+    /// Whether the damage held waits for the display's latch, which wakes
+    /// the session itself, rather than for the period.
+    for_flip: bool,
+    /// Whether the display took the last frame at its next flip, and so
+    /// paces frames by its flips.
+    flips: bool,
 }
 
 impl FramePacer {
@@ -60,22 +72,31 @@ impl FramePacer {
         Self {
             last_ns: None,
             held: false,
+            for_flip: false,
+            flips: false,
         }
     }
 
     /// Whether the frame this wake produced is composited and presented now,
-    /// rather than held for the next deadline.
+    /// rather than held for the next deadline or the display's latch.
     ///
     /// `damaged` is the compositor's own answer to whether a composite would
-    /// recompose a pixel. An undamaged frame is never held and never starts
+    /// recompose a pixel, and `ready` the display's to whether it may be
+    /// handed a frame. An undamaged frame is never held and never starts
     /// the period: presenting it moves nothing, and it is what re-reads the
     /// frame counters as idle, so holding it would suppress that reading and
     /// starting the period would delay the next real frame behind it.
     ///
     /// A clock that has jumped behind the last frame admits rather than
     /// stalling the screen for the length of the jump.
-    pub fn admit(&mut self, now_ns: u64, damaged: bool) -> bool {
-        if damaged && self.remaining_ns(now_ns) != 0 {
+    pub fn admit(&mut self, now_ns: u64, damaged: bool, ready: bool) -> bool {
+        if damaged && !ready {
+            self.held = true;
+            self.for_flip = true;
+            return false;
+        }
+        self.for_flip = false;
+        if damaged && !self.flips && self.remaining_ns(now_ns) != 0 {
             self.held = true;
             return false;
         }
@@ -84,6 +105,12 @@ impl FramePacer {
             self.last_ns = Some(now_ns);
         }
         true
+    }
+
+    /// Note how the display took the frame last admitted: `queued` for one
+    /// it shows from its next flip, which paces the frames from then on.
+    pub fn presented(&mut self, queued: bool) {
+        self.flips = queued;
     }
 
     /// Whether a frame drawn at `now_ns` is due: what the session steps
@@ -114,7 +141,10 @@ impl FramePacer {
     /// cannot spin between a refusal and its deadline.
     #[must_use]
     pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        park_within(park_ns, self.held.then(|| self.remaining_ns(now_ns)))
+        park_within(
+            park_ns,
+            (self.held && !self.for_flip).then(|| self.remaining_ns(now_ns)),
+        )
     }
 
     /// Nanoseconds left of the current frame period: `0` once the next frame

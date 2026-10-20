@@ -116,7 +116,7 @@ fn blocks(
         PaneBlock::half("FRAME WORK — COUNTS ONLY", frame_block(frame)),
         PaneBlock::half(
             "COMPOSITING PATH",
-            BlockBody::Facts(path_facts(sample, stats)),
+            BlockBody::Facts(path_facts(sample, frame, stats)),
         ),
         PaneBlock::full(
             "GRAPHICS DEVICE",
@@ -157,20 +157,29 @@ fn frame_block(frame: Option<FrameReport>) -> BlockBody {
 
 /// How the desktop composites, and what the device it composites onto can do
 /// in hardware.
-fn path_facts(sample: &Sample, stats: Option<&DisplayStats>) -> Vec<ReadingFact> {
-    let mut facts = alloc::vec![ReadingFact::text(
-        "Compositing path",
-        "software · lib/raster",
-    )];
+fn path_facts(
+    sample: &Sample,
+    frame: Option<FrameReport>,
+    stats: Option<&DisplayStats>,
+) -> Vec<ReadingFact> {
+    let layers = frame.map_or(0, |frame| frame.layers);
+    let path = if layers == 0 {
+        String::from("software · lib/raster")
+    } else {
+        format!("hardware layers · {layers}")
+    };
+    let mut facts = alloc::vec![ReadingFact::text("Compositing path", path)];
     match stats.map(|stats| stats.device.accel) {
-        // A device with a hardware compositor still composites in software
-        // here: the desktop's layer path is a separate stage, so the row
-        // states what the device offers and that the desktop is not taking
-        // it — one row, because a reader asking either question wants both.
+        // What the device offers and whether the last frame took it, in one
+        // row, because a reader asking either question wants both.
         Some(Some(caps)) => {
             facts.push(ReadingFact::text(
                 "Accelerated layers",
-                "available · not in use",
+                if layers == 0 {
+                    "available · not in use"
+                } else {
+                    "in use"
+                },
             ));
             facts.push(ReadingFact::text(
                 "Max hardware layers",
@@ -184,6 +193,10 @@ fn path_facts(sample: &Sample, stats: Option<&DisplayStats>) -> Vec<ReadingFact>
                 "Per-layer opacity",
                 if caps.per_layer_opacity { "yes" } else { "no" },
             ));
+            facts.push(ReadingFact::text(
+                "Hardware scaling",
+                if caps.hw_scaling { "yes" } else { "no" },
+            ));
         }
         Some(None) => facts.push(ReadingFact::text(
             "Accelerated layers",
@@ -192,6 +205,17 @@ fn path_facts(sample: &Sample, stats: Option<&DisplayStats>) -> Vec<ReadingFact>
         None => {
             let absence = Unmeasured::from_absence(sample.absence(DegradedField::GpuDeviceStats));
             facts.push(ReadingFact::absent("Accelerated layers", absence));
+        }
+    }
+    match stats.map(|stats| stats.device.cursor) {
+        Some(Some(cursor)) => facts.push(ReadingFact::text(
+            "Cursor plane",
+            format!("up to {}×{}", cursor.max_width_px, cursor.max_height_px),
+        )),
+        Some(None) => facts.push(ReadingFact::text("Cursor plane", "none")),
+        None => {
+            let absence = Unmeasured::from_absence(sample.absence(DegradedField::GpuDeviceStats));
+            facts.push(ReadingFact::absent("Cursor plane", absence));
         }
     }
     // Which flip model the scan-out uses is the driver's own business and no

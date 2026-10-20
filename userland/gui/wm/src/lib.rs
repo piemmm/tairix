@@ -1,8 +1,8 @@
 //! TAIRiX compositing window manager (`userland/gui/wm`).
 //!
 //! This crate is the user-space compositor for the TAIRiX desktop. It composes per-window [`Surface`]s into a single
-//! scan-out frame and presents it through a capability-gated
-//! [`Display`](tairix_abi::driver::display::Display) driver; the kernel
+//! scan-out frame and presents it to a capability-gated display driver
+//! through a [`Presenter`](tairix_display::Presenter); the kernel
 //! never composites (the desktop is an
 //! optional, one-way-dependent userland frontend).
 //!

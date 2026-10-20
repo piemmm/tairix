@@ -4,10 +4,10 @@
 //! `HwResourceKind::Framebuffer` resource is discovered
 //! (`plans/DISPLAY.md` D7b).
 //!
-//! This is the display half of the zero-copy, lease-gated present path:
-//! a desktop session composes frames into one `shm_grant`ed region and
-//! presents by index over the reserved `DISPLAY_ENDPOINT`; this process
-//! blits the presented frame to the scan-out surface. It names no board,
+//! This is the display half of the lease-gated present path: the service
+//! allocates its presenter's frame in shared memory and grants it, and a
+//! present over the reserved `DISPLAY_ENDPOINT` copies the frame's damaged
+//! rows to the scan-out surface. It names no board,
 //! bus, or firmware detail: the surface's physical base, geometry, and
 //! pixel format are read from the kernel-issued device-resource grants
 //! its matched node requested, never a build-time constant.

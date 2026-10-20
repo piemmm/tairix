@@ -21,10 +21,10 @@ and `plans/FIX-DISPLAY-ACCELERATION.md` (the display ABI the scan-out feeds).
 | Id | Item | Status |
 |---|---|---|
 | F1 | x86_64 write-combining memory type (IA32_PAT) | planned |
-| F2 | One shared boot framebuffer console and console/seat layout for every port | planned |
+| F2 | One shared boot framebuffer console and console/seat layout for every port | done: delivered by `plans/FIX-DISPLAY-ACCELERATION.md` F2 |
 | F3 | The UEFI loader hands the kernel a GOP framebuffer (`plans/BOOTLOADER.md` B3) | blocked: the §4 measurement decision, `plans/BOOTLOADER.md` B6 |
 | F4 | GPT/ESP whole-disk image, `cargo xtask image --target x86_64`, `run --target x86_64` (`plans/BOOTLOADER.md` B4) | blocked: F3 |
-| F5 | x86_64 boot display: GOP scan-out → boot console, display node, seat registry | blocked: F1, F2, F3 |
+| F5 | x86_64 boot display: GOP scan-out → boot console, display node, seat registry | blocked: F1, F3 |
 | F6 | Display service and pointer input autoload on x86_64 | blocked: F4, F5 |
 | F7 | Graphical session verticals: greeter by default, then the revealed desktop | blocked: F6 |
 | F8 | Platform page, README matrix, and `plans/ARCHSUPPORT.md` A5 closed | blocked: F7 |
@@ -51,25 +51,23 @@ Missing, in the order the chain needs it:
   `MapError::Unsupported` for `PageFlags::WRITE_COMBINE`, because the port
   never programs the PAT. A display aperture is `FramebufferMemory::WriteCombine`,
   so the display service could not map the screen even if one were published.
-- **No console or seat layout.** The boot calls neither
-  `boot_display::observe_boot_display` nor `with_seat_registry`; it lists COM1
-  alone. With no seat registry, a key press the autoloaded keyboard driver
-  injects is refused rather than reaching the COM1 login.
-- **The boot framebuffer console lives in one port.** Its renderer, surface
-  publication, handover, relocation and purge sit in
-  `kernel/arch/aarch64/src/video.rs`, and the console/seat layout in
-  `kernel/tairix-kernel/src/aarch64/arch_wrapper.rs`. Only surface discovery,
-  the address-translation and direct-map lookups, and cache maintenance there
-  are aarch64's own.
+- **No boot framebuffer console.** The shared console and console/seat layout
+  (F2) run on x86_64: COM1 is the console with a seat, and a discovered
+  virtio-gpu hosts the framebuffer console
+  (`plans/FIX-DISPLAY-ACCELERATION.md` K). With no framebuffer tag, nothing
+  shows the console before a display driver hosts it.
 - **No image and no `run`.** `cargo xtask image` and `run` accept only
   `aarch64-rpi`.
 
 ## 2. Binding decisions
 
-- **One display path, the real one.** The desktop's screen in QEMU is the UEFI
+- **One boot display path, the real one.** The boot's screen is the UEFI
   **GOP** framebuffer, set up by OVMF, handed over by the first-party loader in
   the multiboot2 framebuffer tag — the same chain a physical UEFI machine runs,
-  and the model Linux's `efifb`/`simpledrm` uses. Rejected alternatives:
+  and the model Linux's `efifb`/`simpledrm` uses. A discovered display engine
+  that hosts the console — virtio-gpu in QEMU
+  (`plans/FIX-DISPLAY-ACCELERATION.md` C) — takes the screen over from it, as
+  the HVS does from the Pi's firmware framebuffer. Rejected alternatives:
   ramfb over fw_cfg under `-kernel` (on x86 fw_cfg is found only through the
   ACPI namespace or a blind fixed-port probe, and the path would not exist on
   real hardware), and a bochs-display PCI driver (QEMU/VirtualBox only).
@@ -141,39 +139,32 @@ scan-out is a `ramfb` surface in guest RAM, which the direct map already maps
 write-back, and the vesa driver maps it through `MmioMapper::map_window`,
 which takes no memory type.
 
-riscv64 refuses `WRITE_COMBINE` the same way (Svpbmt `NC` is the encoding). It
-has no display path yet, so the refusal is honest fail-closed behaviour; its
-encoding lands with riscv64's boot display, not here.
+riscv64 refuses `WRITE_COMBINE` the same way (Svpbmt `NC` is the encoding). Its
+one display, virtio-gpu, scans out of buffers in ordinary RAM and maps no
+aperture, so the refusal is honest fail-closed behaviour; its encoding lands
+with a riscv64 boot display, not here.
 
 ### F2 — one boot framebuffer console, one console/seat layout
 
-The arch-neutral half of `kernel/arch/aarch64/src/video.rs` moves to a shared
-home (`lib/fbcon`, which already owns the `TextConsole` engine): the surface
-state and its placement, the render lock, attach, the verbatim and
-program-output write paths, the grid and extent queries, the surface
-disposition (`set_surface` / `reclaim_surface` / `purge`), `relocate` onto
-kernel-owned memory, and `paint`. The port supplies only what differs: where
-the surface comes from, whether an extent translates for a kernel write and
-where the direct map puts a relocated block, the post-write cache maintenance
-(aarch64 cleans to the point of coherency; x86_64 writes through a
-write-combining mapping and needs none), and the interrupt-control type the
-render lock masks with. The shared slot keeps the discipline aarch64 needs: it
-is written once before the MMU is on, where an atomic read-modify-write is
-UNPREDICTABLE, and locked only after.
+The arch-neutral framebuffer console lives in `lib/fbcon`: the `port` half (a
+port's `ConsolePort`: its direct-map lookup, whether it cleans its writes to
+memory, and the interrupt-control type the render lock masks with) and the
+`hosted` half (the surface slot and its placement, the render lock, attach,
+the verbatim and program-output write paths, the grid and extent queries, the
+surface disposition, adoption onto kernel-owned memory, the fatal paint
+modes, and `paint`). Its grids are storage the kernel supplies, so the crate
+links no allocator. A port supplies only where the surface comes from and its
+`ConsolePort`: aarch64 cleans to the point of coherency, while x86_64 and
+riscv64 share one coherent port. The slot is written once before the MMU is
+on, where an atomic read-modify-write is UNPREDICTABLE, and locked only after.
 
-The hoist fixes `plans/OPEN-DEFECTS.md` D152 in the shared code, so both ports
-get the fix: a report raised while the render lock is held must not block on
-that lock. D152 closes with its regression test in this increment.
+`plans/OPEN-DEFECTS.md` D152 is fixed there for every port: a fatal report
+never waits on the render lock.
 
-`console_layout` and its `VIDEO_*` / `UART_*` console-list and seat-registry
-statics move from `aarch64/arch_wrapper.rs` into one shared
-`kernel/tairix-kernel` module, parameterised on the port's framebuffer and
-serial console devices, with the choice of console 0 the root-unlock prompt
-reads (today `aarch64/root_unlock.rs` makes it again). It keeps the invariant
-that the seat's text sink is the console listed at index 0.
-
-aarch64 is rewired onto both in the same change. Its framebuffer, greeter and
-desktop verticals are the regression evidence. No aarch64 behaviour changes.
+`kernel/tairix-kernel`'s one `console_layout` module holds the console-list
+and seat-registry statics and the choice of console 0 for every port, the one
+the root-unlock prompt reads, and keeps the invariant that the seat's text
+sink is the console listed at index 0.
 
 ### F3 — the loader hands over a GOP framebuffer
 

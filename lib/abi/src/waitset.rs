@@ -327,6 +327,17 @@ pub enum WaitSourceKind {
     /// configuration the root volume brings is read the moment that volume
     /// is mounted.
     HardwareTree = 15,
+    /// The framebuffer console the caller hosts (its `id` is always `0`).
+    /// Adding the member is owner-checked: only the driver of the node
+    /// discovery marked to host the console may observe it, before it hosts
+    /// it as well as after. Ready while the console is hosted for the caller
+    /// (`console_adopt`) and owes it painted rows it has not taken
+    /// (`console_damage`), which is what tells a display that must be told
+    /// what changed to transfer them.
+    ///
+    /// **Level-triggered**, as [`Port`](Self::Port) is: taking the rows is
+    /// what makes the member idle again.
+    ConsoleDamage = 16,
 }
 
 impl WaitSourceKind {
@@ -360,6 +371,7 @@ impl WaitSourceKind {
             13 => Ok(Self::DirWatch),
             14 => Ok(Self::Foreground),
             15 => Ok(Self::HardwareTree),
+            16 => Ok(Self::ConsoleDamage),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -397,10 +409,11 @@ mod tests {
             WaitSourceKind::DirWatch,
             WaitSourceKind::Foreground,
             WaitSourceKind::HardwareTree,
+            WaitSourceKind::ConsoleDamage,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(16), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(17), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -424,6 +437,7 @@ mod tests {
         assert_eq!(WaitSourceKind::DirWatch.as_u32(), 13);
         assert_eq!(WaitSourceKind::Foreground.as_u32(), 14);
         assert_eq!(WaitSourceKind::HardwareTree.as_u32(), 15);
+        assert_eq!(WaitSourceKind::ConsoleDamage.as_u32(), 16);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
         assert_eq!(WAITSET_TIMEOUT_NONE, u64::MAX);
     }

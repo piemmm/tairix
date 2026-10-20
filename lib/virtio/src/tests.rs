@@ -658,13 +658,18 @@ fn packed_drain_is_noop_without_available_chain() {
     assert_eq!(t.drain_packed_queue(0).unwrap(), 0);
 }
 
+/// The byte a tagging device writes back: the chain's first device-read byte.
+fn tag_of(chain: &ChainView<'_>) -> u8 {
+    chain.device_read.first().map_or(0, |seg| seg[0])
+}
+
 /// A request queue over a device that answers each chain by writing `tag`
 /// into its one device-write segment.
 fn tagging_queue(t: &mut MockTransport, host: &dyn crate::host::VirtioHost) -> RequestQueue {
     t.install_shim(
         0,
         Box::new(|chain: &mut ChainView<'_>| {
-            let tag = chain.device_read.first().map_or(0, |seg| seg[0]);
+            let tag = tag_of(chain);
             if let Some(out) = chain.device_write.first_mut() {
                 out.fill(tag);
             }
@@ -674,19 +679,24 @@ fn tagging_queue(t: &mut MockTransport, host: &dyn crate::host::VirtioHost) -> R
     RequestQueue::new(SplitQueue::new(t, host, 0, 4, 2).expect("setup"))
 }
 
-fn request(input: &DmaSlab, output: &DmaSlab) -> [ChainSegment; 2] {
+/// The request for byte `at` of `input`, answered into byte `at` of `output`.
+fn byte_request(input: &DmaSlab, output: &DmaSlab, at: usize) -> [ChainSegment; 2] {
     [
         ChainSegment {
-            device_addr: input.device_addr(),
+            device_addr: input.device_addr_at(at, 1).expect("inside"),
             len: 1,
             direction: Direction::DeviceRead,
         },
         ChainSegment {
-            device_addr: output.device_addr(),
+            device_addr: output.device_addr_at(at, 1).expect("inside"),
             len: 1,
             direction: Direction::DeviceWrite,
         },
     ]
+}
+
+fn request(input: &DmaSlab, output: &DmaSlab) -> [ChainSegment; 2] {
+    byte_request(input, output, 0)
 }
 
 #[test]
@@ -963,4 +973,167 @@ fn a_withheld_queue_returns_nothing_to_its_pool() {
     q.withhold();
     drop(q);
     assert_eq!(host.slabs_outstanding(), held);
+}
+
+/// Three requests over an eight-descriptor queue whose device tags each
+/// answer, stalling once `stall_after` chains are answered while `stall`
+/// holds.
+struct Batch {
+    t: alloc::rc::Rc<core::cell::RefCell<MockTransport>>,
+    q: RequestQueue,
+    input: DmaSlab,
+    output: DmaSlab,
+    stall: alloc::rc::Rc<core::cell::Cell<bool>>,
+}
+
+impl Batch {
+    fn new(host: &MockHost, stall_after: usize) -> Self {
+        let mut t = MockTransport::new(1, 8, 0, 0);
+        let stall = alloc::rc::Rc::new(core::cell::Cell::new(true));
+        let held = alloc::rc::Rc::clone(&stall);
+        let mut answered = 0;
+        t.install_shim(
+            0,
+            Box::new(move |chain: &mut ChainView<'_>| {
+                if held.get() && answered == stall_after {
+                    return Err(VirtioError::NoCompletion);
+                }
+                answered += 1;
+                let tag = tag_of(chain);
+                if let Some(out) = chain.device_write.first_mut() {
+                    out.fill(tag);
+                }
+                Ok(1)
+            }),
+        );
+        let q = RequestQueue::new(SplitQueue::new(&mut t, host, 0, 8, 6).expect("setup"));
+        let t = t.into_shared();
+        host.attach(&t);
+        let mut input = host.alloc_dma_zeroed(3).unwrap();
+        input.as_bytes_mut().copy_from_slice(&[0x10, 0x20, 0x30]);
+        let output = host.alloc_dma_zeroed(3).unwrap();
+        Self {
+            t,
+            q,
+            input,
+            output,
+            stall,
+        }
+    }
+
+    fn submit(&mut self, host: &MockHost, budget_ns: u64) -> Result<(), tairix_abi::DriverError> {
+        let chains: [[ChainSegment; 2]; 3] =
+            core::array::from_fn(|at| byte_request(&self.input, &self.output, at));
+        let requests: [&[ChainSegment]; 3] = [&chains[0], &chains[1], &chains[2]];
+        let mut transport = alloc::rc::Rc::clone(&self.t);
+        self.q
+            .submit_all_and_wait(&mut transport, host, &requests, budget_ns)
+    }
+}
+
+#[test]
+fn a_batch_is_published_with_one_notify_and_answered_in_full() {
+    let host = &MockHost::new();
+    let mut batch = Batch::new(host, usize::MAX);
+    batch.submit(host, 1).expect("answered");
+    assert_eq!(batch.output.as_bytes(), &[0x10, 0x20, 0x30]);
+    assert_eq!(
+        batch.t.borrow().notify_log.borrow().len(),
+        1,
+        "one notify for the batch"
+    );
+    assert_eq!(host.notify_log().len(), 1, "and one wait");
+    assert!(!batch.q.is_abandoned());
+}
+
+#[test]
+fn a_batch_the_queue_cannot_hold_at_once_publishes_nothing() {
+    let mut t = MockTransport::new(1, 4, 0, 0);
+    let host = &MockHost::new();
+    t.reach(host);
+    let mut q = tagging_queue(&mut t, host);
+    let input = host.alloc_dma_zeroed(3).unwrap();
+    let output = host.alloc_dma_zeroed(3).unwrap();
+    let chains: [[ChainSegment; 2]; 3] =
+        core::array::from_fn(|at| byte_request(&input, &output, at));
+    let requests: [&[ChainSegment]; 3] = [&chains[0], &chains[1], &chains[2]];
+    assert_eq!(
+        q.submit_all_and_wait(&mut t, host, &requests, 1),
+        Err(tairix_abi::DriverError::Busy),
+        "six descriptors into four"
+    );
+    assert_eq!(t.drain_queue(0), Ok(0), "nothing was published");
+    assert!(!q.is_abandoned());
+    assert_eq!(
+        q.submit_all_and_wait(&mut t, host, &[], 1),
+        Ok(()),
+        "an empty batch is nothing to wait for"
+    );
+}
+
+#[test]
+fn a_partly_answered_batch_stays_out_until_its_last_chain_is_back() {
+    let host = &MockHost::new();
+    host.script_waits([MockWait::Answer, MockWait::Silent]);
+    let mut batch = Batch::new(host, 1);
+    assert_eq!(
+        batch.submit(host, 10),
+        Err(tairix_abi::DriverError::DeviceOffline)
+    );
+    assert!(batch.q.is_abandoned());
+    assert_eq!(
+        batch.output.as_bytes(),
+        &[0x10, 0, 0],
+        "one chain came back"
+    );
+    assert_eq!(
+        batch.submit(host, 10),
+        Err(tairix_abi::DriverError::DeviceOffline),
+        "nothing is published while two chains are out"
+    );
+    let mut transport = alloc::rc::Rc::clone(&batch.t);
+    assert_eq!(
+        batch.q.settle(&mut transport, host),
+        Err(tairix_abi::DriverError::DeviceOffline)
+    );
+
+    batch.stall.set(false);
+    assert_eq!(batch.t.borrow_mut().drain_queue(0), Ok(2));
+    let last = batch
+        .q
+        .settle(&mut transport, host)
+        .expect("settled")
+        .expect("the batch came back");
+    assert_eq!(last.written, 1);
+    assert!(!batch.q.is_abandoned());
+    assert_eq!(batch.output.as_bytes(), &[0x10, 0x20, 0x30]);
+
+    batch.output.as_bytes_mut().fill(0);
+    batch.submit(host, 10).expect("the device answers again");
+    assert_eq!(batch.output.as_bytes(), &[0x10, 0x20, 0x30]);
+}
+
+#[test]
+fn a_batch_answered_a_chain_per_wake_completes() {
+    let host = &MockHost::new();
+    let mut batch = Batch::new(host, usize::MAX);
+    let stall = alloc::rc::Rc::clone(&batch.stall);
+    stall.set(false);
+    // The device answers one chain per wake, holding the next back.
+    batch.t.borrow_mut().install_shim(
+        0,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            if stall.replace(!stall.get()) {
+                return Err(VirtioError::NoCompletion);
+            }
+            let tag = tag_of(chain);
+            if let Some(out) = chain.device_write.first_mut() {
+                out.fill(tag);
+            }
+            Ok(1)
+        }),
+    );
+    batch.submit(host, 10).expect("answered a chain at a time");
+    assert_eq!(batch.output.as_bytes(), &[0x10, 0x20, 0x30]);
+    assert_eq!(host.notify_log().len(), 3, "a wake per chain");
 }

@@ -1137,7 +1137,7 @@ unions. E.2 carries that to the driver.
 
 ### E.2 One present per frame, carrying a list of rects
 A frame is presented **once**, naming every disjoint rectangle it changed.
-`Display::present_rects(&[DamageRect])` is the one damage-aware present — there
+`Display::present(id, &[DamageRect])` is the one damage-aware present — there
 is no per-rectangle entry point beside it — and the `DISPLAY_ENDPOINT` `Present`
 request carries a fixed-width, self-validating `DamageList` of up to
 `MAX_DAMAGE_RECTS` rectangles, the one wire shape

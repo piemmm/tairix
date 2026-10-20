@@ -3,26 +3,35 @@
 //!
 //! The display's surface takes the mode of the first output with a sink it
 //! can drive, in valve order; every other connected output shows the same
-//! surface scaled to its own mode, its aspect kept. A present copies into a
-//! frame no channel reads, and each channel latches it at its next frame
-//! start. A mode set goes up and comes down in the order the encoder holds
-//! its phases to, interleaved with the valve's and the channel's steps.
+//! surface scaled to its own mode, its aspect kept. A present names buffers
+//! the presenter filled, and each running channel is handed a list of one
+//! plane per layer, with the pointer on top, in the stack slot it does not
+//! composite; the present is queued until every one of them latches it at a
+//! frame start. A mode set goes up and comes down in the order the encoder
+//! holds its phases to, interleaved with the valve's and the channel's steps.
 
 use tairix_abi::driver::clock;
 use tairix_abi::driver::display::{
-    DamageRect, Display, DisplayFormat, DisplayMode, DisplayPower, Scan, Timing,
+    AccelCaps, AccelLayer, AcceleratedDisplay, AllocatedBuffer, BufferId, CursorCaps, DamageRect,
+    Display, DisplayFormat, DisplayMode, DisplayPower, HardwareCursor, Presented, Scan, Serviced,
+    Timing, MAX_ACCEL_LAYERS,
 };
 use tairix_abi::driver::encoder::{Connector, EncoderOp, Phase, PipeLimits};
 use tairix_abi::driver::mmio::RegisterBlock;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{Delay, DriverError};
+use tairix_display::{copy_rows, BufferMemory, DeviceBuffer, SharedBuffer};
 use tairix_drvrt::Recorder;
 use tairix_inline::ArrayVec;
 use tairix_linkclient::{ClockClient, EncoderClient, LinkCall};
 
-use crate::dlist::{lbm_words, plane, Place, Scaling, Surface, LBM_WORDS};
-use crate::frames::{FrameAllocator, Frames};
-use crate::hvs::{Hvs, List, FRAMES_MAX, KERNEL_AT};
+use crate::buffers::{carve, Buffers};
+use crate::dlist::{
+    lbm_words, narrower, plane, position, size, Alpha, Place, PlaneWords, Scaling, Surface,
+    LBM_WORDS, UNITY_POINTER, UNITY_POSITION, UNITY_SIZE,
+};
+use crate::hvs::{Hvs, List, KERNEL_AT, STACKS, STACK_PLANES};
+use crate::regs::hvs::CHANNELS;
 use crate::valve::{Load, Valve, ValveKind};
 
 /// The outputs one engine drives.
@@ -40,6 +49,24 @@ const STRIDE_ALIGN: u32 = 64;
 
 /// Line-buffer words each output's channel scales through.
 const LBM_SHARE: usize = LBM_WORDS as usize / OUTPUTS_MAX;
+
+/// The pointer's side at most, and so its images'.
+const CURSOR_SIDE: u32 = 64;
+
+/// Bytes from one line of a pointer image to the next.
+const CURSOR_STRIDE: u32 = CURSOR_SIDE * 4;
+
+/// Pointer images held: the clear one shown while the pointer is hidden, and
+/// room for the one listed and those a list may still be read from.
+const CURSOR_IMAGES: usize = 5;
+
+/// Frame ends every running channel sees before an image a list stopped
+/// naming is no longer read: the frame that latched the change may already
+/// have been under way.
+const RETIRE_FRAMES: u64 = 2;
+
+/// The largest buffer side a plane's fields hold.
+const SIDE_MAX: u32 = (1 << 13) - 1;
 
 /// A decision the engine records.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -153,24 +180,94 @@ pub struct Parts<H, V, C: LinkCall, A, D, L> {
     pub console: Option<Surface>,
     /// Where scan-out frames come from.
     pub alloc: A,
+    /// Most bytes one presenter's buffers may hold together: a share of the
+    /// memory the HVS reaches.
+    pub budget: usize,
     /// The timed waits a mode set takes.
     pub delay: D,
     /// Where decisions are recorded.
     pub log: L,
 }
 
+/// One layer of the stack the outputs show: part of a buffer, placed on the
+/// surface.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Shown {
+    buffer: BufferId,
+    src: DamageRect,
+    dst: (i32, i32, u32, u32),
+    opacity: u8,
+}
+
+/// A stack's list for one output, built and not yet written.
+struct Built {
+    planes: ArrayVec<PlaneWords, STACK_PLANES>,
+    named: ArrayVec<BufferId, MAX_ACCEL_LAYERS>,
+    /// Which of `planes` is the pointer's.
+    pointer_plane: usize,
+}
+
+/// What one channel's stack slots hold, and what it is about to latch.
+#[derive(Clone, Default)]
+struct Slots {
+    /// The buffers each slot's list names.
+    named: [ArrayVec<BufferId, MAX_ACCEL_LAYERS>; STACKS],
+    /// Where each slot's pointer plane starts.
+    pointer_at: [Option<usize>; STACKS],
+    /// The slot a queued present waits for this channel to latch.
+    waiting: Option<usize>,
+    /// Frame ends this channel has seen.
+    ends: u64,
+}
+
+/// A pointer image the HVS reads, and the frame ends after which no list can
+/// still be read from it, once one stopped naming it.
+struct Image<M> {
+    memory: M,
+    bus: u32,
+    retire: Option<[u64; OUTPUTS_MAX]>,
+}
+
+/// The pointer: its images, the one the lists show, and where.
+struct Cursor<M> {
+    /// The clear image first, shown while the pointer is hidden.
+    images: ArrayVec<Image<M>, CURSOR_IMAGES>,
+    listed: usize,
+    size: (u32, u32),
+    hot: (u32, u32),
+    at: (i32, i32),
+    shown: bool,
+}
+
 /// The display engine.
-pub struct Engine<H, V, C: LinkCall, A: FrameAllocator, D, L> {
+pub struct Engine<H, V, C: LinkCall, A: BufferMemory, D, L> {
     hvs: Hvs<H>,
     pipes: ArrayVec<Pipe<V, C>, OUTPUTS_MAX>,
     clock: ClockClient<C>,
     core_max_hz: u64,
     floor_hz: u64,
+    /// The floor the clock last refused, not asked again until another is
+    /// needed.
+    floor_refused: Option<u64>,
     surface: Option<DisplayMode>,
-    frames: Option<Frames<A::Memory>>,
+    buffers: Buffers<A::Region>,
     alloc: A,
+    /// Most bytes the presenter's buffers may hold together.
+    budget: usize,
     console: Option<Surface>,
     shows: Shows,
+    /// The layers the last present asked for, bottom first.
+    stack: ArrayVec<Shown, MAX_ACCEL_LAYERS>,
+    /// The stack every running output last latched: what they composite
+    /// while a later one waits.
+    latched: ArrayVec<Shown, MAX_ACCEL_LAYERS>,
+    slots: [Slots; OUTPUTS_MAX],
+    cursor: Cursor<A::Region>,
+    /// Whether the channels raise an interrupt at each frame end.
+    watching: bool,
+    /// An output a queued present waited on was brought down, so it latched
+    /// there.
+    wait_dropped: bool,
     power: DisplayPower,
     delay: D,
     log: L,
@@ -220,7 +317,8 @@ where
     H: RegisterBlock,
     V: RegisterBlock,
     C: LinkCall,
-    A: FrameAllocator,
+    A: BufferMemory,
+    A::Region: DeviceBuffer,
     D: Delay,
     L: Recorder<Record>,
 {
@@ -287,15 +385,30 @@ where
             clock,
             core_max_hz: core.max_hz,
             floor_hz: 0,
+            floor_refused: None,
             surface: None,
-            frames: None,
+            buffers: Buffers::new(),
             alloc: parts.alloc,
+            budget: parts.budget,
             console: parts.console,
             shows: if parts.console.is_some() {
                 Shows::Console
             } else {
                 Shows::Nothing
             },
+            stack: ArrayVec::new(),
+            latched: ArrayVec::new(),
+            slots: Default::default(),
+            cursor: Cursor {
+                images: ArrayVec::new(),
+                listed: 0,
+                size: (1, 1),
+                hot: (0, 0),
+                at: (0, 0),
+                shown: false,
+            },
+            watching: false,
+            wait_dropped: false,
             power: DisplayPower::On,
             delay: parts.delay,
             log,
@@ -397,20 +510,15 @@ where
                 encoder: pipe.name(),
             });
         }
+        // A channel stopped reads nothing, so nothing it named is in use and
+        // a present waiting on it has latched as far as it ever will.
+        let ends = self.slots[at].ends;
+        self.wait_dropped |= self.slots[at].waiting.is_some();
+        self.slots[at] = Slots {
+            ends,
+            ..Slots::default()
+        };
         first
-    }
-
-    /// The list a channel latches for what the outputs show.
-    fn list(&self) -> List {
-        match self.shows {
-            Shows::Console if self.console.is_some() => List::Console,
-            Shows::Frames => self
-                .frames
-                .as_ref()
-                .and_then(Frames::latest)
-                .map_or(List::Black, List::Frame),
-            _ => List::Black,
-        }
     }
 
     /// The line buffer channel `channel` scales through.
@@ -418,58 +526,527 @@ where
         u32::try_from(channel * LBM_SHARE).map_err(|_| DriverError::OutOfRange)
     }
 
-    /// Write channel `channel`'s list showing `surface` on an output of
-    /// `width` by `height`.
-    fn write_plane(
-        &self,
+    /// The plane showing `surface` on an output of `width` by `height` as the
+    /// console is shown: fitted, its aspect kept, opaque.
+    fn fitted_plane(
         channel: usize,
-        list: List,
         surface: &Surface,
         width: u32,
         height: u32,
-    ) -> Result<(), DriverError> {
+    ) -> Result<PlaneWords, DriverError> {
         let place = Place::fit(surface.width, surface.height, width, height);
         let x = Scaling::of(surface.width, place.width);
         let y = Scaling::of(surface.height, place.height);
         if lbm_words(surface.width, x, y, place.width) as usize > LBM_SHARE {
             return Err(DriverError::OutOfRange);
         }
-        let kernel = u32::try_from(KERNEL_AT).map_err(|_| DriverError::OutOfRange)?;
-        let words = plane(surface, &place, kernel, Self::lbm_at(channel)?)?;
-        self.hvs.write_slot(channel, list, &words)
+        plane(
+            surface,
+            &place,
+            (kernel_at()?, Self::lbm_at(channel)?),
+            Alpha::Opaque,
+        )
     }
 
-    /// The frame list `index` of the current surface.
-    fn frame_surface(&self, index: usize) -> Option<Surface> {
-        let frames = self.frames.as_ref()?;
-        let mode = frames.mode();
-        Some(Surface {
-            bus: frames.bus(index)?,
-            stride: mode.stride_bytes,
-            width: mode.width_px,
-            height: mode.height_px,
-            format: mode.format,
+    /// Write every fixed list of pipe `at`, whose valve runs `timing`.
+    fn write_lists(&self, at: usize, timing: &Timing) -> Result<(), DriverError> {
+        let channel = self.pipes[at].valve.kind().channel;
+        let (width, height) = active_size(timing);
+        self.hvs.write_slot(channel, List::Black, &[])?;
+        if let Some(console) = self.console {
+            let words = Self::fitted_plane(channel, &console, width, height)?;
+            self.hvs.write_slot(channel, List::Console, &words)?;
+        }
+        Ok(())
+    }
+
+    /// Hand pipe `at`, whose valve runs `timing`, what the outputs show: the
+    /// stack written into the slot its channel does not composite, answering
+    /// that slot, or the console or black.
+    fn show_on(&mut self, at: usize, timing: &Timing) -> Result<Option<usize>, DriverError> {
+        let channel = self.pipes[at].valve.kind().channel;
+        match self.shows {
+            Shows::Console if self.console.is_some() => {
+                self.hvs.latch(channel, List::Console)?;
+                Ok(None)
+            }
+            // An output coming up that cannot show the stack shows black, and
+            // the presenter's next stack is built for it with the others.
+            Shows::Frames if !self.stack.is_empty() => {
+                if let Ok((built, index)) = self
+                    .build_stack(at, timing)
+                    .and_then(|built| Ok((built, self.free_slot(at)?)))
+                {
+                    self.latch_built(at, index, built).map(Some)
+                } else {
+                    self.hvs.latch(channel, List::Black)?;
+                    Ok(None)
+                }
+            }
+            _ => {
+                self.hvs.latch(channel, List::Black)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// The stack's list for pipe `at`: one plane per layer, placed on its
+    /// output as the surface is, then the pointer. Everything a stack can be
+    /// refused for is found here, before any list is written.
+    fn build_stack(&mut self, at: usize, timing: &Timing) -> Result<Built, DriverError> {
+        let surface = self.surface.ok_or(DriverError::Stale)?;
+        let channel = self.pipes[at].valve.kind().channel;
+        let output = active_size(timing);
+        let fit = Place::fit(surface.width_px, surface.height_px, output.0, output.1);
+        let mut planes: ArrayVec<PlaneWords, STACK_PLANES> = ArrayVec::new();
+        let mut named: ArrayVec<BufferId, MAX_ACCEL_LAYERS> = ArrayVec::new();
+        let mut lbm = 0usize;
+        for layer in &self.stack {
+            let held = self
+                .buffers
+                .get(layer.buffer)
+                .ok_or(DriverError::NotFound)?;
+            let Some((source, place)) = crop(layer, (held.bus, held.stride), &surface, &fit)?
+            else {
+                continue;
+            };
+            let x = Scaling::of(source.width, place.width);
+            let y = Scaling::of(source.height, place.height);
+            let words = lbm_words(source.width, x, y, place.width) as usize;
+            let base =
+                u32::try_from(channel * LBM_SHARE + lbm).map_err(|_| DriverError::OutOfRange)?;
+            lbm += words;
+            if lbm > LBM_SHARE {
+                return Err(DriverError::OutOfRange);
+            }
+            planes
+                .try_push(plane(
+                    &source,
+                    &place,
+                    (kernel_at()?, base),
+                    Alpha::Premultiplied(layer.opacity),
+                )?)
+                .map_err(|_| DriverError::OutOfRange)?;
+            named
+                .try_push(layer.buffer)
+                .map_err(|_| DriverError::OutOfRange)?;
+        }
+        let pointer = self.pointer_plane(&fit)?;
+        let pointer_plane = planes.len();
+        planes
+            .try_push(pointer)
+            .map_err(|_| DriverError::OutOfRange)?;
+        Ok(Built {
+            planes,
+            named,
+            pointer_plane,
         })
     }
 
-    /// Write every list of pipe `at`, whose valve runs `timing`.
-    fn write_lists(&self, at: usize, timing: &Timing) -> Result<(), DriverError> {
-        let channel = self.pipes[at].valve.kind().channel;
-        let (width, height) = (
-            u32::from(timing.horizontal.active),
-            u32::from(timing.vertical.active),
+    /// The pointer's plane on an output the surface is placed on at `fit`:
+    /// unscaled, cut to the output, or the clear image where it is hidden.
+    fn pointer_plane(&mut self, fit: &Place) -> Result<PlaneWords, DriverError> {
+        self.ensure_clear_image()?;
+        let (surface, place) = self.pointer_at(fit);
+        plane(
+            &surface,
+            &place,
+            (kernel_at()?, 0),
+            Alpha::Premultiplied(u8::MAX),
+        )
+    }
+
+    /// Where the pointer's plane reads and lands on an output the surface is
+    /// placed on at `fit`.
+    fn pointer_at(&self, fit: &Place) -> (Surface, Place) {
+        let clear = (
+            Surface {
+                bus: self.cursor.images.first().map_or(0, |image| image.bus),
+                stride: CURSOR_STRIDE,
+                width: 1,
+                height: 1,
+                format: DisplayFormat::Bgra8888,
+            },
+            Place {
+                x: fit.x,
+                y: fit.y,
+                width: 1,
+                height: 1,
+            },
         );
-        self.hvs.write_slot(channel, List::Black, &[])?;
-        if let Some(console) = self.console {
-            self.write_plane(channel, List::Console, &console, width, height)?;
+        let Some(image) = self
+            .cursor
+            .images
+            .get(self.cursor.listed)
+            .filter(|_| self.cursor.shown)
+        else {
+            return clear;
+        };
+        let surface = self.surface.unwrap_or(DisplayMode {
+            width_px: 1,
+            height_px: 1,
+            stride_bytes: 4,
+            format: DisplayFormat::Bgra8888,
+        });
+        // The hot spot lands where the surface's point does on this output;
+        // the image itself is drawn at its own size.
+        let scale = |value: i32, from: u32, to: u32| {
+            i64::from(value) * i64::from(to) / i64::from(from.max(1))
+        };
+        let left = i64::from(fit.x) + scale(self.cursor.at.0, surface.width_px, fit.width)
+            - i64::from(self.cursor.hot.0);
+        let top = i64::from(fit.y) + scale(self.cursor.at.1, surface.height_px, fit.height)
+            - i64::from(self.cursor.hot.1);
+        let (width, height) = self.cursor.size;
+        let right = (left + i64::from(width)).min(i64::from(fit.x + fit.width));
+        let bottom = (top + i64::from(height)).min(i64::from(fit.y + fit.height));
+        let (from_x, from_y) = (left.max(i64::from(fit.x)), top.max(i64::from(fit.y)));
+        let (Ok(cut_x), Ok(cut_y), Ok(seen_w), Ok(seen_h), Ok(x), Ok(y)) = (
+            u32::try_from(from_x - left),
+            u32::try_from(from_y - top),
+            u32::try_from(right - from_x),
+            u32::try_from(bottom - from_y),
+            u32::try_from(from_x),
+            u32::try_from(from_y),
+        ) else {
+            return clear;
+        };
+        if seen_w == 0 || seen_h == 0 {
+            return clear;
         }
-        let count = self.frames.as_ref().map_or(0, Frames::len);
-        for index in 0..count {
-            if let Some(surface) = self.frame_surface(index) {
-                self.write_plane(channel, List::Frame(index), &surface, width, height)?;
+        (
+            Surface {
+                bus: image.bus + cut_y * CURSOR_STRIDE + cut_x * 4,
+                stride: CURSOR_STRIDE,
+                width: seen_w,
+                height: seen_h,
+                format: DisplayFormat::Bgra8888,
+            },
+            Place {
+                x,
+                y,
+                width: seen_w,
+                height: seen_h,
+            },
+        )
+    }
+
+    /// Bring the pointer's plane in every list a running channel reads to
+    /// the pointer as it now is, in place.
+    fn rewrite_pointer(&self) -> Result<(), DriverError> {
+        let Some(surface) = self.surface else {
+            return Ok(());
+        };
+        for (at, pipe) in self.pipes.iter().enumerate() {
+            let Some(timing) = pipe.runs else { continue };
+            let output = active_size(&timing);
+            let fit = Place::fit(surface.width_px, surface.height_px, output.0, output.1);
+            let (source, place) = self.pointer_at(&fit);
+            for &start in self.slots[at].pointer_at.iter().flatten() {
+                self.rewrite_pointer_plane(start, &source, &place)?;
             }
         }
         Ok(())
+    }
+
+    /// Point the pointer plane at word `start` at `source`, landing at
+    /// `place`. A changed size is narrowed to fit both the old and the new
+    /// read first, so no state between the writes reads past either image.
+    fn rewrite_pointer_plane(
+        &self,
+        start: usize,
+        source: &Surface,
+        place: &Place,
+    ) -> Result<(), DriverError> {
+        let next = size(source);
+        let current = self.hvs.read_list(start + UNITY_SIZE)?;
+        if current != next {
+            self.hvs
+                .write_list(start + UNITY_SIZE, &[narrower(current, next)])?;
+        }
+        self.hvs
+            .write_list(start + UNITY_POSITION, &[position(place)])?;
+        self.hvs.write_list(start + UNITY_POINTER, &[source.bus])?;
+        if current != next {
+            self.hvs.write_list(start + UNITY_SIZE, &[next])?;
+        }
+        Ok(())
+    }
+
+    /// Hold the clear pointer image every stack's pointer plane falls back to.
+    fn ensure_clear_image(&mut self) -> Result<(), DriverError> {
+        if !self.cursor.images.is_empty() {
+            return Ok(());
+        }
+        let (memory, bus) = carve(
+            &mut self.alloc,
+            CURSOR_STRIDE as usize * CURSOR_SIDE as usize,
+        )?;
+        self.cursor
+            .images
+            .try_push(Image {
+                memory,
+                bus,
+                retire: None,
+            })
+            .map_err(|_| DriverError::NoSpace)
+    }
+
+    /// A pointer image no list names or may still be read from, held anew
+    /// where every one is.
+    fn free_image(&mut self) -> Result<usize, DriverError> {
+        let listed = self.cursor.listed;
+        let free = (1..self.cursor.images.len()).find(|&index| {
+            !(index == listed && self.cursor.shown)
+                && self.cursor.images[index]
+                    .retire
+                    .is_none_or(|stamp| self.passed(&stamp))
+        });
+        if let Some(index) = free {
+            self.cursor.images[index].retire = None;
+            return Ok(index);
+        }
+        let (memory, bus) = carve(
+            &mut self.alloc,
+            CURSOR_STRIDE as usize * CURSOR_SIDE as usize,
+        )?;
+        self.cursor
+            .images
+            .try_push(Image {
+                memory,
+                bus,
+                retire: None,
+            })
+            .map_err(|_| DriverError::Busy)?;
+        Ok(self.cursor.images.len() - 1)
+    }
+
+    /// The frame ends each pipe has seen.
+    fn ends(&self) -> [u64; OUTPUTS_MAX] {
+        let mut ends = [0; OUTPUTS_MAX];
+        for (end, slots) in ends.iter_mut().zip(&self.slots) {
+            *end = slots.ends;
+        }
+        ends
+    }
+
+    /// Whether every running channel has seen the frame ends `stamp` waits
+    /// for; one that is not running reads nothing.
+    fn passed(&self, stamp: &[u64; OUTPUTS_MAX]) -> bool {
+        self.pipes
+            .iter()
+            .zip(&self.slots)
+            .zip(stamp)
+            .all(|((pipe, slots), wanted)| pipe.runs.is_none() || slots.ends >= *wanted)
+    }
+
+    /// The listed image no list will name from the next frame: what it may
+    /// still be read until.
+    fn retire_listed(&mut self) {
+        let stamp = self.ends().map(|ends| ends + RETIRE_FRAMES);
+        let listed = self.cursor.listed;
+        if listed != 0 {
+            if let Some(image) = self.cursor.images.get_mut(listed) {
+                image.retire = Some(stamp);
+            }
+        }
+    }
+
+    /// The buffers a list a running channel composites or latches next
+    /// names.
+    fn named_buffers(
+        &self,
+    ) -> Result<ArrayVec<BufferId, { 2 * OUTPUTS_MAX * MAX_ACCEL_LAYERS }>, DriverError> {
+        let mut named = ArrayVec::new();
+        for (at, pipe) in self.pipes.iter().enumerate() {
+            if pipe.runs.is_none() {
+                continue;
+            }
+            for list in self
+                .hvs
+                .lists(pipe.valve.kind().channel)?
+                .into_iter()
+                .flatten()
+            {
+                if let List::Stack(index) = list {
+                    for &id in &self.slots[at].named[index] {
+                        let _ = named.try_push(id);
+                    }
+                }
+            }
+        }
+        Ok(named)
+    }
+
+    /// Whether anything waits for a frame to end: a queued present, a pointer
+    /// image a list may still read, or a buffer given back that one names.
+    fn waits_on_frames(&self) -> bool {
+        self.slots.iter().any(|slots| slots.waiting.is_some())
+            || self.buffers.any_doomed()
+            || self
+                .cursor
+                .images
+                .iter()
+                .any(|image| image.retire.is_some_and(|stamp| !self.passed(&stamp)))
+    }
+
+    /// Have the running channels raise frame ends exactly while something
+    /// waits on one.
+    fn watch_frames(&mut self) -> Result<(), DriverError> {
+        let wanted = self.waits_on_frames();
+        if wanted == self.watching {
+            return Ok(());
+        }
+        for channel in 0..CHANNELS {
+            self.hvs.watch_frames(channel, wanted)?;
+        }
+        self.watching = wanted;
+        Ok(())
+    }
+
+    /// Count the frames that ended, settle what waited on them, and answer
+    /// whether a queued present has latched on every channel it went to.
+    fn note_frames(&mut self) -> Result<bool, DriverError> {
+        let ended = self.hvs.take_frame_ends()?;
+        let mut waited = core::mem::take(&mut self.wait_dropped);
+        let mut still = false;
+        for at in 0..self.pipes.len() {
+            let channel = self.pipes[at].valve.kind().channel;
+            if ended.get(channel).copied().unwrap_or(false) {
+                self.slots[at].ends += 1;
+            }
+            if let Some(index) = self.slots[at].waiting {
+                waited = true;
+                let running = self.pipes[at].runs.is_some();
+                if !running || self.hvs.lists(channel)?[0] == Some(List::Stack(index)) {
+                    self.slots[at].waiting = None;
+                } else {
+                    still = true;
+                }
+            }
+        }
+        let named = self.named_buffers()?;
+        self.buffers.reap(|id| named.contains(&id));
+        if waited && !still {
+            self.latched.clone_from(&self.stack);
+            self.settle_floor();
+        }
+        self.watch_frames()?;
+        Ok(waited && !still)
+    }
+
+    /// Show `stack`, at least one layer, queued until every running channel
+    /// latches it.
+    fn present_stack(
+        &mut self,
+        stack: ArrayVec<Shown, MAX_ACCEL_LAYERS>,
+    ) -> Result<Presented, DriverError> {
+        if self.slots.iter().any(|slots| slots.waiting.is_some()) {
+            return Err(DriverError::Busy);
+        }
+        let shown = (core::mem::replace(&mut self.stack, stack), self.shows);
+        self.shows = Shows::Frames;
+        // Every running output's list is built before any is latched, so a
+        // stack one output cannot take leaves every output showing what it did.
+        let mut built: ArrayVec<(usize, usize, Built), OUTPUTS_MAX> = ArrayVec::new();
+        for at in 0..self.pipes.len() {
+            let Some(timing) = self.pipes[at].runs else {
+                continue;
+            };
+            match self
+                .free_slot(at)
+                .and_then(|index| Ok((index, self.build_stack(at, &timing)?)))
+            {
+                Ok((index, list)) => {
+                    let _ = built.try_push((at, index, list));
+                }
+                Err(refused) => {
+                    (self.stack, self.shows) = shown;
+                    return Err(refused);
+                }
+            }
+        }
+        // The clock the new stack composites at is had before a channel
+        // reads it.
+        self.raise_floor();
+        let mut queued = false;
+        let mut latched = Ok(());
+        for (at, index, list) in built {
+            match self.latch_built(at, index, list) {
+                Ok(index) => {
+                    self.slots[at].waiting = Some(index);
+                    queued = true;
+                }
+                Err(reason) => {
+                    latched = Err(reason);
+                    break;
+                }
+            }
+        }
+        // An output already latched still has its frame end watched.
+        self.watch_frames()?;
+        latched?;
+        if queued {
+            Ok(Presented::Queued)
+        } else {
+            self.latched.clone_from(&self.stack);
+            Ok(Presented::Shown)
+        }
+    }
+
+    /// The stack slot of pipe `at`'s channel that neither the list it
+    /// composites nor the one it latches next names: the only one that may be
+    /// written while the channel runs.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::Busy`] while both are stack slots, until the next frame
+    /// starts.
+    fn free_slot(&self, at: usize) -> Result<usize, DriverError> {
+        let lists = self.hvs.lists(self.pipes[at].valve.kind().channel)?;
+        (0..STACKS)
+            .find(|&index| !lists.contains(&Some(List::Stack(index))))
+            .ok_or(DriverError::Busy)
+    }
+
+    /// Write `built` into pipe `at`'s free stack slot `index`, record what it
+    /// names, and latch it, answering the slot.
+    fn latch_built(&mut self, at: usize, index: usize, built: Built) -> Result<usize, DriverError> {
+        let channel = self.pipes[at].valve.kind().channel;
+        let starts = self.hvs.write_stack(channel, index, &built.planes)?;
+        let slots = &mut self.slots[at];
+        slots.named[index] = built.named;
+        slots.pointer_at[index] = starts.get(built.pointer_plane).copied();
+        self.hvs.latch(channel, List::Stack(index))?;
+        Ok(index)
+    }
+
+    /// Bring the core clock to what the running outputs composite, once no
+    /// channel still composites a stack it is to latch away from: lowering it
+    /// earlier would starve the larger one.
+    fn settle_floor(&mut self) {
+        if self.slots.iter().any(|slots| slots.waiting.is_some()) {
+            return;
+        }
+        let mut running = [None; OUTPUTS_MAX];
+        for (runs, pipe) in running.iter_mut().zip(&self.pipes) {
+            *runs = pipe.runs;
+        }
+        let settled = self.needed_hz(&running[..self.pipes.len()]);
+        self.floor(settled);
+    }
+
+    /// Raise the core clock to what the stack now composites, where that is
+    /// more than it runs at; lowering waits for the outputs to settle.
+    fn raise_floor(&mut self) {
+        let mut running = [None; OUTPUTS_MAX];
+        for (runs, pipe) in running.iter_mut().zip(&self.pipes) {
+            *runs = pipe.runs;
+        }
+        let needed = self.needed_hz(&running[..self.pipes.len()]);
+        if needed > self.floor_hz {
+            self.floor(needed);
+        }
     }
 
     /// Bring pipe `at` up running `timing`.
@@ -483,7 +1060,7 @@ where
             u32::from(timing.vertical.active),
             timing.scan == Scan::Interlaced,
         )?;
-        self.hvs.latch(kind.channel, self.list())?;
+        let _ = self.show_on(at, &timing)?;
         let pipe = &mut self.pipes[at];
         pipe.encoder.configure(&timing)?;
         pipe.phase = Phase::Configured;
@@ -509,6 +1086,16 @@ where
     /// pixels it composites, as Linux's `vc4_core_clock_atomic_check` has it.
     fn needed_hz(&self, timings: &[Option<Timing>]) -> u64 {
         let surface = self.surface;
+        let (width, height) = surface.map_or((0, 0), |mode| (mode.width_px, mode.height_px));
+        let surface_area = (u64::from(width) * u64::from(height)).max(1);
+        // Every layer is composited, so the stack loads the core by its
+        // layers' area, never less than the one plane the surface is.
+        let stacked = self
+            .stack
+            .iter()
+            .map(|layer| u64::from(layer.dst.2) * u64::from(layer.dst.3))
+            .sum::<u64>()
+            .max(surface_area);
         let mut most = 0;
         let mut pixels = 0;
         let mut running = 0;
@@ -516,16 +1103,10 @@ where
             let Some(timing) = timing else { continue };
             running += 1;
             most = most.max(output_load_hz(pipe.valve.kind().load, timing));
-            let (width, height) = surface.map_or((0, 0), |mode| (mode.width_px, mode.height_px));
-            let place = Place::fit(
-                width,
-                height,
-                u32::from(timing.horizontal.active),
-                u32::from(timing.vertical.active),
-            );
-            pixels +=
-                u64::from(place.width) * u64::from(place.height) * u64::from(timing.refresh_mhz())
-                    / 1_000;
+            let (out_width, out_height) = active_size(timing);
+            let place = Place::fit(width, height, out_width, out_height);
+            let placed = u64::from(place.width) * u64::from(place.height);
+            pixels += placed * stacked / surface_area * u64::from(timing.refresh_mhz()) / 1_000;
         }
         let share = if running > 1 { 40 } else { 60 };
         most.max(pixels * share / 100)
@@ -534,7 +1115,7 @@ where
     /// Hold the core clock at no less than `hz`, within what it can run at.
     fn floor(&mut self, hz: u64) {
         let hz = hz.min(self.core_max_hz);
-        if hz == self.floor_hz {
+        if hz == self.floor_hz || self.floor_refused == Some(hz) {
             return;
         }
         let result = if hz == 0 {
@@ -543,11 +1124,17 @@ where
             self.clock.floor(hz).map(|_| ())
         };
         match result {
-            Ok(()) => self.floor_hz = hz,
-            Err(errno) => self.log.record(Record::ClockRefused {
-                hz,
-                reason: clock::refusal(errno),
-            }),
+            Ok(()) => {
+                self.floor_hz = hz;
+                self.floor_refused = None;
+            }
+            Err(errno) => {
+                self.floor_refused = Some(hz);
+                self.log.record(Record::ClockRefused {
+                    hz,
+                    reason: clock::refusal(errno),
+                });
+            }
         }
     }
 
@@ -583,7 +1170,13 @@ where
                     self.down_or_fail(at, channel);
                 }
             }
-            self.frames = None;
+            // The presenter's buffers are for the surface that went; nothing
+            // of them is shown on the next.
+            self.stack.clear();
+            self.latched.clear();
+            if self.shows == Shows::Frames {
+                self.shows = Shows::Nothing;
+            }
             self.surface = surface;
         }
         let mut wanted = [None; OUTPUTS_MAX];
@@ -628,12 +1221,7 @@ where
                 }
             }
         }
-        let mut running = [None; OUTPUTS_MAX];
-        for (runs, pipe) in running.iter_mut().zip(&self.pipes) {
-            *runs = pipe.runs;
-        }
-        let settled = self.needed_hz(&running[..self.pipes.len()]);
-        self.floor(settled);
+        self.settle_floor();
         first
     }
 
@@ -647,78 +1235,87 @@ where
             });
         }
     }
+}
 
-    /// The channels running, each with what the engine feeds it.
-    fn running_channels(&self) -> impl Iterator<Item = usize> + '_ {
-        self.pipes
-            .iter()
-            .filter(|pipe| pipe.runs.is_some())
-            .map(|pipe| pipe.valve.kind().channel)
-    }
+/// The word offset of the filter kernel, as a plane's field holds it.
+fn kernel_at() -> Result<u32, DriverError> {
+    u32::try_from(KERNEL_AT).map_err(|_| DriverError::OutOfRange)
+}
 
-    /// Have every running channel latch what the outputs show.
-    fn latch_all(&self) -> Result<(), DriverError> {
-        let list = self.list();
-        for channel in self.running_channels() {
-            self.hvs.latch(channel, list)?;
-        }
-        Ok(())
-    }
+/// A timing's active pixels across and lines down.
+fn active_size(timing: &Timing) -> (u32, u32) {
+    (
+        u32::from(timing.horizontal.active),
+        u32::from(timing.vertical.active),
+    )
+}
 
-    /// Hold the frames a present needs for `mode`: one for each running
-    /// channel to composite, one for each to latch, and the one written —
-    /// every new frame's lists written on every running channel.
-    fn frames_for(&mut self, mode: DisplayMode) -> Result<(), DriverError> {
-        if self
-            .frames
-            .as_ref()
-            .is_none_or(|frames| *frames.mode() != mode)
-        {
-            self.frames = Some(Frames::new(mode));
-        }
-        let running = self.running_channels().count().max(1);
-        let Some(frames) = self.frames.as_mut() else {
-            return Err(DriverError::DeviceFault);
-        };
-        let before = frames.grow(&self.alloc, (2 + running).min(FRAMES_MAX))?;
-        let count = frames.len();
-        for at in 0..self.pipes.len() {
-            let Some(timing) = self.pipes[at].runs else {
-                continue;
-            };
-            let channel = self.pipes[at].valve.kind().channel;
-            for index in before..count {
-                if let Some(surface) = self.frame_surface(index) {
-                    self.write_plane(
-                        channel,
-                        List::Frame(index),
-                        &surface,
-                        u32::from(timing.horizontal.active),
-                        u32::from(timing.vertical.active),
-                    )?;
-                }
-            }
-        }
-        Ok(())
+/// Where `layer` reads its buffer, at `bus` and `stride` bytes a line, and
+/// where it lands on an output the surface is placed on at `fit`: cut to the
+/// surface, then scaled with it. `None` for a layer that lands nowhere.
+///
+/// # Errors
+///
+/// [`DriverError::OutOfRange`] for a layer whose cut no address holds.
+fn crop(
+    layer: &Shown,
+    (bus, stride): (u32, u32),
+    surface: &DisplayMode,
+    fit: &Place,
+) -> Result<Option<(Surface, Place)>, DriverError> {
+    let (dx, dy, dw, dh) = layer.dst;
+    let (left, top) = (i64::from(dx), i64::from(dy));
+    let (right, bottom) = (left + i64::from(dw), top + i64::from(dh));
+    let (seen_left, seen_top) = (left.max(0), top.max(0));
+    let seen_right = right.min(i64::from(surface.width_px));
+    let seen_bottom = bottom.min(i64::from(surface.height_px));
+    if seen_right <= seen_left || seen_bottom <= seen_top {
+        return Ok(None);
     }
-
-    /// A frame no running channel composites or latches next.
-    fn free_frame(&self) -> Result<usize, DriverError> {
-        let mut busy = [false; FRAMES_MAX];
-        for channel in self.running_channels() {
-            for list in self.hvs.lists(channel)? {
-                if let Some(List::Frame(index)) = list {
-                    if let Some(slot) = busy.get_mut(index) {
-                        *slot = true;
-                    }
-                }
-            }
-        }
-        let count = self.frames.as_ref().map_or(0, Frames::len);
-        (0..count)
-            .find(|&index| !busy[index])
-            .ok_or(DriverError::Busy)
+    // The source is cut in proportion, so a scaled layer keeps its scale.
+    let src = &layer.src;
+    let along = |cut: i64, extent: u32, src_extent: u32| {
+        cut * i64::from(src_extent) / i64::from(extent.max(1))
+    };
+    let src_left = along(seen_left - left, dw, src.width_px);
+    let src_top = along(seen_top - top, dh, src.height_px);
+    let src_right = i64::from(src.width_px) - along(right - seen_right, dw, src.width_px);
+    let src_bottom = i64::from(src.height_px) - along(bottom - seen_bottom, dh, src.height_px);
+    let narrow = |value: i64| u32::try_from(value).map_err(|_| DriverError::OutOfRange);
+    let (from_x, from_y) = (narrow(src_left)? + src.x, narrow(src_top)? + src.y);
+    let (src_w, src_h) = (narrow(src_right - src_left)?, narrow(src_bottom - src_top)?);
+    if src_w == 0 || src_h == 0 {
+        return Ok(None);
     }
+    let offset = u64::from(from_y) * u64::from(stride) + u64::from(from_x) * 4;
+    let bus = u32::try_from(u64::from(bus) + offset).map_err(|_| DriverError::OutOfRange)?;
+    // The surface's point lands on the output where `fit` scales it to.
+    let to_x = |value: i64| {
+        i64::from(fit.x) + value * i64::from(fit.width) / i64::from(surface.width_px.max(1))
+    };
+    let to_y = |value: i64| {
+        i64::from(fit.y) + value * i64::from(fit.height) / i64::from(surface.height_px.max(1))
+    };
+    let (x, y) = (to_x(seen_left), to_y(seen_top));
+    let (width, height) = (to_x(seen_right) - x, to_y(seen_bottom) - y);
+    if width <= 0 || height <= 0 {
+        return Ok(None);
+    }
+    Ok(Some((
+        Surface {
+            bus,
+            stride,
+            width: src_w,
+            height: src_h,
+            format: surface.format,
+        },
+        Place {
+            x: narrow(x)?,
+            y: narrow(y)?,
+            width: narrow(width)?,
+            height: narrow(height)?,
+        },
+    )))
 }
 
 impl<H, V, C, A, D, L> Display for Engine<H, V, C, A, D, L>
@@ -726,7 +1323,8 @@ where
     H: RegisterBlock,
     V: RegisterBlock,
     C: LinkCall,
-    A: FrameAllocator,
+    A: BufferMemory,
+    A::Region: DeviceBuffer,
     D: Delay,
     L: Recorder<Record>,
 {
@@ -734,7 +1332,7 @@ where
         self.surface
     }
 
-    fn service_events(&mut self) -> Result<(), DriverError> {
+    fn service_events(&mut self) -> Result<Serviced, DriverError> {
         for at in 0..self.pipes.len() {
             let pipe = &mut self.pipes[at];
             if pipe.gone {
@@ -760,27 +1358,79 @@ where
         // An output that will not come up is the engine's to record; the
         // events themselves were read.
         let _ = self.reconcile();
-        Ok(())
+        let latched = self.note_frames()?;
+        Ok(Serviced { latched })
     }
 
-    fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-        let mode = self.surface.ok_or(DriverError::Stale)?;
-        self.present_rects(frame, &[DamageRect::full(&mode)])
+    fn frame_count(&self) -> u32 {
+        // The HVS reads the frame it shows, so the presenter draws the next
+        // into another while one present is queued.
+        2
     }
 
-    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
+    fn abandon_queued(&mut self) {
+        let mut withdrawn = false;
+        for at in 0..self.pipes.len() {
+            if self.slots[at].waiting.take().is_none() {
+                continue;
+            }
+            withdrawn = true;
+            // The list it never latched is withdrawn before the slot can be
+            // written again under a channel that may yet pick it up.
+            let channel = self.pipes[at].valve.kind().channel;
+            if let Ok([Some(active), _]) = self.hvs.lists(channel) {
+                let _ = self.hvs.latch(channel, active);
+            }
+        }
+        // The outputs go on compositing the stack they latched last, which is
+        // what an output coming up shows and the clock is held to.
+        if withdrawn {
+            self.stack.clone_from(&self.latched);
+        }
+        // What only the withdrawn lists named is free to go.
+        if let Ok(named) = self.named_buffers() {
+            self.buffers.reap(|id| named.contains(&id));
+        }
+        let _ = self.watch_frames();
+    }
+
+    fn alloc_buffer(
+        &mut self,
+        width_px: u32,
+        height_px: u32,
+    ) -> Result<AllocatedBuffer, DriverError> {
+        if width_px == 0 || height_px == 0 || width_px > SIDE_MAX || height_px > SIDE_MAX {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let stride = (width_px * 4).next_multiple_of(STRIDE_ALIGN);
+        self.buffers
+            .alloc(&mut self.alloc, (width_px, height_px), stride, self.budget)
+    }
+
+    fn free_buffer(&mut self, id: BufferId) -> Result<(), DriverError> {
+        let named = self.named_buffers()?;
+        self.buffers.free(id, |id| named.contains(&id))?;
+        self.watch_frames()
+    }
+
+    fn present(&mut self, id: BufferId, damage: &[DamageRect]) -> Result<Presented, DriverError> {
         let mode = self.surface.ok_or(DriverError::Stale)?;
         DamageRect::validate_list(damage, &mode)?;
-        let len = u64::from(mode.stride_bytes) * u64::from(mode.height_px);
-        if (frame.len() as u64) < len {
-            return Err(DriverError::BufferTooSmall);
+        let held = self.buffers.get(id).ok_or(DriverError::NotFound)?;
+        if (held.width, held.height) != (mode.width_px, mode.height_px) {
+            return Err(DriverError::Stale);
         }
-        self.frames_for(mode)?;
-        let target = self.free_frame()?;
-        let frames = self.frames.as_mut().ok_or(DriverError::DeviceFault)?;
-        frames.present(target, frame, damage)?;
-        self.shows = Shows::Frames;
-        self.latch_all()
+        let whole = DamageRect::full(&mode);
+        let mut stack = ArrayVec::new();
+        stack
+            .try_push(Shown {
+                buffer: id,
+                src: whole,
+                dst: (0, 0, mode.width_px, mode.height_px),
+                opacity: u8::MAX,
+            })
+            .map_err(|_| DriverError::OutOfRange)?;
+        self.present_stack(stack)
     }
 
     fn set_power(&mut self, power: DisplayPower) -> Result<(), DriverError> {
@@ -788,7 +1438,11 @@ where
             return Ok(());
         }
         self.power = power;
-        self.reconcile()
+        let reconciled = self.reconcile();
+        let named = self.named_buffers()?;
+        self.buffers.reap(|id| named.contains(&id));
+        self.watch_frames()?;
+        reconciled
     }
 
     fn released(&mut self, surface: ReleaseSurface) {
@@ -796,12 +1450,22 @@ where
             ReleaseSurface::Text => Shows::Console,
             ReleaseSurface::Handover => Shows::Nothing,
         };
-        if let Some(frames) = self.frames.as_mut() {
-            frames.forget();
+        // What a departed presenter left must never be shown to the next.
+        self.stack.clear();
+        self.latched.clear();
+        self.cursor.shown = false;
+        for slots in &mut self.slots {
+            slots.waiting = None;
+        }
+        let mut moved = true;
+        for at in 0..self.pipes.len() {
+            if let Some(timing) = self.pipes[at].runs {
+                moved &= self.show_on(at, &timing).is_ok();
+            }
         }
         // A channel that cannot be moved off the departed presenter's frame
         // goes dark rather than go on showing it.
-        if self.latch_all().is_err() {
+        if !moved {
             for at in 0..self.pipes.len() {
                 if self.pipes[at].runs.is_some() {
                     let channel = Some(self.pipes[at].valve.kind().channel);
@@ -810,5 +1474,145 @@ where
                 }
             }
         }
+        // The buffers it leaves are given back once no list names them.
+        let _ = self.watch_frames();
+    }
+
+    fn as_accelerated(&mut self) -> Option<&mut dyn AcceleratedDisplay> {
+        Some(self)
+    }
+
+    fn hardware_cursor(&mut self) -> Option<&mut dyn HardwareCursor> {
+        Some(self)
+    }
+}
+
+impl<H, V, C, A, D, L> AcceleratedDisplay for Engine<H, V, C, A, D, L>
+where
+    H: RegisterBlock,
+    V: RegisterBlock,
+    C: LinkCall,
+    A: BufferMemory,
+    A::Region: DeviceBuffer,
+    D: Delay,
+    L: Recorder<Record>,
+{
+    fn accel_caps(&self) -> AccelCaps {
+        // A stack slot holds every layer's plane and the pointer's, and each
+        // plane's fields bound its sides.
+        AccelCaps {
+            max_layers: u32::try_from(MAX_ACCEL_LAYERS).unwrap_or(u32::MAX),
+            max_width_px: SIDE_MAX,
+            max_height_px: SIDE_MAX,
+            per_layer_opacity: true,
+            hw_scaling: true,
+        }
+    }
+
+    fn present_layers(&mut self, layers: &[AccelLayer]) -> Result<Presented, DriverError> {
+        if self.surface.is_none() {
+            return Err(DriverError::Stale);
+        }
+        let caps = self.accel_caps();
+        if layers.is_empty() || layers.len() > caps.max_layers as usize {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let mut stack = ArrayVec::new();
+        for layer in layers {
+            let held = self
+                .buffers
+                .get(layer.buffer)
+                .ok_or(DriverError::NotFound)?;
+            layer.validate(&caps, held.width, held.height)?;
+            stack
+                .try_push(Shown {
+                    buffer: layer.buffer,
+                    src: layer.src,
+                    dst: (
+                        layer.dst_x,
+                        layer.dst_y,
+                        layer.dst_width_px,
+                        layer.dst_height_px,
+                    ),
+                    opacity: layer.opacity,
+                })
+                .map_err(|_| DriverError::LengthOutOfRange)?;
+        }
+        self.present_stack(stack)
+    }
+}
+
+impl<H, V, C, A, D, L> HardwareCursor for Engine<H, V, C, A, D, L>
+where
+    H: RegisterBlock,
+    V: RegisterBlock,
+    C: LinkCall,
+    A: BufferMemory,
+    A::Region: DeviceBuffer,
+    D: Delay,
+    L: Recorder<Record>,
+{
+    fn cursor_caps(&self) -> CursorCaps {
+        CursorCaps {
+            max_width_px: CURSOR_SIDE,
+            max_height_px: CURSOR_SIDE,
+        }
+    }
+
+    fn set_cursor(&mut self, id: BufferId, hot_x: u32, hot_y: u32) -> Result<(), DriverError> {
+        let (width, height, stride) = {
+            let held = self.buffers.get(id).ok_or(DriverError::NotFound)?;
+            (held.width, held.height, held.stride)
+        };
+        if width > CURSOR_SIDE || height > CURSOR_SIDE || hot_x >= width || hot_y >= height {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        self.ensure_clear_image()?;
+        let index = self.free_image()?;
+        // The image is the device's once copied, so the presenter may draw
+        // the next into its buffer at once.
+        let (Some(held), Some(image)) = (self.buffers.get(id), self.cursor.images.get_mut(index))
+        else {
+            return Err(DriverError::NotFound);
+        };
+        held.memory.with_bytes(|source| {
+            image.memory.with_bytes_mut(|target| {
+                copy_rows(
+                    source,
+                    stride as usize,
+                    target,
+                    CURSOR_STRIDE as usize,
+                    width as usize * 4,
+                    height as usize,
+                )
+            })
+        })?;
+        if self.cursor.shown {
+            self.retire_listed();
+        }
+        self.cursor.listed = index;
+        self.cursor.size = (width, height);
+        self.cursor.hot = (hot_x, hot_y);
+        self.cursor.shown = true;
+        self.rewrite_pointer()?;
+        self.watch_frames()
+    }
+
+    fn move_cursor(&mut self, x: i32, y: i32) -> Result<(), DriverError> {
+        self.cursor.at = (x, y);
+        if self.cursor.shown {
+            self.rewrite_pointer()?;
+        }
+        Ok(())
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), DriverError> {
+        if !self.cursor.shown {
+            return Ok(());
+        }
+        self.retire_listed();
+        self.cursor.shown = false;
+        self.rewrite_pointer()?;
+        self.watch_frames()
     }
 }

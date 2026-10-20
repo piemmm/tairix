@@ -5,7 +5,7 @@ TAIRiX desktop (`AGENTS.md` §10). All compositing happens in user space;
 the kernel only ships framebuffer access through a capability, and no
 non-GUI crate depends on it (`AGENTS.md` §17.3). This page documents the
 **compositor core** and the **input router** delivered in the first
-Stage 7 increments, plus the optional **GPU-accelerated present path**;
+Stage 7 increments, plus the optional **hardware layer path**;
 theming and the taskbar build on them in later increments.
 
 ## Pipeline
@@ -198,8 +198,9 @@ nothing else in the compositor reads it.
 
 It is applied at exactly one point — the step in `compose_span` where a
 composited pixel becomes a scan-out byte — so every present path
-(`composite`, `present`, the accelerated path's software
-fallback) dims each pixel exactly once. The back buffer deliberately keeps
+(`composite`, `present`) dims each pixel exactly once; the layered path is
+not taken while a reveal runs, since the engine scans a layer out as it was
+handed it. The back buffer deliberately keeps
 the **true** composed colour: a frosted window samples the backdrop out of
 it, and a blur-split rectangle re-reads it for its second segment, so
 dimming the buffer instead would dim those pixels twice.
@@ -262,62 +263,63 @@ desktop layer's owner rather than swallowed: see *Input routing*, below.
 
 ## Hardware acceleration
 
-When the display driver exposes the optional
-`AcceleratedDisplay` seam (`AGENTS.md` §10),
-`Compositor::present_accelerated` lets the hardware composite the scene
-instead of the CPU. It encodes the scene back-to-front as one solid
-background layer, the desktop layer (when one is installed) directly on
-top of it, one `AccelLayer` per visible window spanning its footprint (its
-pixels baked over its shadow with that window's opacity and corner coverage,
-each row resolved once through the same `Window::row` and `Window::shadow_row`
-the software composite reads and dithered at its screen position, so the
-hardware result matches
-pixel-for-pixel), and the pointer overlay on top — one layer per sprite,
-trail, halo and cursor, in the order the software composite blends them — then
-hands the stack to `AcceleratedDisplay::present_layers`.
+The compositor presents through `tairix_display::Presenter`, never a driver
+trait. Where the display reports a layer engine (`Presenter::layers`, at least
+two layers, and hardware scaling if the desktop is scaled) and no screen
+reveal is running, `Compositor::present` takes the layered path; otherwise,
+and whenever no stack is taken, it composites the frame in software and
+presents its damage, so a hardware frame is never partial.
 
-A **fullscreen window that covers the scan-out** is promoted to the
-single layer the scene actually is: the background fill and every window
-under it are dropped, because none of them can contribute a pixel. That
-is where exclusive fullscreen's benefit lives — no composition pass, one
-tear-free flip — and it is reached through the one display path every
-other window uses; no app ever touches the framebuffer.
-`Compositor::fullscreen_cover` reads every condition from the
-compositor's own state rather than from anything the client claims: the
-window must be visible, fullscreen, exactly the scan-out rectangle,
-wholly opaque, cut to no shape, **and** holding presented pixels for all
-of it. That last one is what makes dropping the background sound — a
-window is resized before its app presents at the new extent, and in
-between, its margin samples transparent, so the promotion waits for the
-frame that genuinely covers. The software path needs no promotion of its
-own: an opaque run covering a row already skips the desktop, the
-background fill and every window beneath it, and a second occlusion
-mechanism beside that one is forbidden (`AGENTS.md` §2.2).
+A layered present shows a **base** — the output frame, holding the desktop
+and every window below the lowest layer, composited in software as ever —
+and above it one layer per window, each in two buffers the display allocated:
 
-The software path is always the fallback: if the scene exceeds the
-engine's reported `AccelCaps` — more layers than it has planes, or a
-layer larger than it can source — the compositor composites the whole
-frame in software and presents it instead, so a hardware frame is never
-partial (`AGENTS.md` §2.9). A **backdrop blur** takes that same fallback
-unconditionally (`Compositor::has_backdrop_blur`): a hardware layer is
-composed from its own pixels alone and cannot sample what is already
-behind it, so a scene with any visible frosted window has no layer
-encoding at all and goes through software rather than presenting a frame
-the frosting is missing from. A **translucent window** takes it as well
-(`Compositor::has_translucent_window`): the engine would blend that layer
-over what is beneath it in the scan-out's own 8 bits with a fixed rounding,
-which is exactly what bands a picture under a translucent field, and no
-layer stack can express a per-pixel dither. A window's own anti-aliased
-corner is not this case — partial coverage a few pixels wide has no gradient
-to band — so ordinary rounded windows still take the hardware path. An
-**in-flight screen reveal** takes it too:
-the engine scans a layer out as the driver was handed it, so nothing it
-composes passes through the dimming and the screen would show at full
-strength while the fade ran. `encode_layers` therefore declines while
-`reveal() < u8::MAX` and resumes the moment the fade completes. The first
-driver to implement the seam is the
-Raspberry Pi VideoCore HVS plane compositor (see
-[Display drivers](../drivers/display.md)).
+- **Free** — an opaque window with no frost and no partially transparent
+  content, baked alone over nothing: content, furniture, corner coverage and
+  shadow. The engine blends only its edges and its shadow, and moving the
+  window is a new destination, not a composite.
+- **Flattened** — any other window, baked as the software composite of its
+  footprint over everything beneath it, opaque, so the engine is never handed
+  a translucent field it would band without the dither. It is re-baked
+  wherever anything beneath it changes. Flattened footprints never overlap
+  and never cross a frosted window of the base.
+
+The back buffer holds at each pixel the composite the frame or layer showing
+it needs. A layer's buffers alternate: the engine shows one while what changed
+is baked into the other, so it never reads a buffer being written, and
+`Presenter::ready` holds a frame while a present is queued. Each buffer
+catches up on what changed while the other was shown, and a frame with nothing
+new presents nothing.
+
+A **fullscreen window that covers the output** with a free layer is promoted
+to the one layer the scene is: no base is presented, and the base's damage is
+kept for when it shows again. `Compositor::fullscreen_cover` reads every
+condition from the compositor's own state — visible, fullscreen, exactly the
+output, wholly opaque, unshaped, and holding presented pixels for all of it —
+since a window is resized before its app presents at the new extent. A
+desktop composed smaller than its output is presented as one desktop-sized
+layer the engine scales onto it.
+
+A refusal shrinks the stack rather than failing the frame. A window the
+display cannot give buffers, or the lowest window on a layer of a stack the
+engine cannot composite at once (`DriverError::OutOfRange`: scaled layers
+outrunning a mirrored output's line buffer, say), joins the base with every
+window beneath it. The layers above keep their buffers, the frame is planned
+again within the same present, and the window stays in the base until its size
+changes or another window's refusal is remembered in its place. A stack the
+engine can never take (`LengthOutOfRange`, `Unsupported`, or `OutOfRange` for
+the scaled desktop's one layer) keeps the output on the software path until its
+mode changes, and a desktop layer the display cannot give buffers is not asked
+for again at that size. A frame whose new layer could not be baked for want of
+memory is carried by the software path, and the layers are tried again on the
+next.
+
+**The pointer** takes one of three routes: composited into the frame; on the
+display's cursor plane (`Presenter::cursor`), which only a single sprite with
+no trail or halo, unscaled, is given, so moving it presents nothing; or a
+layer of its own above every window. A presenter that was replaced — the
+driver restarted under the session — is noticed by its buffers and plane no
+longer being held, and the layers are rebuilt.
 
 ## Premultiplied alpha
 
@@ -945,18 +947,19 @@ session driving a wake loop can therefore skip a frame outright when it is
 `Compositor::present` composites and then moves the smallest sensible
 number of bytes:
 
-- **No damage presents nothing.** The display driver is not called at
-  all, so a wake that changed nothing costs neither the whole-frame
-  shared-memory copy nor the driver blit. The first frame still shows: a
-  new compositor marks the whole screen dirty.
-- **A frame is presented once, naming everything it changed.** Damage
-  that covers the screen is one `Display::present`; anything else is one
-  `Display::present_rects` carrying the frame's disjoint dirty
-  rectangles. The bytes moved are proportional to what changed rather
-  than to the box around it — a dirty taskbar strip along the bottom edge
-  plus a cursor near the top is two small blits, not a near-full-screen
-  one — and a scattered frame costs one round trip, not one per
-  rectangle.
+- **No damage presents nothing.** The display is not called at all, so a
+  wake that changed nothing costs neither a copy into a frame nor the
+  driver's own. The first frame still shows: a new compositor marks the
+  whole screen dirty.
+- **A frame is presented once, naming everything it changed.** One
+  `Presenter::present` carries the frame's disjoint dirty rectangles, or
+  the whole frame where damage covers the screen. The presenter copies
+  into the driver's frame it draws next only what that frame lacks, and
+  the driver moves only the damage on. The bytes moved are proportional
+  to what changed rather than to the box around it — a dirty taskbar
+  strip along the bottom edge plus a cursor near the top is two small
+  copies, not a near-full-screen one — and a scattered frame costs one
+  round trip, not one per rectangle.
 - **Covering the screen and spanning it are different questions.** Two
   far-apart corners have a bounding box the size of the screen while
   changing a few dozen pixels, so the whole-frame path is reserved for

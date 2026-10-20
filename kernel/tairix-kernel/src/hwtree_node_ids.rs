@@ -80,11 +80,17 @@ pub const VIRTIO_AUDIO_PROBE_NODE_BASE_ID: u32 = region(5);
 /// order.
 pub const IOMMU_UNIT_NODE_BASE_ID: u32 = region(6);
 
+/// First synthetic id for a probed virtio-MMIO **display** child node
+/// ([`crate::hwdiscovery::observe_virtio_mmio_display_devices`]). One id per
+/// enumerated GPU slot, so distinct adapters stay distinct.
+pub const VIRTIO_DISPLAY_PROBE_NODE_BASE_ID: u32 = region(7);
+
 /// The first region of the PCI function nodes: every segment the kernel owns
 /// takes the region at its position among them, and each function's node
 /// sits at its requester id within it, so a function has one id whatever its
-/// class and however many segments there are.
-pub const PCI_FUNCTION_NODE_BASE_ID: u32 = region(7);
+/// class and however many segments there are. It is the last region, since
+/// every segment past the first claims the one after it.
+pub const PCI_FUNCTION_NODE_BASE_ID: u32 = region(8);
 
 /// The node id of the function with requester id `requester` on the
 /// `ordinal`-th segment the kernel owns, or [`None`] past the id space.
@@ -123,7 +129,7 @@ mod tests {
     use super::*;
 
     /// Every reserved base, in region order, for the disjointness sweep.
-    const BASES: [u32; 8] = [
+    const BASES: [u32; 9] = [
         VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_INPUT_PROBE_NODE_BASE_ID,
         BOOT_DISPLAY_NODE_ID,
@@ -131,6 +137,7 @@ mod tests {
         VIRTUAL_BUS_NODE_ID,
         VIRTIO_AUDIO_PROBE_NODE_BASE_ID,
         IOMMU_UNIT_NODE_BASE_ID,
+        VIRTIO_DISPLAY_PROBE_NODE_BASE_ID,
         PCI_FUNCTION_NODE_BASE_ID,
     ];
 

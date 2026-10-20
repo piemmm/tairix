@@ -1,7 +1,6 @@
-//! Host tests: the server engine against mock seams, and the client
-//! halves wired to a real [`DisplayServer`] through a loopback
-//! transport, so both halves are proven against the one shared
-//! definition of the protocol semantics.
+//! Host tests: the server engine against mock seams, and the client half
+//! wired to a real [`DisplayServer`] through a loopback transport, so both
+//! halves are proven against the one definition of the protocol.
 
 extern crate alloc;
 
@@ -10,21 +9,29 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::display_ipc::{decode_stats_reply, DisplayRequest, DISPLAY_MAX_FRAMES};
+use tairix_abi::display_ipc::{
+    decode_buffer_reply, decode_configure_reply, decode_mode_reply, decode_planes_reply,
+    decode_present_reply, decode_stats_reply, ConfiguredFrames, DisplayEvent, DisplayRequest,
+    GrantedBuffer, LayerList, Planes, PresentReply, DISPLAY_MAX_BUFFERS, DISPLAY_MAX_FRAMES,
+};
 use tairix_abi::driver::display::{
-    AccelCaps, DamageList, DamageRect, Display, DisplayDeviceReport, DisplayFormat, DisplayMode,
-    DisplayPower,
+    AccelCaps, AccelLayer, AcceleratedDisplay, AllocatedBuffer, BufferId, CursorCaps, DamageList,
+    DamageRect, Display, DisplayFormat, DisplayMemory, DisplayMode, DisplayPower, HardwareCursor,
+    Presented, Serviced,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::seat::{DisplayLease, ReleaseSurface};
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, DriverError, Errno, ProcId, PROC_ID_LEN};
 
-use crate::client::{DisplayClient, DisplayTransport, RemoteDisplay};
+use crate::client::{BufferMapper, DisplayClient, DisplayTransport, RemoteDisplay};
 use crate::driver_error_from_errno;
-use crate::server::{DisplayServer, FrameRegion, PeerFacts, ShmMapper, DISPLAY_REPLY_MAX};
+use crate::presenter::{Base, Presenter};
+use crate::server::{
+    Delivery, DisplayServer, Latch, PeerFacts, DISPLAY_REPLY_MAX, PRESENT_LATCH_DEADLINE_NS,
+};
 
-/// 4×3 BGRA test mode, stride == one scanline.
+/// 4×3 BGRA test mode, stride one scanline.
 const MODE: DisplayMode = DisplayMode {
     width_px: 4,
     height_px: 3,
@@ -35,7 +42,7 @@ const MODE: DisplayMode = DisplayMode {
 /// Bytes one MODE frame occupies.
 const FRAME_LEN: usize = 48;
 
-/// A narrower mode the output moves to, whose frames fit the rig's region.
+/// A narrower mode the output moves to.
 const NARROW: DisplayMode = DisplayMode {
     width_px: 2,
     height_px: 3,
@@ -45,19 +52,37 @@ const NARROW: DisplayMode = DisplayMode {
 
 const SEAT: u64 = 0;
 const TICKET: u64 = 7;
+const PORT: u64 = 0x9047_0001;
 
-/// The presenter that granted the display service its frame region.
-const PRESENTER: ProcId = ProcId::from_raw([0x7C; PROC_ID_LEN]);
+/// The driver instance that grants the buffers.
+const DRIVER: ProcId = ProcId::from_raw([0xD1; PROC_ID_LEN]);
 
-/// A caller oracle scripted per test: a lease answer (`Ok(generation)` or a
-/// typed refusal) and whether the caller holds the hardware-inventory
-/// authority the device read needs.
+/// What a grant handle adds to the region it names, so a test can tell the
+/// two apart.
+const GRANT_TAG: u64 = 0x1_0000;
+
+const CAPS: AccelCaps = AccelCaps {
+    max_layers: 3,
+    max_width_px: 64,
+    max_height_px: 64,
+    per_layer_opacity: false,
+    hw_scaling: false,
+};
+
+const CURSOR: CursorCaps = CursorCaps {
+    max_width_px: 8,
+    max_height_px: 8,
+};
+
+/// Nanoseconds the rig's clock advances per reading.
+const CLOCK_STEP_NS: u64 = 1_000;
+
+/// A caller oracle scripted per test.
 struct MockSeat {
     answer: Result<u64, Errno>,
     holds: Result<bool, Errno>,
-    origin: ProcId,
+    owns_port: bool,
     asked: Vec<(u64, u64)>,
-    caps_asked: Vec<(u64, CapabilityId)>,
 }
 
 impl MockSeat {
@@ -65,26 +90,9 @@ impl MockSeat {
         Self {
             answer: Ok(generation),
             holds: Ok(false),
-            origin: PRESENTER,
+            owns_port: true,
             asked: Vec::new(),
-            caps_asked: Vec::new(),
         }
-    }
-
-    fn refusing(err: Errno) -> Self {
-        Self {
-            answer: Err(err),
-            holds: Ok(false),
-            origin: PRESENTER,
-            asked: Vec::new(),
-            caps_asked: Vec::new(),
-        }
-    }
-
-    /// The same oracle, answering the capability question with `holds`.
-    fn holding(mut self, holds: Result<bool, Errno>) -> Self {
-        self.holds = holds;
-        self
     }
 }
 
@@ -94,32 +102,63 @@ impl PeerFacts for MockSeat {
         self.answer
     }
 
-    fn holds_capability(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
-        self.caps_asked.push((ticket, cap));
+    fn holds_capability(&mut self, _ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
+        assert_eq!(cap, CapabilityId::SYSINFO_HW);
         self.holds
     }
 
-    fn origin(&mut self, _ticket: u64) -> Result<ProcId, Errno> {
-        Ok(self.origin)
+    fn owns_port(&mut self, _ticket: u64, port: u64) -> bool {
+        self.owns_port && port == PORT
     }
 }
 
-/// A clock a test advances by hand, so a measured occupancy is asserted as a
-/// value rather than as "some elapsed time".
+/// The kernel's grants and posts, recorded.
+#[derive(Default)]
+struct MockDelivery {
+    grants: Vec<(u64, u64)>,
+    refuse_grant: Option<Errno>,
+    posts: Vec<(u64, DisplayEvent)>,
+    refuse_post: Option<Errno>,
+}
+
+impl Delivery for MockDelivery {
+    fn grant(&mut self, region: u64, ticket: u64) -> Result<u64, Errno> {
+        if let Some(err) = self.refuse_grant {
+            return Err(err);
+        }
+        self.grants.push((region, ticket));
+        Ok(region + GRANT_TAG)
+    }
+
+    fn grantor(&self) -> ProcId {
+        DRIVER
+    }
+
+    fn post(&mut self, port: u64, event: &DisplayEvent) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_post {
+            return Err(err);
+        }
+        self.posts.push((port, *event));
+        Ok(())
+    }
+}
+
+/// A clock a test advances by hand; every reading also advances one step,
+/// so bracketing a present costs exactly one step.
 #[derive(Clone)]
 struct StepClock {
     now: Rc<RefCell<u64>>,
-    /// Nanoseconds every reading advances by, so bracketing one present costs
-    /// exactly one step.
-    step: u64,
 }
 
 impl StepClock {
-    fn new(step: u64) -> Self {
+    fn new() -> Self {
         Self {
             now: Rc::new(RefCell::new(0)),
-            step,
         }
+    }
+
+    fn advance(&self, ns: u64) {
+        *self.now.borrow_mut() += ns;
     }
 }
 
@@ -127,183 +166,225 @@ impl MonotonicClock for StepClock {
     fn now_ns(&self) -> u64 {
         let mut now = self.now.borrow_mut();
         let reading = *now;
-        *now = reading.saturating_add(self.step);
+        *now = reading.saturating_add(CLOCK_STEP_NS);
         reading
     }
 }
 
-/// The shared backing store standing in for one shm region: tests write
-/// it and the mapper snapshots it at map time. (Real shared memory is a
-/// live aliased mapping; the engine only reads the region at present
-/// time, so a map-time snapshot exercises the same code path — tests
-/// fill their frame content before configuring.)
-type SharedBytes = Rc<RefCell<Vec<u8>>>;
-
-struct MockRegion {
-    bytes: Vec<u8>,
+/// One buffer the mock driver allocated.
+#[derive(Copy, Clone, Debug)]
+struct MockBuffer {
+    id: BufferId,
+    width_px: u32,
+    height_px: u32,
 }
 
-impl FrameRegion for MockRegion {
-    fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-/// A mapper that knows one grant handle and its shared backing.
-struct MockMapper {
-    handle: u64,
-    bytes: SharedBytes,
-    maps: Rc<RefCell<u32>>,
-}
-
-impl ShmMapper for MockMapper {
-    type Region = MockRegion;
-
-    fn map(&mut self, grantor: ProcId, handle: u64, min_len: usize) -> Result<Self::Region, Errno> {
-        // The kernel's binding: the grant resolves only for its own grantor.
-        if handle != self.handle || grantor != PRESENTER {
-            return Err(Errno::NotFound);
-        }
-        if self.bytes.borrow().len() < min_len {
-            return Err(Errno::LengthOutOfRange);
-        }
-        *self.maps.borrow_mut() += 1;
-        Ok(MockRegion {
-            bytes: self.bytes.borrow().clone(),
-        })
-    }
-}
-
-/// A display that records what reached scan-out.
-#[derive(Default)]
-struct RecordingDisplay {
-    scanout: Vec<u8>,
-    presents: u32,
-    region_presents: u32,
-    /// The rectangles the last present named, empty after a whole-frame
-    /// one — so a test can tell one call naming two rectangles from two
-    /// calls naming one each.
-    last_damage: Vec<DamageRect>,
-    fail_with: Option<DriverError>,
-    /// Whether the display has a power control at all.
-    has_power: bool,
-    /// Every power switch the driver carried out, in order.
-    switches: Vec<DisplayPower>,
-    /// When set, a power switch fails with it.
-    power_fails: Option<DriverError>,
-    /// What the output runs; a test moves it as a hotplug would.
+/// A display driver double: it allocates ids, shows what it is told, and
+/// says what it was asked.
+struct MockDisplay {
     output: Option<DisplayMode>,
-    /// Where the screen went each time a presenter's lease ended.
+    frame_count: u32,
+    /// Presents answer `Queued` rather than `Shown`.
+    queues: bool,
+    next: u32,
+    live: Vec<MockBuffer>,
+    /// Buffers allocated beyond which a further allocation is refused.
+    room: usize,
+    shown: Vec<(BufferId, Vec<DamageRect>)>,
+    layers: Vec<Vec<AccelLayer>>,
+    freed: Vec<BufferId>,
     released: Vec<ReleaseSurface>,
+    powered: Vec<DisplayPower>,
+    power_refusal: Option<DriverError>,
+    accel: Option<AccelCaps>,
+    cursor: Option<CursorCaps>,
+    cursor_ops: Vec<CursorOp>,
+    memory: DisplayMemory,
+    /// Queued presents the server gave up on.
+    abandoned: usize,
 }
 
-impl RecordingDisplay {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CursorOp {
+    Set(BufferId, u32, u32),
+    Move(i32, i32),
+    Hide,
+}
+
+impl MockDisplay {
     fn new() -> Self {
         Self {
-            scanout: vec![0u8; FRAME_LEN],
-            has_power: true,
             output: Some(MODE),
-            ..Self::default()
+            frame_count: 2,
+            queues: false,
+            next: 1,
+            live: Vec::new(),
+            room: usize::MAX,
+            shown: Vec::new(),
+            layers: Vec::new(),
+            freed: Vec::new(),
+            released: Vec::new(),
+            powered: Vec::new(),
+            power_refusal: None,
+            accel: None,
+            cursor: None,
+            cursor_ops: Vec::new(),
+            memory: DisplayMemory::NONE,
+            abandoned: 0,
         }
     }
 
-    /// Bytes one frame of the output's mode occupies.
-    fn frame_len(&self) -> Result<usize, DriverError> {
-        let mode = self.output.ok_or(DriverError::Stale)?;
-        Ok(mode.stride_bytes as usize * mode.height_px as usize)
+    fn buffer(&self, id: BufferId) -> Option<MockBuffer> {
+        self.live.iter().copied().find(|buffer| buffer.id == id)
+    }
+
+    fn outcome(&self) -> Presented {
+        if self.queues {
+            Presented::Queued
+        } else {
+            Presented::Shown
+        }
     }
 }
 
-impl Display for RecordingDisplay {
+impl Display for MockDisplay {
     fn output(&self) -> Option<DisplayMode> {
         self.output
     }
 
-    fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-        if let Some(err) = self.fail_with {
-            return Err(err);
+    fn abandon_queued(&mut self) {
+        self.abandoned += 1;
+    }
+
+    fn memory(&self) -> DisplayMemory {
+        self.memory
+    }
+
+    fn frame_count(&self) -> u32 {
+        self.frame_count
+    }
+
+    fn alloc_buffer(
+        &mut self,
+        width_px: u32,
+        height_px: u32,
+    ) -> Result<AllocatedBuffer, DriverError> {
+        if self.live.len() >= self.room {
+            return Err(DriverError::NoSpace);
         }
-        let len = self.frame_len()?;
-        if frame.len() < len {
-            return Err(DriverError::BufferTooSmall);
-        }
-        self.scanout[..len].copy_from_slice(&frame[..len]);
-        self.presents += 1;
-        self.last_damage.clear();
+        let id = BufferId::new(self.next).ok_or(DriverError::NoSpace)?;
+        self.next += 1;
+        self.live.push(MockBuffer {
+            id,
+            width_px,
+            height_px,
+        });
+        Ok(AllocatedBuffer {
+            id,
+            region: u64::from(id.get()) * 0x10,
+            stride_bytes: width_px * 4,
+        })
+    }
+
+    fn free_buffer(&mut self, id: BufferId) -> Result<(), DriverError> {
+        let at = self
+            .live
+            .iter()
+            .position(|buffer| buffer.id == id)
+            .ok_or(DriverError::NotFound)?;
+        self.live.remove(at);
+        self.freed.push(id);
         Ok(())
+    }
+
+    fn present(&mut self, id: BufferId, damage: &[DamageRect]) -> Result<Presented, DriverError> {
+        let mode = self.output.ok_or(DriverError::Stale)?;
+        DamageRect::validate_list(damage, &mode)?;
+        self.buffer(id).ok_or(DriverError::NotFound)?;
+        self.shown.push((id, damage.to_vec()));
+        Ok(self.outcome())
     }
 
     fn released(&mut self, surface: ReleaseSurface) {
         self.released.push(surface);
     }
 
-    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
-        if let Some(err) = self.fail_with {
-            return Err(err);
+    fn set_power(&mut self, power: DisplayPower) -> Result<(), DriverError> {
+        if let Some(refusal) = self.power_refusal {
+            return Err(refusal);
         }
-        let mode = self.output.ok_or(DriverError::Stale)?;
-        DamageRect::validate_list(damage, &mode)?;
-        if frame.len() < self.frame_len()? {
-            return Err(DriverError::BufferTooSmall);
-        }
-        let stride = mode.stride_bytes as usize;
-        for rect in damage {
-            let x0 = rect.x as usize * 4;
-            let span = rect.width_px as usize * 4;
-            for row in 0..rect.height_px as usize {
-                let line = (rect.y as usize + row) * stride + x0;
-                self.scanout[line..line + span].copy_from_slice(&frame[line..line + span]);
-            }
-        }
-        self.region_presents += 1;
-        self.last_damage = damage.to_vec();
+        self.powered.push(power);
         Ok(())
     }
 
-    fn set_power(&mut self, power: DisplayPower) -> Result<(), DriverError> {
-        if !self.has_power {
-            return Err(DriverError::Unsupported);
+    fn as_accelerated(&mut self) -> Option<&mut dyn AcceleratedDisplay> {
+        if self.accel.is_some() {
+            Some(self)
+        } else {
+            None
         }
-        if let Some(err) = self.power_fails {
-            return Err(err);
+    }
+
+    fn hardware_cursor(&mut self) -> Option<&mut dyn HardwareCursor> {
+        if self.cursor.is_some() {
+            Some(self)
+        } else {
+            None
         }
-        self.switches.push(power);
+    }
+}
+
+impl AcceleratedDisplay for MockDisplay {
+    fn accel_caps(&self) -> AccelCaps {
+        self.accel.unwrap_or(CAPS)
+    }
+
+    fn present_layers(&mut self, layers: &[AccelLayer]) -> Result<Presented, DriverError> {
+        self.layers.push(layers.to_vec());
+        Ok(self.outcome())
+    }
+}
+
+impl HardwareCursor for MockDisplay {
+    fn cursor_caps(&self) -> CursorCaps {
+        self.cursor.unwrap_or(CURSOR)
+    }
+
+    fn set_cursor(&mut self, id: BufferId, hot_x: u32, hot_y: u32) -> Result<(), DriverError> {
+        self.cursor_ops.push(CursorOp::Set(id, hot_x, hot_y));
+        Ok(())
+    }
+
+    fn move_cursor(&mut self, x: i32, y: i32) -> Result<(), DriverError> {
+        self.cursor_ops.push(CursorOp::Move(x, y));
+        Ok(())
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), DriverError> {
+        self.cursor_ops.push(CursorOp::Hide);
         Ok(())
     }
 }
 
-const GRANT: u64 = 42;
-
-/// Nanoseconds the rig's clock advances per reading, so one bracketed present
-/// costs exactly this much device-busy time.
-const CLOCK_STEP_NS: u64 = 1_000;
-
-/// A server rig: engine + display + caller oracle + the shared region.
+/// A server rig: the engine, the driver double, the caller oracle and the
+/// kernel's deliveries.
 struct Rig {
-    server: DisplayServer<MockMapper, StepClock>,
-    display: RecordingDisplay,
+    server: DisplayServer<StepClock>,
+    clock: StepClock,
+    display: MockDisplay,
     seat: MockSeat,
-    bytes: SharedBytes,
-    maps: Rc<RefCell<u32>>,
+    delivery: MockDelivery,
 }
 
 impl Rig {
-    fn new(frames: u32, generation: u64) -> Self {
-        let bytes: SharedBytes = Rc::new(RefCell::new(vec![0u8; FRAME_LEN * frames as usize]));
-        let maps = Rc::new(RefCell::new(0));
+    fn new() -> Self {
+        let clock = StepClock::new();
         Self {
-            server: DisplayServer::new(
-                MockMapper {
-                    handle: GRANT,
-                    bytes: Rc::clone(&bytes),
-                    maps: Rc::clone(&maps),
-                },
-                StepClock::new(CLOCK_STEP_NS),
-            ),
-            display: RecordingDisplay::new(),
-            seat: MockSeat::live(generation),
-            bytes,
-            maps,
+            server: DisplayServer::new(clock.clone()),
+            clock,
+            display: MockDisplay::new(),
+            seat: MockSeat::live(1),
+            delivery: MockDelivery::default(),
         }
     }
 
@@ -312,6 +393,7 @@ impl Rig {
         let len = self.server.serve(
             &mut self.display,
             &mut self.seat,
+            &mut self.delivery,
             TICKET,
             &request.to_le_bytes(),
             &mut reply,
@@ -320,37 +402,67 @@ impl Rig {
     }
 
     fn status(&mut self, request: &DisplayRequest) -> Result<(), Errno> {
-        let reply = self.serve(request);
-        decode_status_reply(&reply)
-    }
-
-    fn configure(&mut self, frames: u32) -> Result<(), Errno> {
-        self.configure_for(frames, MODE)
-    }
-
-    fn configure_for(&mut self, frames: u32, mode: DisplayMode) -> Result<(), Errno> {
-        self.status(&DisplayRequest::Configure {
-            seat_id: SEAT,
-            shm_handle: GRANT,
-            frame_count: frames,
-            width_px: mode.width_px,
-            height_px: mode.height_px,
-            stride_bytes: mode.stride_bytes,
-            format: mode.format,
-        })
+        decode_status_reply(&self.serve(request))
     }
 
     fn query(&mut self) -> Result<Option<DisplayMode>, Errno> {
-        let reply = self.serve(&DisplayRequest::Query { seat_id: SEAT });
-        tairix_abi::display_ipc::decode_mode_reply(&reply)
+        decode_mode_reply(&self.serve(&DisplayRequest::Query { seat_id: SEAT }))
     }
 
-    fn present(&mut self, frame_index: u32, damage: &[DamageRect]) -> Result<(), Errno> {
-        self.status(&DisplayRequest::Present {
+    fn configure_for(&mut self, mode: DisplayMode) -> Result<ConfiguredFrames, Errno> {
+        decode_configure_reply(&self.serve(&DisplayRequest::Configure {
             seat_id: SEAT,
-            frame_index,
+            width_px: mode.width_px,
+            height_px: mode.height_px,
+            format: mode.format,
+            events_port: PORT,
+        }))
+    }
+
+    fn configure(&mut self) -> Result<ConfiguredFrames, Errno> {
+        self.configure_for(MODE)
+    }
+
+    fn frames(&mut self) -> Vec<BufferId> {
+        self.configure()
+            .expect("configured")
+            .frames()
+            .map(|frame| frame.buffer)
+            .collect()
+    }
+
+    fn present(&mut self, buffer: BufferId, damage: &[DamageRect]) -> Result<PresentReply, Errno> {
+        decode_present_reply(&self.serve(&DisplayRequest::Present {
+            seat_id: SEAT,
+            buffer,
             damage: DamageList::new(damage)?,
+        }))
+    }
+
+    fn present_layers(&mut self, layers: &[AccelLayer]) -> Result<PresentReply, Errno> {
+        decode_present_reply(&self.serve(&DisplayRequest::PresentLayers {
+            seat_id: SEAT,
+            layers: LayerList::new(layers)?,
+        }))
+    }
+
+    fn alloc(&mut self, width_px: u32, height_px: u32) -> Result<GrantedBuffer, Errno> {
+        decode_buffer_reply(&self.serve(&DisplayRequest::AllocBuffer {
+            seat_id: SEAT,
+            width_px,
+            height_px,
+        }))
+    }
+
+    fn free(&mut self, buffer: BufferId) -> Result<(), Errno> {
+        self.status(&DisplayRequest::FreeBuffer {
+            seat_id: SEAT,
+            buffer,
         })
+    }
+
+    fn planes(&mut self) -> Result<Planes, Errno> {
+        decode_planes_reply(&self.serve(&DisplayRequest::QueryPlanes { seat_id: SEAT }))
     }
 
     fn set_power(&mut self, power: DisplayPower) -> Result<(), Errno> {
@@ -360,7 +472,11 @@ impl Rig {
         })
     }
 
-    /// The kernel announcing the boot seat's lease.
+    fn latch(&mut self) -> Latch {
+        self.server
+            .serviced(Serviced { latched: true }, &mut self.delivery)
+    }
+
     fn lease_moved(&mut self, lease: DisplayLease) {
         self.server.lease_moved(&mut self.display, lease);
     }
@@ -370,607 +486,516 @@ fn full() -> DamageRect {
     DamageRect::full(&MODE)
 }
 
-// --- server ---------------------------------------------------------
+fn rect(x: u32, y: u32, width_px: u32, height_px: u32) -> DamageRect {
+    DamageRect {
+        x,
+        y,
+        width_px,
+        height_px,
+    }
+}
+
+fn layer(buffer: BufferId, width_px: u32, height_px: u32) -> AccelLayer {
+    AccelLayer {
+        buffer,
+        src: rect(0, 0, width_px, height_px),
+        dst_x: 0,
+        dst_y: 0,
+        dst_width_px: width_px,
+        dst_height_px: height_px,
+        opacity: u8::MAX,
+    }
+}
 
 #[test]
 fn query_returns_the_mode_to_the_live_owner_only() {
-    let mut rig = Rig::new(2, 1);
+    let mut rig = Rig::new();
     assert_eq!(rig.query(), Ok(Some(MODE)));
     assert_eq!(rig.seat.asked, vec![(TICKET, SEAT)]);
-
-    // A non-owner learns nothing — not even the mode.
-    rig.seat = MockSeat::refusing(Errno::SeatNotOwner);
-    let reply = rig.serve(&DisplayRequest::Query { seat_id: SEAT });
-    assert_eq!(
-        tairix_abi::display_ipc::decode_mode_reply(&reply),
-        Err(Errno::SeatNotOwner)
-    );
+    for refused in [Errno::SeatNotOwner, Errno::SeatRevoked, Errno::NotFound] {
+        rig.seat.answer = Err(refused);
+        assert_eq!(rig.query(), Err(refused));
+    }
 }
 
 #[test]
 fn a_device_read_is_gated_on_hardware_authority_not_on_a_lease() {
-    // The reader holds no lease and never will; a monitor's authority is
-    // CAP_SYSINFO_HW, which is what the hardware inventory this read details
-    // is served under.
-    let mut rig = Rig::new(2, 1);
-    rig.seat = MockSeat::refusing(Errno::SeatNotOwner).holding(Ok(true));
-    let reply = rig.serve(&DisplayRequest::QueryStats);
-    let stats = decode_stats_reply(&reply).expect("a holder reads the device");
-    assert_eq!(stats.mode, Some(MODE));
-    assert_eq!(stats.device, DisplayDeviceReport::SOFTWARE);
-    assert_eq!(stats.seat_id, 0, "nothing is configured yet");
-    // The lease oracle was not consulted at all: a device read acts for no
-    // seat, so the question never arises.
-    assert!(rig.seat.asked.is_empty());
-    assert_eq!(
-        rig.seat.caps_asked,
-        vec![(TICKET, CapabilityId::SYSINFO_HW)]
-    );
-
-    // A caller without the authority learns nothing, even holding the lease.
-    rig.seat = MockSeat::live(1).holding(Ok(false));
-    assert_eq!(
-        decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)),
-        Err(Errno::PermissionDenied)
-    );
-
-    // An attestation the kernel could not answer is a refusal, never a
-    // reading.
-    rig.seat = MockSeat::live(1).holding(Err(Errno::NotFound));
-    assert_eq!(
-        decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)),
-        Err(Errno::NotFound)
-    );
+    let mut rig = Rig::new();
+    rig.seat.answer = Err(Errno::SeatNotOwner);
+    rig.display.accel = Some(CAPS);
+    rig.display.cursor = Some(CURSOR);
+    rig.display.memory = DisplayMemory {
+        resident_bytes: 4096,
+        total_bytes: 1 << 20,
+    };
+    let stats = |rig: &mut Rig| decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats));
+    assert_eq!(stats(&mut rig).err(), Some(Errno::PermissionDenied));
+    rig.seat.holds = Err(Errno::NotFound);
+    assert_eq!(stats(&mut rig).err(), Some(Errno::NotFound));
+    rig.seat.holds = Ok(true);
+    let read = stats(&mut rig).expect("the device read");
+    assert!(rig.seat.asked.is_empty(), "no lease was asked about");
+    assert_eq!(read.device.accel, Some(CAPS));
+    assert_eq!(read.device.cursor, Some(CURSOR));
+    assert_eq!(read.device.mem_total_bytes, 1 << 20);
+    assert_eq!(read.mode, Some(MODE));
+    assert_eq!((read.busy_ns, read.idle_ns, read.seat_id), (0, 0, 0));
 }
 
 #[test]
 fn device_busy_time_counts_only_the_drivers_own_present() {
-    let mut rig = Rig::new(2, 1);
-    rig.configure(2).expect("configure");
-    rig.present(0, &[full()]).expect("present");
-    rig.seat = MockSeat::live(1).holding(Ok(true));
-    let stats = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("stats");
+    let mut rig = Rig::new();
+    rig.seat.holds = Ok(true);
+    let frames = rig.frames();
     assert_eq!(
-        stats.busy_ns, CLOCK_STEP_NS,
-        "one present, bracketed by two readings one step apart"
+        rig.present(frames[0], &[full()]).map(|r| r.presented),
+        Ok(Presented::Shown)
     );
-    assert_eq!(
-        stats.seat_id, SEAT,
-        "the seat the frames are configured for"
-    );
-
-    // A refused present never reached the driver, so it adds no busy time.
-    let before = stats.busy_ns;
-    assert_eq!(rig.present(9, &[full()]), Err(Errno::OutOfRange));
-    rig.seat = MockSeat::live(1).holding(Ok(true));
-    let after = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("stats");
-    assert_eq!(after.busy_ns, before, "the device was never driven");
-}
-
-#[test]
-fn a_refused_device_read_moves_no_state_the_engine_holds() {
-    // The measurement window opens when the device is first *driven*, not
-    // when a request arrives, so a caller without the authority cannot shift
-    // its epoch by asking. Were it latched before the capability answer, the
-    // refused read below would start the window and the authorised read after
-    // it would report idle time that nothing had spent.
-    let mut rig = Rig::new(2, 1);
-    rig.seat = MockSeat::live(1).holding(Ok(false));
-    assert_eq!(
-        decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)),
-        Err(Errno::PermissionDenied)
-    );
-    rig.seat = MockSeat::live(1).holding(Ok(true));
-    let stats = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("stats");
-    assert_eq!(stats.busy_ns, 0);
-    assert_eq!(
-        stats.idle_ns, 0,
-        "no present has reached the driver, so there is no window to be idle in"
-    );
-}
-
-#[test]
-fn busy_and_idle_partition_the_window_the_engine_measured() {
-    let mut rig = Rig::new(2, 1);
-    rig.configure(2).expect("configure");
-    rig.present(0, &[full()]).expect("present");
-    rig.seat = MockSeat::live(1).holding(Ok(true));
-    let reply = rig.serve(&DisplayRequest::QueryStats);
-    let stats = decode_stats_reply(&reply).expect("stats");
-    // The window is however many readings the clock has served since the
-    // first request, minus one for the reading this stats call took; busy is
-    // the bracketed present inside it. The two must sum to the window rather
-    // than to a total the engine chose.
-    let window = stats.busy_ns + stats.idle_ns;
-    assert!(window >= stats.busy_ns);
-    assert_eq!(window % CLOCK_STEP_NS, 0);
+    rig.clock.advance(50_000);
+    let read = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("read");
+    assert_eq!(read.busy_ns, CLOCK_STEP_NS, "one bracketed present");
+    assert_eq!(read.seat_id, SEAT);
     assert!(
-        stats.idle_ns > 0,
-        "more elapsed than the one present occupied"
+        read.idle_ns >= 50_000,
+        "the window partitions into busy and idle"
     );
-}
-
-#[test]
-fn an_accelerated_device_publishes_its_own_capabilities() {
-    // The driver is the only thing that can state what its compositor does;
-    // the engine passes its report through rather than inventing one.
-    struct AcceleratedDisplayStub;
-    impl Display for AcceleratedDisplayStub {
-        fn output(&self) -> Option<DisplayMode> {
-            Some(MODE)
-        }
-        fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
-            Ok(())
-        }
-        fn device_report(&self) -> DisplayDeviceReport {
-            DisplayDeviceReport {
-                mem_resident_bytes: 4 << 20,
-                mem_total_bytes: 64 << 20,
-                accel: Some(AccelCaps {
-                    max_layers: 4,
-                    max_width_px: 1920,
-                    max_height_px: 1080,
-                    per_layer_opacity: true,
-                }),
-            }
-        }
-    }
-
-    let bytes: SharedBytes = Rc::new(RefCell::new(vec![0u8; FRAME_LEN]));
-    let mut server = DisplayServer::new(
-        MockMapper {
-            handle: GRANT,
-            bytes,
-            maps: Rc::new(RefCell::new(0)),
-        },
-        StepClock::new(CLOCK_STEP_NS),
-    );
-    let mut display = AcceleratedDisplayStub;
-    let mut seat = MockSeat::live(1).holding(Ok(true));
-    let mut reply = [0u8; DISPLAY_REPLY_MAX];
-    let len = server.serve(
-        &mut display,
-        &mut seat,
-        TICKET,
-        &DisplayRequest::QueryStats.to_le_bytes(),
-        &mut reply,
-    );
-    let stats = decode_stats_reply(&reply[..len]).expect("stats");
-    assert_eq!(stats.device, display.device_report());
 }
 
 #[test]
 fn a_malformed_request_is_refused_before_the_seat_is_asked() {
-    let mut rig = Rig::new(2, 1);
+    let mut rig = Rig::new();
     let mut reply = [0u8; DISPLAY_REPLY_MAX];
     let len = rig.server.serve(
         &mut rig.display,
         &mut rig.seat,
+        &mut rig.delivery,
         TICKET,
-        &[0u8; 4],
+        &[0u8; 8],
         &mut reply,
     );
     assert_eq!(
         decode_status_reply(&reply[..len]),
         Err(Errno::BufferTooSmall)
     );
-    assert!(rig.seat.asked.is_empty(), "no oracle call for garbage");
+    assert!(rig.seat.asked.is_empty());
 }
 
 #[test]
-fn configure_maps_once_and_present_blits_the_indexed_frame() {
-    let mut rig = Rig::new(2, 1);
-    // Render frame 1 in the shared region, then hand it over.
-    rig.bytes.borrow_mut()[FRAME_LEN..].fill(0xAB);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert!(rig.server.is_configured());
-    assert_eq!(*rig.maps.borrow(), 1, "the region is mapped exactly once");
-
-    assert_eq!(rig.present(1, &[full()]), Ok(()));
-    assert_eq!(rig.display.presents, 1, "full damage takes the full blit");
-    assert_eq!(rig.display.scanout, vec![0xAB; FRAME_LEN]);
-    assert_eq!(*rig.maps.borrow(), 1, "no mapping on the present hot path");
-}
-
-#[test]
-fn present_with_partial_damage_blits_only_the_region() {
-    let mut rig = Rig::new(1, 1);
-    rig.bytes.borrow_mut().fill(0xCD);
-    assert_eq!(rig.configure(1), Ok(()));
-    let damage = DamageRect {
-        x: 1,
-        y: 1,
-        width_px: 2,
-        height_px: 1,
-    };
-    assert_eq!(rig.present(0, &[damage]), Ok(()));
-    assert_eq!(rig.display.region_presents, 1);
-    assert_eq!(rig.display.last_damage, vec![damage]);
-    // Only the damaged span reached scan-out.
-    let mut want = vec![0u8; FRAME_LEN];
-    want[16 + 4..16 + 12].fill(0xCD);
-    assert_eq!(rig.display.scanout, want);
-}
-
-#[test]
-fn configure_refuses_a_geometry_that_is_not_the_outputs_mode() {
-    let mut rig = Rig::new(2, 1);
-    for (w, h, stride, format) in [
-        (
-            MODE.width_px - 1,
-            MODE.height_px,
-            MODE.stride_bytes,
-            MODE.format,
-        ),
-        (
-            MODE.width_px,
-            MODE.height_px + 1,
-            MODE.stride_bytes,
-            MODE.format,
-        ),
-        (
-            MODE.width_px,
-            MODE.height_px,
-            MODE.stride_bytes + 16,
-            MODE.format,
-        ),
-        (
-            MODE.width_px,
-            MODE.height_px,
-            MODE.stride_bytes,
-            DisplayFormat::Rgba8888,
-        ),
-    ] {
-        let refused = rig.status(&DisplayRequest::Configure {
-            seat_id: SEAT,
-            shm_handle: GRANT,
-            frame_count: 1,
-            width_px: w,
-            height_px: h,
-            stride_bytes: stride,
-            format,
-        });
-        assert_eq!(refused, Err(Errno::Stale));
-        assert!(!rig.server.is_configured());
+fn configure_allocates_the_drivers_frames_and_grants_each_to_the_caller() {
+    let mut rig = Rig::new();
+    rig.display.frame_count = 3;
+    let configured = rig.configure().expect("configured");
+    assert_eq!(configured.grantor, DRIVER);
+    assert_eq!(configured.stride_bytes, MODE.stride_bytes);
+    let frames: Vec<_> = configured.frames().collect();
+    assert_eq!(frames.len(), 3);
+    for (frame, &(region, ticket)) in frames.iter().zip(&rig.delivery.grants) {
+        assert_eq!(ticket, TICKET, "granted to the caller in service");
+        assert_eq!(frame.grant, region + GRANT_TAG);
     }
+    assert!(rig
+        .display
+        .live
+        .iter()
+        .all(|b| (b.width_px, b.height_px) == (4, 3)));
+    assert!(rig.server.is_configured());
 }
 
 #[test]
-fn with_no_output_a_query_answers_none_and_a_configure_is_stale() {
-    let mut rig = Rig::new(2, 1);
+fn configure_refuses_another_mode_no_output_and_a_port_the_caller_does_not_own() {
+    let mut rig = Rig::new();
+    assert_eq!(rig.configure_for(NARROW).err(), Some(Errno::Stale));
     rig.display.output = None;
-    assert_eq!(rig.query(), Ok(None));
-    assert_eq!(rig.configure(2), Err(Errno::Stale));
+    assert_eq!(rig.configure().err(), Some(Errno::Stale));
+    rig.display.output = Some(MODE);
+    rig.seat.owns_port = false;
+    assert_eq!(rig.configure().err(), Some(Errno::PermissionDenied));
+    assert!(rig.display.live.is_empty(), "nothing was allocated");
     assert!(!rig.server.is_configured());
-    assert_eq!(*rig.maps.borrow(), 0, "nothing is mapped for no output");
-    rig.seat = MockSeat::refusing(Errno::SeatNotOwner).holding(Ok(true));
-    let stats = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("read");
-    assert_eq!(stats.mode, None);
 }
 
-/// The output moving under configured frames makes them stale without
-/// dropping them: they scan out again the moment the output runs their mode,
-/// and nothing reaches the device while it runs another or none.
+#[test]
+fn a_configure_that_cannot_finish_frees_what_it_allocated() {
+    let mut rig = Rig::new();
+    rig.delivery.refuse_grant = Some(Errno::OutOfMemory);
+    assert_eq!(rig.configure().err(), Some(Errno::OutOfMemory));
+    assert!(rig.display.live.is_empty());
+    rig.delivery.refuse_grant = None;
+    rig.display.room = 1;
+    assert_eq!(rig.configure().err(), Some(Errno::NoSpace));
+    assert!(rig.display.live.is_empty());
+    rig.display.frame_count = DISPLAY_MAX_FRAMES + 1;
+    rig.display.room = usize::MAX;
+    assert_eq!(rig.configure().err(), Some(Errno::DeviceFault));
+    assert!(!rig.server.is_configured());
+}
+
+#[test]
+fn a_present_shows_only_a_frame_of_the_live_configuration() {
+    let mut rig = Rig::new();
+    let frames = rig.frames();
+    let extra = rig.alloc(2, 2).expect("an extra buffer").grant.buffer;
+    assert_eq!(rig.present(extra, &[full()]).err(), Some(Errno::NotFound));
+    let stranger = BufferId::new(99).expect("an id");
+    assert_eq!(
+        rig.present(stranger, &[full()]).err(),
+        Some(Errno::NotFound)
+    );
+    assert_eq!(
+        rig.present(frames[1], &[rect(3, 0, 2, 1)]).err(),
+        Some(Errno::LengthOutOfRange),
+        "damage outside the mode"
+    );
+    let reply = rig.present(frames[1], &[rect(1, 1, 2, 1)]).expect("shown");
+    assert_eq!(
+        reply,
+        PresentReply {
+            presented: Presented::Shown,
+            seq: 1
+        }
+    );
+    assert_eq!(rig.display.shown, vec![(frames[1], vec![rect(1, 1, 2, 1)])]);
+    assert_eq!(rig.present(frames[0], &[full()]).map(|r| r.seq), Ok(2));
+}
+
 #[test]
 fn frames_go_stale_while_the_output_runs_another_mode_and_serve_again_after() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.present(0, &[full()]), Ok(()));
-    for moved in [Some(NARROW), None] {
-        rig.display.output = moved;
-        assert_eq!(rig.present(1, &[full()]), Err(Errno::Stale));
-        assert!(rig.server.is_configured(), "the frames stand");
-    }
-    assert_eq!(rig.display.presents + rig.display.region_presents, 1);
-    rig.display.output = Some(MODE);
-    assert_eq!(rig.present(1, &[full()]), Ok(()));
-    assert_eq!(*rig.maps.borrow(), 1, "the same frames, never re-mapped");
-}
-
-#[test]
-fn a_configure_for_the_mode_the_output_moved_to_replaces_the_stale_frames() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
+    let mut rig = Rig::new();
+    let frames = rig.frames();
     rig.display.output = Some(NARROW);
-    assert_eq!(rig.query(), Ok(Some(NARROW)));
-    assert_eq!(rig.configure(2), Err(Errno::Stale), "the old geometry");
-    assert_eq!(rig.configure_for(2, NARROW), Ok(()));
-    assert_eq!(*rig.maps.borrow(), 2);
-    assert_eq!(rig.present(1, &[DamageRect::full(&NARROW)]), Ok(()));
-}
-
-#[test]
-fn configure_refuses_an_unknown_grant_and_a_short_region() {
-    let mut rig = Rig::new(2, 1);
-    let unknown = rig.status(&DisplayRequest::Configure {
-        seat_id: SEAT,
-        shm_handle: GRANT + 1,
-        frame_count: 2,
-        width_px: MODE.width_px,
-        height_px: MODE.height_px,
-        stride_bytes: MODE.stride_bytes,
-        format: MODE.format,
-    });
-    assert_eq!(unknown, Err(Errno::NotFound));
-
-    // A region sized for two frames cannot hold four.
-    assert_eq!(rig.configure(4), Err(Errno::LengthOutOfRange));
-    assert!(!rig.server.is_configured());
-}
-
-#[test]
-fn configure_maps_only_a_region_the_caller_itself_granted() {
-    let mut rig = Rig::new(2, 1);
-    rig.seat.origin = ProcId::from_raw([0x3E; PROC_ID_LEN]);
     assert_eq!(
-        rig.configure(2),
-        Err(Errno::NotFound),
-        "another presenter's handle names nothing for this caller"
+        rig.present(frames[0], &[rect(0, 0, 1, 1)]).err(),
+        Some(Errno::Stale)
     );
-    assert_eq!(*rig.maps.borrow(), 0);
-    rig.seat.origin = PRESENTER;
-    assert_eq!(rig.configure(2), Ok(()));
-}
-
-#[test]
-fn present_is_refused_without_before_and_out_of_bounds_configuration() {
-    let mut rig = Rig::new(2, 1);
-    // No configuration yet.
-    assert_eq!(rig.present(0, &[full()]), Err(Errno::NotFound));
-    assert_eq!(rig.configure(2), Ok(()));
-    // Frame index beyond the configured count.
-    assert_eq!(rig.present(2, &[full()]), Err(Errno::OutOfRange));
-    // Damage escaping the mode.
-    let escape = DamageRect {
-        x: 3,
-        y: 0,
-        width_px: 2,
-        height_px: 1,
-    };
-    assert_eq!(rig.present(0, &[escape]), Err(Errno::LengthOutOfRange));
-    assert_eq!(rig.display.presents + rig.display.region_presents, 0);
-}
-
-#[test]
-fn a_present_under_a_newer_lease_requires_reconfigure() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
-    // The seat was released and re-acquired: same owner task id in the
-    // rig, but a newer generation.
-    rig.seat = MockSeat::live(2);
-    assert_eq!(rig.present(0, &[full()]), Err(Errno::NotFound));
-    // Reconfiguring under the live lease restores presentability.
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.present(0, &[full()]), Ok(()));
-}
-
-#[test]
-fn a_revoked_owner_is_refused_typed_and_its_frames_go_with_the_lease() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
-    rig.seat = MockSeat::refusing(Errno::SeatRevoked);
-    assert_eq!(rig.present(0, &[full()]), Err(Errno::SeatRevoked));
-    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
+    rig.display.output = Some(MODE);
     assert!(
-        !rig.server.is_configured(),
-        "a revoked owner's frames are released, never scanned out"
+        rig.present(frames[0], &[full()]).is_ok(),
+        "the configuration stood"
     );
 }
 
-/// The endpoint takes calls from anyone, and a refusal cannot tell a
-/// stranger from the owner that lost its lease: were it to release the
-/// configuration, one refused request from any process would take the
-/// desktop's screen away.
 #[test]
-fn a_stranger_refused_for_the_seat_leaves_the_owner_presenting() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
-    rig.seat = MockSeat::refusing(Errno::SeatNotOwner);
-    let reply = rig.serve(&DisplayRequest::Query { seat_id: SEAT });
+fn frames_are_bound_to_the_lease_that_configured_them() {
+    let mut rig = Rig::new();
+    let frames = rig.frames();
+    rig.seat.answer = Ok(2);
     assert_eq!(
-        tairix_abi::display_ipc::decode_mode_reply(&reply),
-        Err(Errno::SeatNotOwner)
+        rig.present(frames[0], &[full()]).err(),
+        Some(Errno::NotFound)
     );
-    assert_eq!(rig.present(0, &[full()]), Err(Errno::SeatNotOwner));
-    assert_eq!(rig.set_power(DisplayPower::On), Err(Errno::SeatNotOwner));
-    assert!(rig.server.is_configured());
+    rig.seat.answer = Err(Errno::SeatRevoked);
     assert_eq!(
-        rig.display.switches,
-        vec![DisplayPower::On, DisplayPower::Off],
-        "still dark"
+        rig.present(frames[0], &[full()]).err(),
+        Some(Errno::SeatRevoked)
     );
+    rig.seat.answer = Err(Errno::SeatNotOwner);
+    assert_eq!(rig.alloc(2, 2).err(), Some(Errno::SeatNotOwner));
+    rig.seat.answer = Ok(1);
+    assert!(
+        rig.present(frames[0], &[full()]).is_ok(),
+        "refusing a stranger left the owner presenting"
+    );
+}
 
-    rig.seat = MockSeat::live(1);
-    assert_eq!(rig.present(0, &[full()]), Ok(()));
+#[test]
+fn a_queued_present_holds_the_next_until_its_latch_is_posted() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let frames = rig.frames();
+    let first = rig.present(frames[0], &[full()]).expect("queued");
+    assert_eq!(first.presented, Presented::Queued);
+    assert_eq!(
+        rig.present(frames[1], &[full()]).err(),
+        Some(Errno::WouldBlock),
+        "the frame it replaces is still being read"
+    );
+    assert!(rig.server.deadline_ns().is_some());
+    assert_eq!(
+        rig.server.serviced(Serviced::default(), &mut rig.delivery),
+        Latch::Idle
+    );
+    assert_eq!(rig.latch(), Latch::Posted);
+    assert_eq!(
+        rig.delivery.posts,
+        vec![(PORT, DisplayEvent::Presented { seq: first.seq })]
+    );
+    assert_eq!(rig.server.deadline_ns(), None);
+    assert!(rig.present(frames[1], &[full()]).is_ok());
+}
+
+#[test]
+fn a_present_that_never_latches_is_released_at_its_deadline() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let frames = rig.frames();
+    let queued = rig.present(frames[0], &[full()]).expect("queued");
+    assert_eq!(
+        rig.server.expire(&mut rig.display, &mut rig.delivery),
+        Latch::Idle,
+        "not yet due"
+    );
+    assert_eq!(rig.display.abandoned, 0);
+    rig.clock.advance(PRESENT_LATCH_DEADLINE_NS);
+    assert_eq!(
+        rig.server.expire(&mut rig.display, &mut rig.delivery),
+        Latch::Overdue
+    );
+    assert_eq!(
+        rig.display.abandoned, 1,
+        "the display stops waiting on it too, so the next present is not refused"
+    );
+    assert_eq!(
+        rig.delivery.posts,
+        vec![(PORT, DisplayEvent::Presented { seq: queued.seq })]
+    );
+    assert_eq!(rig.latch(), Latch::Idle, "nothing is queued any more");
+}
+
+#[test]
+fn a_latch_its_port_refuses_still_releases_the_presenter() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let frames = rig.frames();
+    assert!(rig.present(frames[0], &[full()]).is_ok());
+    rig.delivery.refuse_post = Some(Errno::NoSpace);
+    assert_eq!(rig.latch(), Latch::Undelivered(Errno::NoSpace));
+    assert!(rig.present(frames[1], &[full()]).is_ok());
+}
+
+#[test]
+fn buffers_beyond_the_frames_are_the_configurations_to_free() {
+    let mut rig = Rig::new();
+    assert_eq!(
+        rig.alloc(2, 2).err(),
+        Some(Errno::NotFound),
+        "nothing configured"
+    );
+    let frames = rig.frames();
+    let granted = rig.alloc(5, 2).expect("allocated");
+    assert_eq!((granted.stride_bytes, granted.grantor), (20, DRIVER));
+    assert_eq!(
+        rig.free(frames[0]).err(),
+        Some(Errno::OutOfRange),
+        "a frame stays"
+    );
+    assert_eq!(rig.free(granted.grant.buffer), Ok(()));
+    assert_eq!(rig.free(granted.grant.buffer).err(), Some(Errno::NotFound));
+    assert!(rig.display.freed.contains(&granted.grant.buffer));
+}
+
+#[test]
+fn a_configuration_holds_no_more_buffers_than_its_table() {
+    let mut rig = Rig::new();
+    let frames = rig.frames().len();
+    for _ in frames..DISPLAY_MAX_BUFFERS {
+        assert!(rig.alloc(1, 1).is_ok());
+    }
+    let live = rig.display.live.len();
+    assert_eq!(rig.alloc(1, 1).err(), Some(Errno::NoSpace));
+    assert_eq!(
+        rig.display.live.len(),
+        live,
+        "refused before the driver allocated"
+    );
+}
+
+#[test]
+fn layers_reach_only_a_compositor_and_only_buffers_it_can_show() {
+    let mut rig = Rig::new();
+    let frames = rig.frames();
+    assert_eq!(
+        rig.present_layers(&[layer(frames[0], 4, 3)]).err(),
+        Some(Errno::NotSupported)
+    );
+    rig.display.accel = Some(CAPS);
+    let window = rig.alloc(16, 16).expect("a layer").grant.buffer;
+    let stack = [layer(frames[0], 4, 3), layer(window, 16, 16)];
+    let reply = rig.present_layers(&stack).expect("shown");
+    assert_eq!(reply.presented, Presented::Shown);
+    assert_eq!(rig.display.layers, vec![stack.to_vec()]);
+    for refused in [
+        (layer(window, 17, 16), Errno::LengthOutOfRange),
+        (layer(BufferId::new(99).expect("id"), 1, 1), Errno::NotFound),
+        (
+            AccelLayer {
+                opacity: 9,
+                ..layer(window, 1, 1)
+            },
+            Errno::NotImplemented,
+        ),
+    ] {
+        assert_eq!(rig.present_layers(&[refused.0]).err(), Some(refused.1));
+    }
+    let deep = [layer(window, 1, 1); 4];
+    assert_eq!(
+        rig.present_layers(&deep).err(),
+        Some(Errno::LengthOutOfRange)
+    );
+    assert_eq!(
+        rig.display.layers.len(),
+        1,
+        "no refused stack reached the device"
+    );
+}
+
+#[test]
+fn the_pointer_is_drawn_by_a_cursor_plane_from_a_buffer_it_fits() {
+    let mut rig = Rig::new();
+    let frames = rig.frames();
+    let set = |rig: &mut Rig, buffer, hot_x, hot_y| {
+        rig.status(&DisplayRequest::SetCursor {
+            seat_id: SEAT,
+            buffer,
+            hot_x,
+            hot_y,
+        })
+    };
+    let image = rig.alloc(8, 8).expect("an image").grant.buffer;
+    assert_eq!(set(&mut rig, image, 1, 1), Err(Errno::NotSupported));
+    rig.display.cursor = Some(CURSOR);
+    assert_eq!(
+        rig.status(&DisplayRequest::MoveCursor {
+            seat_id: SEAT,
+            x: 1,
+            y: 1
+        }),
+        Err(Errno::NotFound),
+        "no pointer is shown"
+    );
+    assert_eq!(
+        set(&mut rig, frames[0], 0, 0),
+        Err(Errno::NotFound),
+        "a frame"
+    );
+    assert_eq!(
+        set(&mut rig, image, 8, 0),
+        Err(Errno::LengthOutOfRange),
+        "hot spot"
+    );
+    let big = rig.alloc(9, 1).expect("a big image").grant.buffer;
+    assert_eq!(set(&mut rig, big, 0, 0), Err(Errno::LengthOutOfRange));
+    assert_eq!(set(&mut rig, image, 3, 4), Ok(()));
+    assert_eq!(
+        rig.status(&DisplayRequest::MoveCursor {
+            seat_id: SEAT,
+            x: -2,
+            y: 7
+        }),
+        Ok(())
+    );
+    assert_eq!(
+        rig.free(image),
+        Ok(()),
+        "freeing the pointer's buffer hides it"
+    );
+    assert_eq!(
+        rig.display.cursor_ops,
+        vec![
+            CursorOp::Set(image, 3, 4),
+            CursorOp::Move(-2, 7),
+            CursorOp::Hide
+        ]
+    );
+}
+
+#[test]
+fn planes_report_what_the_device_draws_in_hardware() {
+    let mut rig = Rig::new();
+    assert_eq!(
+        rig.planes(),
+        Ok(Planes {
+            accel: None,
+            cursor: None
+        })
+    );
+    rig.display.accel = Some(CAPS);
+    rig.display.cursor = Some(CURSOR);
+    assert_eq!(
+        rig.planes(),
+        Ok(Planes {
+            accel: Some(CAPS),
+            cursor: Some(CURSOR)
+        })
+    );
+    rig.seat.answer = Err(Errno::SeatNotOwner);
+    assert_eq!(rig.planes().err(), Some(Errno::SeatNotOwner));
 }
 
 #[test]
 fn the_configured_owner_switches_its_display_off_and_on() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
+    let mut rig = Rig::new();
+    assert_eq!(rig.set_power(DisplayPower::Off), Err(Errno::NotFound));
+    rig.frames();
     assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
-    assert_eq!(
-        rig.present(0, &[full()]),
-        Ok(()),
-        "a dark display still takes frames"
-    );
     assert_eq!(rig.set_power(DisplayPower::On), Ok(()));
-    assert_eq!(
-        rig.display.switches,
-        vec![DisplayPower::On, DisplayPower::Off, DisplayPower::On]
-    );
+    rig.seat.answer = Ok(5);
+    assert_eq!(rig.set_power(DisplayPower::Off), Err(Errno::NotFound));
+    rig.display.power_refusal = Some(DriverError::Unsupported);
+    rig.seat.answer = Ok(1);
+    assert_eq!(rig.set_power(DisplayPower::Off), Err(Errno::NotImplemented));
 }
 
-/// A service restarted after its predecessor switched the display off
-/// inherits a dark screen it has no record of.
 #[test]
 fn the_display_is_lit_before_the_first_presenters_first_frame() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.display.switches, vec![DisplayPower::On]);
-    rig.seat = MockSeat::live(2);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(
-        rig.display.switches,
-        vec![DisplayPower::On],
-        "a display known to be lit is not switched again"
-    );
-
-    // A switch that fails before this service ever switched the display off
-    // cannot be a dark screen it caused: the presenter still configures, and
-    // the switch is retried at the next release.
-    let mut rig = Rig::new(2, 1);
-    rig.display.power_fails = Some(DriverError::Busy);
-    assert_eq!(rig.configure(2), Ok(()));
-    rig.display.power_fails = None;
-    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
-    assert_eq!(rig.display.switches, vec![DisplayPower::On]);
-}
-
-#[test]
-fn only_the_lease_the_frames_are_configured_under_may_switch_the_display() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.set_power(DisplayPower::Off), Err(Errno::NotFound));
-    assert_eq!(rig.configure(2), Ok(()));
-    rig.seat = MockSeat::live(2);
-    assert_eq!(
-        rig.set_power(DisplayPower::Off),
-        Err(Errno::NotFound),
-        "a newer lease must configure first"
-    );
-    assert_eq!(rig.display.switches, vec![DisplayPower::On]);
-}
-
-#[test]
-fn a_display_with_no_power_control_says_so() {
-    let mut rig = Rig::new(2, 1);
-    rig.display.has_power = false;
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.set_power(DisplayPower::Off), Err(Errno::NotImplemented));
-    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
-    assert!(!rig.server.is_configured());
+    let mut rig = Rig::new();
+    rig.frames();
+    assert_eq!(rig.display.powered, vec![DisplayPower::On]);
 }
 
 #[test]
 fn an_ended_lease_releases_its_configuration_and_lights_the_display() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
-
-    rig.lease_moved(DisplayLease::held(1, ProcId::KERNEL));
-    assert!(rig.server.is_configured(), "the live lease is left alone");
+    let mut rig = Rig::new();
+    let frames = rig.frames();
+    let extra = rig.alloc(2, 2).expect("allocated").grant.buffer;
+    rig.display.cursor = Some(CURSOR);
     assert_eq!(
-        rig.display.switches,
-        vec![DisplayPower::On, DisplayPower::Off]
+        rig.status(&DisplayRequest::SetCursor {
+            seat_id: SEAT,
+            buffer: extra,
+            hot_x: 0,
+            hot_y: 0
+        }),
+        Ok(())
     );
-
+    assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
     rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
     assert!(!rig.server.is_configured());
-    assert_eq!(
-        rig.display.switches,
-        vec![DisplayPower::On, DisplayPower::Off, DisplayPower::On],
-        "the next owner of the seat never inherits a dark screen"
-    );
-    assert_eq!(rig.present(0, &[full()]), Err(Errno::NotFound));
-}
-
-/// A display scanning out frames of its own must not go on showing a
-/// departed presenter's: it is told where the screen went.
-#[test]
-fn the_display_learns_where_the_screen_went_when_its_presenter_leaves() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
-    rig.lease_moved(DisplayLease::held(1, ProcId::KERNEL));
-    assert!(
-        rig.display.released.is_empty(),
-        "the live lease is left alone"
-    );
-    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
-    assert_eq!(rig.display.released, [ReleaseSurface::Text]);
-
-    rig.seat = MockSeat::live(2);
-    assert_eq!(rig.configure(2), Ok(()));
-    rig.lease_moved(DisplayLease::ended(2, ReleaseSurface::Handover));
-    assert_eq!(
-        rig.display.released[1..],
-        [ReleaseSurface::Handover],
-        "nothing shows until the next presenter's first frame"
-    );
-
-    rig.seat = MockSeat::live(3);
-    assert_eq!(rig.configure(2), Ok(()));
-    rig.lease_moved(DisplayLease::held(4, ProcId::KERNEL));
-    assert_eq!(
-        rig.display.released[2..],
-        [ReleaseSurface::Handover],
-        "a lease held anew is a newcomer taking over"
-    );
-}
-
-/// A newer lease can configure before its edge reaches the service; the
-/// frames left by the old one go even so.
-#[test]
-fn frames_configured_under_a_new_lease_hand_the_screen_over() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.configure(2), Ok(()));
-    assert!(
-        rig.display.released.is_empty(),
-        "the same presenter reconfiguring keeps its screen"
-    );
-    rig.seat = MockSeat::live(2);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.display.released, [ReleaseSurface::Handover]);
+    assert_eq!(rig.display.released, vec![ReleaseSurface::Text]);
+    assert!(rig.display.live.is_empty(), "every buffer freed");
+    for buffer in frames.iter().chain([&extra]) {
+        assert!(rig.display.freed.contains(buffer));
+    }
+    assert_eq!(rig.display.cursor_ops.last(), Some(&CursorOp::Hide));
+    assert_eq!(rig.display.powered.last(), Some(&DisplayPower::On));
 }
 
 #[test]
-fn a_new_configuration_starts_with_the_display_on() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
-    rig.seat = MockSeat::live(2);
-    assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(
-        rig.display.switches,
-        vec![DisplayPower::On, DisplayPower::Off, DisplayPower::On]
-    );
+fn the_same_presenter_reconfiguring_keeps_its_screen_and_a_new_one_takes_it_over() {
+    let mut rig = Rig::new();
+    let first = rig.frames();
+    let second = rig.frames();
+    assert!(rig.display.released.is_empty(), "the screen stayed its own");
+    assert!(first.iter().all(|frame| rig.display.freed.contains(frame)));
+    assert!(second
+        .iter()
+        .all(|frame| !rig.display.freed.contains(frame)));
+    rig.seat.answer = Ok(2);
+    rig.frames();
+    assert_eq!(rig.display.released, vec![ReleaseSurface::Handover]);
 }
 
 #[test]
 fn a_display_that_will_not_light_again_is_refused_to_the_next_presenter() {
-    let mut rig = Rig::new(2, 1);
-    assert_eq!(rig.configure(2), Ok(()));
+    let mut rig = Rig::new();
+    rig.frames();
     assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
-    rig.display.power_fails = Some(DriverError::DeviceFault);
-    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
-    rig.seat = MockSeat::live(2);
-    assert_eq!(rig.configure(2), Err(Errno::DeviceFault));
-
-    // The next lease edge retries, and a lit display configures again.
-    rig.display.power_fails = None;
-    rig.lease_moved(DisplayLease::held(2, ProcId::KERNEL));
-    assert_eq!(
-        rig.display.switches,
-        vec![DisplayPower::On, DisplayPower::Off, DisplayPower::On]
-    );
-    assert_eq!(rig.configure(2), Ok(()));
+    rig.display.power_refusal = Some(DriverError::DeviceFault);
+    assert_eq!(rig.configure().err(), Some(Errno::DeviceFault));
+    assert!(!rig.server.is_configured());
 }
 
 #[test]
-fn driver_failures_surface_as_typed_errnos() {
-    let mut rig = Rig::new(1, 1);
-    assert_eq!(rig.configure(1), Ok(()));
-    rig.display.fail_with = Some(DriverError::DeviceFault);
-    assert_eq!(rig.present(0, &[full()]), Err(Errno::DeviceFault));
-    rig.display.fail_with = Some(DriverError::Busy);
-    assert_eq!(rig.present(0, &[full()]), Err(Errno::WouldBlock));
-}
-
-// --- error conversions ----------------------------------------------
-
-#[test]
-fn error_conversions_preserve_the_seat_and_fault_vocabulary() {
+fn error_conversions_preserve_the_seat_busy_and_fault_vocabulary() {
     assert_eq!(
         driver_error_from_errno(Errno::SeatRevoked),
         DriverError::SeatRevoked
@@ -979,12 +1004,22 @@ fn error_conversions_preserve_the_seat_and_fault_vocabulary() {
         driver_error_from_errno(Errno::SeatNotOwner),
         DriverError::PermissionDenied
     );
-    // A view of the output that has moved is the client's to correct, not a
-    // fault of the device.
-    assert_eq!(driver_error_from_errno(Errno::Stale), DriverError::Stale);
-    // A condition with no driver equivalent fails closed as a fault.
     assert_eq!(
-        driver_error_from_errno(Errno::EntropyNotReady),
+        driver_error_from_errno(Errno::WouldBlock),
+        DriverError::Busy
+    );
+    assert_eq!(driver_error_from_errno(Errno::Busy), DriverError::Busy);
+    assert_eq!(driver_error_from_errno(Errno::Stale), DriverError::Stale);
+    assert_eq!(
+        driver_error_from_errno(Errno::NotSupported),
+        DriverError::Unsupported
+    );
+    assert_eq!(
+        driver_error_from_errno(Errno::OutOfMemory),
+        DriverError::OutOfMemory
+    );
+    assert_eq!(
+        driver_error_from_errno(Errno::TimedOut),
         DriverError::DeviceFault
     );
 }
@@ -1005,333 +1040,433 @@ impl DisplayTransport for Loopback {
             server,
             display,
             seat,
+            delivery,
             ..
         } = &mut *rig;
-        let len = server.serve(display, seat, TICKET, request, &mut buf);
+        let len = server.serve(display, seat, delivery, TICKET, request, &mut buf);
         reply[..len].copy_from_slice(&buf[..len]);
         Ok(len)
     }
 }
 
-/// Bring up a configured client session over a loopback rig.
-fn client_session(frames: u32) -> (Rc<RefCell<Rig>>, DisplayClient<Loopback>, DisplayMode) {
-    let rig = Rc::new(RefCell::new(Rig::new(frames, 1)));
-    let mut client = DisplayClient::new(
-        Loopback {
-            rig: Rc::clone(&rig),
-        },
-        SEAT,
-    );
-    let mode = client
-        .query()
-        .expect("owner queries the output")
-        .expect("an output is connected");
-    client
-        .configure(GRANT, frames, &mode)
-        .expect("configure under the live lease");
-    (rig, client, mode)
+/// Maps a grant to a buffer of the presenter's own, recording what it was
+/// asked for.
+#[derive(Default)]
+struct MockMapper {
+    mapped: Rc<RefCell<Vec<(ProcId, u64, usize)>>>,
 }
 
-#[test]
-fn remote_display_round_trips_a_frame_to_scanout() {
-    let (rig, client, mode) = client_session(2);
-    // The client's own view of the shared region.
-    let mut view = vec![0u8; FRAME_LEN * 2];
-    // Compositor-side full frame.
-    let frame = vec![0x5A; FRAME_LEN];
+impl BufferMapper for MockMapper {
+    type Mapping = Vec<u8>;
 
-    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
-    remote.present(&frame).expect("present succeeds");
-    drop(remote);
-    // The client wrote frame 0 of its view. (In production the view and
-    // the server's mapping alias one shm region; the mock keeps them
-    // separate, so the server side is asserted through the recorded
-    // protocol activity.)
-    assert_eq!(view[..FRAME_LEN], frame[..]);
-    let rig = rig.borrow();
-    assert_eq!(
-        rig.display.presents, 1,
-        "full-frame damage takes the full blit"
-    );
-}
-
-#[test]
-fn remote_display_tracks_stale_regions_across_the_ring() {
-    let (rig, client, mode) = client_session(2);
-    let mut view = vec![0u8; FRAME_LEN * 2];
-    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
-
-    // First present: whole surface (frame 0 starts wholly stale).
-    let frame_a = vec![0x11; FRAME_LEN];
-    remote.present(&frame_a).expect("first present");
-
-    // Second present with a one-row damage into frame 1: frame 1 was
-    // never written, so the copy must refresh the whole frame (stale ∪
-    // damage), leaving no zero bytes from the ring buffer's past.
-    let mut frame_b = frame_a.clone();
-    for x in 0..4 {
-        frame_b[16 + x * 4..16 + x * 4 + 4].fill(0x22);
-    }
-    let damage = DamageRect {
-        x: 0,
-        y: 1,
-        width_px: 4,
-        height_px: 1,
-    };
-    remote
-        .present_rects(&frame_b, &[damage])
-        .expect("damage present");
-
-    // Third present into frame 0 with the same damage: frame 0 missed
-    // frame_b's row, so the union refreshes it too.
-    let frame_c = frame_b.clone();
-    remote
-        .present_rects(&frame_c, &[damage])
-        .expect("second damage present");
-    drop(remote);
-
-    // Frame 1 was made fully current by present #2 (stale ∪ damage
-    // covered the whole frame) and untouched since; frame 0 caught up
-    // on present #3 through its accumulated stale region.
-    assert_eq!(view[FRAME_LEN..], frame_b[..], "frame 1 is fully current");
-    assert_eq!(view[..FRAME_LEN], frame_c[..], "frame 0 caught up");
-
-    let rig = rig.borrow();
-    assert_eq!(rig.display.region_presents, 2);
-    assert_eq!(rig.display.last_damage, vec![damage]);
-}
-
-/// Byte offset of pixel `(x, y)` in one frame.
-fn pixel(x: usize, y: usize) -> usize {
-    y * MODE.stride_bytes as usize + x * 4
-}
-
-/// A byte no primed frame holds, so a byte the copy was never asked for is
-/// recognisable wherever it lands.
-const MARKER: u8 = 0x99;
-
-/// The reported stall's shape, proven at the copy: a frame that changed two
-/// far-apart places is **one** round trip that copies those two places, and
-/// the buffer's own catch-up is just as tight. Their bounding box here is
-/// the whole surface — which is exactly what the ring used to copy, twice
-/// over, because it rotated once per rectangle.
-#[test]
-fn a_scattered_frame_copies_its_rectangles_not_the_box_between_them() {
-    let (rig, client, mode) = client_session(2);
-    let mut view = vec![0u8; FRAME_LEN * 2];
-    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
-
-    // Both buffers start wholly stale, so level them first: what this
-    // measures is the steady state a desktop spends its life in.
-    let base = vec![0x11; FRAME_LEN];
-    remote.present(&base).expect("frame 0");
-    remote.present(&base).expect("frame 1");
-
-    let top_left = DamageRect {
-        x: 0,
-        y: 0,
-        width_px: 1,
-        height_px: 1,
-    };
-    let bottom_right = DamageRect {
-        x: 3,
-        y: 2,
-        width_px: 1,
-        height_px: 1,
-    };
-    // Frame 0 is still catching up on the whole surface, so this present is
-    // the one that leaves frame 1 owing exactly `top_left`.
-    remote
-        .present_rects(&base, &[top_left])
-        .expect("one corner changed");
-
-    // Every byte of this frame differs from the primed one, so any byte the
-    // copy was not asked for shows up as the marker.
-    let mut marked = vec![MARKER; FRAME_LEN];
-    marked[pixel(0, 0)..pixel(0, 0) + 4].fill(0xA1);
-    marked[pixel(3, 2)..pixel(3, 2) + 4].fill(0xB2);
-    remote
-        .present_rects(&marked, &[bottom_right])
-        .expect("the other corner changed");
-    drop(remote);
-
-    {
-        let rig = rig.borrow();
-        assert_eq!(
-            rig.display.region_presents, 2,
-            "one round trip per frame, not one per rectangle"
-        );
-        assert_eq!(
-            rig.display.last_damage,
-            vec![bottom_right],
-            "the driver blits what changed on screen, not the catch-up"
-        );
-    }
-
-    // Frame 1 took the corner it owed (`top_left`, from its stale set) and
-    // the corner this present named — and nothing in between.
-    for (offset, byte) in view[FRAME_LEN..].iter().enumerate() {
-        let expected = if (pixel(0, 0)..pixel(0, 0) + 4).contains(&offset) {
-            0xA1
-        } else if (pixel(3, 2)..pixel(3, 2) + 4).contains(&offset) {
-            0xB2
-        } else {
-            0x11
-        };
-        assert_eq!(*byte, expected, "frame 1, byte {offset}");
+    fn map(&mut self, grantor: ProcId, grant: u64, least: usize) -> Result<Vec<u8>, Errno> {
+        if grant < GRANT_TAG {
+            return Err(Errno::NotFound);
+        }
+        self.mapped.borrow_mut().push((grantor, grant, least));
+        Ok(vec![0u8; least])
     }
 }
 
-/// A refused present still moved the composed frame on, so the damage it
-/// named is owed to every other buffer. Forgetting it would show as stale
-/// pixels the next time one of them is presented.
-#[test]
-fn damage_from_a_refused_present_is_still_owed_to_the_other_frames() {
-    let (rig, client, mode) = client_session(2);
-    let mut view = vec![0u8; FRAME_LEN * 2];
-    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
-    let base = vec![0x11; FRAME_LEN];
-    remote.present(&base).expect("frame 0");
-    remote.present(&base).expect("frame 1");
-    remote.present(&base).expect("frame 0 catches up");
+type Remote = RemoteDisplay<MockMapper, Loopback>;
 
-    let refused = DamageRect {
-        x: 0,
-        y: 0,
-        width_px: 1,
-        height_px: 1,
-    };
-    let served = DamageRect {
-        x: 3,
-        y: 2,
-        width_px: 1,
-        height_px: 1,
-    };
-    let mut changed = base.clone();
-    changed[pixel(0, 0)..pixel(0, 0) + 4].fill(0xA1);
-    changed[pixel(3, 2)..pixel(3, 2) + 4].fill(0xB2);
-
-    // Frame 1 is the back buffer and the service refuses it.
-    rig.borrow_mut().display.fail_with = Some(DriverError::Busy);
-    assert!(remote.present_rects(&changed, &[refused]).is_err());
-    rig.borrow_mut().display.fail_with = None;
-    // The ring did not advance, so this lands in frame 1 as well.
-    remote
-        .present_rects(&changed, &[served])
-        .expect("the retry is served");
-    // …and frame 0's turn comes round: it owes both corners.
-    remote
-        .present_rects(&changed, &[served])
-        .expect("frame 0 catches up");
-    drop(remote);
-
-    for (frame, bytes) in view.as_chunks::<FRAME_LEN>().0.iter().enumerate() {
-        assert_eq!(
-            bytes[pixel(0, 0)],
-            0xA1,
-            "frame {frame} never caught up on the refused present's damage"
-        );
-        assert_eq!(bytes[pixel(3, 2)], 0xB2, "frame {frame}");
-    }
-}
-
-#[test]
-fn remote_display_validates_its_construction_and_inputs() {
-    let (_rig, client, mode) = client_session(2);
-    let mut short = vec![0u8; FRAME_LEN];
-    assert_eq!(
-        RemoteDisplay::new(client, mode, &mut short, 2).err(),
-        Some(Errno::LengthOutOfRange),
-        "a view too small for the ring is refused"
-    );
-
-    let (_rig, client, mode) = client_session(2);
-    let mut view = vec![0u8; FRAME_LEN * 2];
-    assert_eq!(
-        RemoteDisplay::new(client, mode, &mut view, DISPLAY_MAX_FRAMES + 1).err(),
-        Some(Errno::LengthOutOfRange),
-        "the frame-count bound holds client-side too"
-    );
-
-    let (_rig, client, mode) = client_session(2);
-    let mut view = vec![0u8; FRAME_LEN * 2];
-    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
-    let escape = DamageRect {
-        x: 3,
-        y: 0,
-        width_px: 2,
-        height_px: 1,
-    };
-    assert_eq!(
-        remote.present_rects(&[0u8; FRAME_LEN], &[escape]),
-        Err(DriverError::LengthOutOfRange)
-    );
-    assert_eq!(
-        remote.present(&[0u8; 4]),
-        Err(DriverError::BufferTooSmall),
-        "a short frame is refused before any copy"
-    );
-}
-
-#[test]
-fn a_remote_display_switches_the_seats_display() {
-    let (rig, client, mode) = client_session(2);
-    let mut view = vec![0u8; FRAME_LEN * 2];
-    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
-    assert_eq!(remote.set_power(DisplayPower::Off), Ok(()));
-    assert_eq!(
-        rig.borrow().display.switches,
-        vec![DisplayPower::On, DisplayPower::Off]
-    );
-    rig.borrow_mut().display.has_power = false;
-    assert_eq!(
-        remote.set_power(DisplayPower::On),
-        Err(DriverError::NotImplemented)
-    );
-}
-
-/// A ring configures the service over its own frames, as it lays them out:
-/// the frames it owns are the ones the service presents.
-#[test]
-fn a_ring_configures_the_service_over_the_frames_it_owns() {
-    let rig = Rc::new(RefCell::new(Rig::new(2, 1)));
+fn remote(rig: Rig) -> (Rc<RefCell<Rig>>, Remote) {
+    let rig = Rc::new(RefCell::new(rig));
     let client = DisplayClient::new(
         Loopback {
             rig: Rc::clone(&rig),
         },
         SEAT,
     );
-    let mut remote =
-        RemoteDisplay::new(client, MODE, vec![0u8; FRAME_LEN * 2], 2).expect("valid ring");
-    assert!(!rig.borrow().server.is_configured());
-    assert_eq!(remote.configure(GRANT), Ok(()));
-    assert!(rig.borrow().server.is_configured());
-    rig.borrow_mut().display.output = Some(NARROW);
-    assert_eq!(remote.configure(GRANT), Err(Errno::Stale));
+    let remote =
+        RemoteDisplay::configure(client, MockMapper::default(), MODE, PORT).expect("configured");
+    (rig, remote)
+}
+
+/// A frame whose every byte names its own offset.
+fn numbered() -> Vec<u8> {
+    (0..FRAME_LEN)
+        .map(|at| u8::try_from(at).expect("small"))
+        .collect()
 }
 
 #[test]
-fn a_remote_display_reports_an_output_that_moved_as_stale() {
-    let (rig, client, mode) = client_session(2);
-    let mut view = vec![0u8; FRAME_LEN * 2];
-    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
-    rig.borrow_mut().display.output = None;
+fn a_remote_display_copies_the_frame_into_the_drivers_frame_and_names_it() {
+    let (rig, mut remote) = remote(Rig::new());
+    let frame = numbered();
+    remote.present(&frame, &[full()]).expect("shown");
+    assert_eq!(remote.frame(0), &frame[..]);
+    let shown = rig.borrow().display.shown.clone();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].1, vec![full()]);
+    assert_eq!(Presenter::mode(&remote), MODE);
+}
+
+#[test]
+fn a_remote_display_refreshes_what_each_frame_missed_across_the_ring() {
+    let (_rig, mut remote) = remote(Rig::new());
+    let mut frame = vec![0u8; FRAME_LEN];
+    remote.present(&frame, &[full()]).expect("frame 0");
+    remote.present(&frame, &[full()]).expect("frame 1");
+    frame[16..20].fill(0xAB);
+    remote
+        .present(&frame, &[rect(0, 1, 1, 1)])
+        .expect("frame 0 again");
+    assert_eq!(remote.frame(0)[16..20], [0xAB; 4]);
+    frame[44..48].fill(0xCD);
+    remote
+        .present(&frame, &[rect(3, 2, 1, 1)])
+        .expect("frame 1 again");
     assert_eq!(
-        remote.present(&[0x33; FRAME_LEN]),
-        Err(DriverError::Stale),
-        "the compositor's present says to read the output again"
+        remote.frame(1),
+        &frame[..],
+        "the frame-0 change was owed to it"
+    );
+}
+
+#[test]
+fn a_scattered_frame_copies_its_rectangles_not_the_box_between_them() {
+    let mut rig = Rig::new();
+    rig.display.frame_count = 1;
+    let (_rig, mut remote) = remote(rig);
+    remote
+        .present(&[0u8; FRAME_LEN], &[full()])
+        .expect("the frame, whole");
+    let marked = vec![0x99u8; FRAME_LEN];
+    remote
+        .present(&marked, &[rect(0, 0, 1, 1), rect(3, 2, 1, 1)])
+        .expect("two corners");
+    let target = remote.frame(0);
+    assert_eq!(target[0..4], [0x99; 4]);
+    assert_eq!(target[44..48], [0x99; 4]);
+    assert_eq!(target[20..24], [0; 4], "the middle was never copied");
+}
+
+#[test]
+fn damage_from_a_refused_present_is_still_owed_to_the_other_frames() {
+    let (rig, mut remote) = remote(Rig::new());
+    remote
+        .present(&[0u8; FRAME_LEN], &[full()])
+        .expect("frame 0");
+    remote
+        .present(&[0u8; FRAME_LEN], &[full()])
+        .expect("frame 1");
+    rig.borrow_mut().display.output = Some(NARROW);
+    let changed = vec![0x77u8; FRAME_LEN];
+    assert_eq!(
+        remote.present(&changed, &[rect(0, 0, 1, 1)]),
+        Err(DriverError::Stale)
+    );
+    rig.borrow_mut().display.output = Some(MODE);
+    remote
+        .present(&changed, &[rect(3, 2, 1, 1)])
+        .expect("frame 0");
+    remote
+        .present(&changed, &[rect(3, 2, 1, 1)])
+        .expect("frame 1");
+    assert_eq!(
+        remote.frame(1)[0..4],
+        [0x77; 4],
+        "the refused rectangle reached it"
+    );
+}
+
+#[test]
+fn a_remote_display_waits_for_a_queued_frames_latch() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let (rig, mut remote) = remote(rig);
+    remote
+        .present(&[0u8; FRAME_LEN], &[full()])
+        .expect("queued");
+    assert!(!remote.ready(), "the next waits for its latch");
+    assert_eq!(
+        remote.present(&[1u8; FRAME_LEN], &[full()]),
+        Err(DriverError::Busy)
+    );
+    assert_eq!(rig.borrow().display.shown.len(), 1, "nothing was sent");
+    assert!(
+        !remote.latched(DisplayEvent::Presented { seq: 9 }),
+        "another present's"
+    );
+    let latch = rig.borrow_mut().latch();
+    assert_eq!(latch, Latch::Posted);
+    let event = rig.borrow().delivery.posts[0].1;
+    assert!(remote.latched(event));
+    assert!(remote.present(&[1u8; FRAME_LEN], &[full()]).is_ok());
+}
+
+#[test]
+fn a_remote_display_reaches_layers_and_the_pointer_only_where_the_device_has_them() {
+    let (_rig, mut plain) = remote(Rig::new());
+    assert!(plain.layers().is_none());
+    assert!(plain.cursor().is_none());
+
+    let mut rig = Rig::new();
+    rig.display.accel = Some(CAPS);
+    rig.display.cursor = Some(CURSOR);
+    let (rig, mut remote) = remote(rig);
+    let layers = remote.layers().expect("a compositor");
+    assert_eq!(layers.caps(), CAPS);
+    let window = layers.alloc(2, 2).expect("a layer");
+    let (pixels, stride) = layers.pixels(window).expect("mapped");
+    assert_eq!((pixels.len(), stride), (16, 8));
+    pixels.fill(0x42);
+    layers
+        .present_layers(None, &[layer(window, 2, 2)])
+        .expect("shown");
+    assert_eq!(rig.borrow().display.layers, vec![vec![layer(window, 2, 2)]]);
+    layers.free(window).expect("freed");
+    assert_eq!(layers.free(window), Err(DriverError::NotFound));
+
+    let cursor = remote.cursor().expect("a cursor plane");
+    let image = [0xFFu8; 4 * 4 * 4];
+    cursor.show(&image, 4, 4, 16, 1, 1).expect("shown");
+    cursor.show(&image, 4, 4, 16, 2, 2).expect("shown again");
+    assert_eq!(
+        cursor.show(&image, 9, 1, 36, 0, 0),
+        Err(DriverError::LengthOutOfRange),
+        "larger than the plane"
+    );
+    cursor.move_to(5, 6).expect("moved");
+    cursor.hide().expect("hidden");
+    let ops = rig.borrow().display.cursor_ops.clone();
+    let (CursorOp::Set(first, 1, 1), CursorOp::Set(second, 2, 2)) = (ops[0], ops[1]) else {
+        panic!("two images set: {ops:?}");
+    };
+    assert_eq!(
+        first, second,
+        "the device took the first image, so its buffer is rewritten"
+    );
+    assert_eq!(&ops[2..], [CursorOp::Move(5, 6), CursorOp::Hide]);
+}
+
+#[test]
+fn a_pointer_of_any_size_is_drawn_into_the_one_buffer_the_plane_s_largest_fits() {
+    let mut rig = Rig::new();
+    rig.display.cursor = Some(CURSOR);
+    let (rig, mut remote) = remote(rig);
+    let cursor = remote.cursor().expect("a cursor plane");
+    cursor
+        .show(&[0xFF; 4 * 4 * 4], 4, 4, 16, 0, 0)
+        .expect("shown");
+    cursor
+        .show(&[0xFF; 2 * 2 * 4], 2, 2, 8, 1, 1)
+        .expect("smaller");
+    let display = &rig.borrow().display;
+    let (CursorOp::Set(first, ..), CursorOp::Set(second, 1, 1)) =
+        (display.cursor_ops[0], display.cursor_ops[1])
+    else {
+        panic!("two images set: {:?}", display.cursor_ops);
+    };
+    assert_eq!(first, second, "one buffer for both");
+    assert!(display.freed.is_empty());
+    let held = display
+        .live
+        .iter()
+        .find(|buffer| buffer.id == first)
+        .expect("the pointer's buffer");
+    assert_eq!(
+        (held.width_px, held.height_px),
+        (CURSOR.max_width_px, CURSOR.max_height_px)
+    );
+}
+
+#[test]
+fn a_layered_present_lays_the_output_frame_beneath_its_layers() {
+    let mut rig = Rig::new();
+    rig.display.accel = Some(CAPS);
+    let (rig, mut remote) = remote(rig);
+    let frames: Vec<BufferId> = rig
+        .borrow()
+        .display
+        .live
+        .iter()
+        .map(|held| held.id)
+        .collect();
+    let window = remote
+        .layers()
+        .expect("a compositor")
+        .alloc(2, 2)
+        .expect("a layer");
+    let mut frame = vec![0u8; FRAME_LEN];
+    frame[0..4].fill(0x11);
+    let base = Base {
+        frame: &frame,
+        damage: &[rect(0, 0, 1, 1)],
+    };
+    remote
+        .layers()
+        .expect("a compositor")
+        .present_layers(Some(base), &[layer(window, 2, 2)])
+        .expect("shown");
+    let stack = rig.borrow().display.layers[0].clone();
+    assert_eq!(stack.len(), 2);
+    assert_eq!(
+        (
+            stack[0].buffer,
+            stack[0].src,
+            stack[0].dst_x,
+            stack[0].dst_y,
+            stack[0].opacity
+        ),
+        (frames[0], full(), 0, 0, u8::MAX),
+        "the frame is the whole output, opaque"
+    );
+    assert_eq!(stack[1], layer(window, 2, 2));
+    assert_eq!(
+        remote.frame(0)[0..4],
+        [0x11; 4],
+        "the base damage reached the frame"
+    );
+    frame[44..48].fill(0x22);
+    remote
+        .present(&frame, &[rect(3, 2, 1, 1)])
+        .expect("the next frame");
+    assert_eq!(
+        remote.frame(1)[0..4],
+        [0x11; 4],
+        "the layered frame's damage was owed to it"
+    );
+    assert_eq!(rig.borrow().display.shown[0].0, frames[1]);
+}
+
+#[test]
+fn a_layered_present_waits_for_a_queued_frames_latch_as_a_frame_does() {
+    let mut rig = Rig::new();
+    rig.display.accel = Some(CAPS);
+    rig.display.queues = true;
+    let (rig, mut remote) = remote(rig);
+    assert!(remote.ready());
+    let window = remote
+        .layers()
+        .expect("a compositor")
+        .alloc(2, 2)
+        .expect("a layer");
+    remote
+        .layers()
+        .expect("a compositor")
+        .present_layers(None, &[layer(window, 2, 2)])
+        .expect("queued");
+    assert!(!remote.ready());
+    assert_eq!(
+        remote
+            .layers()
+            .expect("a compositor")
+            .present_layers(None, &[layer(window, 2, 2)]),
+        Err(DriverError::Busy)
+    );
+    assert_eq!(rig.borrow_mut().latch(), Latch::Posted);
+    let event = rig.borrow().delivery.posts[0].1;
+    assert!(remote.latched(event));
+    assert!(remote.ready());
+}
+
+#[test]
+fn a_layered_present_with_nothing_new_in_the_base_names_the_frame_on_screen() {
+    let mut rig = Rig::new();
+    rig.display.accel = Some(CAPS);
+    let (rig, mut remote) = remote(rig);
+    let frames: Vec<BufferId> = rig
+        .borrow()
+        .display
+        .live
+        .iter()
+        .map(|held| held.id)
+        .collect();
+    let window = remote
+        .layers()
+        .expect("a compositor")
+        .alloc(2, 2)
+        .expect("a layer");
+    let frame = vec![0x33u8; FRAME_LEN];
+    let whole = [full()];
+    let engine = remote.layers().expect("a compositor");
+    for damage in [&whole[..], &[]] {
+        let base = Base {
+            frame: &frame,
+            damage,
+        };
+        engine
+            .present_layers(Some(base), &[layer(window, 2, 2)])
+            .expect("shown");
+    }
+    let stacks = rig.borrow().display.layers.clone();
+    assert_eq!(stacks[0][0].buffer, frames[0]);
+    assert_eq!(
+        stacks[1][0].buffer, frames[0],
+        "an unchanged frame is named again, never copied into another"
+    );
+}
+
+#[test]
+fn a_remote_display_holds_only_the_layers_it_allocated_and_knows_its_pointer() {
+    let mut rig = Rig::new();
+    rig.display.accel = Some(CAPS);
+    rig.display.cursor = Some(CURSOR);
+    let (_rig, mut remote) = remote(rig);
+    let engine = remote.layers().expect("a compositor");
+    let window = engine.alloc(2, 2).expect("a layer");
+    assert!(engine.holds(window));
+    assert!(
+        !engine.holds(BufferId::new(999).expect("an id")),
+        "a buffer from another display"
+    );
+    let cursor = remote.cursor().expect("a cursor plane");
+    assert!(!cursor.showing(), "nothing shown yet");
+    cursor
+        .show(&[0xFF; 4 * 4 * 4], 4, 4, 16, 0, 0)
+        .expect("shown");
+    assert!(cursor.showing());
+    cursor.hide().expect("hidden");
+    assert!(!cursor.showing());
+}
+
+#[test]
+fn a_remote_display_validates_its_construction_and_inputs() {
+    let rig = Rc::new(RefCell::new(Rig::new()));
+    let client = |rig: &Rc<RefCell<Rig>>| {
+        DisplayClient::new(
+            Loopback {
+                rig: Rc::clone(rig),
+            },
+            SEAT,
+        )
+    };
+    let thin = DisplayMode {
+        stride_bytes: 15,
+        ..MODE
+    };
+    assert_eq!(
+        RemoteDisplay::configure(client(&rig), MockMapper::default(), thin, PORT).err(),
+        Some(Errno::LengthOutOfRange)
+    );
+    assert_eq!(
+        RemoteDisplay::configure(client(&rig), MockMapper::default(), NARROW, PORT).err(),
+        Some(Errno::Stale)
+    );
+    let mut remote =
+        RemoteDisplay::configure(client(&rig), MockMapper::default(), MODE, PORT).expect("ok");
+    assert_eq!(
+        remote.present(&[0u8; FRAME_LEN - 1], &[full()]),
+        Err(DriverError::BufferTooSmall)
+    );
+    assert_eq!(
+        remote.present(&[0u8; FRAME_LEN], &[rect(4, 0, 1, 1)]),
+        Err(DriverError::LengthOutOfRange)
     );
 }
 
 #[test]
 fn a_revoked_client_sees_the_typed_teardown_signal() {
-    let (rig, client, mode) = client_session(2);
-    let mut view = vec![0u8; FRAME_LEN * 2];
-    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
-    rig.borrow_mut().seat = MockSeat::refusing(Errno::SeatRevoked);
+    let (rig, mut remote) = remote(Rig::new());
+    rig.borrow_mut().seat.answer = Err(Errno::SeatRevoked);
     assert_eq!(
-        remote.present(&[0x33; FRAME_LEN]),
-        Err(DriverError::SeatRevoked),
-        "the compositor's present surfaces the distinct revocation"
+        remote.present(&[0u8; FRAME_LEN], &[full()]),
+        Err(DriverError::SeatRevoked)
+    );
+    assert_eq!(
+        remote.set_power(DisplayPower::Off),
+        Err(DriverError::SeatRevoked)
     );
 }

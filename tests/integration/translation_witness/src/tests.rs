@@ -2,8 +2,8 @@ use tairix_log::{EventId, Field, Level};
 
 use super::*;
 
-const KEYBOARD: u32 = 0x8007_0008;
-const MOUSE: u32 = 0x8007_0028;
+const KEYBOARD: u32 = 0x8008_0008;
+const MOUSE: u32 = 0x8008_0028;
 
 fn event<'a>(audit: AuditEvent, fields: &'a [Field<'a>]) -> Event<'a> {
     Event {

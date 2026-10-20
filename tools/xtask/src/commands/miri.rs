@@ -222,6 +222,26 @@ pub const TARGETS: &[Target] = &[
         spread: Spread::OneProcess,
     },
     Target {
+        package: "tairix-fbcon",
+        description: "the hosted console's cell a pre-MMU boot writes without atomics, the \
+                      scan-out slices it forms over the surface a port hands it, and the lock a \
+                      fatal report busts",
+        features: &[],
+        scope: Scope::LibExcept {
+            skip: &[
+                "tests::a_dense_panel_draws_a_glyph_at_its_authored_size",
+                "port::tests::",
+            ],
+            reason: "the first is safe glyph arithmetic over a 1920×1080 surface: the \
+                     interpreter spends most of the crate's budget filling two million pixels \
+                     that the smaller surfaces of every other test already cover. The port's \
+                     tests form direct-map pointers from physical addresses, integer-to-pointer \
+                     casts the interpreter refuses under strict provenance, and the module they \
+                     test holds no `unsafe`",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
         package: "tairix-inline",
         description: "the allocation-free tier's inline slot arrays, and the volatile scrub a secret ring leaves behind",
         features: &[],
@@ -654,6 +674,15 @@ pub const TARGETS: &[Target] = &[
         description: "`lib/virtio`'s rings and slabs along a sound driver's own paths: the \
                       periods lent to the device and freed only once it hands them back, and \
                       the control and event queues",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-drv-display-gpu-virtio",
+        description: "`lib/virtio`'s rings and slabs along a display driver's own paths: the \
+                      batch a present submits whole, a backing the device may still read, and \
+                      the pointer image the cursor queue transfers",
         features: &[],
         scope: Scope::AllTargets,
         spread: Spread::OneProcess,

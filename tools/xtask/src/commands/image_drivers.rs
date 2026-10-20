@@ -70,6 +70,10 @@ pub const VIRTIO_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd
 /// any platform-published linear scan-out surface.
 pub const FRAMEBUFFER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"framebuffer", b"Run"];
 
+/// Store path of the virtio-gpu display bundle: class `display`, the
+/// `virtio_gpu` leaf naming the (vendor-neutral) driver.
+pub const VIRTIO_GPU_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"virtio_gpu", b"Run"];
+
 /// Store path of the BCM2711 display engine bundle: class `display`, the part
 /// leaf `bcm2711_hvs` (the HVS and the pixel valves feeding the HDMI outputs).
 pub const BCM2711_HVS_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"bcm2711_hvs", b"Run"];
@@ -583,6 +587,34 @@ pub fn build_framebuffer_bundle(
         "tairix-drv-display-framebuffer",
         tairix_drv_display_framebuffer::REQUIRED_CAPABILITIES,
         tairix_drv_display_framebuffer::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the virtio-gpu display bundle.
+///
+/// It reaches its device through the transport's windows (`CAP_MMIO_MAP`),
+/// carves the frames and console the device reads under its node's DMA grant
+/// (`CAP_MEM_DMA`), answers every command on the device interrupt
+/// (`CAP_IRQ_BIND`), grants the frames to the presenter (`CAP_SHM`), binds the
+/// reserved `DISPLAY_ENDPOINT` (`CAP_IPC_BIND_PRIVILEGED`) and records its
+/// decisions (`CAP_LOG_EMIT`). Carries `tairix_drv_display_gpu_virtio::BIND_KEYS`,
+/// so it autoloads against a discovered virtio GPU on either bus.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_virtio_gpu_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-display-gpu-virtio",
+        tairix_drv_display_gpu_virtio::REQUIRED_CAPABILITIES,
+        tairix_drv_display_gpu_virtio::BIND_KEYS,
         profile,
     )
 }
@@ -1290,24 +1322,70 @@ pub fn autoload_driver_store_files(
         [const { OnceLock::new() }; MEMO_SLOTS];
     FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
-            Ok(vec![
-                store_file(
-                    VIRTIO_KBD_STORE_PATH,
-                    build_virtio_kbd_bundle(ctx, arch, profile)?,
-                ),
+            autoload_set(
+                ctx,
+                arch,
+                profile,
                 store_file(
                     FRAMEBUFFER_STORE_PATH,
                     build_framebuffer_bundle(ctx, arch, profile)?,
                 ),
-                store_file(
-                    VIRTIO_NET_STORE_PATH,
-                    build_virtio_net_bundle(ctx, arch, profile)?,
-                ),
-            ])
+            )
         })
         .as_ref()
         .map(Vec::as_slice)
         .map_err(Clone::clone)
+}
+
+/// The [`autoload_driver_store_files`] set with the virtio-gpu driver as its
+/// display, for the verticals whose board's only display is a virtio GPU.
+/// Built once per xtask process and memoised.
+///
+/// # Errors
+///
+/// As [`autoload_driver_store_files`].
+pub fn virtio_gpu_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            autoload_set(
+                ctx,
+                arch,
+                profile,
+                store_file(
+                    VIRTIO_GPU_STORE_PATH,
+                    build_virtio_gpu_bundle(ctx, arch, profile)?,
+                ),
+            )
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// The keyboard, `display` and NIC drivers an autoload disk carries.
+fn autoload_set(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+    display: AppStoreFile,
+) -> Result<Vec<AppStoreFile>, String> {
+    Ok(vec![
+        store_file(
+            VIRTIO_KBD_STORE_PATH,
+            build_virtio_kbd_bundle(ctx, arch, profile)?,
+        ),
+        display,
+        store_file(
+            VIRTIO_NET_STORE_PATH,
+            build_virtio_net_bundle(ctx, arch, profile)?,
+        ),
+    ])
 }
 
 /// The signed **virtio sound driver bundle alone**, paired with its store

@@ -19,6 +19,7 @@
 
 use tairix_abi::driver::bus::{Bus, BusDevice};
 use tairix_abi::driver::pci::{PciAddress, CLASS_HD_AUDIO, CLASS_OFFSET, CLASS_USB_XHCI};
+use tairix_abi::driver::virtio::VIRTIO_GPU_DEVICE_ID;
 use tairix_abi::driver::virtio_mmio::VirtioMmioBus;
 use tairix_abi::driver::virtio_pci::{
     virtio_pci_window_resource, VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE,
@@ -41,7 +42,8 @@ use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
 
 use crate::hwtree_node_ids::{
     pci_function_node_id, VIRTIO_AUDIO_PROBE_NODE_BASE_ID, VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
-    VIRTIO_INPUT_PROBE_NODE_BASE_ID, VIRTIO_NET_PROBE_NODE_BASE_ID,
+    VIRTIO_DISPLAY_PROBE_NODE_BASE_ID, VIRTIO_INPUT_PROBE_NODE_BASE_ID,
+    VIRTIO_NET_PROBE_NODE_BASE_ID,
 };
 use crate::iommu_fdt::SlotDma;
 use crate::pci_host::HostBus;
@@ -537,6 +539,36 @@ pub fn observe_virtio_mmio_audio_devices(
     )
 }
 
+/// Probe `bus` for virtio-MMIO devices whose `DeviceID` equals
+/// [`VIRTIO_GPU_DEVICE_ID`] and emit each as a [`HwDeviceClass::Display`]
+/// node with the register-window, coherent-DMA and interrupt-line grant
+/// requests the autoloaded user-space virtio-gpu driver needs: it answers
+/// every command on the device's interrupt.
+///
+/// # Errors
+///
+/// As [`observe_virtio_mmio_input_devices`].
+pub fn observe_virtio_mmio_display_devices(
+    bus: &dyn VirtioMmioBus,
+    slot_irq: &dyn Fn(u64) -> Option<u32>,
+    dma: &SlotDma,
+    sink: &mut dyn HwNodeSink,
+    log: &dyn Sink,
+) -> Result<(), DriverError> {
+    observe_virtio_mmio_interrupt_devices(
+        bus,
+        slot_irq,
+        dma,
+        sink,
+        log,
+        Probe {
+            device_id: VIRTIO_GPU_DEVICE_ID,
+            class: HwDeviceClass::Display,
+            node_base_id: VIRTIO_DISPLAY_PROBE_NODE_BASE_ID,
+        },
+    )
+}
+
 /// What one interrupt-driven probe looks for, and how it numbers what it
 /// finds.
 struct Probe {
@@ -751,6 +783,27 @@ pub fn observe_virtio_pci_audio_devices(
     let kind = VirtioPciKind {
         virtio_type: VIRTIO_SND_DEVICE_ID,
         class: HwDeviceClass::Audio,
+    };
+    observe_virtio_pci_devices(walk, dev_irq, sink, log, kind)
+}
+
+/// Emit each modern virtio GPU function `walk` found as a
+/// [`HwDeviceClass::Display`] node carrying its configuration windows, its
+/// routed interrupt line and, behind a unit, its DMA identity; one any of
+/// them cannot be resolved for is left undiscovered.
+///
+/// # Errors
+///
+/// [`DriverError::BufferTooSmall`] for a full sink.
+pub fn observe_virtio_pci_display_devices(
+    walk: &PciWalk<'_>,
+    dev_irq: &dyn Fn(u64) -> Option<DeviceInterrupt>,
+    sink: &mut dyn HwNodeSink,
+    log: &dyn Sink,
+) -> Result<(), DriverError> {
+    let kind = VirtioPciKind {
+        virtio_type: VIRTIO_GPU_DEVICE_ID,
+        class: HwDeviceClass::Display,
     };
     observe_virtio_pci_devices(walk, dev_irq, sink, log, kind)
 }
@@ -1330,6 +1383,37 @@ mod tests {
             node.resources(),
             &[
                 HwResource::mmio(0x0A00_0000, 0x200),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
+                HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_probed_virtio_gpu_slot_is_discovered_as_a_display_with_its_grants() {
+        let bus = FakeBus::with(&[VIRTIO_SND_DEVICE_ID, VIRTIO_GPU_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_display_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1, "the sound card is no display");
+        let node = &sink.nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Display));
+        assert_eq!(node.id(), VIRTIO_DISPLAY_PROBE_NODE_BASE_ID);
+        assert_eq!(
+            node.match_keys(),
+            &[HwMatchKey::virtio(VIRTIO_GPU_DEVICE_ID)],
+            "the emitted key must be the one the driver's own bind table carries"
+        );
+        assert_eq!(
+            node.resources(),
+            &[
+                HwResource::mmio(0x0A00_0200, 0x200),
                 HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
                 HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
             ]
@@ -2011,6 +2095,40 @@ mod tests {
         assert_eq!(sink.nodes.len(), 2);
         assert_eq!(sink.nodes[0].id(), node_of(0x0000_0800));
         assert_eq!(sink.nodes[1].id(), node_of(0x0000_1000));
+    }
+
+    #[test]
+    fn a_virtio_gpu_pci_function_is_discovered_as_a_display() {
+        let bus = FakePciBus::with(&[
+            (VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800),
+            (0x1050, 0x0000_0900),
+        ]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_display_devices(
+            &walk_of(&bus, SEGMENT, &|_| None),
+            &|_| {
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
+            },
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1, "the NIC is no display");
+        let node = &sink.nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Display));
+        assert_eq!(node.id(), node_of(0x0000_0900));
+        assert_eq!(
+            node.match_keys(),
+            &[HwMatchKey::virtio(VIRTIO_GPU_DEVICE_ID)]
+        );
+        assert!(
+            node.resources()
+                .contains(&HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
+            "its interrupt, which every command is answered on"
+        );
     }
 
     #[test]

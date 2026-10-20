@@ -75,6 +75,8 @@ pub enum Behaviour {
     /// `attach` translates the stream but answers that the unit did not
     /// confirm.
     UnconfirmedAttach,
+    /// `map` installs nothing and answers that the unit did not confirm.
+    UnconfirmedMap,
     /// `enable` refuses.
     RefusesEnable,
     /// `route_faults` refuses.
@@ -321,6 +323,9 @@ impl IommuUnit for ModelUnit<'_> {
         let mut state = self.state.lock();
         if state.behaviour == Behaviour::NoWriteOnly && !access.read() {
             return Err(IommuError::OutOfRange);
+        }
+        if state.behaviour == Behaviour::UnconfirmedMap {
+            return Err(IommuError::Unconfirmed);
         }
         let table = state
             .domains

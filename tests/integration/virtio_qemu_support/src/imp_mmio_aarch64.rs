@@ -223,7 +223,6 @@ pub fn bring_up_el1_identity_mmu(env: &dyn QemuEnv) {
     unsafe {
         space.switch();
     }
-    core::mem::forget(space);
 }
 
 // --- Device-tree helper ----------------------------------------------
@@ -405,7 +404,7 @@ fn arm_external_irq(
         env.fail("bind device source");
     };
 
-    DISPATCH_TABLE.store((table as *const IrqTable).cast_mut(), Ordering::Release);
+    DISPATCH_TABLE.store(core::ptr::from_ref(table).cast_mut(), Ordering::Release);
     DISPATCH_INTID.store(source, Ordering::Release);
 
     if exceptions::set_device_irq_dispatch(device_dispatch).is_err() {

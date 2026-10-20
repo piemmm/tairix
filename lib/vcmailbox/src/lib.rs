@@ -745,7 +745,7 @@ pub fn discover_framebuffer(
 
 /// Tag: get the physical display width/height the firmware detected
 /// (EDID-derived; both zero when no display is attached).
-const TAG_GET_PHYSICAL_WH: u32 = 0x0004_0003;
+pub(crate) const TAG_GET_PHYSICAL_WH: u32 = 0x0004_0003;
 
 /// Upper bound on a believable display dimension in pixels.
 ///

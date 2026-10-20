@@ -62,6 +62,9 @@ tairix-conout = { path = "../../../lib/conout", version = "=0.0.0" }
 # masking primitive plugs into. Needs only `core`, so the freestanding
 # binaries here still link no global allocator.
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+# This port's half of the console the kernel hosts (`port`), allocator-free
+# without `hosted`.
+tairix-fbcon = { path = "../../../lib/fbcon", version = "=0.0.0" }
 
 [dev-dependencies]
 # Enable the shared DTB builder for this port's `fdt`/`platform` host

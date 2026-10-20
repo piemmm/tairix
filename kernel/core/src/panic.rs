@@ -50,6 +50,7 @@ use tairix_arch_api::fatal::{
     self, format_hex_word, Entry, FatalRecord, FaultWords, KernelFault, FAULT_WORDS, KERNEL_FAULT,
     KERNEL_PANIC,
 };
+use tairix_arch_api::quiesce::StopOutcome;
 use tairix_arch_api::quiesce_stop_others_best_effort;
 use tairix_arch_api::{BootStackGuard, CpuId, KernelStackRegion};
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
@@ -488,6 +489,18 @@ fn reclaim_surfaces(consoles: &[crate::console::ConsoleDevice]) {
     }
 }
 
+/// Have every console render the rest of the report without waiting on its
+/// lock: whoever holds it once `stop` shows every peer stopped, and only
+/// where it is free otherwise — a peer that would not stop may still be
+/// inside a renderer, and its lock is then still the only thing between the
+/// two.
+fn bust_console_locks(stop: &StopOutcome, consoles: &[crate::console::ConsoleDevice]) {
+    let every_cpu_stopped = stop.unresponsive.is_none();
+    for device in consoles {
+        device.enter_fatal(every_cpu_stopped);
+    }
+}
+
 /// Regime fields a fault report can carry: the active root, the re-probe
 /// verdict and its raw result, the hole extent, and the post-flush verdict
 /// and its raw result.
@@ -810,6 +823,7 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     let stop = quiesce_stop_others_best_effort(cpu, |peer| {
         crate::sched::SchedulerArch::send_ipi(ctx.arch, peer);
     });
+    bust_console_locks(&stop, ctx.consoles);
     // The lead-up still queued goes out ahead of the record and leaves it the
     // whole ring; with the producers stopped, the drain can finish.
     ctx.arch.flush_console_blocking();
@@ -981,7 +995,7 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::string::{String, ToString};
     use core::panic::Location;
-    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use tairix_arch_api::backtrace::{
         Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, RegisterSnapshot,
@@ -1443,6 +1457,103 @@ mod tests {
             assert_eq!(surface.reclaimed.load(Ordering::SeqCst), !nested);
             reset_panic_guard();
         }
+    }
+
+    /// What the fatal path asked of a console: nothing yet, to render only
+    /// where its lock is free, or to render whoever holds it.
+    const FATAL_UNTOLD: u8 = 0;
+    const FATAL_IF_FREE: u8 = 1;
+    const FATAL_BUSTED: u8 = 2;
+
+    /// A console recording the fatal mode the report put it in.
+    struct FatalConsole(&'static AtomicU8);
+
+    impl crate::console::ConsoleWrite for FatalConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, tairix_abi::Errno> {
+            Ok(bytes.len())
+        }
+
+        fn enter_fatal(&self, every_cpu_stopped: bool) {
+            let mode = if every_cpu_stopped {
+                FATAL_BUSTED
+            } else {
+                FATAL_IF_FREE
+            };
+            self.0.store(mode, Ordering::SeqCst);
+        }
+    }
+
+    /// A console's lock is ignored only once every peer is known stopped: a
+    /// peer that would not stop may be inside the renderer still, so the
+    /// console then renders only where its lock is free, never waiting on it.
+    #[test]
+    fn a_console_renders_past_its_lock_only_when_every_peer_stopped() {
+        static MODE: AtomicU8 = AtomicU8::new(FATAL_UNTOLD);
+        static CONSOLE: FatalConsole = FatalConsole(&MODE);
+        static CONSOLES: [crate::console::ConsoleDevice; 1] = [crate::console::ConsoleDevice::new(
+            &CONSOLE,
+            &crate::console::NULL_CONSOLE_READ,
+        )];
+        MODE.store(FATAL_UNTOLD, Ordering::SeqCst);
+        let wedged = StopOutcome {
+            asked: 2,
+            stopped: 1,
+            unresponsive: Some(3),
+        };
+        bust_console_locks(&wedged, &CONSOLES);
+        assert_eq!(
+            MODE.load(Ordering::SeqCst),
+            FATAL_IF_FREE,
+            "a live peer keeps the lock"
+        );
+        let stopped = StopOutcome {
+            asked: 2,
+            stopped: 2,
+            unresponsive: None,
+        };
+        bust_console_locks(&stopped, &CONSOLES);
+        assert_eq!(MODE.load(Ordering::SeqCst), FATAL_BUSTED);
+    }
+
+    /// The report puts the console it renders on in its fatal mode before it
+    /// writes the record, so a panic raised inside the renderer still reaches
+    /// the screen rather than hanging on the lock its own frame holds.
+    #[test]
+    fn panic_dump_busts_the_console_locks_before_the_record() {
+        static MODE: AtomicU8 = AtomicU8::new(FATAL_UNTOLD);
+        static CONSOLE: FatalConsole = FatalConsole(&MODE);
+        static CONSOLES: [crate::console::ConsoleDevice; 1] = [crate::console::ConsoleDevice::new(
+            &CONSOLE,
+            &crate::console::NULL_CONSOLE_READ,
+        )];
+
+        struct BustSink {
+            mode_at_report: AtomicU8,
+        }
+
+        impl Sink for BustSink {
+            fn write_event(&self, _event: &Event<'_>) {
+                self.mode_at_report
+                    .store(MODE.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+        MODE.store(FATAL_UNTOLD, Ordering::SeqCst);
+        let sink = &BustSink {
+            mode_at_report: AtomicU8::new(FATAL_UNTOLD),
+        };
+        let arch = TestArch::with_cpus(1);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_consoles(&CONSOLES);
+            panic_dump(None, &ctx);
+        }));
+        assert!(result.is_err());
+        assert_eq!(sink.mode_at_report.load(Ordering::SeqCst), FATAL_BUSTED);
+        reset_panic_guard();
     }
 
     #[test]

@@ -523,6 +523,10 @@ pub const SETTINGS_RUN_PATH: &str = "/System/Components/settings.app/Run";
 /// The entry point of the elevated Date & Time setter component.
 pub const DATETIME_RUN_PATH: &str = "/System/Components/datetime.app/Run";
 
+/// The entry point of the graphical login screen, a system service the
+/// session authority starts for a graphical round.
+pub const GREETER_RUN_PATH: &str = "/System/Services/greeter.app/Run";
+
 /// The directory-name suffix every application bundle carries
 /// (`<name>.app`). Command resolution appends it to a bare command word and
 /// recognises it on an explicitly-typed bundle name (`plans/APPS.md` §9).
@@ -1723,9 +1727,9 @@ mod tests {
         APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE,
         APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_CONTENT_DIGEST_MAGIC,
         BUNDLE_ID_MAX, BUNDLE_SUFFIX, DATETIME_RUN_PATH, DESKTOP_RUN_PATH, FILES_RUN_PATH,
-        HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX,
-        PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN,
-        PUBLISHER_ID_PREIMAGE_LEN, SETTINGS_RUN_PATH, SYSTEM_APPLICATION_STORE,
+        GREETER_RUN_PATH, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN,
+        MIME_TYPE_MAX, PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT,
+        PUBLISHER_ID_LEN, PUBLISHER_ID_PREIMAGE_LEN, SETTINGS_RUN_PATH, SYSTEM_APPLICATION_STORE,
         SYSTEM_COMMAND_STORE, SYSTEM_COMPONENT_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
     };
     use crate::syscall::SYSCALL_TABLE_HASH_LEN;
@@ -1896,6 +1900,21 @@ mod tests {
                 "{run}"
             );
         }
+    }
+
+    /// The login screen's entry point is a service's, spelled under the
+    /// service store.
+    #[test]
+    fn the_greeter_runs_from_the_service_store() {
+        let bundle = GREETER_RUN_PATH
+            .strip_suffix("/Run")
+            .expect("an entry point");
+        assert!(bundle.ends_with(BUNDLE_SUFFIX));
+        assert!(ProgramKind::Service.launchable_from(bundle));
+        assert_eq!(
+            bundle.rsplit_once('/').map(|(store, _)| store),
+            Some(SYSTEM_SERVICE_STORE)
+        );
     }
 
     /// Each kind names a distinct store, and the `/System`-relative

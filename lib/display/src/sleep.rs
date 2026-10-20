@@ -5,8 +5,10 @@
 //! display they own, so the three states, which refusal means what, and
 //! which display is switched back on have one definition here.
 
-use tairix_abi::driver::display::{Display, DisplayPower};
+use tairix_abi::driver::display::DisplayPower;
 use tairix_abi::DriverError;
+
+use crate::presenter::Presenter;
 
 /// What asking a display to switch off came to.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -70,7 +72,7 @@ impl DisplaySleep {
     /// `display` to ask there is no power control to use.
     pub fn switch_off(
         &mut self,
-        display: Option<&mut dyn Display>,
+        display: Option<&mut dyn Presenter>,
         can_blank: bool,
     ) -> Option<SwitchedOff> {
         if !self.is_awake() {
@@ -106,7 +108,7 @@ impl DisplaySleep {
     ///
     /// The display's refusal to switch back on. It stays off, so the next
     /// wake asks again rather than presenting to a screen nobody can see.
-    pub fn wake(&mut self, display: Option<&mut dyn Display>) -> Result<bool, DriverError> {
+    pub fn wake(&mut self, display: Option<&mut dyn Presenter>) -> Result<bool, DriverError> {
         if self.is_off() {
             if let Some(display) = display {
                 display.set_power(DisplayPower::On)?;

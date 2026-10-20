@@ -118,7 +118,7 @@ a reply), withholds it: `DmaSlab::withhold` makes the slab's drop tell its
 pool `SlabEnd::Withheld`, and the pool frees nothing, so the region stays
 mapped until the driver exits and the kernel quarantines it. A request a device leaves unanswered is failed
 to its caller, but the buffers it named stay the device's until the device
-hands them back; a request queue carrying one request at a time
+hands them back; a request queue carrying one batch of requests at a time
 (`tairix_virtio::RequestQueue`) publishes nothing over them until then.
 
 `mailbox(&self) -> Option<&dyn MailboxChannel>` is the board-neutral
@@ -336,31 +336,56 @@ endpoint id its host handed it through its startup arguments
 
 ## Display
 
-`trait Display`. Methods:
+`trait Display`: an output, and the buffers its device reads, which the
+driver allocates and a presenter fills. Every method is gated by the
+driver handle. Methods:
 
-| Method               | Returns                            | Capability gate                       |
-|----------------------|------------------------------------|---------------------------------------|
-| `output()`           | `Option<DisplayMode>`              | Driver handle.                        |
-| `service_events()`   | `Result<(), DriverError>`          | Driver handle.                        |
-| `device_report()`    | `DisplayDeviceReport`              | Driver handle.                        |
-| `present(&)`         | `Result<(), DriverError>`          | Driver handle.                        |
-| `present_rects(&, &)` | `Result<(), DriverError>`         | Driver handle.                        |
-| `set_power(power)`   | `Result<(), DriverError>`          | Driver handle.                        |
-| `released(surface)`  | `()`                               | Driver handle.                        |
+| Method                  | Returns                                | Default                |
+|-------------------------|----------------------------------------|------------------------|
+| `output()`              | `Option<DisplayMode>`                  | —                      |
+| `service_events()`      | `Result<Serviced, DriverError>`        | Reports nothing.       |
+| `requests_take_wakes()` | `bool`                                 | `false`.               |
+| `abandon_queued()`      | `()`                                   | Does nothing.          |
+| `memory()`              | `DisplayMemory`                        | `DisplayMemory::NONE`. |
+| `frame_count()`         | `u32`                                  | —                      |
+| `alloc_buffer(w, h)`    | `Result<AllocatedBuffer, DriverError>` | —                      |
+| `free_buffer(id)`       | `Result<(), DriverError>`              | —                      |
+| `present(id, damage)`   | `Result<Presented, DriverError>`       | —                      |
+| `released(surface)`     | `()`                                   | Does nothing.          |
+| `set_power(power)`      | `Result<(), DriverError>`              | `Unsupported`.         |
+| `as_accelerated()`      | `Option<&mut dyn AcceleratedDisplay>`  | `None`.                |
+| `hardware_cursor()`     | `Option<&mut dyn HardwareCursor>`      | `None`.                |
 
-`DisplayMode` carries `width_px`, `height_px`, `stride_bytes`, and
-a `DisplayFormat` (`Rgba8888` or `Bgra8888`). `output` is `None` while no
-sink is connected, and moves only across `service_events`, which the service
-loop calls when one of the display's event sources (`DeviceWake`) fired; its
-default does nothing, for a display whose output never moves. A present with
-no output is refused `Stale`. `set_power` takes a `DisplayPower` (`On` or
-`Off`); its default refuses `Unsupported`, the answer for a display with no
-power control of its own. `released` tells the display that the lease its
-frames were presented under ended, and whether the seat went to its text
-console or to another presenter (`ReleaseSurface`): a driver scanning out
-frames of its own shows the console's surface or nothing, never the outgoing
-presenter's last frame. Its default does nothing, for a surface the console
-draws into itself.
+`DisplayMode` carries `width_px`, `height_px`, `stride_bytes`, and a
+`DisplayFormat` (`Rgba8888` or `Bgra8888`). `output` is `None` while no sink
+is connected, and moves only across `service_events`, which the service loop
+calls when one of the display's event sources fired, and after every request
+where `requests_take_wakes` says serving one can take such a wake.
+
+`alloc_buffer` returns a zeroed buffer in memory the device reads — its
+`BufferId`, the shared region holding it, and its stride — within a budget
+the driver derives from that memory; `free_buffer` releases one once the
+device no longer reads it. A presenter rotates through `frame_count`
+output-sized buffers, and `present` shows one of them, naming the one to
+`MAX_DAMAGE_RECTS` disjoint rectangles that changed. It answers `Shown`, or
+`Queued` when the device takes the buffer at its next frame start: the buffer
+it replaces is read until `service_events` reports the latch, and a present
+meanwhile is `Busy`. `abandon_queued` stops that wait when the hosting loop
+gave up on a latch at its deadline.
+
+`set_power` takes a `DisplayPower` (`On` or `Off`); the surface keeps its
+pixels while off. `released` tells the display that the lease its buffers were
+presented under ended, and whether the seat went to its text console or to
+another presenter (`ReleaseSurface`): the display shows the console's surface
+or nothing, never the outgoing presenter's last frame.
+
+`AcceleratedDisplay` composites a stack of layers in hardware:
+`accel_caps()` bounds each stack (`AccelCaps`), and `present_layers(layers)`
+shows one — refused `LengthOutOfRange` or `Unsupported` past the caps, and
+`OutOfRange` for a stack within them an output cannot composite at once, with
+nothing on screen moved. `HardwareCursor` draws the pointer on a cursor plane:
+`cursor_caps()`, `set_cursor(id, hot_x, hot_y)`, `move_cursor(x, y)` and
+`hide_cursor()`.
 
 ## Filesystem
 

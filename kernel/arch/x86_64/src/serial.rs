@@ -424,6 +424,12 @@ impl SerialSink {
     pub const fn new() -> Self {
         Self
     }
+
+    /// Milliseconds since boot, as this console stamps its records.
+    #[must_use]
+    pub fn uptime_ms(&self) -> Option<u64> {
+        CONSOLE.tx().uptime_ms()
+    }
 }
 
 impl Default for SerialSink {

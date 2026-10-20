@@ -674,12 +674,12 @@ pub enum HwProperty {
     /// keep clear of — an HDMI transmitter's TMDS harmonics: the tree's
     /// `wifi-2.4ghz-coexistence`. The value is `1`.
     RadioCoexistence = 7,
-    /// The device is the display engine that takes the screen over from the
-    /// firmware which lit it, so the kernel's framebuffer console must move
-    /// off the firmware's memory first: its driver may ask for that move
-    /// (`console_relocate`). The value is `1`; only discovery states it, a
+    /// The device is the display engine the kernel's framebuffer console
+    /// appears on, taking the screen over from any firmware that lit it: its
+    /// driver hosts the console on memory the kernel allocates for it
+    /// (`console_adopt`). The value is `1`; only discovery states it, a
     /// driver never publishes it.
-    BootConsole = 8,
+    ConsoleHost = 8,
     /// The node is a block unit: what its medium is and the evidence for
     /// each fact, as the driver that probed it found. Built and read through
     /// [`HwResource::block_medium`] and [`HwNode::block_medium`].
@@ -697,7 +697,7 @@ impl HwProperty {
         Self::FixedClockRate,
         Self::BusSpeed,
         Self::RadioCoexistence,
-        Self::BootConsole,
+        Self::ConsoleHost,
         Self::BlockMedium,
     ];
 
@@ -711,7 +711,7 @@ impl HwProperty {
     /// it would claim authority only the kernel confers.
     #[must_use]
     pub const fn discovery_only(self) -> bool {
-        matches!(self, Self::KernelDriven | Self::BootConsole)
+        matches!(self, Self::KernelDriven | Self::ConsoleHost)
     }
 
     /// Inverse of [`Self::as_u32`]; `None` for an unknown key.
@@ -725,7 +725,7 @@ impl HwProperty {
             5 => Some(Self::FixedClockRate),
             6 => Some(Self::BusSpeed),
             7 => Some(Self::RadioCoexistence),
-            8 => Some(Self::BootConsole),
+            8 => Some(Self::ConsoleHost),
             9 => Some(Self::BlockMedium),
             _ => None,
         }
@@ -1430,6 +1430,17 @@ impl HwResource {
         self.kind == HwResourceKind::Dma.as_u16() && self.flags & Self::DMA_TRANSLATED != 0
     }
 
+    /// Whether this [`Dma`](HwResourceKind::Dma) resource holds every block
+    /// placed below its top: an untranslated constraint, or a translated
+    /// window whose CPU side starts at the bottom of memory. The allocator
+    /// places a block below a ceiling and above no floor, so a window that
+    /// starts higher may not hold one.
+    #[must_use]
+    pub const fn dma_from_bottom_of_memory(&self) -> bool {
+        self.kind == HwResourceKind::Dma.as_u16()
+            && (self.flags & Self::DMA_TRANSLATED == 0 || self.base == self.len)
+    }
+
     /// The bus address the CPU-physical range `[cpu, cpu + len)` has through
     /// this translated [`Dma`](HwResourceKind::Dma) window, or [`None`] when
     /// this is not such a window or the range does not lie wholly inside it.
@@ -1860,9 +1871,7 @@ impl HwResource {
         if u64::from(mode.stride_bytes) < min_stride {
             return Err(Errno::LengthOutOfRange);
         }
-        let len = u64::from(mode.stride_bytes)
-            .checked_mul(u64::from(mode.height_px))
-            .ok_or(Errno::LengthOutOfRange)?;
+        let len = mode.len_bytes();
         let xlate = u64::from(mode.width_px) | (u64::from(mode.height_px) << 32);
         let flags = u32::from(mode.format.as_u8())
             | (u32::from(memory.as_u8()) << Self::FRAMEBUFFER_MEMORY_SHIFT);
@@ -3727,16 +3736,16 @@ mod tests {
             .iter()
             .copied()
             .filter(|key| key.discovery_only())
-            .eq([HwProperty::KernelDriven, HwProperty::BootConsole]));
+            .eq([HwProperty::KernelDriven, HwProperty::ConsoleHost]));
         let mut node = HwNode::new(9, HW_NODE_ROOT_ID, HwDeviceClass::Display);
         node.push_resource(HwResource::property(HwProperty::RadioCoexistence, 1))
             .unwrap();
         assert!(!node.states_discovery_only());
-        assert_eq!(node.property(HwProperty::BootConsole), None);
-        node.push_resource(HwResource::property(HwProperty::BootConsole, 1))
+        assert_eq!(node.property(HwProperty::ConsoleHost), None);
+        node.push_resource(HwResource::property(HwProperty::ConsoleHost, 1))
             .unwrap();
         assert!(node.states_discovery_only());
-        assert_eq!(node.property(HwProperty::BootConsole), Some(1));
+        assert_eq!(node.property(HwProperty::ConsoleHost), Some(1));
         assert_eq!(node.property(HwProperty::RadioCoexistence), Some(1));
         assert_eq!(
             HwNode::from_bytes(&node.to_le_bytes()).map(|n| n.states_discovery_only()),
@@ -4769,6 +4778,24 @@ mod tests {
             !HwResource::dma(0, 0x1000, snooped).covers(&unbounded),
             "a no wider extent"
         );
+    }
+
+    #[test]
+    fn only_a_window_from_the_bottom_of_memory_holds_every_block_below_its_top() {
+        let coherence = crate::DmaCoherence::Unsnooped;
+        // A Pi 4 display engine: memory through [0, 1 GiB), the peripherals'
+        // aperture through [0xFC00_0000, 0xFF80_0000).
+        assert!(
+            HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xC000_0000, coherence)
+                .dma_from_bottom_of_memory()
+        );
+        assert!(
+            !HwResource::dma_translated(0xFF80_0000, 0x0380_0000, 0x7C00_0000, coherence)
+                .dma_from_bottom_of_memory()
+        );
+        assert!(HwResource::dma(0x1000_0000, 0, coherence).dma_from_bottom_of_memory());
+        assert!(HwResource::dma(0, 0, coherence).dma_from_bottom_of_memory());
+        assert!(!HwResource::mmio(0, 0x1000).dma_from_bottom_of_memory());
     }
 
     #[test]

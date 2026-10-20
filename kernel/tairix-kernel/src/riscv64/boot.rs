@@ -71,7 +71,7 @@ use tairix_arch_riscv64::fdt::Fdt;
 use tairix_arch_riscv64::irqmask::{SstatusIrqControl, SstatusState};
 use tairix_arch_riscv64::paging::{self, AddressSpace, PageTablePool};
 use tairix_arch_riscv64::{
-    halt_current_hart, serial, syscall_entry, trap, RiscvArch, RiscvArchStorage, SERIAL_SINK,
+    halt_current_hart, serial, syscall_entry, trap, RiscvArch, RiscvArchStorage,
 };
 use tairix_kernel_core::boot_audit_ring::{
     boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
@@ -714,8 +714,8 @@ static GATED_RISCV_CONSOLE_READ: crate::unlock_service::GatedConsoleRead =
         &crate::unlock_service::CONSOLE0_GATE,
     );
 
-/// The riscv64 boot console list: the SBI console is the only console,
-/// with both halves wired.
+/// The serial console list: the SBI console is the only console, with both
+/// halves wired, when no framebuffer console is attached.
 pub static RISCV_UART_CONSOLES: [tairix_kernel_core::ConsoleDevice; 1] =
     [tairix_kernel_core::ConsoleDevice::new(
         &RISCV_UART_CONSOLE,
@@ -1118,14 +1118,16 @@ pub static BOOT_AUDIT_RING: BootAuditRing<BOOT_AUDIT_RING_CAPACITY, SstatusIrqCo
     BootAuditRing::new(boot_audit_clock);
 
 /// The production boot **audit** channel: a fan-out delivering each record to
-/// both the SBI serial console ([`SERIAL_SINK`]) and the retained
+/// both the kernel's log sink ([`crate::console_layout::LOG_SINK`], the SBI
+/// console and the screen a user sees) and the retained
 /// [`BOOT_AUDIT_RING`].
 ///
 /// `main.rs` passes this as [`BootInfo`]'s audit sink for the production
 /// binary; the QEMU boot verticals substitute their own audit sink through
 /// [`boot`] directly, so retaining the trail is a production-only wiring and
 /// never disturbs a test's audit interception.
-pub static AUDIT_SINK: TeeSink<'static, 2> = TeeSink::new([&SERIAL_SINK, &BOOT_AUDIT_RING]);
+pub static AUDIT_SINK: TeeSink<'static, 2> =
+    TeeSink::new([&crate::console_layout::LOG_SINK, &BOOT_AUDIT_RING]);
 
 /// Log the RV-P2 paged-boot init line (MMU + dispatch reached).
 fn log_reached(sink: &(dyn Sink + Sync), hartid: u64, dtb: u64, mmu_on: bool) {
@@ -1250,8 +1252,13 @@ pub fn try_boot(
     // block binding from it and moves it into the authoritative `HW_TREE`
     // the `hw_tree_read` / `hw_tree_wait` syscalls read (Design D). It
     // consumes the parsed `fdt`, which no later step needs.
-    let tree = seed_hardware_tree(fdt, dtb, log_sink);
+    let (tree, placement) = seed_hardware_tree(fdt, dtb, log_sink);
     crate::unlock_service::record_boot(dtb, tree, log_sink);
+    // The port lights no surface of its own, so the framebuffer console is
+    // console 0 only where a display will host it.
+    if placement == crate::boot_display::ConsolePlacement::Hosted {
+        let _ = crate::console_layout::CONSOLE.attach(Some(tairix_fbcon::Geometry::UNHOSTED));
+    }
 
     let arch = Arc::new(RiscvBinArch::new(
         RiscvArch::new(&STORAGE, BOOT_CPU, timebase_hz),
@@ -1266,6 +1273,7 @@ pub fn try_boot(
     unsafe {
         crate::riscv64::panic_ctx::publish_arch(Arc::as_ptr(&arch));
     }
+    let (consoles, seat_registry) = crate::console_layout::console_layout();
     let boot_info = BootInfo::new(
         BOOT_CPU,
         1,
@@ -1279,10 +1287,11 @@ pub fn try_boot(
         &DISPATCH_SLOT,
         heap,
     )
-    // Install the SBI console as the only console-list entry: its write
-    // half carries the startup banners and its read half drains the
-    // legacy `console_getchar` service, so fd 0 reads reach the operator.
-    .with_consoles(&RISCV_UART_CONSOLES)
+    // One decision for the console list and the boot seat, so the seat's
+    // text sink, the console whose surface its lease hands over, and the
+    // console a descriptor's index names cannot disagree.
+    .with_consoles(consoles)
+    .with_seat_registry(seat_registry)
     // Record the device-tree-discovered installed-RAM total so the core
     // mints the `boot_facts_get` machine summary from it.
     .with_installed_memory(installed_memory_bytes)
@@ -1392,7 +1401,10 @@ fn seed_hardware_tree(
     fdt: Fdt<'_>,
     dtb: u64,
     log_sink: &'static (dyn Sink + Sync),
-) -> alloc::vec::Vec<tairix_abi::HwNode> {
+) -> (
+    alloc::vec::Vec<tairix_abi::HwNode>,
+    crate::boot_display::ConsolePlacement,
+) {
     use tairix_arch_api::PlatformDiscovery;
     // The validated blob's own length, captured before the discovery walk
     // consumes the `fdt` reader, so the virtio-MMIO probe below can reborrow
@@ -1453,6 +1465,9 @@ fn seed_hardware_tree(
         let _ = crate::hwdiscovery::observe_virtio_mmio_audio_devices(
             &bus, &slot_irq, &dma, &mut sink, log_sink,
         );
+        let _ = crate::hwdiscovery::observe_virtio_mmio_display_devices(
+            &bus, &slot_irq, &dma, &mut sink, log_sink,
+        );
     }
 
     // Every generic ECAM host the tree describes becomes the kernel's own,
@@ -1492,7 +1507,9 @@ fn seed_hardware_tree(
         }
         None => {}
     }
-    sink.into_vec()
+    let host = crate::boot_display::virtio_gpu(&sink);
+    let placement = crate::boot_display::place_console(&mut sink, host, None);
+    (sink.into_vec(), placement)
 }
 
 /// One past the highest physical address the identity window every root the

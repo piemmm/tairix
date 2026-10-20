@@ -1,64 +1,75 @@
 # Display drivers
 
-Display drivers present a single linear pixel surface to the
-compositor (`userland/gui/wm`). They implement
-[`tairix_abi::driver::display::Display`](../abi/driver_traits.md) and
-are loaded as user-space drivers; compositing, damage tracking, and
-GPU acceleration live above this trait, not inside it.
+Display drivers scan out what the compositor (`userland/gui/wm`) draws.
+They implement
+[`tairix_abi::driver::display::Display`](../abi/driver_traits.md) and are
+loaded as user-space drivers; compositing policy and damage tracking live
+above this trait, not inside it.
 
 ## Class trait
 
-`Display` is intentionally minimal:
+A display driver allocates every buffer its hardware reads, and a present
+names one by id:
 
-| Method           | Purpose                                  | Capability gate          |
-|------------------|------------------------------------------|--------------------------|
-| `output`         | report the `DisplayMode { width_px, height_px, stride_bytes, format }` the output runs, or `None` with no sink | `DriverHandle` ownership |
-| `service_events` | collect what woke the display's event sources and move `output` to match | `DriverHandle` ownership |
-| `device_report`  | report the device's own memory and compositor, for the monitor | `DriverHandle` ownership |
-| `present`        | copy a fully-rendered frame to the surface | `DriverHandle` ownership |
-| `present_rects`  | present a full frame of which only a list of `DamageRect`s changed | `DriverHandle` ownership |
-| `set_power`      | switch the display `On` or `Off` (`DisplayPower`) | `DriverHandle` ownership |
+| Method            | Purpose |
+|-------------------|---------|
+| `output`          | the `DisplayMode { width_px, height_px, stride_bytes, format }` the output runs, or `None` with no sink |
+| `frame_count`     | how many output frames a presenter rotates through: 1 where a present copies or transfers synchronously, 2 where the engine reads the frame while it shows |
+| `alloc_buffer`    | a buffer of a size, in memory the device reaches: its `BufferId`, the shared region holding it and its stride |
+| `free_buffer`     | give a buffer back; one the device may still read is kept until it no longer can |
+| `present`         | show an output-sized buffer, of which only a list of `DamageRect`s changed, answering `Presented::Shown` or `Presented::Queued` |
+| `service_events`  | collect what woke the display's event sources: the output moving, and a queued present latching (`Serviced { latched }`) |
+| `memory`          | the device's own memory, for the monitor |
+| `released`        | the seat moved on: show the text console, or black for a handover |
+| `set_power`       | switch the display `On` or `Off` (`DisplayPower`) |
+| `as_accelerated`  | the hardware layer compositor, where the device has one |
+| `hardware_cursor` | the cursor plane, where the device has one |
 
-Pixel encodings are `DisplayFormat::Rgba8888` and
-`DisplayFormat::Bgra8888` (4 bytes per pixel). Per `AGENTS.md` §2.9 the
-trait never panics: a frame shorter than `stride_bytes * height_px`
-maps to `DriverError::BufferTooSmall`.
+Pixel encodings are `DisplayFormat::Rgba8888` and `DisplayFormat::Bgra8888`
+(4 bytes per pixel), premultiplied. The trait never panics: every refusal is
+a typed `DriverError`.
 
-`present_rects` is the damage-aware present (`plans/DISPLAY.md` D7b):
-`frame` still carries the whole surface, and `damage` names the
-rectangles that changed since the previous present — one to
-`MAX_DAMAGE_RECTS`, kept disjoint by the caller so no pixel is blitted
-twice. The **whole list** is validated against the active mode
-(`DamageRect::validate_list` — non-empty, within the bound, each
-rectangle non-empty and wholly on-surface, overflow-checked) before any
-pixel access, so one bad rectangle refuses the present rather than
-leaving the ones before it on screen.
+### Buffers belong to the driver
 
-One call carries a whole frame's damage. A frame that changed two
-far-apart places — a menu and the title band its owner repainted — costs
-one dispatch and two rectangle-sized blits, never a blit of the box
-spanning them and never a dispatch each. The trait
-supplies a full-blit default so every driver stays correct unchanged;
-a driver whose scan-out path is a copy overrides it to blit only the
-touched scanline spans (the framebuffer driver does). The WM
-compositor threads its composited damage bounds through this method,
-so a small screen update costs a small copy end to end.
+The driver is the one component that knows its device's reach, contiguity,
+coherence and translation domain, so it carves every buffer itself: a
+DMA-capable engine with `shm_create_dma` under its own node's `Dma` grant (in
+the device's IOMMU domain where it has one), a CPU-blit framebuffer with plain
+shared memory. The display service grants each to the presenting client with
+`shm_grant_peer`, and the client maps it. A buffer belongs to the
+configuration that allocated it and dies with it; a stale id is `NotFound`.
+Each driver bounds what one configuration may hold by a budget derived from
+the memory its device reaches, and a request past it fails closed (`NoSpace`).
+
+A buffer is never given back while the device may still read it: unmapping a
+DMA region tells the kernel the device has stopped mastering it, so a driver
+whose device scans memory in place keeps a freed buffer until no list it
+latched names it.
+
+### One present in flight
+
+`present` validates the whole damage list (`DamageRect::validate_list` —
+non-empty, within `MAX_DAMAGE_RECTS`, each rectangle non-empty and on the
+surface) before touching anything. A driver that copies or transfers the
+frame answers `Shown`: every buffer it replaced is free on return. One whose
+device reads the frame where it lies answers `Queued`: the buffer it replaces
+is read until the device latches the new one at its next frame start, which
+`service_events` reports. The display service posts the latch to the
+configuration's event port as `DisplayEvent::Presented { seq }`; a present
+before it is refused `Busy`, by the client without a call and by the service
+if one arrives. A driver whose pipe stops completes a queued present at once,
+and one the hardware never latched completes after a bounded deadline,
+recorded.
 
 ### The present right follows the live seat lease
 
-Every present/flip path is additionally gated on the presenting
-client's *current* seat lease (`plans/DISPLAY.md` D4): at `open` a
-driver captures its host's `DriverHost::seat_gate()` — a
-`tairix_abi::driver::display::SeatGate` the kernel bound to the
-client's `SeatLease` — and consults it at the **top** of `present` (and
-`present_layers`), before any validation or surface access. A client
-whose lease was revoked is refused with the distinct
-`DriverError::SeatRevoked` even though its framebuffer mapping
-(`CAP_MMIO_MAP`) still exists; any other dead handle is
-`DriverError::PermissionDenied`, and the refused frame never touches
-scan-out. A host with no seat wired (headless, boot bring-up, unit
-seams) exposes no gate and the present proceeds ungated — there is no
-lease to derive the right from. See
+Every request that acts for a seat is refused before any state is read
+unless the caller holds that seat's live lease (`plans/DISPLAY.md` D4). The
+framebuffer engine also captures its host's `DriverHost::seat_gate()` — a
+`SeatGate` the kernel bound to the client's `SeatLease` — and consults it at
+the top of `present`, so a client whose lease was revoked is refused with the
+distinct `DriverError::SeatRevoked` before the surface is touched. A host
+with no seat wired (headless, bring-up, unit seams) exposes no gate. See
 [the seat model](../desktop/seat.md) for the ownership side.
 
 ### Switching the display off
@@ -71,43 +82,58 @@ through the one `tairix_display::DisplaySleep` state machine, so which
 refusal means what and which display is switched back on have one
 definition. The trait's default refuses `Unsupported`, which is the truth for
 a surface with no power control of its own — a firmware linear framebuffer, a
-VBE mode — and the presenter then keeps its screen black and still instead,
-so it spends nothing on the screen either way. A driver that can reach the
-panel overrides it: the Pi 4's display engine brings its outputs down, so a
-sink sees no signal and sleeps.
+VBE mode — and the presenter then keeps its screen black and still instead.
+A driver that can reach the panel overrides it: the Pi 4's display engine
+brings its outputs down, and virtio-gpu scans out nothing.
 
 A power-down never outlives the configuration that asked for it.
-`DisplayServer` tracks the display as unverified, on, or off: its release of a
+`DisplayServer` switches a dark display back on when it releases a
 configuration — the lease that made it ended, or a newer owner configured —
-switches a dark display back on, and a service that has just started knows
-nothing of the display's state, so its first configuration switches it on
-too. The service learns that a lease ended from the kernel's `DisplayLease`
-system notice (`docs/src/abi/notice.md`), so a session that crashes behind a
-dark screen leaves the machine lit for whoever comes next. Only a lease's end
-or a newer `Configure` releases a configuration: a refused request — malformed,
-from a caller without the lease, or for a seat nobody configured — changes
-nothing.
+and a service that has just started knows nothing of the display's state, so
+its first configuration switches it on too. The service learns that a lease
+ended from the kernel's `DisplayLease` system notice
+(`docs/src/abi/notice.md`), so a session that crashes behind a dark screen
+leaves the machine lit for whoever comes next.
 
-### Optional hardware acceleration
+### Hardware layers
 
-A driver whose hardware can composite a stack of planes itself also
-implements `AcceleratedDisplay: Display` — the GPU-accelerated path
-(`AGENTS.md` §10):
+A driver whose hardware composites a stack of planes also implements
+`AcceleratedDisplay`:
 
-| Method           | Purpose                                            |
-|------------------|----------------------------------------------------|
-| `accel_caps`     | report `AccelCaps { max_layers, max_width_px, max_height_px, per_layer_opacity }` |
-| `present_layers` | composite a back-to-front `AccelLayer` stack and scan it out |
+| Method           | Purpose |
+|------------------|---------|
+| `accel_caps`     | `AccelCaps { max_layers, max_width_px, max_height_px, per_layer_opacity, hw_scaling }` |
+| `present_layers` | show a bottom-first `AccelLayer` stack, as `present` answers |
 
-Each `AccelLayer` carries premultiplied-alpha source pixels in the
-display's active format plus a destination origin and a per-layer
-opacity; the engine blends them and scans the result out, so the host
-never composites the whole screen in software. The software
-`Display::present` path is always the mandatory fallback: the
-compositor (`Compositor::present_accelerated`) drops back to it when the
-scene exceeds the reported `AccelCaps` (too many layers, or a layer
-larger than the engine can source), so a hardware frame is never
-partial (§2.9).
+An `AccelLayer` names a buffer the driver allocated: the part of it shown
+(`src`), where it lands (`dst_x`, `dst_y`, which may be negative) and at what
+size (`src`'s unless `hw_scaling`), and a constant `opacity` (`255` unless
+`per_layer_opacity`). `AccelLayer::validate` checks it against the caps and
+its buffer's extent. A stack the engine cannot take is refused whole; the
+compositor then presents the frame in software instead, never a partial
+hardware frame.
+
+### The cursor plane
+
+A driver whose hardware draws the pointer itself implements
+`HardwareCursor`: `cursor_caps` bounds the image, `set_cursor` shows a buffer
+as the pointer with its hot spot, `move_cursor` puts the hot spot somewhere,
+and `hide_cursor` takes it off. The device has taken the image when
+`set_cursor` returns, so the presenter may draw the next into the same
+buffer at once. Moving a pointer on the plane presents no frame.
+
+### The presenter side
+
+A compositor names none of these traits. It presents through
+`tairix_display::Presenter` — the mode, whether a present may go now
+(`ready`), `present(frame, damage)`, `set_power` — and, where the device has
+them, `LayerPresenter` (the caps, layer buffers it bakes into, and
+`present_layers` over the output frame as the bottom layer) and
+`CursorPlane`. `RemoteDisplay` implements all three over `DISPLAY_ENDPOINT`:
+it maps the frames the driver granted at `Configure`, copies each present's
+damage into the frame the device does not read, together with whatever that
+frame missed while others were shown, and names it by id. How the desktop
+uses the layers and the plane is [the window manager's](../desktop/wm.md).
 
 ## Shipped drivers
 
@@ -115,12 +141,13 @@ partial (§2.9).
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
 | framebuffer  | `tairix-drv-display-framebuffer` (Run process over `tairix_display::Framebuffer`) | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
 | vesa         | `tairix-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
+| gpu_virtio   | `tairix-drv-display-gpu-virtio`      | a virtio GPU's 2D device on virtio-mmio or virtio-PCI: frames are resource backings, the pointer its cursor, the console hosted on it | host-side tests against a model device + aarch64, riscv64 and x86_64 QEMU verticals |
 | bcm2711_hvs  | `tairix-drv-display-bcm2711-hvs`     | the Pi 4's HVS and HDMI pixel valves, driven natively, its encoders over `encoder-v1` | host-side tests against a register-level model |
 | bcm2711_hdmi | `tairix-drv-display-bcm2711-hdmi`    | not a surface: each Pi 4 HDMI block, an `encoder-v1` encoder of the display engine and an `audiochan-v1` audio device | host-side tests against a register-level model |
 
-The two display drivers are deliberate siblings (`AGENTS.md` §2.2
-carve-out), not duplicates: `vesa` owns the VBE-specific decode, while
-the framebuffer path consumes an already-parsed geometry record.
+The two linear-surface drivers are deliberate siblings, not duplicates:
+`vesa` owns the VBE-specific decode, while the framebuffer path consumes an
+already-parsed geometry record.
 
 ### `tairix-drv-display-framebuffer`
 
@@ -141,11 +168,12 @@ fail-closed from its kernel-issued device-resource grants
 `stride_bytes * height_px` bytes through the host's `MmioMapper`,
 which enforces `CAP_MMIO_MAP`. The framebuffer is therefore reached
 only through a kernel-installed mapping, never through a pointer the
-service synthesises (`AGENTS.md` §4 — no ambient authority). `present`
-is byte-preserving: it copies the caller's frame verbatim into the
-mapped window, bounds-checked at every write; `present_rects` blits
-only the validated damage rectangles, and refuses the whole list
-rather than write part of it.
+service synthesises. Its buffers are plain shared memory, none larger than
+the surface, and one configuration's buffers hold no more than
+`DISPLAY_MAX_FRAMES` surfaces together. A present copies only the validated
+damage out of the buffer it names into the mapped window — one span per
+rectangle row, or one span for whole rows of matching stride — bounds-checked
+at every write, and answers `Shown`.
 
 The hardware-tree framebuffer resource also carries its discovered CPU
 memory policy. QEMU `ramfb` scans ordinary coherent guest RAM and therefore
@@ -168,14 +196,12 @@ until a discovered backend can guarantee bounded pan or true wrap.
 The service binds the reserved `DISPLAY_ENDPOINT` (its manifest's
 `CAP_IPC_BIND_PRIVILEGED` — a squatter cannot intercept presents) and
 serves the `lib/display` protocol from a wait-set park that also holds the
-kernel's display-lease notice: every request that
-acts *for a seat* — `Query` included — is gated on the in-flight caller's
-live seat lease through `call_peer_seat`, a `Configure` maps the client's
-`shm_grant`ed frame region once (sized from the kernel's own record of
-the region length via `shm_map_from`'s `len_out`, never the client's
-claimed geometry, and mapped only as the attested caller's own delegation),
-and a `Present` blits by frame index — zero frame
-bytes ever cross the IPC.
+kernel's display-lease notice: every request that acts *for a seat* —
+`Query` included — is gated on the in-flight caller's live seat lease
+through `call_peer_seat`. `Configure` allocates the configuration's output
+frames and `AllocBuffer` one more buffer, each granted to the calling process
+alone (`shm_grant_peer`); a `Present` names a buffer by id, so no frame byte
+ever crosses the IPC.
 
 `QueryStats` is the one operation that acts for no seat: it describes the
 *device* this service drives, for the monitor that draws graphics
@@ -188,12 +214,11 @@ inventory it details is already read under. It answers the cumulative
 call* — which is also where the window they partition opens, so a refused
 present adds nothing to either and no request an unauthorised caller can send
 moves the epoch —
-the memory and compositor capabilities the driver reports through
-`Display::device_report`, and the mode being scanned out, or none while
-there is no output. The default
-`device_report` is honest for a firmware framebuffer — no memory of its
-own, no hardware compositor — and an `AcceleratedDisplay` driver overrides
-it with its real `AccelCaps`.
+what the device is (`DisplayDeviceReport`: its own memory, from
+`Display::memory`, and the caps of its layer compositor and cursor plane),
+and the mode being scanned out, or none while there is no output. A firmware
+framebuffer honestly reports no memory of its own, no compositor and no
+plane.
 
 #### The display follows its output
 
@@ -211,13 +236,13 @@ the frames serve again the moment the output runs their mode, and it still
 ends only with its lease. A linear framebuffer's output never moves, so it
 names no source.
 
-Clients establish frames one way, `tairix_display::establish_frames` (feature
-`rt`): the shared region, its grant to the service, the configure, and the
-ring that owns the region and unmaps it when dropped.
+Clients configure one way, `tairix_display::establish_display` (feature
+`rt`): the event port bound and admitted to the endpoint, the configure, and
+the `RtDisplay` that maps the granted frames and owns the port.
 
 Lifecycle: the signed-bundle load gate clears `CAP_DRV_LOAD`;
 `Framebuffer::open` maps the surface; dropping the `Framebuffer`
-releases the window (unload); calling `open` again reloads. The engine
+releases the window and its buffers (unload); calling `open` again reloads. The engine
 and its unit tests live in `lib/display`
 (`lib/display/tests/framebuffer.rs`); the QEMU verticals below drive
 that same shared engine.
@@ -325,7 +350,7 @@ the bootloader; the boot stub captures the 256-byte VBE `ModeInfoBlock`
 (VBE function `0x4F01`) for a 32-bpp direct-colour linear-framebuffer
 mode and hands it to the driver host as a boot capability.
 
-`VbeModeInfo::parse` decodes and validates that block, accepting only a
+`parse_mode_info` decodes and validates that block, accepting only a
 supported mode whose linear-framebuffer attribute is set
 (`ModeAttributes` bits 0 and 7), the direct-colour memory model
 (`MemoryModel == 6`), 32 bits per pixel with 8-bit channel masks, and a
@@ -335,14 +360,14 @@ scanline, or any other layout fails closed (`DeviceFault` /
 `LengthOutOfRange` / `Unsupported`), so the byte-preserving `present`
 copy never mis-renders.
 
-`VesaFramebuffer::open` then maps exactly `stride_bytes * height_px`
-bytes at the reported `PhysBasePtr` through the host's `MmioMapper`
-(which enforces `CAP_MMIO_MAP`); the framebuffer is reached only through
-a kernel-installed mapping, never through a pointer the driver
-synthesises from the block (`AGENTS.md` §4). Lifecycle and `present`
-semantics match the framebuffer driver: `register` clears
-`CAP_DRV_LOAD`, dropping the `VesaFramebuffer` releases the window
-(unload), and calling `open` again reloads.
+`open` then hands the decoded geometry to the shared linear-framebuffer
+engine, `tairix_display::Framebuffer`, which maps exactly
+`stride_bytes * height_px` bytes at the reported `PhysBasePtr` through the
+host's `MmioMapper` (which enforces `CAP_MMIO_MAP`); the framebuffer is
+reached only through a kernel-installed mapping, never through a pointer the
+driver synthesises from the block. Buffers, presents and lifecycle are the
+framebuffer driver's: `register` clears `CAP_DRV_LOAD`, dropping the engine
+releases the window (unload), and calling `open` again reloads.
 
 #### QEMU integration vertical
 
@@ -359,7 +384,7 @@ then synthesises the bootloader-captured VBE `ModeInfoBlock` describing
 that surface — the shape a real VBE mode query (`0x4F01`) would produce
 — as the boot hand-off, loads the signed vesa `.rxe` through
 `tairix_drvhost::Host` (the §8 load gate), and for the "use" step decodes
-the block with `VesaFramebuffer::open`, maps the surface through the
+the block with `open`, maps the surface through the
 capability-gated `tairix_kernel_virtio::KernelMmioMapper`, and calls
 `present`. A second window mapped over the same physical range reads the
 pixels back to confirm they reached the scan-out memory, before and
@@ -369,6 +394,35 @@ The `fw_cfg` DMA protocol lives once in the shared `lib/fwcfg` crate
 (`tairix-fwcfg`); this vertical supplies only the x86_64 IOport
 transport, the deliberate sibling of the riscv64 MMIO transport
 (`AGENTS.md` §2.2).
+
+### `tairix-drv-display-gpu-virtio`
+
+The 2D device of a virtio GPU (virtio 1.2 §5.7) as the seat's display, on
+either transport; one signed bundle binds both. Kernel discovery publishes
+device type 16 as a `Display` node, the first marked `ConsoleHost`.
+
+- **The output** is the first scanout the device reports enabled, at the size
+  its display information states, else the preferred timing of the EDID it
+  offers. A `VIRTIO_GPU_EVENT_DISPLAY` configuration change re-reads it.
+- **Presents.** Each frame is the backing of a 2D resource made at its first
+  present, which transfers it whole. A present is one batch on the control
+  queue — a transfer per damage rectangle, the scan-out switch, a flush per
+  rectangle — published with one notify (`RequestQueue::submit_all_and_wait`)
+  and answered on the device interrupt, so it answers `Shown`. The batch
+  relies on the device processing its control queue in order, as every
+  virtio-gpu device does and Linux's driver relies on.
+- **The cursor plane.** A pointer image is copied into the driver's own
+  64 × 64 image, transferred, and shown on the cursor queue at its hot spot.
+- **The console.** It is hosted at the output's mode under the node's DMA
+  grant, shown as a resource of its own while the seat shows text, its rows
+  transferred on its damage wake, and re-hosted when the output moves —
+  after a refusal too, its memory having gone back to the kernel.
+- **Power.** `SET_SCANOUT` naming resource 0 switches the output off.
+- **Memory.** A buffer the device may still read is never unmapped: a shown
+  frame given back keeps its resource until replaced, a backing whose detach
+  the device never answered is held, and a resource an unanswered batch may
+  have made — a frame's, the console's, the pointer's — is unreferenced
+  before its memory is used again or given back.
 
 ### `tairix-drv-display-bcm2711-hvs`
 
@@ -381,18 +435,20 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
   node, which the image's display overlay enables: the HVS window `hvs`, the
   pixel valves' windows `valve2` and `valve4` with `Encoder` links `hdmi0`
   and `hdmi1` to the blocks they feed (`tairix_vcmailbox::ENGINE_OUTPUTS`),
-  the core clock's link, its bus's DMA windows, and, where the boot lit a
-  framebuffer console, the discovery-only `BootConsole` fact in place of a
-  boot display node, so no generic framebuffer service binds the firmware's
-  surface ([aarch64 platform](../platform/aarch64.md)).
-- **Takeover.** The kernel first moves the boot console off the firmware's
-  memory onto a block it owns below the HVS's DMA reach (`console_relocate`),
-  so nothing writes or scans out memory the firmware may take back; a console
-  that will not move ends the driver with the firmware told nothing. The call
-  waits until the boot has handed the console to `login`, so the takeover's
-  mode set, which blanks a sink while it re-locks, never lands under the
-  Supervisor window or a passphrase prompt. The
-  engine then tells the firmware the display is the ARM's
+  the core clock's link, its bus's DMA windows, and the discovery-only
+  `ConsoleHost` fact in place of a boot display node, so no generic
+  framebuffer service binds the firmware's surface ([aarch64
+  platform](../platform/aarch64.md)).
+- **Takeover.** The engine first asks the firmware the size of the screen it
+  lit (`GET_PHYSICAL_WH`, tag `0x0004_0003`, which the mailbox service admits
+  only for the HVS node's driver) and has the kernel host the console on a
+  block it owns below the HVS's DMA window from the bottom of memory, at that
+  size (`console_adopt`), so nothing writes or scans out memory the firmware
+  may take back; a console that cannot be hosted ends the driver with the
+  firmware told nothing. The call waits until the boot has handed the console
+  to `login`, so the takeover's mode set, which blanks a sink while it
+  re-locks, never lands under the Supervisor window or a passphrase prompt.
+  The engine then tells the firmware the display is the ARM's
   (`NOTIFY_DISPLAY_DONE`, tag `0x0003_0066`, which the mailbox service admits
   only for the HVS node's driver) and records the answer: the message header
   is all the firmware answers for a tag with no values, as Linux reads it, so
@@ -414,23 +470,45 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
   surface scaled to its mode with its aspect kept — the polyphase filter
   enlarging or shrinking by up to a third, the trapezoidal one shrinking
   further, through the Mitchell–Netravali kernel in display-list memory.
-- **Presents.** Every display list is written before its channel can read it.
-  A present copies into a frame no running channel composites or latches next,
-  and each channel latches it at its next frame start, so a present never
-  tears and never waits; with two frames per channel in flight and one being
-  written, three frames serve one output and four serve two. A frame is
-  brought up to date with only the damage presented since it was last written.
+- **Presents write no pixel.** The engine carves every buffer its presenter
+  fills in memory the HVS reaches, under the node's DMA window, and the
+  display service grants it. A present writes each running channel a list
+  naming the buffers — the output frame or one plane per layer, bottom first,
+  cut where a layer runs off the surface and scaled by the HVS's filters, and
+  the pointer on a plane of its own above — into the stack slot the channel
+  neither composites nor latches next, and is `Busy` while no slot is free.
+  Every running output's list is built before any is written: a stack one
+  output cannot composite, its scaled layers outrunning that output's share of
+  the line buffer, is refused `OutOfRange` with nothing moved. It answers
+  `Queued` until every running channel has latched the list at a frame start,
+  which the end-of-frame interrupt reports, so a present never tears and the
+  presenter draws its next frame into the buffer no list names. An output
+  brought down or switched off latches what it waited for at once, and a
+  present the display service abandons at its deadline is withdrawn, leaving
+  the stack the outputs latched before it. An output coming up that cannot
+  show the stack shows black until the presenter's next one.
+- **The cursor plane.** A pointer image is copied into one of the engine's
+  own, and the pointer's position, size and image words are rewritten in the
+  lists the channels read, so moving the pointer presents nothing; a changed
+  size is narrowed first, so no state between the writes reads past an image.
+  An image a list stopped naming is drawn into again only once two frames
+  have ended on every running channel.
+- **Memory a list names is never given back.** A buffer freed while a list a
+  channel composites or latches next names it is kept until none does:
+  unmapping it tells the kernel the HVS has stopped reading it. The
+  end-of-frame interrupt is raised only while something waits on it.
 - **Where the screen goes.** While the seat shows text the outputs show the
   boot console's surface scaled to fit; while another presenter takes over
-  they show black. A departed presenter's frames are forgotten, so the next
-  presenter's first present rewrites a frame whole before any channel shows
-  it.
+  they show black, and a departed presenter's buffers are never shown
+  again.
 - **The core clock.** Each encoder is told what its pipe carries at the core
   clock's ceiling (`clock-v1`'s highest rate): a deep-FIFO valve composites a
   line's active pixels with an 8 MHz margin and no less than nine tenths of
   the pixel clock, a shallow one keeps pace with the clock. The core clock is
   raised to at least 500 MHz for a mode set and settles at what the running
-  outputs need.
+  outputs need: raised before a channel can latch a larger stack, and lowered
+  only once none still composites one. A rate the clock refused is not asked
+  again until another is needed.
 
 QEMU models no HVS; the register-level model carries the host tests and the
 metal run is `plans/SOUND.md` SND19q.

@@ -30,12 +30,13 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ptr;
 
-use tairix_abi::driver::display::{Display, DisplayFormat, SeatGate};
+use tairix_abi::driver::display::{DisplayFormat, SeatGate};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers};
 use tairix_abi::seat::{SeatLease, SEAT_PRIMARY};
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
+use tairix_display::testkit::HeapMemory;
 use tairix_display::{Framebuffer, FramebufferConfig};
 use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
@@ -384,10 +385,11 @@ fn drive_seat_lease(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
     };
     let frame_a = make_frame(0x5A);
     {
-        let Ok(mut fb) = Framebuffer::open(&host_a, config) else {
+        let memory = HeapMemory::default();
+        let Ok(mut fb) = Framebuffer::open(&host_a, config, memory.clone()) else {
             env.fail("seat: open for client A");
         };
-        if fb.present(&frame_a).is_err() {
+        if memory.present_whole(&mut fb, &frame_a).is_err() {
             env.fail("seat: client A present");
         }
     }
@@ -400,10 +402,11 @@ fn drive_seat_lease(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
         env.fail("seat: revoke");
     }
     {
-        let Ok(mut fb) = Framebuffer::open(&host_a, config) else {
+        let memory = HeapMemory::default();
+        let Ok(mut fb) = Framebuffer::open(&host_a, config, memory.clone()) else {
             env.fail("seat: reopen for revoked client A");
         };
-        if fb.present(&make_frame(0xEE)) != Err(DriverError::SeatRevoked) {
+        if memory.present_whole(&mut fb, &make_frame(0xEE)) != Err(DriverError::SeatRevoked) {
             env.fail("seat: revoked present not refused");
         }
     }
@@ -429,10 +432,11 @@ fn drive_seat_lease(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
     };
     let frame_b = make_frame(0x3C);
     {
-        let Ok(mut fb) = Framebuffer::open(&host_b, config) else {
+        let memory = HeapMemory::default();
+        let Ok(mut fb) = Framebuffer::open(&host_b, config, memory.clone()) else {
             env.fail("seat: open for client B");
         };
-        if fb.present(&frame_b).is_err() {
+        if memory.present_whole(&mut fb, &frame_b).is_err() {
             env.fail("seat: client B present");
         }
     }
@@ -518,10 +522,11 @@ fn drive_multi_seat(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
     };
     let frame_b = make_frame(0x77);
     {
-        let Ok(mut fb) = Framebuffer::open(&host_b, config) else {
+        let memory = HeapMemory::default();
+        let Ok(mut fb) = Framebuffer::open(&host_b, config, memory.clone()) else {
             env.fail("multi-seat: open for B");
         };
-        if fb.present(&frame_b).is_err() {
+        if memory.present_whole(&mut fb, &frame_b).is_err() {
             env.fail("multi-seat: B present");
         }
     }
@@ -536,10 +541,11 @@ fn drive_multi_seat(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
         env.fail("multi-seat: detach");
     }
     {
-        let Ok(mut fb) = Framebuffer::open(&host_b, config) else {
+        let memory = HeapMemory::default();
+        let Ok(mut fb) = Framebuffer::open(&host_b, config, memory.clone()) else {
             env.fail("multi-seat: reopen for B");
         };
-        if fb.present(&make_frame(0xEE)) != Err(DriverError::PermissionDenied) {
+        if memory.present_whole(&mut fb, &make_frame(0xEE)) != Err(DriverError::PermissionDenied) {
             env.fail("multi-seat: dead-seat present not refused");
         }
     }
@@ -563,10 +569,11 @@ fn present_and_verify(
     phase: &str,
 ) {
     {
-        let Ok(mut fb) = Framebuffer::open(fb_host, config) else {
+        let memory = HeapMemory::default();
+        let Ok(mut fb) = Framebuffer::open(fb_host, config, memory.clone()) else {
             env.fail(phase_msg(phase, "Framebuffer::open"));
         };
-        if fb.present(frame).is_err() {
+        if memory.present_whole(&mut fb, frame).is_err() {
             env.fail(phase_msg(phase, "present"));
         }
         // `fb` drops here, releasing its window handle (the quiesce step).

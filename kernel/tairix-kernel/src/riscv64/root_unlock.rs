@@ -148,11 +148,11 @@ static RISCV_UNLOCK_CONSOLE: RiscvUnlockConsole = RiscvUnlockConsole;
 
 impl UnlockConsole for RiscvUnlockConsole {
     fn acquire_console0(&self) -> Console0 {
-        Console0 {
+        crate::console_layout::framebuffer_console0().unwrap_or(Console0 {
             write: &crate::riscv64::boot::RISCV_UART_CONSOLE,
             read: &crate::riscv64::boot::RISCV_UART_CONSOLE_READ,
             keys: KeySource::Live,
-        }
+        })
     }
 
     fn release_console0_to_login(&self) {

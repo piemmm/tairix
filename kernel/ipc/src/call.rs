@@ -342,7 +342,8 @@ impl CallEndpoint {
     ///   creator past `queue_limit`, its `ipc-queue-bytes` limit.
     ///
     /// On any failure exactly one [`AuditEvent::CallEndpointCreateDenied`] is
-    /// emitted; on success exactly one [`AuditEvent::CallEndpointCreated`].
+    /// emitted; on success exactly one [`AuditEvent::CallEndpointCreated`],
+    /// naming the process that now serves the endpoint.
     pub fn create<S: Sink + ?Sized>(
         id: EndpointId,
         creator: &TaskCapabilities,
@@ -504,6 +505,10 @@ impl CallEndpoint {
             }
         };
 
+        let server_field = Field {
+            key: "process",
+            value: tairix_log::FieldValue::UnsignedInt(creator.process().0),
+        };
         if reserved_bind_attested {
             // The seat-attested bind is a distinct security decision:
             // record it distinguishably from a capability-authorised bind.
@@ -512,6 +517,7 @@ impl CallEndpoint {
                 AuditEvent::CallEndpointCreated,
                 &[
                     id_field,
+                    server_field,
                     Field {
                         key: "bind",
                         value: tairix_log::FieldValue::Str("seat-lease"),
@@ -519,7 +525,11 @@ impl CallEndpoint {
                 ],
             );
         } else {
-            record(audit, AuditEvent::CallEndpointCreated, &[id_field]);
+            record(
+                audit,
+                AuditEvent::CallEndpointCreated,
+                &[id_field, server_field],
+            );
         }
 
         Ok(Self {
@@ -1557,7 +1567,11 @@ mod tests {
         )
         .expect("privileged service binds its reserved rendezvous");
         assert_eq!(ep.id(), EndpointId(tairix_abi::sysinfo::SYSINFO_ENDPOINT));
-        assert!(sink.ids().contains(&AuditEvent::CallEndpointCreated.id().0));
+        assert_eq!(
+            sink.unsigned(AuditEvent::CallEndpointCreated.id().0, "process"),
+            Some(service.process().0),
+            "the record names the process that serves it"
+        );
     }
 
     #[test]

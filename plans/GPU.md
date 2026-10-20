@@ -13,8 +13,8 @@ Scanout is `plans/DISPLAY.md`'s. Layer composition is
 beside it**.
 
 Read first (§15.18): `plans/SHADER.md` (the IR and the compiler), `plans/FIX-DISPLAY-ACCELERATION.md`
-(the `AcceleratedDisplay`/`AccelLayer` seam and the empty `gpu_virtio`
-placeholder), `plans/DISPLAY.md`, `plans/FIX-DESKTOP-SPEEDUP.md` (the software
+(the `AcceleratedDisplay`/`AccelLayer` seam and the 2D `gpu_virtio` driver
+it delivered), `plans/DISPLAY.md`, `plans/FIX-DESKTOP-SPEEDUP.md` (the software
 path that stays mandatory), `plans/PI.md` (VideoCore VI), `plans/WINTERSUN.md`
 (the first demanding consumer), `AGENTS.md` §1 (Rust only), §4 (no ambient
 authority, OOM as a value), §5.2 (capability minimalism), §16.4 (the curated
@@ -27,7 +27,7 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | # | Item | Status |
 |---|---|---|
 | GP0 | This plan, `plans/SHADER.md`, the jump-sheet rows, the §3 map entries, the `PLAN.md` section | done |
-| GP1 | `drivers/display/gpu_virtio`: the 2D driver — `register`, `BIND_KEYS`, resources, scanout, and the flip-completion interrupt | planned |
+| GP1 | `drivers/display/gpu_virtio`: the 2D driver — `register`, `BIND_KEYS`, resources, scanout, and the flip-completion interrupt | done: delivered by `plans/FIX-DISPLAY-ACCELERATION.md` C |
 | GP2 | The memory and submission model: context-local GPU address spaces, typed allocations, command submission with validation, timeline fences, the reset watchdog, and the IOMMU requirement | planned |
 | GP3 | `lib/gpu`: the device-neutral **render and compute** vocabulary, and the software backend — including the tile-wide SPIR-V interpreter that makes it complete rather than render-only | planned |
 | GP4 | The pinned first-party pipeline set: OS chrome and the game's passes as build-time SPIR-V, with the conformance suite | planned |
@@ -251,13 +251,12 @@ where the security properties actually live.
 
 ## 3. GP1 / GP5 / GP9 — the backends
 
-**GP1 has the clearest independent value and lands first.**
-`drivers/display/gpu_virtio` is today a two-line `#![no_std]` placeholder, so
-the desktop's accelerated display path is unreachable on every QEMU target. It
-lands as a user-space driver on `lib/virtio` + `lib/drvrt` + `lib/dma-barrier`,
-bound by discovery-match (§18.3), holding only the register window, DMA
-constraint and interrupt its matched node requested. It serves
-`plans/FIX-DISPLAY-ACCELERATION.md` whether or not anything above it follows.
+**GP1 is the 2D driver `plans/FIX-DISPLAY-ACCELERATION.md` C delivered.**
+`drivers/display/gpu_virtio` is a user-space driver on `lib/virtio` +
+`lib/drvrt` + `lib/dma-barrier`, bound by discovery-match (§18.3), holding only
+the register window, DMA constraint and interrupt its matched node requested.
+The 3D backends below extend it; it serves the display path whether or not
+anything above it follows.
 
 **GP5 is the strategic one: Venus.** virtio-gpu's Venus capset carries
 serialised Vulkan commands with SPIR-V modules to the host, which replays them
@@ -380,7 +379,7 @@ Each needs sign-off before the item that depends on it; none is assumed.
 
 - **GP1**: binds by discovery-match under `devmgr` on aarch64 `virt`, riscv64
   `virt` and x86_64 q35; resource create/transfer/flush/flip; flip completion
-  parks on the interrupt; the desktop's accelerated seam drives it end to end.
+  parks on the interrupt; the display seam drives it end to end.
 - **GP2**: a submission naming another context's resource is refused; an
   out-of-bounds offset is refused whole, not clamped; a context cannot map
   memory it was not granted; an overrunning submission loses its context and

@@ -101,7 +101,7 @@
 #define TAIRIX_HW_PROPERTY_FIXED_CLOCK_RATE ((uint32_t)5u)
 #define TAIRIX_HW_PROPERTY_BUS_SPEED ((uint32_t)6u)
 #define TAIRIX_HW_PROPERTY_RADIO_COEXISTENCE ((uint32_t)7u)
-#define TAIRIX_HW_PROPERTY_BOOT_CONSOLE ((uint32_t)8u)
+#define TAIRIX_HW_PROPERTY_CONSOLE_HOST ((uint32_t)8u)
 #define TAIRIX_HW_PROPERTY_BLOCK_MEDIUM ((uint32_t)9u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed

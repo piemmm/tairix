@@ -29,11 +29,10 @@ mod telling;
 #[cfg(test)]
 pub(crate) use system_monitor::fixtures as monitor_fixtures;
 
-use tairix_abi::driver::display::Display;
 use tairix_abi::switchboard_ipc::MachineReport;
 use tairix_abi::time::WallClockReading;
 use tairix_abi::DriverError;
-use tairix_display::{DisplaySleep, SwitchedOff};
+use tairix_display::{DisplaySleep, Presenter, SwitchedOff};
 use tairix_raytrace::Detail;
 use tairix_theme::Theme;
 use tairix_tz::CivilClock;
@@ -333,7 +332,7 @@ impl Screensaver {
     pub fn dismiss(
         &mut self,
         compositor: &mut Compositor,
-        display: Option<&mut dyn Display>,
+        display: Option<&mut dyn Presenter>,
     ) -> Result<bool, DriverError> {
         let was_up = self.is_shown();
         self.sleep.wake(display)?;
@@ -356,7 +355,7 @@ impl Screensaver {
     pub fn switch_display_off(
         &mut self,
         compositor: &mut Compositor,
-        display: Option<&mut dyn Display>,
+        display: Option<&mut dyn Presenter>,
     ) -> Option<SwitchedOff> {
         let answer = self.sleep.switch_off(display, self.shown.is_some())?;
         match answer {

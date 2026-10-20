@@ -89,6 +89,7 @@ pub use network::{
 };
 
 use crate::bounded_text::BoundedText;
+use crate::driver::display::MAX_ACCEL_LAYERS;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::power::PowerAction;
@@ -832,6 +833,9 @@ pub struct FrameReport {
     pub chrome_hits: u32,
     /// Window-furniture lookups that had to be rendered.
     pub chrome_misses: u32,
+    /// Hardware layers the display's engine showed the frame in, its base
+    /// among them; zero for a frame composited into the scan-out alone.
+    pub layers: u32,
 }
 
 impl FrameReport {
@@ -860,6 +864,8 @@ impl FrameReport {
     /// * `present_calls` cannot exceed `dirty_rects + 1` — a frame publishes
     ///   at most one driver call per rectangle, and the whole-screen,
     ///   bounding-box, and hardware-layer paths each publish exactly one.
+    /// * `layers` cannot exceed [`MAX_ACCEL_LAYERS`], what one present can
+    ///   name.
     ///
     /// `blended_px` is deliberately unbounded in both directions: it counts
     /// layer *contributions*, so a stack of windows may blend one damaged
@@ -871,6 +877,7 @@ impl FrameReport {
             || (self.dirty_rects == 0) != (self.damaged_px == 0)
             || self.opaque_px > self.damaged_px
             || self.present_calls > self.dirty_rects.saturating_add(1)
+            || self.layers as usize > MAX_ACCEL_LAYERS
         {
             return Err(Errno::OutOfRange);
         }
@@ -927,8 +934,10 @@ const FRAME_PRESENTS_OFFSET: usize = FRAME_RECTS_OFFSET + 4;
 const FRAME_CHROME_HITS_OFFSET: usize = FRAME_PRESENTS_OFFSET + 4;
 /// Byte offset of a frame report's furniture-cache miss count.
 const FRAME_CHROME_MISSES_OFFSET: usize = FRAME_CHROME_HITS_OFFSET + 4;
+/// Byte offset of a frame report's hardware-layer count.
+const FRAME_LAYERS_OFFSET: usize = FRAME_CHROME_MISSES_OFFSET + 4;
 /// First reserved byte past a frame report's payload.
-const FRAME_END_OFFSET: usize = FRAME_CHROME_MISSES_OFFSET + 4;
+const FRAME_END_OFFSET: usize = FRAME_LAYERS_OFFSET + 4;
 
 /// Byte offset of an owner-bundle report's attested process identity.
 const OWNER_BUNDLE_PROC_OFFSET: usize = 8;
@@ -1073,6 +1082,7 @@ impl SwitchboardCommand {
                 put_u32(&mut out, FRAME_PRESENTS_OFFSET, report.present_calls);
                 put_u32(&mut out, FRAME_CHROME_HITS_OFFSET, report.chrome_hits);
                 put_u32(&mut out, FRAME_CHROME_MISSES_OFFSET, report.chrome_misses);
+                put_u32(&mut out, FRAME_LAYERS_OFFSET, report.layers);
             }
             Self::Power { action } => {
                 put_u16(&mut out, 6, OP_POWER);
@@ -1238,6 +1248,7 @@ fn decode_frame_report(bytes: &[u8]) -> Result<FrameReport, Errno> {
         present_calls: read_u32(bytes, FRAME_PRESENTS_OFFSET),
         chrome_hits: read_u32(bytes, FRAME_CHROME_HITS_OFFSET),
         chrome_misses: read_u32(bytes, FRAME_CHROME_MISSES_OFFSET),
+        layers: read_u32(bytes, FRAME_LAYERS_OFFSET),
     };
     report.validate()?;
     Ok(report)

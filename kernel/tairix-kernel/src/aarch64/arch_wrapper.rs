@@ -31,9 +31,8 @@ use tairix_arch_aarch64::fdt::PsciMethod;
 use tairix_arch_aarch64::gicv3::{RedistributorRegion, RedistributorStride};
 use tairix_arch_aarch64::{halt_current_cpu, psci, serial, Aarch64Arch};
 use tairix_arch_api::{CpuId, PlatformEntropy, SchedulerArch, SecondaryBringup};
-use tairix_kernel_core::{
-    ConsoleRead, ConsoleSurface, ConsoleWrite, IrqRouting, KernelArch, Relocation, SeatRegistry,
-};
+use tairix_kernel_core::{ConsoleRead, ConsoleWrite, IrqRouting, KernelArch};
+
 use tairix_kernel_irq::IrqTable;
 
 /// Local [`KernelArch`] wrapper around the arch port's
@@ -451,7 +450,7 @@ impl KernelArch for Aarch64BinArch {
         // The active framebuffer console's scan-out surface, so the pre-boot
         // Supervisor's `memtest` takeover can keep it out of the destructive
         // whole-RAM sweep. `None` on a UART-only boot or a host build.
-        let (base, len) = tairix_arch_aarch64::video::active_framebuffer_extent()?;
+        let (base, len) = crate::console_layout::CONSOLE.extent()?;
         Some((tairix_kernel_mem::PhysAddr::new(base), len))
     }
 
@@ -659,7 +658,8 @@ pub static UART_CONSOLE: UartConsole = UartConsole;
 /// in kernel-core's `BlockingConsoleRead` (the `login` reader) or the
 /// root-unlock kthread's `KthreadConsoleRead` the instant input arrives
 /// (the backing parks rather than polls). It is the
-/// UART analogue of [`VIDEO_KEYBOARD`]: the same `'static` backs both the
+/// UART analogue of the framebuffer keyboard queue
+/// (`crate::console_layout::FRAMEBUFFER_KEYBOARD`): the same `'static` backs both the
 /// console's [`tairix_kernel_core::ConsoleRead`] half (drained by the
 /// reader's `stream_read`) and its [`tairix_kernel_core::ConsoleInput`] half
 /// (the interrupt's push target), so the push reaches the parked reader.
@@ -719,184 +719,9 @@ impl ConsoleRead for UartConsoleRead {
 /// UART console's read half (wrapped, for console 0, in the unlock gate).
 pub static UART_CONSOLE_READ: UartConsoleRead = UartConsoleRead;
 
-/// The video (framebuffer) console device — the **primary** console the
-/// boot path lists when the P7b framebuffer boot console is configured
-/// (`plans/PI.md` P11).
-///
-/// A zero-sized [`ConsoleWrite`] adapter over the framebuffer text
-/// renderer: every `stream_write` byte is rendered on screen through
-/// [`tairix_arch_aarch64::video::write_bytes`]. The video console's
-/// **input** half is not this type but the shared [`VIDEO_KEYBOARD`]
-/// queue: the display's session reads a directly attached keyboard
-/// (USB HID / PS-2 — the P10 input wiring), whose decoded key edges the
-/// keyboard-input driver hands to the [`VIDEO_SEAT_REGISTRY`], which (while
-/// the seat is unowned) encodes a press and enqueues it here, never on
-/// the UART, which is the session-free debug log line while a display is
-/// active (`plans/PI.md` P11). Until a keyboard driver injects anything
-/// the queue is empty, so
-/// kernel-core's `BlockingConsoleRead` parks a reader until a keystroke
-/// arrives — the prompt waits instead of exiting or borrowing the serial
-/// line.
-#[derive(Debug, Default, Copy, Clone)]
-pub struct VideoConsole;
-
-impl ConsoleWrite for VideoConsole {
-    fn write(&self, bytes: &[u8]) -> Result<usize, tairix_abi::Errno> {
-        // The boot path lists this device only when the framebuffer
-        // console came up, but fail closed rather than silently dropping
-        // bytes if that invariant is ever violated.
-        if !tairix_arch_aarch64::video::is_active() {
-            return Err(tairix_abi::Errno::NotImplemented);
-        }
-        tairix_arch_aarch64::video::write_bytes(bytes);
-        Ok(bytes.len())
-    }
-
-    fn write_output(&self, bytes: &[u8]) -> Result<usize, tairix_abi::Errno> {
-        if !tairix_arch_aarch64::video::is_active() {
-            return Err(tairix_abi::Errno::NotImplemented);
-        }
-        tairix_arch_aarch64::video::write_output_bytes(bytes);
-        Ok(bytes.len())
-    }
-
-    fn geometry(&self) -> Option<tairix_abi::TerminalSize> {
-        // The framebuffer console's grid is a function of the firmware
-        // panel resolution and the font, known at runtime; report it so a
-        // full-screen program (`top`) draws to the real display extents. A
-        // UART keeps the trait default (`None`).
-        tairix_arch_aarch64::video::text_grid()
-    }
-
-    fn set_surface(&self, surface: tairix_arch_aarch64::video::Surface) {
-        // The scan-out surface this console paints is the one a display
-        // client presents into, so the seat's lease decides which of them
-        // owns it. Unlike the write paths there is no `is_active` guard: a
-        // board with no framebuffer console has nothing to hand over and
-        // the port call is inert.
-        tairix_arch_aarch64::video::set_surface(surface);
-    }
-
-    fn reclaim_surface(&self) {
-        tairix_arch_aarch64::video::reclaim_surface();
-    }
-
-    fn surface(&self) -> Option<ConsoleSurface> {
-        tairix_arch_aarch64::video::placement().map(console_surface)
-    }
-
-    fn relocate(&self, phys: u64, len: u64) -> Relocation {
-        use tairix_arch_aarch64::video::Relocated;
-        match tairix_arch_aarch64::video::relocate(phys, len) {
-            Relocated::Moved(placement) => Relocation::Moved(console_surface(placement)),
-            Relocated::Owned(placement) => Relocation::Owned(console_surface(placement)),
-            Relocated::Refused => Relocation::Refused,
-        }
-    }
-
-    fn boot_holds_screen(&self) -> bool {
-        // The video console is console 0, which the boot hands to `login` by
-        // opening this gate, and the opener wakes the console wait-queue.
-        !crate::unlock_service::CONSOLE0_GATE.is_open()
-    }
-
-    fn purge(&self) {
-        // A retained console owns its screen, so the discard is real: both
-        // cell grids and every pixel, not the escape sequence the trait
-        // default sends a terminal the kernel cannot reach.
-        tairix_arch_aarch64::video::purge();
-    }
-}
-
-/// The port's account of the console's scan-out, as the kernel states it.
-fn console_surface(placement: tairix_arch_aarch64::video::Placement) -> ConsoleSurface {
-    ConsoleSurface {
-        phys: placement.phys_base,
-        mode: tairix_abi::driver::display::DisplayMode {
-            width_px: placement.width_px,
-            height_px: placement.height_px,
-            stride_bytes: placement.stride_bytes,
-            format: placement.format,
-        },
-        kernel_owned: placement.kernel_owned,
-    }
-}
-
-/// The single `'static` [`VideoConsole`] the boot path lists first when
-/// the framebuffer boot console is active. Zero-sized, like
-/// [`UART_CONSOLE`].
-pub static VIDEO_CONSOLE: VideoConsole = VideoConsole;
-
-/// The video console's keyboard type-ahead queue (`plans/PI.md` P11 —
-/// keyboard input for the video console).
-///
-/// It is both the video console's [`tairix_kernel_core::ConsoleRead`]
-/// half (drained by a `stream_read` from the video login) and its
-/// [`tairix_kernel_core::ConsoleInput`] half — the [`VIDEO_SEAT_REGISTRY`]'s
-/// *text sink*, into which an injected key press is encoded
-/// while the seat is unowned. The same `'static` backs both
-/// halves, so the registry's push wakes the reader parked in kernel-core's
-/// `BlockingConsoleRead`. The video login takes input only from its own
-/// keyboard, never the serial line — the UART carries no console at all
-/// while a display is active (`plans/PI.md` P11).
-pub static VIDEO_KEYBOARD: tairix_kernel_core::ConsoleInputQueue =
-    tairix_kernel_core::ConsoleInputQueue::new();
-
-/// The kernel seat registry the boot path installs through
-/// [`tairix_kernel_core::KernelSyscallHandlers::with_seat_registry`]
-/// (`plans/DISPLAY.md` D2; `plans/PI.md` P11 — input follows the
-/// surface owner).
-///
-/// Its *text sink* is the **video console device**
-/// (`VIDEO_ONLY_CONSOLES[0]`), whose line discipline forwards to
-/// [`VIDEO_KEYBOARD`]: while the seat is unowned (the default for a freshly
-/// booted text login) the registry encodes each injected key *press* to the
-/// video console's tty bytes and pushes them through the console's input
-/// filter (`plans/SPAWN.md` SP9 — a cooked-mode `^C`/`^Z` reaches the
-/// foreground job instead of the queue), landing in the keyboard queue
-/// where the video login's `stream_read` drains them. When the
-/// window manager acquires the seat (`display_acquire`, owner-checked) the
-/// registry routes whole [`tairix_abi::input::KeyInput`] records to its
-/// desktop keyboard channel instead, drained by the owner's
-/// `keyboard_read`. The same `'static` is shared by the `key_inject` /
-/// `display_acquire` / `display_release` / `keyboard_read` syscall handlers.
-///
-/// It also carries the console list, so a lease transition hands the boot
-/// seat's **display surface** between that console and the session holding
-/// the seat — the pixel half of the handover the keyboard already followed
-/// (`plans/DISPLAY.md` D8).
-///
-/// There is one registry per console layout, and [`console_layout`] chooses
-/// the registry and the installed console list *together*, so a seat's text
-/// sink, the console whose surface it hands over, and the console a
-/// descriptor's index names are always the same device.
-pub static VIDEO_SEAT_REGISTRY: SeatRegistry =
-    SeatRegistry::new(&VIDEO_ONLY_CONSOLES[0]).with_consoles(&VIDEO_ONLY_CONSOLES);
-
-/// The seat registry for the serial-only layout (QEMU `virt` with no ramfb, a
-/// headless Pi): the UART *is* the console, so it is the boot seat's text
-/// sink and a directly attached keyboard's injected presses reach the login
-/// reading that console. It has no display surface, so the D8 handover is
-/// inert for it — and suppressing a UART's output would lose it outright.
-pub static UART_SEAT_REGISTRY: SeatRegistry =
-    SeatRegistry::new(&UART_ONLY_CONSOLES[0]).with_consoles(&UART_ONLY_CONSOLES);
-
-/// The console-0 read half of the video console, gated on the in-kernel
-/// root-unlock service's ownership latch (`plans/PI.md` P11 Chunk B-2 item
-/// 5): a `stream_read` from the primary console's `login` is withheld
-/// (parked) until the unlock kthread has finished reading the root
-/// passphrase off the same queue and opened the gate, so the two never
-/// race for console-0 input. Wraps [`VIDEO_KEYBOARD`]; the injected-input
-/// (`console_input`) half stays the raw queue.
-static GATED_VIDEO_READ: crate::unlock_service::GatedConsoleRead =
-    crate::unlock_service::GatedConsoleRead::new(
-        &VIDEO_KEYBOARD,
-        &crate::unlock_service::CONSOLE0_GATE,
-    );
-
-/// The console-0 read half of the UART console, gated on the same unlock
-/// ownership latch as [`GATED_VIDEO_READ`] for the UART-only (QEMU `virt`,
-/// headless Pi) layout where the UART *is* the primary console.
+/// The console-0 read half of the UART console, gated on the unlock
+/// ownership latch for the UART-only (QEMU `virt`, headless Pi) layout where
+/// the UART *is* the primary console.
 ///
 /// It reads the interrupt-fed [`UART_INPUT`] queue (not the raw FIFO): once
 /// the gate opens the receive interrupt is unmasked and a parked `login`
@@ -906,24 +731,6 @@ static GATED_UART_READ: crate::unlock_service::GatedConsoleRead =
         &UART_CONSOLE_READ,
         &crate::unlock_service::CONSOLE0_GATE,
     );
-
-/// The console list installed when the framebuffer boot console is
-/// active: the video console is the **only** console (index 0, PID 1's
-/// banner + the login session). The UART then carries no session at all —
-/// it is the debug log line (`tairix_arch_aarch64::SERIAL_SINK`), and a
-/// full-screen login drawing over the log stream would garble both — so
-/// no stream backing is installed for it and its receive interrupt is
-/// never enabled (`plans/PI.md` P11).
-pub static VIDEO_ONLY_CONSOLES: [tairix_kernel_core::ConsoleDevice; 1] = [
-    // The video console: written to the framebuffer, read (through the
-    // unlock ownership gate) from the shared keyboard type-ahead queue,
-    // and fed by the input-focus arbiter's text sink into that same queue.
-    tairix_kernel_core::ConsoleDevice::with_input(
-        &VIDEO_CONSOLE,
-        &GATED_VIDEO_READ,
-        &VIDEO_KEYBOARD,
-    ),
-];
 
 /// The console list installed when no display came up (QEMU `virt`, a
 /// headless Pi): the discovered UART is the only console, so it is the
@@ -948,26 +755,6 @@ pub static UART_ONLY_CONSOLES: [tairix_kernel_core::ConsoleDevice; 1] =
 #[must_use]
 pub fn uart_console_device() -> &'static tairix_kernel_core::ConsoleDevice {
     &UART_ONLY_CONSOLES[0]
-}
-
-/// The console list and the seat registry for the console layout the boot
-/// path discovered: the framebuffer console when the P7b boot console came
-/// up, else the discovered UART.
-///
-/// One decision for both, because the two must agree: the registry's text
-/// sink is the same device the list installs at index 0, so an injected key
-/// press always reaches the session reading that console, and the seat's
-/// `ConsoleIndex` always names the console a descriptor's index names.
-#[must_use]
-pub fn console_layout() -> (
-    &'static [tairix_kernel_core::ConsoleDevice],
-    &'static SeatRegistry,
-) {
-    if tairix_arch_aarch64::video::is_active() {
-        (&VIDEO_ONLY_CONSOLES, &VIDEO_SEAT_REGISTRY)
-    } else {
-        (&UART_ONLY_CONSOLES, &UART_SEAT_REGISTRY)
-    }
 }
 
 #[cfg(test)]

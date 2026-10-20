@@ -197,6 +197,7 @@ pub mod uaccess;
 /// ([`tairix_arch_api::EnterUser`]): the one `sret`
 /// sequence that drops a built process image into U-mode.
 pub mod userentry;
+pub mod video;
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod entry;

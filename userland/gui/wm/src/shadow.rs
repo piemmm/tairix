@@ -605,8 +605,9 @@ pub(crate) enum ShadowRow<'a> {
 }
 
 impl ShadowRow<'_> {
-    /// The shadow's own pixel at screen column `x` — what a layer bakes under
-    /// the window's body there — or `None` where it draws nothing.
+    /// The shadow's own pixel at screen column `x`, or `None` where it draws
+    /// nothing: the oracle a row's blend is held to.
+    #[cfg(test)]
     pub(crate) fn sample(&self, x: i32, bias: u32) -> Option<Pixel> {
         match self {
             Self::One(row) => row.sample(x, bias),
@@ -702,6 +703,7 @@ impl LevelRow<'_> {
 
     /// The shadow's own pixel at screen column `x`, or `None` where it draws
     /// nothing.
+    #[cfg(test)]
     fn sample(&self, x: i32, bias: u32) -> Option<Pixel> {
         let weight = self.weight(x);
         (weight > 0).then(|| self.level.color.scale_alpha_biased(weight, bias))

@@ -15,6 +15,9 @@ workspace = true
 # The `Display` trait, `encoder-v1`'s limits and phases, the register seam
 # and the capability ids.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The memory its presenter's buffers are carved in, and the row copy a
+# pointer image is taken with.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 # The recorder the engine's decisions go to.
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # Bounded containers: the outputs, a plane's words, a frame's damage.

@@ -782,6 +782,7 @@ impl FrameReportGate {
             present_calls: stats.present_calls,
             chrome_hits: stats.chrome_hits,
             chrome_misses: stats.chrome_misses,
+            layers: stats.layers,
         };
         if self.last_sent == Some(report) {
             self.pending = false;

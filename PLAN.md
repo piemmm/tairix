@@ -143,8 +143,8 @@ plan's ledger. A `blocked` row names its blocker.
 | I2C | The shared-memory I2C protocol, its controllers, and HID over I2C (`plans/I2C.md`) | in progress |
 | ACPI | The ACPI namespace bus driver and its AML interpreter (`plans/ACPI.md`) | planned |
 | SOUND | The audio stack and the `dmaengine-v1` DMA-engine seam (`plans/SOUND.md`) | in progress |
-| FIX-DISPLAY-ACCELERATION | Hardware layer composition and `gpu_virtio` (`plans/FIX-DISPLAY-ACCELERATION.md`) | blocked: Stage A waits on the scanout-memory decision |
-| GPU | The `lib/gpu` render and compute seam and its backends (`plans/GPU.md`) | planned |
+| FIX-DISPLAY-ACCELERATION | Driver-allocated scan-out, hardware layers and the cursor plane, `gpu_virtio`, and the console a display hosts (`plans/FIX-DISPLAY-ACCELERATION.md`) | done |
+| GPU | The `lib/gpu` render and compute seam and its backends (`plans/GPU.md`) | in progress |
 | SHADER | SPIR-V, its validator, and the WGSL front end (`plans/SHADER.md`) | planned |
 
 ### Networking and remote access

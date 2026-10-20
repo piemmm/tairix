@@ -246,6 +246,7 @@ pub fn seed(
         let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(&walk, &irq, sink, log);
         let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(&walk, &irq, sink, log);
         let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(&walk, &irq, sink, log);
+        let _ = crate::hwdiscovery::observe_virtio_pci_display_devices(&walk, &irq, sink, log);
         for class in [
             crate::hwdiscovery::XHCI_CONTROLLERS,
             crate::hwdiscovery::HD_AUDIO_CONTROLLERS,

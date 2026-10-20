@@ -1,70 +1,35 @@
-//! Framebuffer boot console: kernel log output on the attached display.
+//! Framebuffer boot console: the surface this port lights at boot, and its
+//! half of the console the kernel hosts (`tairix_fbcon::port`).
 //!
-//! Boot (and later) console messages default to the **video display**;
-//! the UART is the fallback when no display exists (the user-facing output is the screen, the serial line is a debug
-//! last resort). On the Raspberry Pi the display pipeline is owned by
-//! the `VideoCore` firmware, so this module asks it for a scan-out
-//! surface over the shared mailbox property-channel client
-//! (`tairix_vcmailbox`) and renders the kernel log into that surface
-//! with the shared, architecture-neutral framebuffer text-console engine
-//! (`tairix_fbcon` — one terminal definition across every arch port).
+//! On the Raspberry Pi the display pipeline belongs to the `VideoCore`
+//! firmware, so the surface comes from its mailbox property channel
+//! (`tairix_vcmailbox`); on QEMU's `virt` board, from `ramfb` over `fw_cfg`
+//! when QEMU was started with `-device ramfb`. Discovery runs **before the
+//! MMU is enabled**, with the data caches off, so the firmware exchange is
+//! coherent without maintenance; afterwards every console write is cleaned
+//! to the point of coherency so a scan-out reading SDRAM sees it.
 //!
-//! Bring-up runs **before the MMU is enabled** (`configure_from_fdt`
-//! is an early-returning, `ranges`-aware walk like the console/GIC
-//! discoveries): with the data caches still off, the CPU↔firmware
-//! property exchange is coherent by construction, so no cache
-//! maintenance is needed during discovery. After the MMU and caches
-//! come on, every framebuffer write is followed by a data-cache clean
-//! to the point of coherency (`clean_dcache_range`) so the HVS
-//! scan-out (which reads physical SDRAM) sees the rendered pixels.
-//!
-//! A display engine that takes the screen over from the firmware first has
-//! the console moved onto a block of kernel memory it reaches
-//! ([`relocate`](crate::video::relocate)),
-//! because the firmware may take its own allocation back once it stops
-//! driving the display.
-//!
-//! On QEMU's `virt` board there is no firmware mailbox; when the tree
-//! instead carries a `qemu,fw-cfg-mmio` node **and** QEMU was started
-//! with `-device ramfb`, the console programs the `ramfb` scan-out
-//! (over the shared `tairix_fwcfg` client) to a statically-reserved
-//! guest-RAM surface and renders into that — the same renderer, glyph
-//! atlas, and publication discipline as the mailbox path, only the
-//! surface source differs.
-//!
-//! Fail closed: no mailbox node and no ramfb device, a detached
-//! display (`0×0` size), or any failed/malformed firmware answer
-//! leaves the video console unconfigured and the UART keeps the
-//! console (`crate::serial` routes through `write_bytes` only when
-//! `is_active` reports a configured surface).
+//! No mailbox and no ramfb, a detached display, or any malformed firmware
+//! answer leaves no surface to publish, and the UART keeps the console.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::ptr::NonNull;
 
-use tairix_abi::driver::display::DisplayFormat;
+use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::hwtree::FramebufferMemory;
 /// Named only by the surface-extent page arithmetic, which the host build
 /// carries for its tests alone.
 #[cfg(any(all(target_arch = "aarch64", target_os = "none"), test))]
 use tairix_abi::PAGE_SIZE;
-/// The framebuffer console's character cell, re-exported so the boot caller
-/// can size and blank the grid buffers it leaks into [`attach_console`]
-/// without naming `tairix_fbcon` directly.
-pub use tairix_fbcon::Cell;
+use tairix_fbcon::port::{ConsolePort, ConsoleSurface};
 use tairix_fbcon::Geometry;
-/// Re-exported for the same reason: the boot consumer names the surface
-/// disposition it hands this port without naming `tairix_fbcon` directly.
+/// Re-exported so the boot consumer names the surface disposition it hands
+/// this port without naming `tairix_fbcon` directly.
 pub use tairix_fbcon::Surface;
 use tairix_vcmailbox::{
     discover_framebuffer, query_display_size, FramebufferRequest, MailboxTransport,
 };
 
-// --- Text geometry ---------------------------------------------------------
-//
-// The shared framebuffer text-console engine — the glyph atlas, palette,
-// scrolling, and the `Geometry` / `TextConsole` / `DirtyBand` types — lives in
-// `tairix_fbcon` so every arch port renders through one definition. This module
-// keeps only the board-specific surface discovery below and threads its
-// firmware-confirmed extents into `Geometry::for_display`.
+use crate::irqmask::PortIrqControl;
 
 /// Fixed scan-out width of the QEMU `virt` ramfb boot console — the
 /// shared `tairix_fwcfg` console geometry, so the port programming the
@@ -74,17 +39,63 @@ pub const RAMFB_WIDTH_PX: u32 = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
 /// Fixed scan-out height of the QEMU `virt` ramfb boot console.
 pub const RAMFB_HEIGHT_PX: u32 = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
 
-/// Text geometry of the fixed-size ramfb surface.
-///
-/// The surface is tightly packed (stride == width), so this is a pure
-/// function of the two constants above; host-testable next to
-/// [`Geometry::for_display`].
+/// Text geometry of the fixed-size ramfb surface, tightly packed.
 #[must_use]
 pub fn ramfb_geometry() -> Option<Geometry> {
     Geometry::for_display(RAMFB_WIDTH_PX, RAMFB_HEIGHT_PX, RAMFB_WIDTH_PX * 4)
 }
 
-// --- Firmware bring-up ------------------------------------------------------
+/// This port's half of the hosted console: `AT` probes, the direct map, and
+/// the clean to the point of coherency a non-snooping scan-out needs.
+pub struct FramebufferPort;
+
+impl ConsolePort for FramebufferPort {
+    type Irq = PortIrqControl;
+
+    const CLEANS: bool = true;
+
+    fn reachable(base: NonNull<u32>, bytes: usize) -> bool {
+        surface_translates(base.as_ptr().addr(), bytes)
+    }
+
+    fn direct_map(phys: u64, len: u64) -> Option<NonNull<u32>> {
+        if !crate::paging::physmap_covers(phys, len) {
+            return None;
+        }
+        let va = usize::try_from(crate::paging::physmap_virt(phys)).ok()?;
+        NonNull::new(core::ptr::with_exposed_provenance_mut(va))
+    }
+
+    fn publish(first: NonNull<u32>, bytes: usize) {
+        crate::paging::clean_range_to_poc(first.as_ptr().addr() as u64, bytes as u64);
+    }
+}
+
+/// `true` when every 4 KiB page of the `bytes` at `base` translates for an
+/// EL1 write under the active root.
+///
+/// Probing every page rather than the extremities is what makes the answer
+/// total: a hole anywhere inside would otherwise stay invisible until a write
+/// landed in it.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn surface_translates(base: usize, bytes: usize) -> bool {
+    let Some((first, last)) = surface_page_range(base, bytes) else {
+        return false;
+    };
+    for page in (first..=last).step_by(crate::paging::PAGE_SIZE) {
+        if crate::paging::par_faulted(crate::paging::translate_el1(page, true)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The host has no translation regime to probe, so nothing it holds is a
+/// scan-out.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+fn surface_translates(_base: usize, _bytes: usize) -> bool {
+    false
+}
 
 /// A firmware-allocated scan-out surface ready to host the console.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -105,10 +116,9 @@ pub struct ConfiguredFramebuffer {
 /// over `transport`.
 ///
 /// Asks the firmware for the display's native (EDID-derived) size and
-/// requests a 32-bit surface at exactly that size, so the console is
-/// pixel-for-pixel on whatever monitor is plugged in. Returns `None` —
-/// leaving the UART as the console — when no display is attached
-/// (`0×0`), or when any firmware answer fails validation (fail closed; the firmware is an external input).
+/// requests a 32-bit surface at exactly that size. `None` — leaving the UART
+/// as the console — when no display is attached (`0×0`), or when any firmware
+/// answer fails validation: the firmware is an external input.
 pub fn bring_up(transport: &mut dyn MailboxTransport) -> Option<ConfiguredFramebuffer> {
     let size = query_display_size(transport).ok()?;
     if !size.is_attached() {
@@ -131,43 +141,19 @@ pub fn bring_up(transport: &mut dyn MailboxTransport) -> Option<ConfiguredFrameb
     })
 }
 
-// --- Global console state ---------------------------------------------------
-
-/// First and last 4 KiB page base spanned by the `pixel_count`-pixel surface
-/// at `fb_base`, or `None` for an empty or unrepresentable extent.
+/// First and last 4 KiB page base spanned by the `bytes` at `fb_base`, or
+/// `None` for an empty or unrepresentable extent.
 ///
-/// Pure, so the boundary the reachability check walks is host-tested rather
-/// than only exercised on a board: a last page left out of the range would
-/// leave a hole at the end of the surface invisible until a write landed in
-/// it, which is the whole failure the check exists to catch.
-/// Its only consumer is the target-only reachability check, so the host build
-/// carries it for the tests alone.
+/// Pure, so the boundary the reachability check walks is host-tested: a last
+/// page left out of the range would leave a hole at the end of the surface
+/// invisible until a write landed in it.
 #[cfg(any(all(target_arch = "aarch64", target_os = "none"), test))]
 #[must_use]
-pub(crate) fn surface_page_range(fb_base: usize, pixel_count: usize) -> Option<(u64, u64)> {
+pub(crate) fn surface_page_range(fb_base: usize, bytes: usize) -> Option<(u64, u64)> {
     let base = fb_base as u64;
-    let len = (pixel_count as u64).checked_mul(4)?;
-    let last = base.checked_add(len.checked_sub(1)?)?;
+    let last = base.checked_add((bytes as u64).checked_sub(1)?)?;
     let page = PAGE_SIZE as u64;
     Some((base & !(page - 1), last & !(page - 1)))
-}
-
-/// Whether a video console is configured and rendering.
-///
-/// Written once (release) by the boot CPU after `configure_from_fdt`
-/// succeeds; every console write checks it (acquire) before taking the
-/// render lock, so UART-only boards pay one load on the fast path.
-static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// Whether console output is routed to the video console.
-///
-/// `crate::serial` writes to the screen when this is `true` and falls
-/// back to the UART when it is `false` (video first, serial last
-/// resort). The log/debug line path additionally echoes to the UART in
-/// debug builds even when this is `true` (`crate::serial::ConsoleWriter`).
-#[must_use]
-pub fn is_active() -> bool {
-    VIDEO_ACTIVE.load(Ordering::Acquire)
 }
 
 /// What the boot audit line records about the video console bring-up.
@@ -191,239 +177,62 @@ pub struct DiscoveredVideo {
     /// Pixel encoding the surface was programmed with.
     pub format: DisplayFormat,
     /// CPU mapping policy the surface backing requires when a user-space
-    /// display driver maps it. A framebuffer boot-console scan-out is
-    /// always CPU-written and read back by a display engine that does not
-    /// snoop the CPU caches (the Pi's `VideoCore` HVS, QEMU's `ramfb`
-    /// scan-out), so it needs write-combining (Normal non-cacheable)
-    /// memory to stay coherent without per-frame cache maintenance —
-    /// never write-back cacheable, which strands the CPU's writes in the
-    /// data cache and shows the display a stale, fragmented surface.
+    /// display driver maps it. A boot-console scan-out is CPU-written and
+    /// read by a display engine that does not snoop the CPU caches (the Pi's
+    /// HVS, QEMU's `ramfb`), so it needs write-combining (Normal
+    /// non-cacheable) memory — never write-back, which strands the CPU's
+    /// writes in the data cache.
     pub memory: FramebufferMemory,
-}
-
-/// Where the framebuffer console's scan-out lies.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct Placement {
-    /// CPU-physical base of the scan-out.
-    pub phys_base: u64,
-    /// Width in pixels.
-    pub width_px: u32,
-    /// Height in pixels.
-    pub height_px: u32,
-    /// Bytes from one line's start to the next's.
-    pub stride_bytes: u32,
-    /// The pixel encoding.
-    pub format: DisplayFormat,
-    /// The kernel owns the memory, rather than the firmware that lit the
-    /// screen.
+    /// The kernel owns the surface (`ramfb`'s), rather than the firmware.
     pub kernel_owned: bool,
 }
 
-/// What [`relocate`] did with the block it was offered.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum Relocated {
-    /// The console paints the block now.
-    Moved(Placement),
-    /// The console already painted kernel memory, so the block is unused.
-    Owned(Placement),
-    /// No console surface, or a block that cannot hold it.
-    Refused,
-}
-
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use metal::{
-    active_framebuffer_extent, attach_console, configure, placement, purge, reclaim_surface,
-    relocate, set_surface, text_cell_count, text_grid, write_bytes, write_output_bytes,
-};
-
-/// Host stand-in for the freestanding writer: rendering needs the
-/// firmware surface, so on the host this is inert (the renderer itself
-/// is host-tested directly through [`tairix_fbcon::TextConsole`]).
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub fn write_bytes(_bytes: &[u8]) {}
-
-/// Host stand-in for the freestanding program-output writer: no firmware
-/// surface exists, so rendering is inert on the host.
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub fn write_output_bytes(_bytes: &[u8]) {}
-
-/// Host stand-in for the freestanding `text_grid`: no firmware surface exists
-/// on the host, so no video console is active and the grid is unknown.
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-#[must_use]
-pub fn text_grid() -> Option<tairix_abi::TerminalSize> {
-    None
-}
-
-/// Host stand-in for the freestanding `text_cell_count`: no surface is
-/// discovered on the host, so there is no grid to size.
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-#[must_use]
-pub fn text_cell_count() -> Option<usize> {
-    None
-}
-
-/// Host stand-in for the freestanding `active_framebuffer_extent`: no surface
-/// is discovered on the host, so there is no scan-out extent to report.
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-#[must_use]
-pub fn active_framebuffer_extent() -> Option<(u64, u64)> {
-    None
-}
-
-/// Host stand-in for the freestanding `placement`: no surface is discovered
-/// on the host.
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-#[must_use]
-pub fn placement() -> Option<Placement> {
-    None
-}
-
-/// Host stand-in for the freestanding `relocate`: no surface exists on the
-/// host to move.
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-#[must_use]
-pub fn relocate(_phys: u64, _len: u64) -> Relocated {
-    Relocated::Refused
-}
-
-/// Host stand-in for the freestanding `attach_console`: no surface exists on
-/// the host, so there is nothing to attach and no console is taken.
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub fn attach_console(
-    _main: &'static mut [tairix_fbcon::Cell],
-    _alt: &'static mut [tairix_fbcon::Cell],
-) -> bool {
-    false
-}
-
-/// Host stand-in for the freestanding `set_surface`: no surface exists on the
-/// host, so there is nothing to hand over (the handover itself is host-tested
-/// through [`tairix_fbcon::TextConsole`] and the kernel seat registry).
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub fn set_surface(_surface: tairix_fbcon::Surface) {}
-
-/// Host stand-in for the freestanding `reclaim_surface`: no surface exists on
-/// the host, so a panic has nothing to take back.
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub fn reclaim_surface() {}
-
-/// Host stand-in for the freestanding `purge`: no surface exists on the host,
-/// so there is nothing a session could have left on it (the discard itself is
-/// host-tested through [`tairix_fbcon::TextConsole`]).
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub fn purge() {}
-
-/// The freestanding half: the firmware exchange, the identity-mapped
-/// surface, and the cache maintenance. Target-only — every routine here
-/// either touches MMIO/SDRAM through boot-identity addresses or issues
-/// `aarch64` system instructions.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-mod metal {
-    use core::cell::UnsafeCell;
-    use core::sync::atomic::Ordering;
-
-    use tairix_fbcon::{Cell, Surface, TextConsole};
-    use tairix_fdt::Fdt;
-    use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
-    use tairix_sync::IrqSafeSpinLock;
-
-    use crate::firmware::DiscoveredMailbox;
-    use crate::irqmask::PortIrqControl;
-
-    use super::{
-        bring_up, ramfb_geometry, DiscoveredVideo, Geometry, MailboxTransport, Placement,
-        Relocated, VIDEO_ACTIVE,
-    };
-
-    /// The discovered surface and, once attached post-MMU, the renderer.
-    ///
-    /// The console is `None` between the pre-MMU discovery (which records the
-    /// surface and its geometry) and [`attach_console`] (which, once the heap
-    /// is usable, builds the [`TextConsole`] over the leaked cell grids and
-    /// publishes [`VIDEO_ACTIVE`]). `geometry` is known from discovery so the
-    /// caller can size those grids before attaching.
-    struct VideoState {
-        /// Base of the surface as the kernel addresses it: through the
-        /// identity map at boot, through the direct map once [`relocate`]
-        /// moves it onto kernel memory.
-        fb_base: usize,
-        /// CPU-physical base of the surface.
-        phys_base: u64,
-        /// Surface length in pixels (`stride × height`).
-        pixel_count: usize,
-        /// The validated text geometry of the surface.
-        geometry: Geometry,
-        /// The pixel encoding.
-        format: super::DisplayFormat,
-        /// The kernel owns the surface's memory: a firmware's allocation is
-        /// the firmware's to take back once it stops driving the display.
-        kernel_owned: bool,
-        /// The renderer (geometry + cursor + cell grids), once attached.
-        console: Option<TextConsole<'static>>,
-    }
-
-    impl VideoState {
-        fn placement(&self) -> Placement {
-            Placement {
-                phys_base: self.phys_base,
-                width_px: self.geometry.width_px,
-                height_px: self.geometry.height_px,
-                stride_bytes: self.geometry.stride_px * 4,
+impl DiscoveredVideo {
+    /// The surface the console is published on.
+    #[must_use]
+    pub const fn surface(&self) -> ConsoleSurface {
+        ConsoleSurface {
+            phys: self.fb_base,
+            mode: DisplayMode {
+                width_px: self.width_px,
+                height_px: self.height_px,
+                stride_bytes: self.stride_bytes,
                 format: self.format,
-                kernel_owned: self.kernel_owned,
-            }
+            },
+            kernel_owned: self.kernel_owned,
         }
     }
 
-    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-    enum WriteMode {
-        Verbatim,
-        ProgramOutput,
+    /// Where the boot CPU reaches the surface with its MMU off: identity.
+    #[must_use]
+    pub fn identity_base(&self) -> Option<NonNull<u32>> {
+        let base = usize::try_from(self.fb_base).ok()?;
+        NonNull::new(core::ptr::with_exposed_provenance_mut(base))
     }
+}
 
-    /// The video-console slot.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub use metal::configure;
+
+/// The freestanding half: the firmware exchange and the boot surface.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+mod metal {
+    use core::cell::UnsafeCell;
+
+    use tairix_fdt::Fdt;
+    use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+
+    use crate::firmware::DiscoveredMailbox;
+
+    use super::{bring_up, ramfb_geometry, DiscoveredVideo, Geometry, MailboxTransport};
+
+    /// Bring the framebuffer console's surface up: over `firmware`, the
+    /// transport to the `VideoCore` firmware, where the tree carries a mailbox
+    /// (the Pi), else the QEMU `virt` `fw_cfg` / `ramfb` fallback in `fdt`.
     ///
-    /// A plain cell, not a lock, because the pre-MMU boot path must not
-    /// execute atomic read-modify-write instructions (UNPREDICTABLE on
-    /// MMU-off Device-typed memory — the constraint that orders the
-    /// whole aarch64 boot, `plans/PI.md` P6c-2). Mutation discipline:
-    /// the boot CPU writes it once, single-threaded, before publishing
-    /// [`VIDEO_ACTIVE`] with a release store; afterwards every access
-    /// holds [`RENDER_LOCK`] (post-MMU, where the lock's CAS is sound).
-    struct VideoSlot(UnsafeCell<Option<VideoState>>);
-
-    // SAFETY: cross-thread access is serialised by the discipline above
-    // (single-threaded pre-publication writes; lock-held access after).
-    unsafe impl Sync for VideoSlot {}
-
-    static VIDEO: VideoSlot = VideoSlot(UnsafeCell::new(None));
-
-    /// The single render lock every console write serialises on.
-    ///
-    /// Masking this CPU for the hold is what makes it safe against its own
-    /// interrupt handlers: a handler that logs to the screen while the CPU it
-    /// fired on was mid-render would otherwise spin on a lock its own
-    /// interrupted mainline holds. It guards `()` rather than the state
-    /// itself because that state is written pre-MMU, where an atomic
-    /// read-modify-write is architecturally UNPREDICTABLE, so the slot cannot
-    /// live inside a lock; the discipline on [`VideoSlot`] covers that window.
-    static RENDER_LOCK: IrqSafeSpinLock<(), PortIrqControl> = IrqSafeSpinLock::new(());
-
-    /// Bring the framebuffer console up: over `firmware`, the transport the
-    /// boot path talks to the `VideoCore` firmware through, where the tree
-    /// carries a mailbox (the Pi), else the QEMU `virt` `fw_cfg` / `ramfb`
-    /// fallback discovered in `fdt`.
-    ///
-    /// **Boot-CPU, pre-MMU only**: it must run before
-    /// `enable_mmu_and_vectors` (with the data caches off the
-    /// CPU↔firmware property exchange is coherent without cache
-    /// maintenance, and the cell writes below need the single-threaded
-    /// boot CPU) and before SMP bring-up. On success the console output
-    /// switches to the screen ([`super::is_active`]); on any failure —
-    /// no mailbox and no ramfb device, no attached display, a rejected
-    /// or malformed firmware answer — the UART keeps the console (fail
-    /// closed).
+    /// **Boot-CPU, pre-MMU only**: with the data caches off the firmware
+    /// exchange is coherent. `None` on any failure: the UART keeps the
+    /// console.
     #[must_use]
     pub fn configure(
         fdt: &Fdt<'_>,
@@ -435,21 +244,16 @@ mod metal {
         }
     }
 
-    /// Bring the Pi's mailbox-allocated framebuffer console up: probe
-    /// the attached display over the firmware property channel and
-    /// publish the firmware-allocated surface.
+    /// The Pi's mailbox-allocated surface.
     fn configure_mailbox(
         mailbox: DiscoveredMailbox,
         transport: &mut dyn MailboxTransport,
     ) -> Option<DiscoveredVideo> {
         let configured = bring_up(transport)?;
-
         let fb_base = usize::try_from(configured.phys_base).ok()?;
-        // The firmware allocated `[fb_base, fb_base + len_bytes)`
-        // page-aligned inside the validated `VideoCore` SDRAM aperture
-        // (`bring_up` → `arm_physical_base`); `publish_console` checks
-        // the pixel extent fits before touching it.
-        publish_console(
+        // The firmware allocated `[fb_base, fb_base + len_bytes)` page-aligned
+        // inside the validated `VideoCore` SDRAM aperture.
+        discovered(
             fb_base,
             u64::from(configured.len_bytes),
             configured.geometry,
@@ -464,38 +268,27 @@ mod metal {
         super::RAMFB_WIDTH_PX as usize * super::RAMFB_HEIGHT_PX as usize;
 
     /// The QEMU `virt` ramfb scan-out surface: `ramfb` scans guest RAM
-    /// directly, so the kernel supplies the surface itself. A static
-    /// keeps the pre-heap bring-up allocation-free; it is kernel BSS
-    /// (zero-filled at load, not stored in the image), untouched on a
-    /// board whose tree carries a firmware mailbox instead. Mutation
-    /// discipline is `VideoSlot`'s: the boot CPU points the console at
-    /// it once, pre-publication, and every later access holds the
-    /// render lock.
+    /// directly, so the kernel supplies the surface itself, as zero-filled
+    /// BSS that keeps the pre-heap bring-up allocation-free. Written only
+    /// through the console, under its discipline.
     struct RamfbSurface(UnsafeCell<[u32; RAMFB_PIXEL_COUNT]>);
 
-    // SAFETY: cross-thread access is serialised by the `VideoSlot`
-    // discipline above (single-threaded pre-publication writes; render
-    // lock afterwards).
+    // SAFETY: reached only through the hosted console, whose slot discipline
+    // serialises every access (written once pre-publication on the boot CPU,
+    // under the render lock afterwards).
     unsafe impl Sync for RamfbSurface {}
 
     static RAMFB_SURFACE: RamfbSurface = RamfbSurface(UnsafeCell::new([0; RAMFB_PIXEL_COUNT]));
 
-    /// Bring the QEMU `virt` ramfb boot console up over `fw_cfg`.
-    ///
-    /// The fallback when the tree carries no firmware mailbox: locate
-    /// the `qemu,fw-cfg-mmio` node, and — only if the `etc/ramfb` item
-    /// exists (QEMU was started with `-device ramfb`) — point the
-    /// device's scan-out at the statically-reserved surface and publish
-    /// the console. Fail closed on any miss (no `fw_cfg` node, no ramfb
-    /// device, a failed transfer): the UART keeps the console.
+    /// The QEMU `virt` ramfb surface over `fw_cfg`, only if the `etc/ramfb`
+    /// item exists.
     fn configure_ramfb(fdt: &Fdt<'_>) -> Option<DiscoveredVideo> {
         let dma = MmioDma::from_dtb(fdt).ok()?;
         let doorbell_base = dma.base();
         let geometry = ramfb_geometry()?;
-        let fb_base = RAMFB_SURFACE.0.get() as usize;
+        let fb_base = RAMFB_SURFACE.0.get().addr();
         let fb_len_bytes = (RAMFB_PIXEL_COUNT * 4) as u64;
-        let fwcfg = FwCfg::new(dma);
-        fwcfg
+        FwCfg::new(dma)
             .program_ramfb(&RamfbConfig {
                 phys_base: fb_base as u64,
                 drm_format: DRM_FORMAT_XRGB8888,
@@ -505,10 +298,9 @@ mod metal {
                 stride: geometry.stride_px * 4,
             })
             .ok()?;
-        // `DRM_FORMAT_XRGB8888` is little-endian packed `0xXXRRGGBB`, so
-        // the in-memory byte order is B, G, R, X — the `Bgra8888` wire
-        // format with the alpha byte ignored by the scan-out.
-        publish_console(
+        // `DRM_FORMAT_XRGB8888` is little-endian `0xXXRRGGBB`: in memory B, G,
+        // R, X — `Bgra8888` with the alpha byte ignored by the scan-out.
+        discovered(
             fb_base,
             fb_len_bytes,
             geometry,
@@ -518,27 +310,13 @@ mod metal {
         )
     }
 
-    /// Opaque black, the background the surface is cleared to before the cell
-    /// grids are attached (matches the renderer's default background so the
-    /// pre-attach clear and the post-attach repaint agree).
-    const FB_CLEAR_PIXEL: u32 = 0xFF00_0000;
-
-    /// Validate the surface extent, clear it to a clean background, and record
-    /// the discovered surface (the shared tail of both bring-up paths).
+    /// The surface both bring-up paths end with, once its extent is proved to
+    /// hold the mode; the kernel publishes it to its console.
     ///
-    /// The renderer is **not** built here: the cell grids it needs are leaked
-    /// from the kernel heap, which is only usable once the identity MMU is on
-    /// (atomic read-modify-write is UNPREDICTABLE on the MMU-off Device-typed
-    /// memory the boot CPU runs, `plans/PI.md` P6c-2). The post-MMU
-    /// [`attach_console`] builds the console and publishes [`VIDEO_ACTIVE`];
-    /// until then the surface shows a clean background rather than firmware
-    /// garbage.
-    ///
-    /// **Boot-CPU, pre-publication only** (`VideoSlot` discipline). The
-    /// caller guarantees `[fb_base, fb_base + fb_len_bytes)` is
-    /// identity-addressed RAM it exclusively owns for scan-out, the kernel's
+    /// The caller guarantees `[fb_base, fb_base + fb_len_bytes)` is
+    /// identity-addressed RAM it exclusively owns for scan-out — the kernel's
     /// own when `kernel_owned`, else the firmware's.
-    fn publish_console(
+    fn discovered(
         fb_base: usize,
         fb_len_bytes: u64,
         geometry: Geometry,
@@ -546,29 +324,10 @@ mod metal {
         format: super::DisplayFormat,
         kernel_owned: bool,
     ) -> Option<DiscoveredVideo> {
-        let pixel_count = geometry.pixel_count();
-        if u64::try_from(pixel_count.checked_mul(4)?).ok()? > fb_len_bytes {
+        if u64::try_from(geometry.pixel_count().checked_mul(4)?).ok()? > fb_len_bytes
+            || fb_base == 0
+        {
             return None;
-        }
-        // SAFETY: the caller owns `[fb_base, fb_base + fb_len_bytes)` as
-        // identity-addressed scan-out RAM, `pixel_count * 4 ≤ fb_len_bytes`
-        // (checked above), and no other Rust reference aliases the surface
-        // (the cell below is the only owner and is not yet published). The
-        // caches are off pre-MMU, so the fill is coherent without a clean.
-        let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
-        pixels.fill(FB_CLEAR_PIXEL);
-        // SAFETY: single-threaded boot CPU, pre-publication (see
-        // `VideoSlot`): no concurrent access can exist yet.
-        unsafe {
-            *VIDEO.0.get() = Some(VideoState {
-                fb_base,
-                phys_base: fb_base as u64,
-                pixel_count,
-                geometry,
-                format,
-                kernel_owned,
-                console: None,
-            });
         }
         Some(DiscoveredVideo {
             doorbell_base,
@@ -578,384 +337,9 @@ mod metal {
             height_px: geometry.height_px,
             stride_bytes: geometry.stride_px * 4,
             format,
-            // Both bring-up paths (the Pi `VideoCore` mailbox surface and
-            // the QEMU `ramfb` surface) are linear scan-out RAM the CPU
-            // writes and a non-snooping display engine reads, so both
-            // require write-combining to stay coherent without per-frame
-            // cache maintenance.
             memory: super::FramebufferMemory::WriteCombine,
+            kernel_owned,
         })
-    }
-
-    /// The cell-grid length (`columns × rows`) the discovered surface needs,
-    /// so the post-MMU caller can size the `main`/`alt` buffers it leaks into
-    /// [`attach_console`]. `None` when no surface was discovered (UART-only).
-    ///
-    /// Post-MMU only (the render lock's atomic CAS requires it).
-    pub fn text_cell_count() -> Option<usize> {
-        let _guard = RENDER_LOCK.lock();
-        // SAFETY: post-MMU, render lock held; `VIDEO` was written pre-MMU by
-        // the single-threaded boot CPU (program order makes it visible on the
-        // same CPU). A shared borrow suffices; geometry is read, not mutated.
-        let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
-        Some(state.geometry.cell_count())
-    }
-
-    /// The physical extent `(base, len_bytes)` of the active scan-out
-    /// surface, or `None` when no video console was discovered (UART-only).
-    ///
-    /// The pre-boot Supervisor's `memtest` takeover reads it to keep the live
-    /// surface out of the destructive whole-RAM sweep, so the progress display
-    /// survives.
-    ///
-    /// Post-MMU only (the render lock's atomic CAS requires it), which the
-    /// takeover always is.
-    pub fn active_framebuffer_extent() -> Option<(u64, u64)> {
-        let _guard = RENDER_LOCK.lock();
-        // SAFETY: post-MMU, render lock held; `VIDEO` was written pre-MMU by
-        // the single-threaded boot CPU (visible in program order on the same
-        // CPU). A shared borrow suffices; the surface facts are read only.
-        let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
-        let len = (state.pixel_count as u64).saturating_mul(4);
-        Some((state.phys_base, len))
-    }
-
-    /// Where the console's scan-out lies, or `None` when no video console
-    /// was discovered (UART-only).
-    ///
-    /// Post-MMU only (the render lock's atomic CAS requires it).
-    pub fn placement() -> Option<Placement> {
-        let _guard = RENDER_LOCK.lock();
-        // SAFETY: as `active_framebuffer_extent`'s: render lock held, the
-        // facts read only.
-        let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
-        Some(state.placement())
-    }
-
-    /// Move the console onto the zeroed, kernel-owned block of `len` bytes at
-    /// physical `phys`, which the direct map covers, and repaint it there in
-    /// the disposition it holds — unless it already paints kernel memory, in
-    /// which case the block is left alone.
-    ///
-    /// Post-MMU only (the render lock's atomic CAS requires it).
-    pub fn relocate(phys: u64, len: u64) -> Relocated {
-        let _guard = RENDER_LOCK.lock();
-        let (moved, disposition) = {
-            // SAFETY: post-MMU, render lock held; `VIDEO` was written pre-MMU
-            // by the single-threaded boot CPU (visible in program order) and
-            // the held lock serialises this mutable access (see `VideoSlot`).
-            // The borrow ends before `apply_surface` forms its own.
-            let Some(state) = (unsafe { (*VIDEO.0.get()).as_mut() }) else {
-                return Relocated::Refused;
-            };
-            if state.kernel_owned {
-                return Relocated::Owned(state.placement());
-            }
-            let fits = state
-                .pixel_count
-                .checked_mul(4)
-                .and_then(|needed| u64::try_from(needed).ok())
-                .is_some_and(|needed| needed <= len);
-            let Ok(fb_base) = usize::try_from(crate::paging::physmap_virt(phys)) else {
-                return Relocated::Refused;
-            };
-            if !fits
-                || !crate::paging::physmap_covers(phys, len)
-                || !surface_translates(fb_base, state.pixel_count)
-            {
-                return Relocated::Refused;
-            }
-            state.fb_base = fb_base;
-            state.phys_base = phys;
-            state.kernel_owned = true;
-            (
-                state.placement(),
-                state.console.as_ref().map(TextConsole::surface),
-            )
-        };
-        if let Some(disposition) = disposition {
-            apply_surface(disposition);
-        }
-        Relocated::Moved(moved)
-    }
-
-    /// Attach the borrowed cell grids to the discovered surface and activate
-    /// the console: build the [`TextConsole`], clear the surface through it,
-    /// and publish [`VIDEO_ACTIVE`] so console output switches to the screen.
-    ///
-    /// **Post-MMU only** (the render lock's atomic CAS requires it, and the
-    /// caller leaks `main`/`alt` from the heap, unusable pre-MMU). The caller
-    /// sizes each grid to [`text_cell_count`]. A call with no discovered
-    /// surface is a no-op (UART keeps the console, fail closed).
-    pub fn attach_console(main: &'static mut [Cell], alt: &'static mut [Cell]) -> bool {
-        let _guard = RENDER_LOCK.lock();
-        // SAFETY: post-MMU, render lock held; `VIDEO` was written pre-MMU by
-        // the single-threaded boot CPU and is not yet published active.
-        let Some(state) = (unsafe { (*VIDEO.0.get()).as_mut() }) else {
-            return false;
-        };
-        let (fb_base, pixel_count, geometry) = (state.fb_base, state.pixel_count, state.geometry);
-        if !surface_translates(fb_base, pixel_count) {
-            // No console is taken, so every paint entry point stays
-            // unreachable and the UART keeps the console. Painting a surface
-            // the active root does not cover would fault inside the renderer
-            // with the render lock held, taking the machine down instead of
-            // losing a screen.
-            return false;
-        }
-        let mut console = TextConsole::new(geometry, main, alt);
-        // SAFETY: every page of the extent translated for an EL1 write just
-        // above, `pixel_count` is the surface length `publish_console`
-        // validated, and the render lock makes this the only live reference.
-        let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
-        let dirty = console.clear(pixels);
-        if let Some((row_start, row_end)) = dirty {
-            let stride_bytes = geometry.stride_px as usize * 4;
-            clean_dcache_range(
-                fb_base + row_start as usize * stride_bytes,
-                (row_end - row_start) as usize * stride_bytes,
-            );
-        }
-        state.console = Some(console);
-        VIDEO_ACTIVE.store(true, Ordering::Release);
-        true
-    }
-
-    /// `true` when every 4 KiB page of the `pixel_count`-pixel surface at
-    /// `fb_base` translates for an EL1 write under the active root.
-    ///
-    /// Whether the scan-out is reachable is a property of the active
-    /// translation regime, not of the surface: the boot identity map covers
-    /// the firmware's surface and the direct map a relocated one, and the
-    /// paint entry points are reachable from contexts that did not establish
-    /// either. Probing every page rather than the extremities is what makes
-    /// the answer total — a hole anywhere inside would otherwise stay
-    /// invisible until a write landed in it.
-    fn surface_translates(fb_base: usize, pixel_count: usize) -> bool {
-        let Some((first, last)) = super::surface_page_range(fb_base, pixel_count) else {
-            return false;
-        };
-        for page in (first..=last).step_by(crate::paging::PAGE_SIZE) {
-            if crate::paging::par_faulted(crate::paging::translate_el1(page, true)) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Render `bytes` onto the configured surface and clean the touched
-    /// scanlines to the point of coherency so the scan-out engine sees
-    /// them.
-    ///
-    /// Post-MMU only (callers reach it through `crate::serial`, which
-    /// first logs after the MMU is on): the render lock's atomic CAS
-    /// requires it. A call with no configured console is a no-op.
-    pub fn write_bytes(bytes: &[u8]) {
-        render_bytes(bytes, WriteMode::Verbatim);
-    }
-
-    /// Render program-output `bytes` onto the configured surface with the
-    /// console line discipline's `LF` → `CR LF` translation.
-    ///
-    /// The full payload is parsed under one render-lock hold and repainted
-    /// once, so a scrolling burst never turns each line into a framebuffer
-    /// repaint. A call with no configured console is a no-op.
-    pub fn write_output_bytes(bytes: &[u8]) {
-        render_bytes(bytes, WriteMode::ProgramOutput);
-    }
-
-    /// Hand the scan-out surface to whoever the boot seat says owns it: the
-    /// graphical session holding the lease ([`Surface::Hidden`] — the console
-    /// keeps interpreting output into its retained screen and paints
-    /// nothing), the text console ([`Surface::Shown`] — the whole screen
-    /// repaints, including everything written while it was away), or nobody
-    /// at all ([`Surface::Blank`] — cleared for a hand-over between two
-    /// graphical presenters).
-    ///
-    /// Waits for a concurrent write to finish, because the handover must
-    /// *happen*: a skipped hide would leave the console painting over the
-    /// session's frame. The wait is bounded by one console write.
-    ///
-    /// Idempotent, and a call with no configured console (a UART-only board)
-    /// does nothing. Post-MMU only, like every other render entry point.
-    pub fn set_surface(surface: Surface) {
-        let _guard = RENDER_LOCK.lock();
-        apply_surface(surface);
-    }
-
-    /// Take the surface back for a panic report, giving up if it is
-    /// contended.
-    ///
-    /// Best-effort because the panicking CPU may itself hold the render lock
-    /// — it panicked inside the console — and blocking there would hang the
-    /// machine with no report at all, including on a debug build whose report
-    /// would otherwise have reached the serial console untouched. Losing the
-    /// repaint is the lesser failure.
-    pub fn reclaim_surface() {
-        let Some(_guard) = RENDER_LOCK.try_lock() else {
-            return;
-        };
-        apply_surface(Surface::Shown);
-    }
-
-    /// Apply a surface disposition, repainting the screen when the console
-    /// takes it back and clearing it when nobody holds it. The render lock
-    /// **must** be held.
-    fn apply_surface(surface: Surface) {
-        // SAFETY: post-MMU, render lock held by the caller; `VIDEO` was
-        // written pre-MMU by the single-threaded boot CPU (visible in program
-        // order) and the held lock serialises this mutable access (see
-        // `VideoSlot`).
-        let Some(state) = (unsafe { (*VIDEO.0.get()).as_mut() }) else {
-            return;
-        };
-        let (fb_base, pixel_count) = (state.fb_base, state.pixel_count);
-        let Some(console) = state.console.as_mut() else {
-            return;
-        };
-        let pixels: &mut [u32] = if surface.paints() {
-            // Re-proved here rather than inherited from the attach-time
-            // proof: this is the path a fatal report takes to get the screen
-            // back, where a fault would cost the machine the one diagnosis it
-            // was about to emit. Refusing leaves the console's disposition
-            // untouched and paints nothing; a non-painting disposition needs
-            // no surface and is applied regardless.
-            if !surface_translates(fb_base, pixel_count) {
-                return;
-            }
-            // SAFETY: every page of the extent translated for an EL1 write
-            // just above, `pixel_count` is the surface length
-            // `publish_console` validated, and the render lock makes this the
-            // only live reference. A console giving the surface up is handed
-            // an empty slice instead, so no reference into it is formed while
-            // a graphical session owns it.
-            unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) }
-        } else {
-            &mut []
-        };
-        let dirty = match surface {
-            Surface::Shown => console.show(pixels),
-            Surface::Blank => console.blank(pixels),
-            Surface::Hidden => {
-                console.hide();
-                None
-            }
-        };
-        if let Some((row_start, row_end)) = dirty {
-            let stride_bytes = console.geometry().stride_px as usize * 4;
-            clean_dcache_range(
-                fb_base + row_start as usize * stride_bytes,
-                (row_end - row_start) as usize * stride_bytes,
-            );
-        }
-    }
-
-    fn render_bytes(bytes: &[u8], mode: WriteMode) {
-        paint(|console, pixels| match mode {
-            WriteMode::Verbatim => console.write_bytes(pixels, bytes),
-            WriteMode::ProgramOutput => console.write_output_bytes(pixels, bytes),
-        });
-    }
-
-    /// Discard everything a finished session left on the console's screen —
-    /// both cell grids, every pixel, and a partly received escape sequence —
-    /// so none of it reaches whoever uses the terminal next
-    /// (`terminal_purge`).
-    ///
-    /// A console that does not own the surface discards its retained screen
-    /// and paints nothing, so the discard is what the next `Surface::Shown`
-    /// reveals. Post-MMU only, like every other render entry point; a board
-    /// with no configured console does nothing.
-    pub fn purge() {
-        paint(tairix_fbcon::TextConsole::purge);
-    }
-
-    /// Run one operation on the *shown* console's screen and clean the pixel
-    /// band it dirtied to the point of coherency, so the scan-out engine sees
-    /// it — the shared body of every render entry point.
-    ///
-    /// The single place a reference into the firmware surface is formed for a
-    /// write: a hidden console is handed an empty slice, so nothing aliases
-    /// the pixels while a graphical session is writing them. Its retained
-    /// screen still advances, and `set_surface` paints the result when the
-    /// surface comes back — which is why *that* path forms the surface
-    /// itself, taking it back for a console that does not hold it yet.
-    ///
-    /// Post-MMU only (the render lock's atomic CAS requires it). A call with
-    /// no active or no configured console is a no-op.
-    fn paint(
-        op: impl FnOnce(
-            &mut tairix_fbcon::TextConsole<'static>,
-            &mut [u32],
-        ) -> Option<tairix_fbcon::DirtyBand>,
-    ) {
-        if !super::is_active() {
-            return;
-        }
-        let _guard = RENDER_LOCK.lock();
-        // SAFETY: `VIDEO_ACTIVE` was observed `true` (acquire), so the
-        // boot CPU's release-published initialisation is visible, and
-        // the held render lock serialises this mutable access (see
-        // `VideoSlot`).
-        let Some(state) = (unsafe { (*VIDEO.0.get()).as_mut() }) else {
-            return;
-        };
-        let (fb_base, pixel_count) = (state.fb_base, state.pixel_count);
-        let Some(console) = state.console.as_mut() else {
-            return;
-        };
-        // A blanked console does paint: a program's write is what takes the
-        // surface back.
-        let pixels: &mut [u32] = if console.surface().paints() {
-            // SAFETY: `attach_console` proved every page of this extent
-            // translates for an EL1 write, and `relocate` proves it again for
-            // a block it moves to; neither the identity map covering the
-            // firmware's surface nor the direct map covering a relocated one is
-            // ever withdrawn. `pixel_count` is the surface length
-            // `publish_console` validated, `relocate` admits only a block that
-            // holds it, and the render lock makes this the only live
-            // reference.
-            unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) }
-        } else {
-            &mut []
-        };
-        if let Some((row_start, row_end)) = op(console, pixels) {
-            let stride_bytes = console.geometry().stride_px as usize * 4;
-            clean_dcache_range(
-                fb_base + row_start as usize * stride_bytes,
-                (row_end - row_start) as usize * stride_bytes,
-            );
-        }
-    }
-
-    /// The active framebuffer console's character-cell grid, when one is
-    /// configured (`terminal_size` — P-C).
-    ///
-    /// Post-MMU only (the render lock's atomic CAS requires it). Returns
-    /// [`None`] when no video console is active (a UART-only board), so the
-    /// caller reports no size and the client applies its fallback. A grid so
-    /// large a dimension overflows the `u16` wire field also yields [`None`]
-    /// (fail closed) rather than a truncated size.
-    pub fn text_grid() -> Option<tairix_abi::TerminalSize> {
-        if !super::is_active() {
-            return None;
-        }
-        let _guard = RENDER_LOCK.lock();
-        // SAFETY: `VIDEO_ACTIVE` was observed `true` (acquire), so the boot
-        // CPU's release-published initialisation is visible, and the held
-        // render lock serialises this access (see `VideoSlot`). A shared
-        // borrow suffices; the geometry is read, not mutated.
-        let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
-        let rows = u16::try_from(state.geometry.rows()).ok()?;
-        let cols = u16::try_from(state.geometry.columns()).ok()?;
-        tairix_abi::TerminalSize::new(rows, cols).ok()
-    }
-
-    /// Clean `[start, start + len)` from the data cache to the point of
-    /// coherency, so a DMA reader (the HVS scan-out) observes the CPU's
-    /// writes.
-    fn clean_dcache_range(start: usize, len: usize) {
-        crate::paging::clean_range_to_poc(start as u64, len as u64);
     }
 }
 
@@ -965,26 +349,23 @@ mod tests {
 
     use super::*;
 
-    // --- Surface reachability ----------------------------------------
-
     #[test]
     fn a_page_aligned_surface_of_one_page_spans_exactly_that_page() {
-        assert_eq!(surface_page_range(0x1000, 1024), Some((0x1000, 0x1000)));
+        assert_eq!(surface_page_range(0x1000, 4096), Some((0x1000, 0x1000)));
     }
 
     #[test]
     fn an_unaligned_surface_spans_every_page_it_touches() {
         // 16 bytes from 0x1ffc end at 0x200b, so the extent straddles the
         // boundary and both pages must be probed.
-        assert_eq!(surface_page_range(0x1ffc, 4), Some((0x1000, 0x2000)));
+        assert_eq!(surface_page_range(0x1ffc, 16), Some((0x1000, 0x2000)));
     }
 
     #[test]
     fn the_last_page_of_a_surface_is_inside_the_range() {
         // The Pi 4 scan-out a metal capture reported: 0x7f8000 bytes from
-        // 0x3e402000, ending at 0x3ebf9fff. The final page must be covered,
-        // or a hole at the end of the surface stays invisible.
-        let (first, last) = surface_page_range(0x3e40_2000, 0x7f_8000 / 4).expect("real extent");
+        // 0x3e402000, ending at 0x3ebf9fff.
+        let (first, last) = surface_page_range(0x3e40_2000, 0x7f_8000).expect("real extent");
         assert_eq!(first, 0x3e40_2000);
         assert_eq!(last, 0x3ebf_9000);
         assert!(last + (PAGE_SIZE as u64) > 0x3e40_2000 + 0x7f_8000 - 1);
@@ -992,13 +373,14 @@ mod tests {
 
     #[test]
     fn an_empty_or_unrepresentable_surface_has_no_range() {
-        // Nothing to prove reachable, so the caller refuses rather than
-        // treating a zero-length extent as trivially fine.
         assert_eq!(surface_page_range(0x1000, 0), None);
-        assert_eq!(surface_page_range(0x1000, usize::MAX), None);
+        assert_eq!(surface_page_range(usize::MAX, 2), None);
     }
 
-    // --- Firmware bring-up -------------------------------------------
+    #[test]
+    fn the_host_port_reaches_no_surface() {
+        assert!(!FramebufferPort::reachable(NonNull::dangling(), 4));
+    }
 
     /// A mock firmware whose answers are mutually consistent for a
     /// 1920×1080 display: pitch one scanline, surface one full frame.
@@ -1039,8 +421,6 @@ mod tests {
         let mut firmware = MockFirmware::healthy();
         assert!(bring_up(&mut firmware).is_none());
     }
-
-    // --- Geometry policy ---------------------------------------------
 
     #[test]
     fn ramfb_geometry_is_always_renderable() {

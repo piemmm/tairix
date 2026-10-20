@@ -81,7 +81,7 @@ exception.
   hardware tree's wait queue (`park_on_until` over `HW_TREE_WAITQ`).
 - **The window is on a screen that stays lit.** A display engine taking
   console 0's screen over from the firmware waits until the boot hands the
-  console to `login` (`console_relocate` parks), so the takeover's mode set,
+  console to `login` (`console_adopt` parks), so the takeover's mode set,
   which blanks a sink while it re-locks, never lands under the window or the
   passphrase prompt.
 - **The wait is not wasted.** While the window waits, a separate kernel task

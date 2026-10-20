@@ -519,12 +519,15 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   failed transfer falls back to the UART (fail closed); the headless
   UART-backed verticals are unchanged.
 - **The display node.** Where the tree enables the display engine
-  (`platform::display_engine`), no boot display node is published: the HVS
-  node states the discovery-only `BootConsole` fact, and its driver has the
-  kernel move the console onto a block the kernel owns below the HVS's DMA
-  reach (`console_relocate`), once the boot has handed the console to
-  `login`, before it tells the firmware the display is the ARM's. The console
-  then renders through the direct map, cleaning each band
+  (`platform::display_engine`), or else discovery found a virtio GPU
+  (`boot_display::virtio_gpu`), no boot display node is published: that node
+  states the discovery-only `ConsoleHost` fact. The HVS's driver has the
+  kernel host the console on a block the kernel owns below the HVS's DMA
+  reach (`console_adopt`), at the mode the firmware lit, once the boot has
+  handed the console to `login` and before it tells the firmware the display
+  is the ARM's. With no screen lit the console keeps an 80 × 25 grid and
+  paints nothing until a display hosts it. The console then renders through
+  the direct map, cleaning each band
   it paints to the point of coherency as it does on the firmware's surface,
   and repaints from its retained screen in the disposition it held; the
   firmware's surface is never touched again ([Display
@@ -3015,8 +3018,8 @@ runtime.
 
 `tests/integration/framebuffer_display_qemu_aarch64`
 (`tairix-test-framebuffer-display-qemu-aarch64`, enrolled in
-`tools/xtask/src/commands/qemu_tests.rs` with `ramfb: true`) drives the
-framebuffer display driver end-to-end on the `virt` board — the EL1/GICv2
+`tools/xtask/src/commands/qemu_tests.rs` with `display: Display::Ramfb`)
+drives the framebuffer display driver end-to-end on the `virt` board — the EL1/GICv2
 + `ramfb` analogue of the riscv64 framebuffer-display vertical. It reuses
 the shared `bring_up_el1_identity_mmu` helper above and the **same**
 shared `fw_cfg` MMIO transport (`tairix-fwcfg`'s `MmioDma`) the

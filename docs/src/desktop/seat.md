@@ -343,37 +343,44 @@ are live (stage D7b):
 
 - **The wire protocol** is `tairix_abi::display_ipc`: one reserved,
   squat-protected rendezvous (`DISPLAY_ENDPOINT`, bindable only under
-  `CAP_IPC_BIND_PRIVILEGED`) serving the fixed-width, fail-closed
-  requests `Query` (→ the mode reply), `Configure { shm grant handle,
-  frame count, frame geometry }`, and `Present { frame index, damage
-  rect }`. Requests carry the seat id in-protocol; every reserved tail
-  is zero-checked, and the decoders are fuzzed alongside the other ABI
-  decoders.
+  `CAP_IPC_BIND_PRIVILEGED`) serving fixed-width, fail-closed requests:
+  `Query` (→ the mode reply), `Configure { mode, events port }`,
+  `Present { buffer, damage }`, and the layer and pointer requests
+  (`QueryPlanes`, `AllocBuffer`, `FreeBuffer`, `PresentLayers`,
+  `SetCursor`, `MoveCursor`, `HideCursor`). Requests carry the seat id
+  in-protocol; every reserved tail is zero-checked, and the decoders are
+  fuzzed alongside the other ABI decoders.
+- **The driver allocates what its hardware reads.** `Configure` has the
+  driver allocate the presenter's frames — DMA-capable memory wherever
+  the device itself reads a buffer, plain shared memory where the driver
+  copies from it with the CPU — and grants each to the configuring caller
+  alone (`shm_grant_peer`).
+  A present names a buffer, never pixels: nothing is mapped, allocated or
+  copied per present.
 - **One definition of the semantics.** The `lib/display` crate hosts
   both halves over injected seams: the `DisplayServer` engine a display
   driver's `Run` binary hosts (decode → `call_peer_seat` lease gate on
   **every** request, `Query` included, so only the seat owner learns
-  the mode → exact-mode geometry validation → map-once shm adoption →
-  bounded, damage-aware blit through the `Display` trait) and the
+  the mode → exact-mode validation → the `Display` trait) and the
   `DisplayClient`/`RemoteDisplay` client the desktop session presents
-  through — `RemoteDisplay` implements the existing `Display` trait
-  over the session's own mapping of the shared frame region, tracking
-  each frame's stale region so a double-buffered present copies only
-  the pixels that need refreshing.
+  through — `RemoteDisplay` implements `tairix_display::Presenter` over
+  its mappings of the granted frames, tracking what each frame lacks so a
+  present copies into the frame it draws next only the pixels that need
+  refreshing.
 - **Frames are bound to the lease that configured them.** `Configure`
   records the granting lease's generation; a `Present` under any other
   generation (a revoked or re-acquired seat) is refused until the new
-  owner reconfigures, and a caller observed to have lost its lease has
-  its stale frame region dropped — one owner's frames can never scan
-  out under another's lease.
-- **Damage travels end to end.** `Display::present_rects` (an in-place
-  evolution with a full-blit default) carries the changed rectangles
-  from the compositor — which reports its composited damage as a
-  disjoint set — through the protocol to the driver's partial blit, so a
-  small update touches only its own scanlines on the scan-out path. A
-  frame is presented **once**, naming every rectangle it changed, so
-  scattered damage costs those rectangles rather than one round trip
-  each and a copy of the box between them.
+  owner reconfigures, and a configuration whose lease ended is released,
+  its buffers freed once the device has let them go — one owner's frames
+  can never scan out under another's lease.
+- **Damage travels end to end.** A present carries the changed
+  rectangles from the compositor — which reports its composited damage as
+  a disjoint set — through the protocol to the driver, which moves only
+  those (a framebuffer's blit, virtio-gpu's transfer and flush), so a
+  small update touches only its own scanlines. A frame is presented
+  **once**, naming every rectangle it changed, so scattered damage costs
+  those rectangles rather than one round trip each and a copy of the box
+  between them.
 - **A display's surface is discovered, never assumed.** A display-class
   hardware node can now carry a `Framebuffer` resource — a
   geometry-carrying, `CAP_MMIO_MAP`-gated scan-out window (the FDT
@@ -394,12 +401,11 @@ Both `Run` binaries hosting those halves are live (stages D7b–D7c):
 - **The desktop session process** (`userland/gui/session`, stage D7c)
   is the client half: it acquires the boot seat's lease
   (`display_acquire`), performs the bring-up handshake (query →
-  `shm_create` the double-buffered frame region → `shm_grant` it to the
-  display endpoint's serving task → configure), and then runs the
+  configure → map the frames the driver granted), and then runs the
   desktop shell from a `SeatInput` wait-set park: each wake drains the
   owned seat's pointer and keyboard channels through the fail-closed
   record path, pumps the decoded events through the compositor and
-  taskbar, and presents the composited damage by frame index. The
+  taskbar, and presents the composited damage by frame buffer. The
   pointer drain stops at each button edge and the keyboard drain as soon
   as the seat changes hands, because routing an edge can give the seat
   to a menu chain or the lock. The rest of the pointer queue then goes to

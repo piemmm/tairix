@@ -1,11 +1,11 @@
 //! Display driver class (`drivers/display/*`).
 //!
-//! A display driver presents a single linear pixel surface. The
-//! trait is intentionally minimal: querying the active mode and
-//! presenting a fully-rendered frame are the only operations the
-//! Stage 4 first drivers (`vesa`, `framebuffer`, `gpu_virtio`) need.
-//! Compositing, damage tracking, and GPU acceleration live above
-//! this trait in `userland/gui/wm`.
+//! A display driver drives one output and allocates the buffers its device
+//! reads ([`Display`]); a presenter fills them and has them shown by id, so no
+//! frame is copied into memory the device reaches after it is drawn. A device
+//! that composites layers or draws a pointer in hardware says so through
+//! [`AcceleratedDisplay`] and [`HardwareCursor`]. Compositing policy lives
+//! above this trait, in `userland/gui/wm`.
 
 use super::DriverError;
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
@@ -135,7 +135,7 @@ impl DisplayPower {
 /// The most rectangles one present may name.
 ///
 /// A present carries its damage inline — as a slice through
-/// [`Display::present_rects`] in process, and in the fixed-width
+/// [`Display::present`] in process, and in the fixed-width
 /// [`DisplayRequest::Present`](crate::display_ipc::DisplayRequest) frame on
 /// the wire — so this is a format bound the decoder enforces, not a capacity
 /// that grows with the machine: a hostile request can never make a service
@@ -330,6 +330,38 @@ fn merge_cheapest(slots: &mut [DamageRect], count: &mut usize) {
 }
 
 impl DamageRect {
+    /// Encoded size on the wire: x, y, width and height, each a
+    /// little-endian `u32`.
+    pub const WIRE_LEN: usize = 16;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.x);
+        put_u32(&mut out, 4, self.y);
+        put_u32(&mut out, 8, self.width_px);
+        put_u32(&mut out, 12, self.height_px);
+        out
+    }
+
+    /// Decode from the first [`Self::WIRE_LEN`] bytes of `bytes`. Any four
+    /// values decode: whether the rectangle fits a surface is the reader's
+    /// to check against the surface ([`Self::validate_in`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] when `bytes` is shorter than a rectangle.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        let bytes = bytes.get(..Self::WIRE_LEN).ok_or(Errno::BufferTooSmall)?;
+        Ok(Self {
+            x: read_u32(bytes, 0),
+            y: read_u32(bytes, 4),
+            width_px: read_u32(bytes, 8),
+            height_px: read_u32(bytes, 12),
+        })
+    }
+
     /// The rectangle covering the whole of `mode`'s surface.
     #[must_use]
     pub const fn full(mode: &DisplayMode) -> Self {
@@ -624,20 +656,25 @@ pub struct DisplayMode {
     pub format: DisplayFormat,
 }
 
-/// What a display device reports about *itself*, beyond the mode it is
-/// scanning out: the memory it owns and what its hardware compositor can do.
+impl DisplayMode {
+    /// The bytes a surface of this mode spans: every row a stride long.
+    #[must_use]
+    pub const fn len_bytes(&self) -> u64 {
+        self.stride_bytes as u64 * self.height_px as u64
+    }
+}
+
+/// What a display device is, beyond the mode it scans out: the memory it
+/// owns, its layer compositor and its cursor plane — the device half of the
+/// graphics reading a monitor draws, gathered from [`Display::memory`],
+/// [`Display::as_accelerated`] and [`Display::hardware_cursor`].
 ///
-/// The device half of the graphics reading a monitor draws. It is deliberately
-/// separate from [`AccelCaps`]: a device with no hardware compositor still has
-/// (or has not) memory of its own, and both facts are the driver's to state —
-/// nothing above it can measure them.
-///
-/// An in-process driver-trait value, not a wire record: the monitor's
-/// on-the-wire form is [`DisplayStats`](crate::display_ipc::DisplayStats).
+/// An in-process value, not a wire record: the monitor's on-the-wire form is
+/// [`DisplayStats`](crate::display_ipc::DisplayStats).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DisplayDeviceReport {
-    /// Bytes of the device's own memory currently holding scan-out or layer
-    /// sources. Necessarily `0` when [`Self::mem_total_bytes`] is.
+    /// Bytes of the device's own memory holding buffers. Necessarily `0`
+    /// when [`Self::mem_total_bytes`] is.
     pub mem_resident_bytes: u64,
     /// Bytes of memory the device owns. `0` means the device has **no memory
     /// of its own** — a firmware framebuffer scanning out of system RAM — not
@@ -646,19 +683,165 @@ pub struct DisplayDeviceReport {
     /// What the hardware compositor can do, or [`None`] where the device has
     /// none and every frame is composited in software.
     pub accel: Option<AccelCaps>,
+    /// The cursor plane, or [`None`] where the pointer is composited in
+    /// software.
+    pub cursor: Option<CursorCaps>,
 }
 
 impl DisplayDeviceReport {
-    /// A device with no memory of its own and no hardware compositor: what a
-    /// firmware framebuffer honestly is.
+    /// A device with no memory of its own, no hardware compositor and no
+    /// cursor plane: what a firmware framebuffer honestly is.
     pub const SOFTWARE: Self = Self {
         mem_resident_bytes: 0,
         mem_total_bytes: 0,
         accel: None,
+        cursor: None,
+    };
+
+    /// What `display` is.
+    pub fn of(display: &mut dyn Display) -> Self {
+        let memory = display.memory();
+        Self {
+            mem_resident_bytes: memory.resident_bytes,
+            mem_total_bytes: memory.total_bytes,
+            accel: display.as_accelerated().map(|accel| accel.accel_caps()),
+            cursor: display.hardware_cursor().map(|cursor| cursor.cursor_caps()),
+        }
+    }
+}
+
+/// Where a display driver's device reaches the kernel console it hosts, as
+/// `console_adopt` answers it.
+///
+/// The console is laid out as [`DisplayFormat::Bgra8888`] at the mode the
+/// driver asked for, `stride_bytes` from one row to the next.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct HostedConsole {
+    /// Where the device reads the first pixel: its I/O virtual address behind
+    /// a translation unit, else its bus address.
+    pub device_addr: u64,
+    /// Bytes from one row to the next.
+    pub stride_bytes: u32,
+}
+
+impl HostedConsole {
+    /// Encoded size on the wire: the device address, the stride, and a
+    /// reserved word that must be zero.
+    pub const WIRE_LEN: usize = 16;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..8].copy_from_slice(&self.device_addr.to_le_bytes());
+        put_u32(&mut out, 8, self.stride_bytes);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] for a short buffer, [`Errno::BadMagic`] for
+    /// a dirty reserved word, and [`Errno::LengthOutOfRange`] for a stride of
+    /// zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        let bytes = bytes.get(..Self::WIRE_LEN).ok_or(Errno::BufferTooSmall)?;
+        if read_u32(bytes, 12) != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let stride_bytes = read_u32(bytes, 8);
+        if stride_bytes == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut address = [0u8; 8];
+        address.copy_from_slice(&bytes[..8]);
+        Ok(Self {
+            device_addr: u64::from_le_bytes(address),
+            stride_bytes,
+        })
+    }
+}
+
+/// Most layers one [`AcceleratedDisplay::present_layers`] may carry: a wire
+/// bound, as [`MAX_DAMAGE_RECTS`] is, not what any engine can composite —
+/// that is [`AccelCaps::max_layers`], never above it.
+pub const MAX_ACCEL_LAYERS: usize = 8;
+
+/// A buffer a display driver allocated in memory its device reads, by the id
+/// the driver gave it. Never zero.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct BufferId(core::num::NonZeroU32);
+
+impl BufferId {
+    /// The id `raw`, or `None` for `0`, which names no buffer.
+    #[must_use]
+    pub const fn new(raw: u32) -> Option<Self> {
+        match core::num::NonZeroU32::new(raw) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
+    }
+
+    /// The raw id.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// A buffer [`Display::alloc_buffer`] made: its id, the shared region it is,
+/// which the driver grants the presenter that asked, and its row stride.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AllocatedBuffer {
+    /// The driver's name for the buffer.
+    pub id: BufferId,
+    /// The shared region holding it.
+    pub region: u64,
+    /// Bytes from one row to the next.
+    pub stride_bytes: u32,
+}
+
+/// How a present ended.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Presented {
+    /// The buffer is on screen, and every buffer it replaced is free.
+    Shown,
+    /// The device takes the buffer at its next frame start; the buffer it
+    /// replaces is read until [`Display::service_events`] reports the latch.
+    Queued,
+}
+
+/// What [`Display::service_events`] found.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Serviced {
+    /// A queued present latched, so the buffer it replaced is free.
+    pub latched: bool,
+}
+
+/// The memory a display device owns, as [`Display::memory`] reports it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DisplayMemory {
+    /// Bytes of it holding buffers. Necessarily `0` when
+    /// [`Self::total_bytes`] is.
+    pub resident_bytes: u64,
+    /// Bytes the device owns. `0` means it has **no memory of its own** — it
+    /// scans out of system RAM — not that none is free.
+    pub total_bytes: u64,
+}
+
+impl DisplayMemory {
+    /// A device scanning out of system RAM.
+    pub const NONE: Self = Self {
+        resident_bytes: 0,
+        total_bytes: 0,
     };
 }
 
-/// Trait every display driver implements.
+/// Trait every display driver implements: an output, and the buffers its
+/// device reads, which the driver allocates and a presenter fills.
 ///
 /// # Capabilities
 ///
@@ -676,126 +859,120 @@ pub trait Display {
     /// The mode is the driver's to choose for the sink it has. It moves only
     /// across [`Self::service_events`], so a caller that read it before a
     /// call it then makes on the display has read the state that call meets.
-    ///
-    /// # Capabilities
-    ///
-    /// Caller must present the driver's [`DriverHandle`].
-    ///
-    /// [`DriverHandle`]: crate::driver::DriverHandle
     fn output(&self) -> Option<DisplayMode>;
 
     /// Collect what woke the display's event sources — a sink arriving or
-    /// leaving, a sink's mode, a mode set completing — and move
+    /// leaving, a mode set completing, a queued present latching — and move
     /// [`Self::output`] to match.
     ///
-    /// The hosting loop calls it when, and only when, one of the sources the
-    /// driver handed it fired. Every source that fired is quiet again on
-    /// return, whatever the answer: a source that cannot be quieted is the
-    /// driver's to stop raising, so a failing device cannot spin the loop.
-    /// The default does nothing, for a display whose output never moves and
-    /// which therefore names no source.
+    /// The hosting loop calls it when one of the sources the driver handed it
+    /// fired, and after every request it serves where
+    /// [`Self::requests_take_wakes`], since a request that waited on the
+    /// device may have taken the wake a source raised; a call that finds
+    /// nothing to do changes nothing. Every source that fired is quiet
+    /// again on return, whatever the answer: a source that cannot be quieted
+    /// is the driver's to stop raising, so a failing device cannot spin the
+    /// loop. A queued present the output stops for latches here at once. The
+    /// default reports nothing, for a display that names no source.
     ///
     /// # Errors
     ///
     /// * [`DriverError::DeviceFault`] if the device's state could not be
     ///   read. [`Self::output`] then says what the display can still drive.
-    ///
-    /// # Capabilities
-    ///
-    /// Caller must present the driver's
-    /// [`DriverHandle`](crate::driver::DriverHandle).
-    fn service_events(&mut self) -> Result<(), DriverError> {
-        Ok(())
+    fn service_events(&mut self) -> Result<Serviced, DriverError> {
+        Ok(Serviced::default())
     }
 
-    /// Report what this device owns and what its compositor can do.
-    ///
-    /// The default is [`DisplayDeviceReport::SOFTWARE`] — no memory of its
-    /// own, no hardware compositor — which is the truth for a firmware
-    /// framebuffer and for any driver that scans out of system RAM. A device
-    /// with dedicated memory or an [`AcceleratedDisplay`] engine overrides it;
-    /// the default never overstates what the silicon can do.
-    fn device_report(&self) -> DisplayDeviceReport {
-        DisplayDeviceReport::SOFTWARE
+    /// Whether serving a request can wait on the device's interrupt and so
+    /// take a wake one of its event sources raised, which owes
+    /// [`Self::service_events`] a call after every request. The default is
+    /// `false`: a display whose requests never wait is serviced on its
+    /// sources' wakes alone.
+    fn requests_take_wakes(&self) -> bool {
+        false
     }
 
-    /// Present a fully-rendered frame.
-    ///
-    /// `frame` must contain at least `stride_bytes * height_px` bytes of the
-    /// mode [`Self::output`] answers, laid out in its format.
+    /// Stop waiting for the present it queued to latch: the hosting loop gave
+    /// up on it at its deadline and released its presenter as though it had,
+    /// so the next present must not be refused for it. What the output shows
+    /// meanwhile is the driver's to settle. The default does nothing, for a
+    /// display that queues none.
+    fn abandon_queued(&mut self) {}
+
+    /// The memory the device owns. The default is [`DisplayMemory::NONE`],
+    /// the truth for a firmware framebuffer and any device scanning out of
+    /// system RAM.
+    fn memory(&self) -> DisplayMemory {
+        DisplayMemory::NONE
+    }
+
+    /// How many output-sized buffers a presenter rotates through: one where
+    /// a present has finished with its buffer when it returns, more where the
+    /// device reads a buffer while it is shown.
+    fn frame_count(&self) -> u32;
+
+    /// Allocate a buffer of `width_px` × `height_px` in the output's format,
+    /// zeroed, in memory the device reads.
     ///
     /// # Errors
     ///
     /// * [`DriverError::Stale`] if there is no output.
-    /// * [`DriverError::BufferTooSmall`] if `frame` is shorter than
-    ///   the active mode requires.
-    /// * [`DriverError::DeviceFault`] if the underlying hardware
-    ///   rejected the present.
-    /// * [`DriverError::Busy`] if a previous present is still in
-    ///   flight.
-    ///
-    /// # Capabilities
-    ///
-    /// Caller must present the driver's [`DriverHandle`].
-    ///
-    /// [`DriverHandle`]: crate::driver::DriverHandle
-    fn present(&mut self, frame: &[u8]) -> Result<(), DriverError>;
+    /// * [`DriverError::LengthOutOfRange`] for a zero or oversized extent.
+    /// * [`DriverError::NoSpace`] past what the driver lets one presenter
+    ///   hold, a budget derived from the memory its device reaches.
+    /// * [`DriverError::OutOfMemory`] when no memory can be had.
+    fn alloc_buffer(
+        &mut self,
+        width_px: u32,
+        height_px: u32,
+    ) -> Result<AllocatedBuffer, DriverError>;
 
-    /// Present a fully-rendered frame of which only `damage` changed.
-    ///
-    /// `frame` carries the **whole** surface exactly as for
-    /// [`Self::present`]; `damage` names the rectangles that differ from
-    /// the previously presented frame, so a driver whose scan-out path is
-    /// a copy can blit only the touched pixels. It holds one to
-    /// [`MAX_DAMAGE_RECTS`] rectangles and the caller keeps them disjoint,
-    /// so no pixel is blitted twice.
-    ///
-    /// **One call carries a whole frame's damage.** A frame that changed two
-    /// far-apart places — a menu and the title band its owner repainted —
-    /// costs one dispatch and two rectangle-sized blits, never a blit of the
-    /// box spanning them, and never one dispatch per rectangle.
-    ///
-    /// The default forwards to the full-frame [`Self::present`] — a correct
-    /// (if unoptimised) implementation for every existing driver — after
-    /// validating the whole list against the active mode, so a malformed
-    /// rectangle is refused identically on both paths and nothing is
-    /// presented partially.
+    /// Release buffer `id`, once the device no longer reads it: a buffer on
+    /// screen or queued is released when it is replaced, and one a device has
+    /// not yet let go of is held until it has. The id is the presenter's no
+    /// more either way.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::Stale`] if there is no output.
-    /// * [`DriverError::LengthOutOfRange`] if the list is empty, longer than
-    ///   [`MAX_DAMAGE_RECTS`], or holds a rectangle that is empty or falls
-    ///   outside the active mode's surface.
-    /// * Everything [`Self::present`] can return.
-    ///
-    /// # Capabilities
-    ///
-    /// Caller must present the driver's
-    /// [`DriverHandle`](crate::driver::DriverHandle), exactly as for
-    /// [`Self::present`].
-    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
-        let mode = self.output().ok_or(DriverError::Stale)?;
-        DamageRect::validate_list(damage, &mode)?;
-        self.present(frame)
-    }
+    /// [`DriverError::NotFound`] for an id this driver did not allocate.
+    fn free_buffer(&mut self, id: BufferId) -> Result<(), DriverError>;
 
-    /// The lease the display's frames were presented under has ended, and
+    /// Show the output-sized buffer `id`, of which only `damage` changed since
+    /// the previous present.
+    ///
+    /// `damage` holds one to [`MAX_DAMAGE_RECTS`] disjoint rectangles inside
+    /// the output, validated before any pixel is touched; a driver whose
+    /// device reads the buffer in place may ignore it.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Stale`] if there is no output, or the buffer is not
+    ///   its size.
+    /// * [`DriverError::NotFound`] for an id this driver did not allocate.
+    /// * [`DriverError::LengthOutOfRange`] for a malformed damage list.
+    /// * [`DriverError::Busy`] while a queued present has not latched.
+    /// * [`DriverError::OutOfMemory`] when memory the present needs cannot be
+    ///   had.
+    /// * [`DriverError::DeviceFault`] if the device refused it.
+    fn present(&mut self, id: BufferId, damage: &[DamageRect]) -> Result<Presented, DriverError>;
+
+    /// The lease the display's buffers were presented under has ended, and
     /// `surface` says what the seat shows until a presenter's next frame:
     /// its text console, or nothing while another presenter takes over.
     ///
-    /// A display that scans out frames of its own shows the console's
-    /// surface, or nothing, never the frames the outgoing presenter left:
-    /// one principal's screen is never shown to the next. The default does
-    /// nothing, for a display whose surface the console draws into itself,
-    /// which repaints or clears it.
+    /// A display shows the console's surface, or nothing, never a buffer the
+    /// outgoing presenter left: one principal's screen is never shown to the
+    /// next. The default does nothing, for a display whose surface the
+    /// console draws into itself, which repaints or clears it.
     fn released(&mut self, _surface: ReleaseSurface) {}
 
     /// Switch the display's output on or off.
     ///
     /// The surface keeps its pixels while off, and a present is still
-    /// accepted, so switching back on shows the frame last presented.
-    /// Switching to the state already in force succeeds and changes nothing.
+    /// accepted, so switching back on shows the frame last presented. A
+    /// queued present an output switched off was to take latches at the
+    /// [`Self::service_events`] the hosting loop calls after it. Switching to
+    /// the state already in force succeeds and changes nothing.
     ///
     /// The default is [`DriverError::Unsupported`]: a scan-out surface with
     /// no power control of its own cannot switch anything off, and the
@@ -805,150 +982,198 @@ pub trait Display {
     ///
     /// * [`DriverError::Unsupported`] if the device has no power control.
     /// * [`DriverError::DeviceFault`] if the control refused the change.
-    ///
-    /// # Capabilities
-    ///
-    /// Caller must present the driver's
-    /// [`DriverHandle`](crate::driver::DriverHandle), exactly as for
-    /// [`Self::present`].
     fn set_power(&mut self, power: DisplayPower) -> Result<(), DriverError> {
         let _ = power;
         Err(DriverError::Unsupported)
     }
+
+    /// The device's layer compositor, or [`None`] where it has none and every
+    /// frame is composited in software. The default has none.
+    fn as_accelerated(&mut self) -> Option<&mut dyn AcceleratedDisplay> {
+        None
+    }
+
+    /// The device's cursor plane, or [`None`] where it has none and the
+    /// pointer is composited in software. The default has none.
+    fn hardware_cursor(&mut self) -> Option<&mut dyn HardwareCursor> {
+        None
+    }
 }
 
-/// What an [`AcceleratedDisplay`] back-end can composite in hardware.
+/// What an [`AcceleratedDisplay`] can composite in hardware.
 ///
-/// Reported by [`AcceleratedDisplay::accel_caps`] so the compositor can
-/// decide, per frame, whether the hardware path can serve the current
-/// window stack or whether it must fall back to the software
-/// [`Display::present`] path (the software path is
-/// always the fallback).
+/// These bound each stack; a stack within them can still outrun what the
+/// hardware composites at once. The software [`Display::present`] path is
+/// always the fallback for a stack the device does not take.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AccelCaps {
-    /// Maximum number of layers the hardware can composite in a single
-    /// [`AcceleratedDisplay::present_layers`] call. A back-end always
-    /// supports at least one layer.
+    /// Most layers one [`AcceleratedDisplay::present_layers`] composites, at
+    /// least one and at most [`MAX_ACCEL_LAYERS`].
     pub max_layers: u32,
     /// Largest layer width, in pixels, the hardware can source.
     pub max_width_px: u32,
     /// Largest layer height, in pixels, the hardware can source.
     pub max_height_px: u32,
     /// Whether the hardware can scale a whole layer's contribution by a
-    /// constant [`AccelLayer::opacity`] in addition to its per-pixel
-    /// alpha. A back-end that reports `false` requires every layer to
-    /// carry `opacity == 255`.
+    /// constant [`AccelLayer::opacity`] as well as its per-pixel alpha.
+    /// Without it every layer carries `opacity == 255`.
     pub per_layer_opacity: bool,
+    /// Whether a layer's destination may differ in size from its source:
+    /// the hardware scales it.
+    pub hw_scaling: bool,
 }
 
-/// One source layer in an [`AcceleratedDisplay::present_layers`] call.
+/// One layer of an [`AcceleratedDisplay::present_layers`]: the part `src` of
+/// buffer `buffer`, shown at `dst_*` on the output.
 ///
-/// Layers are composited back-to-front: index `0` is the bottom-most
-/// layer and the last layer is the top-most, each placed at its
-/// destination origin and blended *over* the layers beneath it.
-///
-/// `pixels` is **premultiplied-alpha** pixel data in the display's
-/// active [`DisplayMode::format`], stored row-major with `stride_bytes`
-/// between consecutive scanlines. Premultiplied alpha matches the
-/// desktop compositor's pixel model, so a layer can be
-/// handed to the hardware without an extra straight-alpha conversion.
+/// Layers are composited back-to-front: index `0` is the bottom-most, each
+/// blended *over* those beneath it. A buffer holds **premultiplied-alpha**
+/// pixels in the output's format, the desktop compositor's pixel model.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct AccelLayer<'a> {
-    /// Premultiplied-alpha source pixels in the display's active format.
-    pub pixels: &'a [u8],
-    /// Layer width in pixels.
-    pub width_px: u32,
-    /// Layer height in pixels.
-    pub height_px: u32,
-    /// Bytes between consecutive scanlines of `pixels`. Must hold at
-    /// least `width_px * format.bytes_per_pixel()` bytes.
-    pub stride_bytes: u32,
-    /// X position of the layer's top-left pixel in the scan-out surface.
-    /// May be negative; the off-screen portion is clipped.
+pub struct AccelLayer {
+    /// The buffer the layer shows.
+    pub buffer: BufferId,
+    /// The part of the buffer shown.
+    pub src: DamageRect,
+    /// X of the layer's top-left pixel on the output; may be negative, the
+    /// off-screen part clipped.
     pub dst_x: i32,
-    /// Y position of the layer's top-left pixel in the scan-out surface.
-    /// May be negative; the off-screen portion is clipped.
+    /// Y of the layer's top-left pixel on the output; may be negative.
     pub dst_y: i32,
-    /// Constant opacity applied to the whole layer, `0` fully
-    /// transparent, `255` fully opaque (per-pixel alpha only). Requires
-    /// [`AccelCaps::per_layer_opacity`] unless it is `255`.
+    /// Width the layer is shown at, `src.width_px` unless
+    /// [`AccelCaps::hw_scaling`].
+    pub dst_width_px: u32,
+    /// Height the layer is shown at, `src.height_px` unless
+    /// [`AccelCaps::hw_scaling`].
+    pub dst_height_px: u32,
+    /// Constant opacity over the whole layer, `255` opaque; anything else
+    /// needs [`AccelCaps::per_layer_opacity`].
     pub opacity: u8,
 }
 
-impl AccelLayer<'_> {
-    /// Number of source bytes the layer's geometry requires
-    /// (`stride_bytes * height_px`), or [`DriverError::LengthOutOfRange`]
-    /// if the product overflows the host's address width.
+impl AccelLayer {
+    /// Check the layer against what `caps` admits, its source inside a buffer
+    /// of `buffer_width` × `buffer_height`.
     ///
     /// # Errors
     ///
-    /// [`DriverError::LengthOutOfRange`] if the byte count overflows.
-    pub fn required_len(&self, format: DisplayFormat) -> Result<usize, DriverError> {
-        let min_stride = self
-            .width_px
-            .checked_mul(format.bytes_per_pixel())
-            .ok_or(DriverError::LengthOutOfRange)?;
-        if self.width_px == 0 || self.height_px == 0 || self.stride_bytes < min_stride {
+    /// * [`DriverError::LengthOutOfRange`] for an empty or out-of-bounds
+    ///   source, a destination larger than `caps` sources, or a destination
+    ///   whose size differs from its source without hardware scaling.
+    /// * [`DriverError::Unsupported`] for an opacity the hardware cannot
+    ///   apply.
+    pub fn validate(
+        &self,
+        caps: &AccelCaps,
+        buffer_width: u32,
+        buffer_height: u32,
+    ) -> Result<(), DriverError> {
+        let inside = |start: u32, extent: u32, bound: u32| {
+            extent != 0 && start.checked_add(extent).is_some_and(|end| end <= bound)
+        };
+        let scaled =
+            (self.dst_width_px, self.dst_height_px) != (self.src.width_px, self.src.height_px);
+        if !inside(self.src.x, self.src.width_px, buffer_width)
+            || !inside(self.src.y, self.src.height_px, buffer_height)
+            || self.dst_width_px == 0
+            || self.dst_height_px == 0
+            || self.dst_width_px > caps.max_width_px
+            || self.dst_height_px > caps.max_height_px
+            || (scaled && !caps.hw_scaling)
+        {
             return Err(DriverError::LengthOutOfRange);
         }
-        let bytes = u64::from(self.stride_bytes)
-            .checked_mul(u64::from(self.height_px))
-            .ok_or(DriverError::LengthOutOfRange)?;
-        usize::try_from(bytes).map_err(|_| DriverError::LengthOutOfRange)
+        if self.opacity != u8::MAX && !caps.per_layer_opacity {
+            return Err(DriverError::Unsupported);
+        }
+        Ok(())
     }
 }
 
-/// A display back-end that can composite a stack of layers in hardware.
+/// A display device that composites a stack of layers in hardware, reached
+/// through [`Display::as_accelerated`].
 ///
-/// This is the optional GPU-accelerated path. A driver
-/// that exposes it composites the supplied [`AccelLayer`] stack with its
-/// own fixed-function or programmable compositor (e.g. the Raspberry Pi
-/// `VideoCore` HVS plane engine) and scans the result out itself, so the
-/// host never composites the whole screen in software. Every
-/// `AcceleratedDisplay` is also a [`Display`]: the software
-/// full-frame [`Display::present`] path remains available as the
-/// mandatory fallback when the layer stack exceeds [`AccelCaps`].
-///
-/// # Capabilities
-///
-/// Every method is gated by ownership of the driver's
-/// [`DriverHandle`](crate::driver::DriverHandle), exactly as for
-/// [`Display`].
-pub trait AcceleratedDisplay: Display {
-    /// Report what the hardware compositor can do this frame.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::DeviceFault`] if querying the hardware fails.
-    /// * [`DriverError::Unsupported`] if acceleration is unavailable on
-    ///   this device even though the trait is implemented.
-    fn accel_caps(&self) -> Result<AccelCaps, DriverError>;
+/// The driver composites the layers with its own fixed-function or
+/// programmable compositor and scans the result out, so the presenter never
+/// composites the whole screen in software. Every layer names a buffer the
+/// driver allocated ([`Display::alloc_buffer`]); none is copied.
+pub trait AcceleratedDisplay {
+    /// What the hardware compositor can do.
+    fn accel_caps(&self) -> AccelCaps;
 
-    /// Composite `layers` back-to-front and scan the result out.
-    ///
-    /// Index `0` is the bottom layer; the last entry is on top. The
-    /// scan-out surface is cleared to opaque black before the first
-    /// layer is blended, so callers need not supply a full-screen base
-    /// layer.
+    /// Composite `layers` back-to-front over opaque black and scan the result
+    /// out.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::LengthOutOfRange`] if more layers are supplied
-    ///   than [`AccelCaps::max_layers`], or a layer's geometry exceeds
-    ///   [`AccelCaps::max_width_px`] / [`AccelCaps::max_height_px`].
-    /// * [`DriverError::BufferTooSmall`] if a layer's `pixels` is
-    ///   shorter than its geometry requires.
-    /// * [`DriverError::Unsupported`] if a layer requests a per-layer
-    ///   [`AccelLayer::opacity`] the hardware cannot apply.
-    /// * [`DriverError::DeviceFault`] if the hardware rejected the
-    ///   present.
-    /// * [`DriverError::Busy`] if a previous present is still in flight.
-    fn present_layers(&mut self, layers: &[AccelLayer<'_>]) -> Result<(), DriverError>;
+    /// * [`DriverError::LengthOutOfRange`] for more layers than
+    ///   [`AccelCaps::max_layers`], or a layer [`AccelLayer::validate`]
+    ///   refuses.
+    /// * [`DriverError::Unsupported`] for an opacity the hardware cannot
+    ///   apply.
+    /// * [`DriverError::OutOfRange`] for a stack within the caps that one of
+    ///   the outputs cannot composite at once, such as scaled layers
+    ///   outrunning its line buffer. No output is moved off what it showed.
+    /// * [`DriverError::NotFound`] for a buffer this driver did not allocate.
+    /// * [`DriverError::Stale`] if there is no output.
+    /// * [`DriverError::Busy`] while a queued present has not latched.
+    /// * [`DriverError::OutOfMemory`] when memory the present needs cannot be
+    ///   had.
+    /// * [`DriverError::DeviceFault`] if the device refused it.
+    fn present_layers(&mut self, layers: &[AccelLayer]) -> Result<Presented, DriverError>;
+}
+
+/// The size of pointer image a [`HardwareCursor`] shows.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CursorCaps {
+    /// Widest image, in pixels.
+    pub max_width_px: u32,
+    /// Tallest image, in pixels.
+    pub max_height_px: u32,
+}
+
+/// A display device's cursor plane, reached through
+/// [`Display::hardware_cursor`]: a small image the device draws over the
+/// output itself, so moving it composites nothing.
+pub trait HardwareCursor {
+    /// The image size the plane shows.
+    fn cursor_caps(&self) -> CursorCaps;
+
+    /// Show buffer `id` as the pointer, its hot spot `(hot_x, hot_y)` pixels
+    /// in from its top-left.
+    ///
+    /// The device has taken the image when this returns, so the presenter
+    /// may rewrite the buffer for the next one at once.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::LengthOutOfRange`] for a buffer larger than
+    ///   [`Self::cursor_caps`] or a hot spot outside it.
+    /// * [`DriverError::NotFound`] for a buffer this driver did not allocate.
+    /// * [`DriverError::DeviceFault`] if the device refused it.
+    fn set_cursor(&mut self, id: BufferId, hot_x: u32, hot_y: u32) -> Result<(), DriverError>;
+
+    /// Put the pointer's hot spot at `(x, y)` on the output.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the device refused it.
+    fn move_cursor(&mut self, x: i32, y: i32) -> Result<(), DriverError>;
+
+    /// Take the pointer off the screen.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the device refused it.
+    fn hide_cursor(&mut self) -> Result<(), DriverError>;
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
+
     use super::*;
 
     #[test]
@@ -964,6 +1189,27 @@ mod tests {
     }
 
     #[test]
+    fn a_mode_spans_every_row_a_stride_long_at_any_extent() {
+        let mode = DisplayMode {
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 2560 + 64,
+            format: DisplayFormat::Bgra8888,
+        };
+        assert_eq!(mode.len_bytes(), (2560 + 64) * 480);
+        let widest = DisplayMode {
+            width_px: u32::MAX / 4,
+            height_px: u32::MAX,
+            stride_bytes: u32::MAX,
+            format: DisplayFormat::Rgba8888,
+        };
+        assert_eq!(
+            widest.len_bytes(),
+            u64::from(u32::MAX) * u64::from(u32::MAX)
+        );
+    }
+
+    #[test]
     fn a_power_state_round_trips_and_nothing_else_decodes() {
         for power in [DisplayPower::On, DisplayPower::Off] {
             assert_eq!(DisplayPower::from_u8(power.as_u8()), Ok(power));
@@ -975,15 +1221,7 @@ mod tests {
 
     #[test]
     fn a_display_with_no_power_control_says_so() {
-        let mut d = MockDisplay {
-            mode: DisplayMode {
-                width_px: 4,
-                height_px: 2,
-                stride_bytes: 16,
-                format: DisplayFormat::Rgba8888,
-            },
-            frame_len_seen: core::cell::Cell::new(0),
-        };
+        let mut d = MockDisplay::new();
         for power in [DisplayPower::Off, DisplayPower::On] {
             assert_eq!(d.set_power(power), Err(DriverError::Unsupported));
         }
@@ -1018,46 +1256,108 @@ mod tests {
         );
     }
 
+    const MODE: DisplayMode = DisplayMode {
+        width_px: 4,
+        height_px: 2,
+        stride_bytes: 16,
+        format: DisplayFormat::Rgba8888,
+    };
+
+    /// A display that allocates ids and remembers what it showed.
     struct MockDisplay {
-        mode: DisplayMode,
-        frame_len_seen: core::cell::Cell<usize>,
+        next: u32,
+        live: alloc::vec::Vec<BufferId>,
+        shown: Option<BufferId>,
+    }
+
+    impl MockDisplay {
+        fn new() -> Self {
+            Self {
+                next: 1,
+                live: alloc::vec::Vec::new(),
+                shown: None,
+            }
+        }
     }
 
     impl Display for MockDisplay {
         fn output(&self) -> Option<DisplayMode> {
-            Some(self.mode)
+            Some(MODE)
         }
 
-        fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-            let required = (self.mode.stride_bytes as usize) * (self.mode.height_px as usize);
-            if frame.len() < required {
-                return Err(DriverError::BufferTooSmall);
-            }
-            self.frame_len_seen.set(frame.len());
+        fn frame_count(&self) -> u32 {
+            1
+        }
+
+        fn alloc_buffer(
+            &mut self,
+            width_px: u32,
+            _height_px: u32,
+        ) -> Result<AllocatedBuffer, DriverError> {
+            let id = BufferId::new(self.next).ok_or(DriverError::NoSpace)?;
+            self.next += 1;
+            self.live.push(id);
+            Ok(AllocatedBuffer {
+                id,
+                region: u64::from(id.get()) << 8,
+                stride_bytes: width_px * 4,
+            })
+        }
+
+        fn free_buffer(&mut self, id: BufferId) -> Result<(), DriverError> {
+            let at = self
+                .live
+                .iter()
+                .position(|live| *live == id)
+                .ok_or(DriverError::NotFound)?;
+            self.live.remove(at);
             Ok(())
+        }
+
+        fn present(
+            &mut self,
+            id: BufferId,
+            damage: &[DamageRect],
+        ) -> Result<Presented, DriverError> {
+            DamageRect::validate_list(damage, &MODE)?;
+            if !self.live.contains(&id) {
+                return Err(DriverError::NotFound);
+            }
+            self.shown = Some(id);
+            Ok(Presented::Shown)
         }
     }
 
     #[test]
     fn trait_is_object_safe_and_callable() {
-        let mut d = MockDisplay {
-            mode: DisplayMode {
-                width_px: 4,
-                height_px: 2,
-                stride_bytes: 16,
-                format: DisplayFormat::Rgba8888,
-            },
-            frame_len_seen: core::cell::Cell::new(0),
-        };
+        let mut d = MockDisplay::new();
         let dyn_ref: &mut dyn Display = &mut d;
-        let Some(info) = dyn_ref.output() else {
-            unreachable!("mock always has an output")
-        };
-        assert_eq!(info.width_px, 4);
-        assert_eq!(dyn_ref.service_events(), Ok(()));
-        assert_eq!(dyn_ref.present(&[0u8; 8]), Err(DriverError::BufferTooSmall));
-        assert!(dyn_ref.present(&[0u8; 32]).is_ok());
-        assert_eq!(d.frame_len_seen.get(), 32);
+        assert_eq!(dyn_ref.output(), Some(MODE));
+        assert_eq!(dyn_ref.service_events(), Ok(Serviced::default()));
+        assert_eq!(dyn_ref.memory(), DisplayMemory::NONE);
+        assert!(dyn_ref.as_accelerated().is_none());
+        assert!(dyn_ref.hardware_cursor().is_none());
+        let buffer = dyn_ref.alloc_buffer(4, 2).expect("allocated");
+        assert_eq!(buffer.stride_bytes, 16);
+        let whole = [DamageRect::full(&MODE)];
+        assert_eq!(dyn_ref.present(buffer.id, &whole), Ok(Presented::Shown));
+        assert_eq!(
+            dyn_ref.present(buffer.id, &[]),
+            Err(DriverError::LengthOutOfRange),
+            "a present names its damage"
+        );
+        assert_eq!(dyn_ref.free_buffer(buffer.id), Ok(()));
+        assert_eq!(
+            dyn_ref.present(buffer.id, &whole),
+            Err(DriverError::NotFound)
+        );
+        assert_eq!(d.shown, Some(buffer.id));
+    }
+
+    #[test]
+    fn zero_names_no_buffer() {
+        assert_eq!(BufferId::new(0), None);
+        assert_eq!(BufferId::new(7).map(BufferId::get), Some(7));
     }
 
     /// 1080i60: interlaced, both syncs high — every flag set at once.
@@ -1126,177 +1426,196 @@ mod tests {
     }
 
     /// A display with nothing connected, counting what reaches its present.
-    struct Unplugged {
-        presents: usize,
-    }
+    const CAPS: AccelCaps = AccelCaps {
+        max_layers: 2,
+        max_width_px: 64,
+        max_height_px: 64,
+        per_layer_opacity: false,
+        hw_scaling: false,
+    };
 
-    impl Display for Unplugged {
-        fn output(&self) -> Option<DisplayMode> {
-            None
-        }
-
-        fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
-            self.presents += 1;
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn damage_with_no_output_is_stale_and_presents_nothing() {
-        let mut display = Unplugged { presents: 0 };
-        assert_eq!(
-            display.present_rects(&[0u8; 32], &[rect(0, 0, 1, 1)]),
-            Err(DriverError::Stale)
-        );
-        assert_eq!(display.presents, 0);
-    }
-
-    fn layer(width: u32, height: u32, stride: u32) -> AccelLayer<'static> {
+    fn layer(src: DamageRect) -> AccelLayer {
         AccelLayer {
-            pixels: &[],
-            width_px: width,
-            height_px: height,
-            stride_bytes: stride,
-            dst_x: 0,
-            dst_y: 0,
+            buffer: BufferId::new(1).expect("an id"),
+            src,
+            dst_x: -3,
+            dst_y: 2,
+            dst_width_px: src.width_px,
+            dst_height_px: src.height_px,
             opacity: 255,
         }
     }
 
     #[test]
-    fn layer_required_len_uses_stride_times_height() {
-        // 4-px BGRA scanline needs 16 bytes; stride 20 × 3 rows = 60.
-        let l = layer(4, 3, 20);
-        assert_eq!(l.required_len(DisplayFormat::Bgra8888), Ok(60));
+    fn a_layer_shows_only_a_part_of_its_buffer_the_hardware_can_take() {
+        assert_eq!(layer(rect(0, 0, 16, 8)).validate(&CAPS, 16, 8), Ok(()));
+        assert_eq!(layer(rect(4, 2, 12, 6)).validate(&CAPS, 16, 8), Ok(()));
+        for src in [
+            rect(0, 0, 0, 8),
+            rect(0, 0, 17, 8),
+            rect(8, 0, 9, 8),
+            rect(0, 7, 16, 2),
+            rect(u32::MAX, 0, 2, 1),
+        ] {
+            assert_eq!(
+                layer(src).validate(&CAPS, 16, 8),
+                Err(DriverError::LengthOutOfRange),
+                "{src:?}"
+            );
+        }
+        let wide = layer(rect(0, 0, 65, 1));
+        assert_eq!(
+            wide.validate(&CAPS, 128, 1),
+            Err(DriverError::LengthOutOfRange),
+            "wider than the hardware sources"
+        );
     }
 
     #[test]
-    fn layer_rejects_degenerate_or_narrow_geometry() {
+    fn a_layer_is_scaled_or_faded_only_where_the_hardware_can() {
+        let scaled = AccelLayer {
+            dst_width_px: 32,
+            ..layer(rect(0, 0, 16, 8))
+        };
         assert_eq!(
-            layer(0, 3, 16).required_len(DisplayFormat::Rgba8888),
+            scaled.validate(&CAPS, 16, 8),
             Err(DriverError::LengthOutOfRange)
         );
-        assert_eq!(
-            layer(4, 0, 16).required_len(DisplayFormat::Rgba8888),
-            Err(DriverError::LengthOutOfRange)
-        );
-        // Stride too small to hold one 4-px scanline (needs 16).
-        assert_eq!(
-            layer(4, 3, 12).required_len(DisplayFormat::Rgba8888),
-            Err(DriverError::LengthOutOfRange)
-        );
+        let scaling = AccelCaps {
+            hw_scaling: true,
+            ..CAPS
+        };
+        assert_eq!(scaled.validate(&scaling, 16, 8), Ok(()));
+        let faded = AccelLayer {
+            opacity: 128,
+            ..layer(rect(0, 0, 16, 8))
+        };
+        assert_eq!(faded.validate(&CAPS, 16, 8), Err(DriverError::Unsupported));
+        let fading = AccelCaps {
+            per_layer_opacity: true,
+            ..CAPS
+        };
+        assert_eq!(faded.validate(&fading, 16, 8), Ok(()));
     }
 
-    /// A back-end that records the layer stack it was asked to present
-    /// and validates each layer against its reported caps.
+    /// A display whose compositor shows every layer it admits.
     struct MockAccel {
-        mode: DisplayMode,
-        caps: AccelCaps,
-        layers_seen: core::cell::Cell<usize>,
+        display: MockDisplay,
+        layers_seen: usize,
     }
 
     impl Display for MockAccel {
         fn output(&self) -> Option<DisplayMode> {
-            Some(self.mode)
+            self.display.output()
         }
-        fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
-            Ok(())
+
+        fn frame_count(&self) -> u32 {
+            self.display.frame_count()
+        }
+
+        fn alloc_buffer(
+            &mut self,
+            width_px: u32,
+            height_px: u32,
+        ) -> Result<AllocatedBuffer, DriverError> {
+            self.display.alloc_buffer(width_px, height_px)
+        }
+
+        fn free_buffer(&mut self, id: BufferId) -> Result<(), DriverError> {
+            self.display.free_buffer(id)
+        }
+
+        fn present(
+            &mut self,
+            id: BufferId,
+            damage: &[DamageRect],
+        ) -> Result<Presented, DriverError> {
+            self.display.present(id, damage)
+        }
+
+        fn as_accelerated(&mut self) -> Option<&mut dyn AcceleratedDisplay> {
+            Some(self)
         }
     }
 
     impl AcceleratedDisplay for MockAccel {
-        fn accel_caps(&self) -> Result<AccelCaps, DriverError> {
-            Ok(self.caps)
+        fn accel_caps(&self) -> AccelCaps {
+            CAPS
         }
-        fn present_layers(&mut self, layers: &[AccelLayer<'_>]) -> Result<(), DriverError> {
-            if layers.len() > self.caps.max_layers as usize {
+
+        fn present_layers(&mut self, layers: &[AccelLayer]) -> Result<Presented, DriverError> {
+            if layers.len() > CAPS.max_layers as usize {
                 return Err(DriverError::LengthOutOfRange);
             }
-            for l in layers {
-                let need = l.required_len(self.mode.format)?;
-                if l.pixels.len() < need {
-                    return Err(DriverError::BufferTooSmall);
-                }
-                if l.opacity != 255 && !self.caps.per_layer_opacity {
-                    return Err(DriverError::Unsupported);
-                }
+            for layer in layers {
+                layer.validate(&CAPS, MODE.width_px, MODE.height_px)?;
             }
-            self.layers_seen.set(layers.len());
-            Ok(())
-        }
-    }
-
-    fn mock_accel() -> MockAccel {
-        MockAccel {
-            mode: DisplayMode {
-                width_px: 4,
-                height_px: 2,
-                stride_bytes: 16,
-                format: DisplayFormat::Bgra8888,
-            },
-            caps: AccelCaps {
-                max_layers: 2,
-                max_width_px: 64,
-                max_height_px: 64,
-                per_layer_opacity: false,
-            },
-            layers_seen: core::cell::Cell::new(0),
+            self.layers_seen = layers.len();
+            Ok(Presented::Shown)
         }
     }
 
     #[test]
-    fn accelerated_present_accepts_well_formed_layers() {
-        let mut d = mock_accel();
-        let pixels = [0u8; 16]; // 4×1 BGRA, stride 16.
-        let dyn_ref: &mut dyn AcceleratedDisplay = &mut d;
+    fn the_layer_compositor_is_reached_through_the_display() {
+        let mut d = MockAccel {
+            display: MockDisplay::new(),
+            layers_seen: 0,
+        };
+        let display: &mut dyn Display = &mut d;
+        let accel = display.as_accelerated().expect("a compositor");
+        assert_eq!(accel.accel_caps(), CAPS);
+        let one = layer(rect(0, 0, 4, 2));
+        assert_eq!(accel.present_layers(&[one]), Ok(Presented::Shown));
         assert_eq!(
-            dyn_ref.accel_caps().map(|c| c.max_layers),
-            Ok(2),
-            "caps round-trip"
+            accel.present_layers(&[one, one, one]),
+            Err(DriverError::LengthOutOfRange),
+            "past what the hardware composites"
         );
-        let layers = [AccelLayer {
-            pixels: &pixels,
-            width_px: 4,
-            height_px: 1,
-            stride_bytes: 16,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 255,
-        }];
-        assert!(dyn_ref.present_layers(&layers).is_ok());
-        assert_eq!(d.layers_seen.get(), 1);
+        assert_eq!(d.layers_seen, 1);
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::{DamageRect, HostedConsole};
+    use crate::Errno;
+
+    #[test]
+    fn a_rectangle_round_trips_and_a_short_buffer_does_not_decode() {
+        let rect = DamageRect {
+            x: 1,
+            y: 2,
+            width_px: 3,
+            height_px: u32::MAX,
+        };
+        assert_eq!(DamageRect::from_bytes(&rect.to_le_bytes()), Ok(rect));
+        assert_eq!(
+            DamageRect::from_bytes(&rect.to_le_bytes()[..15]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]
-    fn accelerated_present_fails_closed_on_over_budget_and_short_and_opacity() {
-        let mut d = mock_accel();
-        let pixels = [0u8; 16];
-        let one = AccelLayer {
-            pixels: &pixels,
-            width_px: 4,
-            height_px: 1,
-            stride_bytes: 16,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 255,
+    fn a_hosted_console_round_trips_and_fails_closed() {
+        let hosted = HostedConsole {
+            device_addr: 0x1_2345_6000,
+            stride_bytes: 5120,
         };
-        // Three layers exceeds max_layers == 2.
+        let bytes = hosted.to_le_bytes();
+        assert_eq!(HostedConsole::from_bytes(&bytes), Ok(hosted));
         assert_eq!(
-            d.present_layers(&[one, one, one]),
-            Err(DriverError::LengthOutOfRange)
+            HostedConsole::from_bytes(&bytes[..15]),
+            Err(Errno::BufferTooSmall)
         );
-        // A layer whose pixels are shorter than its geometry.
-        let short = AccelLayer {
-            pixels: &pixels[..8],
-            ..one
-        };
-        assert_eq!(d.present_layers(&[short]), Err(DriverError::BufferTooSmall));
-        // Per-layer opacity the hardware does not support.
-        let faded = AccelLayer {
-            opacity: 128,
-            ..one
-        };
-        assert_eq!(d.present_layers(&[faded]), Err(DriverError::Unsupported));
+        let mut dirty = bytes;
+        dirty[15] = 1;
+        assert_eq!(HostedConsole::from_bytes(&dirty), Err(Errno::BadMagic));
+        let mut flat = bytes;
+        flat[8..12].fill(0);
+        assert_eq!(
+            HostedConsole::from_bytes(&flat),
+            Err(Errno::LengthOutOfRange)
+        );
     }
 }
 

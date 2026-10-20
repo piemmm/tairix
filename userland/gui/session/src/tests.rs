@@ -12,7 +12,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use tairix_abi::driver::display::{DamageList, DamageRect, Display, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{
+    DamageList, DamageRect, DisplayFormat, DisplayMode, DisplayPower,
+};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::switchboard_ipc::{
     CommandSection, FrameReport, SeatReport, SwitchboardCommand, SwitchboardRequest,
@@ -31,6 +33,7 @@ use tairix_abi::{
 use tairix_controls::damage::Repaint;
 use tairix_controls::{ChainModel, ChainRow, ControlState, Fact, FactList, MenuItem, PointerState};
 use tairix_cursor::CursorTheme;
+use tairix_display::Presenter;
 use tairix_greeter::{Ticket, Tickets, Verdict, Verifier, UNNAMED_ACCOUNT};
 use tairix_hash::BuildFastHash;
 use tairix_icon::{
@@ -10206,6 +10209,7 @@ fn a_dropped_frame_reading_is_not_worth_stating() {
         present_calls: 1,
         chrome_hits: 0,
         chrome_misses: 0,
+        layers: 0,
     };
     assert!(
         !drop_is_noteworthy(SwitchboardCommand::FrameReport { report }),
@@ -15367,7 +15371,7 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
     // The bar coming up is the desktop's first frame, and a first frame is
     // admitted at once.
     shell.present(&mut comp);
-    assert!(pacer.admit(0, comp.has_damage()));
+    assert!(pacer.admit(0, comp.has_damage(), true));
     comp.composite();
     assert!(!comp.has_damage(), "the opening frame has been drained");
 
@@ -15386,7 +15390,7 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
             )
             .expect("the in-memory source never faults");
         assert!(comp.has_damage(), "sample {sample} changed nothing");
-        if pacer.admit(at, comp.has_damage()) {
+        if pacer.admit(at, comp.has_damage(), true) {
             comp.composite();
             composites += 1;
         }
@@ -15403,7 +15407,7 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
     let due = pacer.park_deadline_ns(last_ns, WAITSET_TIMEOUT_NONE);
     assert!(due > 0, "a deadline of nothing would be a busy poll");
     assert!(due < Timeline::FRAME_NS, "one period at most, not {due}ns");
-    assert!(pacer.admit(last_ns + due, comp.has_damage()));
+    assert!(pacer.admit(last_ns + due, comp.has_damage(), true));
     assert!(
         !comp.composite().is_empty(),
         "the held frame reached the screen having drawn nothing"
@@ -15480,19 +15484,22 @@ struct RefusingDisplay {
     refusals: u32,
 }
 
-impl Display for RefusingDisplay {
-    fn output(&self) -> Option<DisplayMode> {
-        Some(self.mode)
+impl Presenter for RefusingDisplay {
+    fn mode(&self) -> DisplayMode {
+        self.mode
     }
 
-    fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
-        self.refusals += 1;
-        Err(DriverError::Busy)
+    fn ready(&self) -> bool {
+        true
     }
 
-    fn present_rects(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
+    fn present(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
         self.refusals += 1;
-        Err(DriverError::Busy)
+        Err(DriverError::DeviceFault)
+    }
+
+    fn set_power(&mut self, _power: DisplayPower) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 

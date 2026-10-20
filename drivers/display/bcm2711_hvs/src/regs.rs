@@ -38,6 +38,12 @@ pub(crate) mod hvs {
     }
     pub const DISPCTRL_SCLEIRQ: u32 = 1;
 
+    pub const DISPSTAT: usize = 0x04;
+    /// A channel finished compositing a frame; written as one to clear.
+    pub const fn dispstat_eof(channel: usize) -> u32 {
+        1 << (8 + 8 * channel)
+    }
+
     pub const DISPECTRL: usize = 0x0C;
     pub const DISPECTRL_DSP2_MUX: u32 = 1 << 31;
     pub const DISPDITHER: usize = 0x14;

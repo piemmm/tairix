@@ -2267,8 +2267,8 @@ The consumers, each owned by its own plan:
 
 TAIRiX drives the BCM2711 display engine itself, as Linux's full-KMS `vc4`
 does. The firmware lights the screen at boot; the engine driver has the
-kernel move its framebuffer console off the firmware's memory
-(`console_relocate`), then tells the firmware to stop (`NOTIFY_DISPLAY_DONE`,
+kernel host its framebuffer console on memory the kernel owns, at the size
+the firmware lit (`console_adopt`), then tells the firmware to stop (`NOTIFY_DISPLAY_DONE`,
 tag `0x0003_0066`, its answer recorded and the display taken over whatever it
 is), stops whatever pipe it left running in the order the hardware requires —
 encoder output, timing generator, HVS channel — and sets every mode itself.
@@ -2304,10 +2304,10 @@ lives in the firmware's memory.
   HVS's own `hvs`), read from the valve's own node, which stays disabled, rather
   than as a node of its own; links the HVS node to each encoder it feeds
   (`hdmi0`, `hdmi1`), which carries the matching duty; gives it its bus's DMA
-  windows; and marks it `BootConsole` in place of a boot display node, so the
+  windows; and marks it `ConsoleHost` in place of a boot display node, so the
   generic framebuffer service never binds the firmware's surface and the
-  engine alone may have the kernel move the console off it
-  (`console_relocate`). That wiring is fixed silicon the
+  engine alone may have the kernel host the console
+  (`console_adopt`). That wiring is fixed silicon the
   firmware's tree leaves implicit, and the architecture port is the one place a
   platform's wiring is stated; the names are `tairix_vcmailbox::ENGINE_OUTPUTS`,
   defined once for the port and the engine's driver. The HDMI binding lists its

@@ -26,17 +26,15 @@ path = "src/main.rs"
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
-# The witnesses are kernel-attested: the bundle loader's `APP_LOADED` and
-# the IPC layer's `CallReplied`, matched against the shared `lib/abi`
-# spellings of the service store and the display endpoint.
-tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The bundle-name reading every guest sink shares.
+# The witnesses, read by the shared greeter witness: the bundle loader's
+# `APP_LOADED`, the IPC layer's `CallEndpointCreated` naming the display
+# endpoint's process, and that process's own first-frame record.
 tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
-tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

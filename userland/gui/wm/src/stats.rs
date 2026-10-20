@@ -64,6 +64,9 @@ pub struct FrameStats {
     /// Window-furniture lookups that had to be rendered, whether the cache
     /// then retained them or refused.
     pub chrome_misses: u32,
+    /// Hardware layers the display's engine showed the frame in, its base
+    /// among them; zero for a frame composited into the scan-out alone.
+    pub layers: u32,
 }
 
 impl FrameStats {
@@ -78,6 +81,7 @@ impl FrameStats {
         present_calls: 0,
         chrome_hits: 0,
         chrome_misses: 0,
+        layers: 0,
     };
 
     /// `true` when the frame changed nothing at all.
@@ -176,6 +180,11 @@ impl FrameCounters {
 
     pub(crate) fn bump_present(&mut self) {
         self.frame.present_calls = self.frame.present_calls.saturating_add(1);
+    }
+
+    /// The frame went to the display's layer engine as `layers` layers.
+    pub(crate) fn set_layers(&mut self, layers: usize) {
+        self.frame.layers = u32::try_from(layers).unwrap_or(u32::MAX);
     }
 
     pub(crate) fn add_chrome(&mut self, hits: u32, misses: u32) {

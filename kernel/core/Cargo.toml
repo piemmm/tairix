@@ -141,6 +141,8 @@ tairix-resref = { path = "../../lib/resref", version = "=0.0.0" }
 # the erase (rub-out) control through `tairix_vt::control` rather than a second
 # definition of those bytes.
 tairix-vt = { path = "../../lib/vt", version = "=0.0.0" }
+# The console surface and disposition vocabulary the console device trait
+# answers in, and the mode geometry `console_adopt` checks.
 tairix-fbcon = { path = "../../lib/fbcon", version = "=0.0.0" }
 # The single tty line discipline (`plans/PTY.md`): the
 # console device (`src/console.rs`) cooks output (`ONLCR`), echoes input, and

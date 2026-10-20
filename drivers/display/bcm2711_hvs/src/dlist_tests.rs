@@ -29,7 +29,13 @@ const KERNEL_AT: u32 = 32;
 
 #[test]
 fn a_surface_shown_at_its_own_size_is_one_unity_plane() {
-    let words = plane(&FULL_HD, &place(0, 0, 1920, 1080), KERNEL_AT, 0).expect("fits");
+    let words = plane(
+        &FULL_HD,
+        &place(0, 0, 1920, 1080),
+        (KERNEL_AT, 0),
+        Alpha::Opaque,
+    )
+    .expect("fits");
     assert_eq!(
         words.as_slice(),
         [
@@ -48,7 +54,7 @@ fn a_surface_shown_at_its_own_size_is_one_unity_plane() {
 #[test]
 fn an_enlarged_plane_filters_both_axes_through_the_kernel() {
     let at = place(0, 0, 3840, 2160);
-    let words = plane(&FULL_HD, &at, KERNEL_AT, 7680).expect("fits");
+    let words = plane(&FULL_HD, &at, (KERNEL_AT, 7680), Alpha::Opaque).expect("fits");
     let half_scale_ppf = 0x4080_0060; // AGC, 0.5 in 16.16, phase -1/2
     assert_eq!(words.len(), 17);
     assert_eq!(words[0] >> 24 & 0x3F, 17, "the size it states");
@@ -79,7 +85,7 @@ fn an_enlarged_plane_filters_both_axes_through_the_kernel() {
 #[test]
 fn a_halved_plane_shrinks_through_the_trapezoidal_filter() {
     let at = place(0, 0, 1920, 1080);
-    let words = plane(&UHD, &at, KERNEL_AT, 0).expect("fits");
+    let words = plane(&UHD, &at, (KERNEL_AT, 0), Alpha::Opaque).expect("fits");
     assert_eq!(words.len(), 15, "no kernel for a trapezoid");
     assert_eq!(words[0] >> CTL0_SCL0_SHIFT & 7, 3);
     assert_eq!(words[0] >> CTL0_SCL1_SHIFT & 7, 3);
@@ -95,7 +101,13 @@ fn a_halved_plane_shrinks_through_the_trapezoidal_filter() {
 #[test]
 fn the_longest_plane_fits_its_bound() {
     // Shrunk across past a third, enlarged down: trapezoid and polyphase.
-    let words = plane(&UHD, &place(0, 0, 1280, 3000), KERNEL_AT, 0).expect("fits");
+    let words = plane(
+        &UHD,
+        &place(0, 0, 1280, 3000),
+        (KERNEL_AT, 0),
+        Alpha::Opaque,
+    )
+    .expect("fits");
     assert_eq!(words.len(), PLANE_WORDS_MAX);
 }
 
@@ -141,17 +153,22 @@ fn a_plane_no_field_holds_is_refused() {
         },
     ] {
         assert_eq!(
-            plane(&surface, &at, KERNEL_AT, 0),
+            plane(&surface, &at, (KERNEL_AT, 0), Alpha::Opaque),
             Err(DriverError::OutOfRange)
         );
     }
     assert_eq!(
-        plane(&FULL_HD, &place(0, 4096, 1920, 1080), KERNEL_AT, 0),
+        plane(
+            &FULL_HD,
+            &place(0, 4096, 1920, 1080),
+            (KERNEL_AT, 0),
+            Alpha::Opaque
+        ),
         Err(DriverError::OutOfRange),
         "a line past the field"
     );
     assert_eq!(
-        plane(&FULL_HD, &at, 1 << 14, 0),
+        plane(&FULL_HD, &at, (1 << 14, 0), Alpha::Opaque),
         Err(DriverError::OutOfRange),
         "a kernel past the memory"
     );
@@ -164,4 +181,37 @@ fn the_kernel_is_its_half_mirrored_about_the_centre() {
     for at in 0..5 {
         assert_eq!(words[at], words[KERNEL_WORDS - 1 - at]);
     }
+}
+
+#[test]
+fn a_premultiplied_plane_blends_by_its_own_alpha_scaled_by_its_opacity() {
+    let at = place(0, 0, 1920, 1080);
+    let opaque = plane(&FULL_HD, &at, (KERNEL_AT, 0), Alpha::Premultiplied(u8::MAX)).expect("fits");
+    assert_eq!(
+        opaque[2],
+        CTL2_ALPHA_PREMULT | 0xFFF0,
+        "its own alpha, at full strength"
+    );
+    let half = plane(&FULL_HD, &at, (KERNEL_AT, 0), Alpha::Premultiplied(128)).expect("fits");
+    assert_eq!(
+        half[2],
+        CTL2_ALPHA_PREMULT | CTL2_ALPHA_MIX | ((128 * 0xFFF + 127) / 255) << 4,
+        "mixed with a constant of the opacity asked for"
+    );
+}
+
+#[test]
+fn an_unscaled_plane_keeps_its_position_size_and_pointer_where_a_live_update_rewrites_them() {
+    let at = place(12, 34, 64, 64);
+    let cursor = Surface {
+        bus: 0xC300_0000,
+        stride: 256,
+        width: 64,
+        height: 64,
+        format: DisplayFormat::Bgra8888,
+    };
+    let words = plane(&cursor, &at, (KERNEL_AT, 0), Alpha::Premultiplied(u8::MAX)).expect("fits");
+    assert_eq!(words[UNITY_POSITION], position(&at));
+    assert_eq!(words[UNITY_SIZE], size(&cursor));
+    assert_eq!(words[UNITY_POINTER], cursor.bus);
 }

@@ -27,11 +27,12 @@
 //!
 //! # The PASS witnesses
 //!
-//! Both are **kernel-attested**. A userland record reaches the diagnostic
-//! sink only — the audit sink stays kernel-only, so user space can neither
-//! forge nor truncate an entry — which is why the greeter's own
-//! "the login screen is up" cannot be the gate, however plainly it reads on
-//! the serial transcript.
+//! Both rest on what the kernel attests. A userland record reaches the
+//! diagnostic sink only — the audit sink stays kernel-only, so user space can
+//! neither forge nor truncate an entry — and the kernel stamps it with its
+//! emitter, so a userland record counts only from the process the audit trail
+//! says it must come from. The greeter's own "the login screen is up" cannot
+//! be the gate, however plainly it reads on the serial transcript.
 //!
 //! 1. **Login chose the graphical round.** An `APP_LOADED` record naming the
 //!    greeter's bundle in the system service store: the kernel verified and
@@ -39,13 +40,13 @@
 //!    round never asks for it, so the record is login's decision itself.
 //!    `PROCESS_SPAWNED` would not do — it carries an entry address and can
 //!    attribute no bundle.
-//! 2. **A frame reached the screen.** The next reply the display service
-//!    serves on its reserved endpoint, once (1) has latched. The greeter is
-//!    the only graphical client alive at that point — no desktop, no app,
-//!    and the script types nothing after the passphrase — so the exchange is
-//!    the login screen's own present. Ordering after (1) is what makes it
-//!    attributable: an unordered reply on a shared rendezvous belongs to
-//!    nobody in particular.
+//! 2. **A frame reached the display.** Once (1) has latched, the display
+//!    service's `FIRST_PRESENT`, which it records only once its display took
+//!    a client's frame, from the process the kernel's `CallEndpointCreated`
+//!    names as binding the reserved display endpoint. A present the display
+//!    refused never produces it. The greeter is the only graphical client
+//!    alive at that point — no desktop, no app, and the script types nothing
+//!    after the passphrase — so the frame is the login screen's own.
 //!
 //! Together they say the machine decided on the graphical login *and*
 //! reached the point of drawing it. A text round, a greeter that cannot
@@ -61,14 +62,12 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::names_bundle;
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
+    use tairix_itest_witness::GreeterFrame;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
-    use tairix_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -86,73 +85,10 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// Audit observer that replays the whole trail to serial and latches the
-    /// two PASS witnesses described in the module docs.
-    struct GreeterDefaultSink {
-        /// Login chose the graphical round: the greeter's bundle was
-        /// verified and loaded.
-        greeter_loaded: AtomicBool,
-        /// The display service served the greeter a reply, so the login
-        /// screen reached the point of drawing.
-        frame_served: AtomicBool,
-    }
-
-    impl GreeterDefaultSink {
-        /// A sink with no witness latched.
-        const fn new() -> Self {
-            Self {
-                greeter_loaded: AtomicBool::new(false),
-                frame_served: AtomicBool::new(false),
-            }
-        }
-
-        /// Latch the decision witness from an `APP_LOADED` record naming the
-        /// greeter's bundle. A record naming any other bundle leaves the
-        /// latch alone.
-        fn note_bundle_loaded(&self, event: &Event<'_>) {
-            for field in event.fields {
-                if field.key != "bundle" {
-                    continue;
-                }
-                if let tairix_log::FieldValue::Str(value) = field.value {
-                    if names_bundle(value, tairix_abi::SYSTEM_SERVICE_STORE, GREETER_BUNDLE_NAME) {
-                        self.greeter_loaded.store(true, Ordering::Release);
-                    }
-                }
-            }
-        }
-
-        /// Latch the drawing witness from a reply the display service served
-        /// after the greeter loaded.
-        ///
-        /// The endpoint is matched against the exact hex spelling the
-        /// kernel/ipc audit fields render (`format_hex_u64`), so the match
-        /// can neither false-positive on another endpoint nor drift from the
-        /// emitter.
-        fn note_call_replied(&self, event: &Event<'_>) {
-            if !self.greeter_loaded.load(Ordering::Acquire) {
-                return;
-            }
-            let mut endpoint_hex = [0u8; 16];
-            let expected =
-                format_hex_u64(tairix_abi::display_ipc::DISPLAY_ENDPOINT, &mut endpoint_hex);
-            for field in event.fields {
-                if field.key != "endpoint" {
-                    continue;
-                }
-                if let tairix_log::FieldValue::Str(value) = field.value {
-                    if value == expected {
-                        self.frame_served.store(true, Ordering::Release);
-                    }
-                }
-            }
-        }
-
-        /// Whether every witness is in.
-        fn passed(&self) -> bool {
-            self.greeter_loaded.load(Ordering::Acquire) && self.frame_served.load(Ordering::Acquire)
-        }
-    }
+    /// Observer of both the audit and the diagnostic stream, which replays
+    /// each to serial and latches the two PASS witnesses described in the
+    /// module docs.
+    struct GreeterDefaultSink(GreeterFrame);
 
     impl Sink for GreeterDefaultSink {
         fn write_event(&self, event: &Event<'_>) {
@@ -160,26 +96,21 @@ mod kernel {
             // records the full boot → autoload → unlock → login → greeter
             // timeline and the host can gate its injection on it.
             SerialSink::new().write_event(event);
-            if event.id.0 == tairix_appload::events::APP_LOADED.0 {
-                self.note_bundle_loaded(event);
-            } else if event.id.0 == tairix_kernel_ipc::AuditEvent::CallReplied.id().0 {
-                self.note_call_replied(event);
-            } else {
-                return;
-            }
-            if self.passed() {
+            if self.0.observe(
+                event,
+                tairix_itest_witness::GreeterRecords {
+                    app_loaded: tairix_appload::events::APP_LOADED,
+                    endpoint_created: tairix_kernel_ipc::AuditEvent::CallEndpointCreated.id(),
+                    first_present: tairix_display::events::FIRST_PRESENT,
+                },
+            ) {
                 qemu_exit::exit_success();
             }
         }
     }
 
-    /// The audit observer the boot pipeline is handed.
-    static AUDIT_SINK: GreeterDefaultSink = GreeterDefaultSink::new();
-
-    /// The greeter bundle's name in the system service store — the bundle
-    /// `tairix_login::session::GREETER_SERVICE_PATH` names. A rename makes
-    /// this vertical time out loudly, never pass on the wrong bundle.
-    const GREETER_BUNDLE_NAME: &str = "greeter";
+    /// The observer the boot pipeline is handed for both streams.
+    static AUDIT_SINK: GreeterDefaultSink = GreeterDefaultSink(GreeterFrame::new());
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
@@ -201,7 +132,8 @@ mod kernel {
         boot_aarch64::boot(
             dtb,
             &ALLOCATOR,
-            &SERIAL_SINK,
+            // The display service's record reaches the diagnostic stream.
+            &AUDIT_SINK,
             &AUDIT_SINK,
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the
             // default `Info` filter; the host waits for that record's

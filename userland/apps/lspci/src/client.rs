@@ -467,8 +467,8 @@ fn describe_property(resource: &HwResource, line: &mut String) {
         Ok((HwProperty::RadioCoexistence, _)) => {
             line.push_str("Keeps clear of the 2.4 GHz radio band");
         }
-        Ok((HwProperty::BootConsole, _)) => {
-            line.push_str("Takes the boot console's screen over");
+        Ok((HwProperty::ConsoleHost, _)) => {
+            line.push_str("Shows the kernel console");
         }
         Ok((HwProperty::BlockMedium, value)) => {
             match tairix_abi::blkio::BlkMedium::decode(&value.to_le_bytes()) {
@@ -1047,6 +1047,20 @@ C 02  Network controller
             out.lines()[1..],
             ["  Keeps clear of the 2.4 GHz radio band"]
         );
+    }
+
+    #[test]
+    fn verbose_says_which_display_shows_the_kernel_console() {
+        let mut gpu = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Display);
+        gpu.push_match_key(HwMatchKey::pci(0x1af4, 0x1050, 0x03_80_00))
+            .expect("key fits");
+        gpu.push_resource(HwResource::property(HwProperty::ConsoleHost, 1))
+            .expect("resource fits");
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&gpu.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(out.lines()[1..], ["  Shows the kernel console"]);
     }
 
     #[test]

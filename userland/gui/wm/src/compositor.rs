@@ -7,25 +7,23 @@
 //! *over* the opaque background through [`Pixel::over`] — and encodes
 //! them into a scan-out byte frame laid out for the active
 //! [`DisplayMode`]. [`Compositor::present`] hands that frame to a
-//! [`Display`] driver.
+//! [`Presenter`], or where the display composites layers in hardware, the
+//! windows at the top of the stack on layers of their own and the pointer on
+//! its cursor plane (see `layers`).
 //!
-//! All compositing happens here, in user space; the kernel only ships
-//! framebuffer access through a capability. GPU
-//! acceleration, when a driver exposes it, replaces this software path
-//! behind the same public surface; today the software path is the
+//! All compositing policy is here, in user space; the kernel only ships
+//! framebuffer access through a capability. The software path is the
 //! fallback every platform always has.
 
 use alloc::vec::Vec;
 use core::ops::Range;
 
 use tairix_abi::desktop::DOUBLE_CLICK_DEFAULT;
-use tairix_abi::driver::display::{
-    AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayMode, MAX_DAMAGE_RECTS,
-};
+use tairix_abi::driver::display::{DamageRect, DisplayMode, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS};
 use tairix_abi::sysinfo::DesktopFrameTotals;
 use tairix_abi::time::Duration64;
 use tairix_abi::DriverError;
-use tairix_display::{damage_list, scanout_len, ChannelOrder};
+use tairix_display::{damage_list, scanout_len, ChannelOrder, Presenter};
 
 use tairix_collections::SmallVec;
 use tairix_controls::{
@@ -58,6 +56,11 @@ use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{
     Placement, PointerCatch, ResizeBounds, RowLayer, Window, WindowId, WindowRow, WindowShape,
 };
+
+#[path = "layers.rs"]
+mod layers;
+
+use layers::Change;
 
 /// The furniture a composite pass built for itself because the cache would
 /// not retain it, kept alive for exactly that pass.
@@ -317,6 +320,19 @@ pub struct Compositor {
     /// What a client's present changed in its window's content, held here and
     /// cleared per present so presenting allocates nothing.
     present_changes: Region,
+    /// The layers the last layered present left on the display.
+    layers: Option<layers::Stack>,
+    /// What the display refused of its layers and cursor plane, so a refusal
+    /// costs one request rather than one a frame.
+    refused: layers::Refusals,
+    /// What the display's cursor plane was last given, while it carries the
+    /// pointer.
+    plane: Option<layers::PlaneShown>,
+    /// The pointer image as the cursor plane takes it, kept for reuse.
+    plane_bytes: Vec<u8>,
+    /// What of a damaged rectangle lies outside every flattened layer, held
+    /// for reuse.
+    zone_rest: Region,
     /// Which of the composite's specialisations may serve this compositor.
     /// Only a test turns one off, to compose the same scene the general way
     /// and hold the two to each other; production has no reason to and no way
@@ -530,6 +546,11 @@ impl Compositor {
             presented: None,
             undelivered: Region::new(),
             present_changes: Region::new(),
+            layers: None,
+            refused: layers::Refusals::NONE,
+            plane: None,
+            plane_bytes: Vec::new(),
+            zone_rest: Region::new(),
             #[cfg(test)]
             fast_paths: FastPaths::ALL,
             next_id: 1,
@@ -591,6 +612,11 @@ impl Compositor {
         self.frame = frame;
         self.frost_plane = frost_plane;
         self.blur_scratch = blur_scratch;
+        // The display's buffers belonged to its configuration for the old
+        // mode, and went with it.
+        self.layers = None;
+        self.refused = layers::Refusals::NONE;
+        self.plane = None;
         // Retained frosts belong to the old screen and are dropped by the
         // epoch this mode is part of.
         self.damage.clear();
@@ -709,6 +735,9 @@ impl Compositor {
     /// A window that is no longer in the stack cannot be placed in it, so an
     /// unknown `id` marks conservatively.
     fn mark_layer(&mut self, id: WindowId, rect: Rect) {
+        if self.route_to_layer(id, Change::Pixels(rect), [rect, Rect::EMPTY]) {
+            return;
+        }
         match self.index_of(id) {
             Some(index) => self.mark_from(rect, index.saturating_add(1)),
             None => self.mark(rect),
@@ -1804,7 +1833,7 @@ impl Compositor {
     /// origin marks no damage and still returns `true` (only an unknown
     /// `id` returns `false`).
     pub fn move_window(&mut self, id: WindowId, origin: Point) -> bool {
-        self.mutate(id, |w| w.set_origin(origin))
+        self.mutate_as(id, Change::Moved, |w| w.set_origin(origin))
     }
 
     /// Choose which of a window's pixels claim the pointer.
@@ -1882,20 +1911,6 @@ impl Compositor {
             self.frost.invalidate(&id);
         }
         known
-    }
-
-    /// Whether any visible window asks for a backdrop blur.
-    ///
-    /// The effect reads the pixels already composited behind a window, so
-    /// it exists only in the software composite path: a hardware layer is
-    /// composed from its own pixels alone and cannot sample what is behind
-    /// it. [`present_accelerated`](Self::present_accelerated) therefore
-    /// takes the software path whenever this is `true`.
-    #[must_use]
-    pub fn has_backdrop_blur(&self) -> bool {
-        self.windows
-            .iter()
-            .any(|w| w.is_visible() && w.blur_radius() > 0)
     }
 
     /// Set a window's corner style; its footprint is marked dirty. Setting
@@ -2075,6 +2090,9 @@ impl Compositor {
         let mut changed = core::mem::take(&mut self.present_changes);
         changed.clear();
         let out = convert(content, &mut changed);
+        for local in changed.rects() {
+            window.content_changed(*local);
+        }
         let client = window.client_rect();
         if established {
             self.mark_layer(id, client);
@@ -2184,6 +2202,9 @@ impl Compositor {
             return false;
         };
         paint(content, painted.rects());
+        for local in painted.rects() {
+            window.content_changed(*local);
+        }
         let client = window.client_rect();
         painted.translate(client.left(), client.top());
         painted.clip(client);
@@ -3443,6 +3464,7 @@ impl Compositor {
                 .scaled
                 .as_ref()
                 .is_some_and(|scaled| !scaled.owed.is_empty())
+            || self.layers_owe()
     }
 
     /// Whether `point` lies within a currently-dirty rectangle. Test-only: it
@@ -3462,7 +3484,7 @@ impl Compositor {
     /// screen-clipped rectangles every mutation marked dirty since the
     /// last composite, plus the cursor's own damage (see below) — empty
     /// when nothing was dirty. Naming each of its rectangles in the present
-    /// (via [`Display::present_rects`]) moves bytes proportional to what
+    /// ([`Presenter::present`]'s damage) moves bytes proportional to what
     /// changed rather than their bounding box, which can span far more of
     /// the screen than the union of the pixels that actually moved (a
     /// dirty taskbar strip plus a cursor near the opposite edge, say). While
@@ -3516,7 +3538,6 @@ impl Compositor {
         damage.clear();
         self.damage = damage;
         self.ensure_shadow_tiles();
-        let reach = self.shadow.reach();
         // The root fill is constant for the whole composite; premultiply
         // it once rather than per pixel.
         let base = self.background.premultiply();
@@ -3536,33 +3557,68 @@ impl Compositor {
                 .any(|&dirty| covers(window, reach_around(dirty, frost_reach)))
         });
         let mut hits = core::mem::take(&mut self.hits);
+        let mut rest = core::mem::take(&mut self.zone_rest);
+        let (split, zones) = self.layer_depths();
         for &area in &plan {
             composited.add(area);
             self.stats.add_damaged(area_px(area.width, area.height));
-            // Only a window whose footprint overlaps this rectangle can
-            // contribute a pixel inside it; every other window's sample
-            // is unconditionally `None` here, so skipping it is exact
-            // (bit-for-bit identical output) and turns the per-pixel
-            // window scan from "all windows" into "the few that overlap".
-            hits.clear();
-            for (index, window) in self.windows.iter().enumerate() {
-                if casts_into(window, area, reach) {
-                    hits.push(index);
+            // Each part of the rectangle is composited to the depth the frame
+            // or the flattened layer showing it needs.
+            rest.clear();
+            rest.add(area);
+            let mut pieces: ArrayVec<(Rect, usize), { MAX_ACCEL_LAYERS + 1 }> = ArrayVec::new();
+            for &(zone, depth) in &zones {
+                let inside = area.intersection(&zone);
+                if !inside.is_empty() {
+                    rest.subtract(zone);
+                    let _ = pieces.try_push((inside, depth));
                 }
             }
-            self.recompose_rect(area, base, &hits, &fallback);
+            for &piece in rest.rects() {
+                self.recompose_piece(piece, split, base, &mut hits, &fallback);
+            }
+            for &(piece, depth) in &pieces {
+                self.recompose_piece(piece, depth, base, &mut hits, &fallback);
+            }
         }
+        self.zone_rest = rest;
         self.plan = plan;
         self.hits = hits;
         self.retain_pending_frost();
         for window in &mut self.windows {
             window.set_backdrop_changed(false);
         }
-        if self.scaled.is_some() {
+        if self.scaled_in_hardware() {
+            self.scanout.clear();
+        } else if self.scaled.is_some() {
             self.scale_out(composited, screen);
         } else {
             self.rescan_scanout(composited, screen);
         }
+    }
+
+    /// Recompose `piece` from the windows below z-index `depth`.
+    fn recompose_piece(
+        &mut self,
+        piece: Rect,
+        depth: usize,
+        base: Pixel,
+        hits: &mut Vec<usize>,
+        fallback: &ChromeFallback,
+    ) {
+        let reach = self.shadow.reach();
+        // Only a window whose footprint overlaps this rectangle can
+        // contribute a pixel inside it; every other window's sample is
+        // unconditionally `None` here, so skipping it is exact (bit-for-bit
+        // identical output) and turns the per-pixel window scan from "all
+        // windows" into "the few that overlap".
+        hits.clear();
+        for (index, window) in self.windows.iter().enumerate().take(depth) {
+            if casts_into(window, piece, reach) {
+                hits.push(index);
+            }
+        }
+        self.recompose_rect(piece, base, hits, fallback);
     }
 
     /// Re-encode the scan-out bytes of everything
@@ -3999,30 +4055,45 @@ impl Compositor {
         &self.back
     }
 
-    /// Composite any pending damage and present it to `display`.
+    /// Composite any pending damage and present it to `presenter`.
     ///
     /// No damage means nothing changed since the last present, so this does
     /// nothing at all: no scan-out copy, no driver blit, and no frame in the
     /// accounting ([`frame_totals`](Self::frame_totals)). A run loop may
     /// therefore call this on every wake, and a reader watching those totals
-    /// for change still settles while the screen is idle.
+    /// for change still settles while the screen is idle. Nor does a present
+    /// the display is not [ready](Presenter::ready) for: the damage waits for
+    /// it, and the frame that goes then carries all of it.
     ///
-    /// **A frame is presented once, naming everything it changed.** Damage
-    /// that covers the screen takes the full [`Display::present`] path;
-    /// anything else takes [`Display::present_rects`], whose list is the
-    /// frame's disjoint dirty rectangles (`damage_list` chooses between the
-    /// two, and degrades to the bounding box past [`MAX_DAMAGE_RECTS`]). The
-    /// bytes moved are therefore proportional to what actually changed
-    /// rather than to the box around it — a taskbar strip and a cursor near
-    /// the opposite edge cost those two rectangles even though the box
-    /// between them is the screen — and a scattered frame costs one dispatch
-    /// rather than one per rectangle.
+    /// Where the display composites layers, the windows at the top of the
+    /// stack go on layers of their own (see `layers`), and the pointer rides
+    /// the cursor plane wherever it can. Otherwise **a frame is presented
+    /// once, naming everything it changed**: the frame's disjoint dirty
+    /// rectangles, degrading to the bounding box past [`MAX_DAMAGE_RECTS`],
+    /// so the bytes moved are proportional to what changed rather than to the
+    /// box around it.
     ///
     /// # Errors
     ///
-    /// Propagates any [`DriverError`] the display driver returns from
-    /// [`Display::present`] / [`Display::present_rects`].
-    pub fn present(&mut self, display: &mut dyn Display) -> Result<(), DriverError> {
+    /// Propagates any [`DriverError`] the display returns.
+    pub fn present(&mut self, presenter: &mut dyn Presenter) -> Result<(), DriverError> {
+        if !presenter.ready() {
+            return Ok(());
+        }
+        if presenter.layers().is_none() {
+            // Nothing here ever takes a layer, so nothing needs to know which
+            // content is translucent.
+            for window in &mut self.windows {
+                window.forget_partial();
+            }
+        }
+        self.drop_layers_of_another(presenter);
+        let wanted = self.layers_wanted(presenter);
+        self.route_pointer(presenter, wanted);
+        let layered = wanted && self.pointer_allows_layers();
+        if !layered {
+            self.leave_layers(presenter.layers());
+        }
         // A wake with nothing pending is not a frame, and must not open one:
         // the counters are what a reader watches for change, so counting the
         // wakes themselves would make the totals move for ever on an idle
@@ -4031,6 +4102,9 @@ impl Compositor {
             return Ok(());
         }
         self.stats.begin_frame(self.screen_px());
+        if layered && self.present_layered(presenter)? {
+            return Ok(());
+        }
         let mut region = core::mem::take(&mut self.composed);
         self.recompose_damage(&mut region);
         let mut owed = core::mem::take(&mut self.undelivered);
@@ -4038,7 +4112,7 @@ impl Compositor {
         for &rect in owed.rects() {
             region.add(rect);
         }
-        let sent = self.send(display, &region);
+        let sent = self.send(presenter, &region);
         if sent.is_err() {
             self.undelivered = region;
         } else {
@@ -4047,18 +4121,25 @@ impl Compositor {
         sent
     }
 
-    /// Present the frame's `region` to `display`, recording how the frame got
-    /// there; an empty region sends nothing.
-    fn send(&mut self, display: &mut dyn Display, region: &Region) -> Result<(), DriverError> {
+    /// Bring the cursor plane to the pointer, between frames: what a seat
+    /// does once per batch of pointer input, since moving a pointer on the
+    /// plane presents no frame.
+    pub fn place_pointer(&mut self, presenter: &mut dyn Presenter) {
+        let layered = self.layers.is_some();
+        self.route_pointer(presenter, layered);
+    }
+
+    /// Present the frame's `region` to `presenter`, recording how the frame
+    /// got there; an empty region sends nothing.
+    fn send(&mut self, presenter: &mut dyn Presenter, region: &Region) -> Result<(), DriverError> {
         if region.is_empty() {
             return Ok(());
         }
         self.stats.bump_present();
-        let mut list = [DamageRect::full(&self.mode); MAX_DAMAGE_RECTS];
-        match damage_list(region, &self.mode, &mut list) {
-            Some(rects) => display.present_rects(&self.frame, rects),
-            None => display.present(&self.frame),
-        }?;
+        let whole = [DamageRect::full(&self.mode)];
+        let mut list = [whole[0]; MAX_DAMAGE_RECTS];
+        let damage = damage_list(region, &self.mode, &mut list).unwrap_or(&whole);
+        presenter.present(&self.frame, damage)?;
         self.presented = Some(Presentation::Composited);
         Ok(())
     }
@@ -4088,237 +4169,6 @@ impl Compositor {
         }
     }
 
-    /// Present via the display's hardware layer engine when it can serve
-    /// the current scene, falling back to the software full-frame path
-    /// otherwise (the software path is always the
-    /// fallback).
-    ///
-    /// The scene is encoded back-to-front as one solid background layer,
-    /// one layer per visible window (its surface baked with that window's
-    /// opacity and rounded-corner coverage), and the cursor on top, so the
-    /// hardware result matches the software compositor pixel-for-pixel. If
-    /// the engine's [`AccelCaps`] cannot hold that many layers, a layer
-    /// is larger than the engine can source, or a screen reveal
-    /// ([`set_reveal`](Self::set_reveal)) is in flight, the whole frame is
-    /// composited in software and presented instead — never a partial
-    /// hardware frame.
-    ///
-    /// # Errors
-    ///
-    /// Propagates any [`DriverError`] from the hardware
-    /// [`AcceleratedDisplay::present_layers`] or, on fallback, the
-    /// software [`Display::present`].
-    pub fn present_accelerated(
-        &mut self,
-        display: &mut dyn AcceleratedDisplay,
-    ) -> Result<(), DriverError> {
-        let caps = display.accel_caps()?;
-        self.stats.begin_frame(self.screen_px());
-        // A hardware layer is composed from its own pixels alone and cannot
-        // sample what is already behind it, so a backdrop blur has no layer
-        // encoding at all and the whole frame goes through software.
-        // An engine layer is placed in output pixels at its own size, so a
-        // desktop drawn smaller than its output is resampled in software.
-        let layers =
-            if self.scaled.is_some() || self.has_backdrop_blur() || self.has_translucent_window() {
-                None
-            } else {
-                // Every visible window becomes its own layer here, so every one
-                // of them needs its furniture and its shadow's corners available
-                // before the immutable encode.
-                let fallback = self.ensure_chrome(|_| true);
-                self.ensure_shadow_tiles();
-                self.encode_layers(&caps, &fallback)
-            };
-        let presentation = if let Some((buffers, presentation)) = layers {
-            let layers: Vec<AccelLayer<'_>> = buffers.iter().map(LayerBuf::as_layer).collect();
-            self.stats.bump_present();
-            display.present_layers(&layers)?;
-            presentation
-        } else {
-            let mut composed = core::mem::take(&mut self.composed);
-            self.recompose_damage(&mut composed);
-            self.composed = composed;
-            self.stats.bump_present();
-            if let Err(err) = display.present(&self.frame) {
-                self.undelivered.add(self.output_rect());
-                return Err(err);
-            }
-            Presentation::Composited
-        };
-        // Either way the display now holds the whole scene, so nothing an
-        // earlier refused frame left owed is owed any more.
-        self.undelivered.clear();
-        self.presented = Some(presentation);
-        Ok(())
-    }
-
-    /// Whether any visible window is translucent as a whole.
-    ///
-    /// Such a window is a large field the *engine* would have to blend over
-    /// what is beneath it, and an engine blends in the scan-out's own 8 bits
-    /// with a fixed rounding: the wallpaper under it would arrive in the
-    /// `256 - opacity` levels that leaves and step into bands. The composite
-    /// this crate performs spends that missing resolution across the area
-    /// instead ([`DitherRow`]), which no layer stack can express, so the
-    /// frame goes through software exactly as a backdrop blur does. A
-    /// window's own antialiased corner is not this case — its partial
-    /// coverage is an edge a few pixels wide, with no gradient to band.
-    fn has_translucent_window(&self) -> bool {
-        self.windows
-            .iter()
-            .any(|window| window.is_visible() && window.opacity() != u8::MAX)
-    }
-
-    /// Encode the current scene as hardware layers, with how they present
-    /// it, or `None` if the engine's [`AccelCaps`] cannot serve it, or a
-    /// screen reveal ([`set_reveal`](Self::set_reveal)) is in flight (the
-    /// caller falls back to software either way). `fallback` carries the
-    /// furniture the cache would not retain for this pass.
-    ///
-    /// A [`fullscreen_cover`](Self::fullscreen_cover) is promoted to the
-    /// single layer the scene actually is: the background fill and every
-    /// window under it are dropped, because none of them can contribute a
-    /// pixel. The pointer overlay still rides on top where one is shown.
-    fn encode_layers(
-        &self,
-        caps: &AccelCaps,
-        fallback: &ChromeFallback,
-    ) -> Option<(Vec<LayerBuf>, Presentation)> {
-        // The engine scans a layer out as the driver was handed it, so
-        // nothing it composes passes through the reveal and the screen would
-        // appear at full strength while the fade ran.
-        if self.reveal != u8::MAX {
-            return None;
-        }
-        let epoch = self.chrome_epoch();
-        let mut layers = Vec::new();
-        if let Some(cover) = self.fullscreen_cover() {
-            // A fullscreen window is undecorated and casts no shadow, so it has
-            // no chrome to resolve and bakes its own pixels alone.
-            layers.push(self.encode_window_layer(cover, None)?);
-            self.encode_pointer_layers(&mut layers)?;
-            return admitted(layers, caps)
-                .map(|layers| (layers, Presentation::Promoted(cover.id())));
-        }
-        layers.push(
-            self.encode_layer(self.screen.0, self.screen.1, 0, 0, |_, _| {
-                Some(self.background.premultiply())
-            })?,
-        );
-        // The desktop layer sits directly on the background, beneath every
-        // window, so the hardware result matches the software one.
-        if let Some(desktop) = &self.desktop {
-            layers.push(
-                self.encode_layer(desktop.width(), desktop.height(), 0, 0, |lx, ly| {
-                    crate::surface::row(desktop, ly)
-                        .get(usize::try_from(lx).ok()?)
-                        .copied()
-                })?,
-            );
-        }
-        for window in &self.windows {
-            if !window.is_visible() {
-                continue;
-            }
-            let chrome = resolve_chrome(&self.chrome, &epoch, window.id(), fallback);
-            layers.push(self.encode_window_layer(window, chrome)?);
-        }
-        self.encode_pointer_layers(&mut layers)?;
-        admitted(layers, caps).map(|layers| (layers, Presentation::Layered))
-    }
-
-    /// Bake `window`, drawn from `chrome`, into a layer over its footprint:
-    /// its own pixels over its shadow's, each row resolved once for the whole
-    /// scanline through the same [`Window::row`] the software composite reads.
-    ///
-    /// The ordered dither is read at each pixel's **screen** position, not the
-    /// layer's, so a window baked into a layer holds exactly the pixels the
-    /// software composite would have laid at the same place over nothing.
-    fn encode_window_layer(
-        &self,
-        window: &Window,
-        chrome: Option<&WindowChrome>,
-    ) -> Option<LayerBuf> {
-        let footprint = window.footprint(self.shadow.reach());
-        let (left, top) = (footprint.left(), footprint.top());
-        let mut resolved = None;
-        self.encode_layer(footprint.width, footprint.height, left, top, |lx, ly| {
-            let y = top.checked_add(i32::try_from(ly).ok()?)?;
-            let x = left.checked_add(i32::try_from(lx).ok()?)?;
-            if resolved.as_ref().is_none_or(|(at, _, _)| *at != ly) {
-                resolved = Some((
-                    ly,
-                    window.shadow_row(y, &self.shadow),
-                    window.row(y, chrome),
-                ));
-            }
-            let (_, shadow, body) = resolved.as_ref()?;
-            let bias = DitherRow::at(y.cast_unsigned()).bias(x.cast_unsigned());
-            let shadow = shadow.as_ref().and_then(|shadow| shadow.sample(x, bias));
-            match (body.as_ref().and_then(|body| body.sample(x, bias)), shadow) {
-                (Some(body), Some(shadow)) => Some(body.over_biased(shadow, bias)),
-                (body, shadow) => body.or(shadow),
-            }
-        })
-    }
-
-    /// Append the pointer overlay — trail, halo, cursor — as the top-most
-    /// layers, one per sprite in the order the software composite blends
-    /// them. `None` on an encode the allocator refused, exactly as
-    /// [`encode_layer`](Self::encode_layer) reports one.
-    fn encode_pointer_layers(&self, layers: &mut Vec<LayerBuf>) -> Option<()> {
-        for sprite in self.pointer.sprites() {
-            let bounds = sprite.bounds();
-            layers.push(self.encode_layer(
-                bounds.width,
-                bounds.height,
-                bounds.left(),
-                bounds.top(),
-                |lx, ly| sprite.sample_local(lx, ly),
-            )?);
-        }
-        Some(())
-    }
-
-    /// Bake a `width`×`height` region into a premultiplied, display-format
-    /// layer buffer placed at `(dst_x, dst_y)`. `sample` yields each
-    /// surface-local pixel, or `None` for a transparent one. Returns `None`
-    /// if the buffer size overflows `usize` or the allocator refuses it — a
-    /// layer is a whole window's rectangle, so under memory pressure the
-    /// caller composes the frame in software instead.
-    fn encode_layer(
-        &self,
-        width: u32,
-        height: u32,
-        dst_x: i32,
-        dst_y: i32,
-        mut sample: impl FnMut(u32, u32) -> Option<Pixel>,
-    ) -> Option<LayerBuf> {
-        let w = usize::try_from(width).ok()?;
-        let h = usize::try_from(height).ok()?;
-        let count = w.checked_mul(h)?.checked_mul(4)?;
-        let mut pixels = fallible::filled(count, 0u8)?;
-        for ly in 0..height {
-            let row = usize::try_from(ly).ok()?;
-            for lx in 0..width {
-                let pixel = sample(lx, ly).unwrap_or(Pixel::TRANSPARENT);
-                let col = usize::try_from(lx).ok()?;
-                let offset = (row * w + col) * 4;
-                if let Some(slot) = pixels.get_mut(offset..offset + 4) {
-                    slot.copy_from_slice(&self.order.encode(pixel));
-                }
-            }
-        }
-        Some(LayerBuf {
-            pixels,
-            width,
-            height,
-            dst_x,
-            dst_y,
-        })
-    }
-
     /// Apply `change` to the window named by `id` and mark the union of
     /// its footprint before and after dirty, but only when `change` reports
     /// it actually changed the window — an unknown `id` still returns
@@ -4331,6 +4181,17 @@ impl Compositor {
     ///
     /// [`present_window_content`]: Self::present_window_content
     fn mutate(&mut self, id: WindowId, change: impl FnOnce(&mut Window) -> bool) -> bool {
+        self.mutate_as(id, Change::Whole, change)
+    }
+
+    /// [`mutate`](Self::mutate), telling a window on a free layer how the
+    /// change reached it.
+    fn mutate_as(
+        &mut self,
+        id: WindowId,
+        kind: Change,
+        change: impl FnOnce(&mut Window) -> bool,
+    ) -> bool {
         let reach = self.shadow.reach();
         let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
             return false;
@@ -4340,6 +4201,9 @@ impl Compositor {
             return true;
         }
         let after = window.footprint(reach);
+        if self.route_to_layer(id, kind, [before, after]) {
+            return true;
+        }
         self.mark_layer(id, before);
         self.mark_layer(id, after);
         true
@@ -4836,7 +4700,7 @@ impl Compositor {
         } = self;
         let shadow: &ShadowKit = shadow;
         let sprites = if pass == Pass::Finish {
-            pointer.sprites_over(area)
+            pointer.frame_sprites_over(area)
         } else {
             ArrayVec::new()
         };
@@ -5621,20 +5485,6 @@ fn caster_radius(window: &Window) -> Option<u32> {
         .filter(|radius| *radius > 0)
 }
 
-/// `layers` if the engine can serve them all, else `None` so the caller
-/// composes the frame in software — never a partial hardware frame.
-fn admitted(layers: Vec<LayerBuf>, caps: &AccelCaps) -> Option<Vec<LayerBuf>> {
-    if layers.len() > usize::try_from(caps.max_layers).unwrap_or(usize::MAX) {
-        return None;
-    }
-    for layer in &layers {
-        if layer.width > caps.max_width_px || layer.height > caps.max_height_px {
-            return None;
-        }
-    }
-    Some(layers)
-}
-
 /// Claim `rect` in a compose plan, merging it with every rectangle it
 /// overlaps, and return what was claimed.
 ///
@@ -5713,31 +5563,4 @@ fn resolve_chrome<'a>(
             .find(|(key, _)| *key == id)
             .map(|(_, chrome)| chrome)
     })
-}
-
-/// A baked, display-format layer buffer and its on-screen placement,
-/// held alive while the borrowing [`AccelLayer`]s are handed to the
-/// hardware engine.
-struct LayerBuf {
-    pixels: Vec<u8>,
-    width: u32,
-    height: u32,
-    dst_x: i32,
-    dst_y: i32,
-}
-
-impl LayerBuf {
-    /// Borrow this buffer as an [`AccelLayer`]. The buffer is dense, so
-    /// the stride is exactly four bytes per pixel.
-    fn as_layer(&self) -> AccelLayer<'_> {
-        AccelLayer {
-            pixels: &self.pixels,
-            width_px: self.width,
-            height_px: self.height,
-            stride_bytes: self.width.saturating_mul(4),
-            dst_x: self.dst_x,
-            dst_y: self.dst_y,
-            opacity: 255,
-        }
-    }
 }

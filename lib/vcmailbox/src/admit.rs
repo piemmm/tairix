@@ -14,8 +14,8 @@ use crate::{
     FirmwareClock, Malformed, RtcRegister, Tags, CODE_REQUEST, DISPLAY_ENGINE_KEY,
     FIRMWARE_CLOCKS_KEY, HEADER_WORDS, LINKED_CLOCKS, PROPERTY_WORDS, RPI_RTC_KEY,
     SKIP_SETTING_TURBO, TAG_GET_CLOCK_RATE, TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE,
-    TAG_GET_RTC_REG, TAG_NOTIFY_DISPLAY_DONE, TAG_NOTIFY_XHCI_RESET, TAG_SET_CLOCK_RATE,
-    TAG_SET_RTC_REG, VL805_FIRMWARE_DEV_ADDR, VL805_KEY,
+    TAG_GET_PHYSICAL_WH, TAG_GET_RTC_REG, TAG_NOTIFY_DISPLAY_DONE, TAG_NOTIFY_XHCI_RESET,
+    TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG, VL805_FIRMWARE_DEV_ADDR, VL805_KEY,
 };
 
 /// Why the service refused a request.
@@ -89,11 +89,18 @@ const DRIVEN_CLOCKS: [u32; 1 + LINKED_CLOCKS.len()] = {
 const DRIVEN_CLOCK: Word = Word::OneOf(&DRIVEN_CLOCKS);
 
 /// Every request the service forwards: each driver's working set and no more.
-const ADMITTED: [Admitted; 8] = [
+const ADMITTED: [Admitted; 9] = [
     Admitted {
         tag: TAG_NOTIFY_DISPLAY_DONE,
         device: DISPLAY_ENGINE_KEY,
         values: &[],
+    },
+    // The size of the screen the firmware lit, which the engine hosts the
+    // console at as it takes the screen over.
+    Admitted {
+        tag: TAG_GET_PHYSICAL_WH,
+        device: DISPLAY_ENGINE_KEY,
+        values: &[SLOT, SLOT],
     },
     Admitted {
         tag: TAG_NOTIFY_XHCI_RESET,

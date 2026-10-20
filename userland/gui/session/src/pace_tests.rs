@@ -19,7 +19,7 @@ const SAMPLE_NS: u64 = Timeline::FRAME_NS / 8;
 fn the_first_damaged_frame_is_admitted_at_once() {
     let mut pacer = FramePacer::new();
     assert!(
-        pacer.admit(0, true),
+        pacer.admit(0, true, true),
         "a desktop coming up draws its first frame immediately"
     );
     assert_eq!(
@@ -35,7 +35,7 @@ fn a_flood_of_samples_inside_one_period_composites_once() {
     let mut composites = 0u32;
     // Sixteen samples, all of them landing inside a single frame period.
     for step in 0..16u64 {
-        if pacer.admit(step * (Timeline::FRAME_NS / 16), true) {
+        if pacer.admit(step * (Timeline::FRAME_NS / 16), true, true) {
             composites += 1;
         }
     }
@@ -53,7 +53,7 @@ fn a_sustained_flood_costs_no_more_than_one_composite_per_period() {
     let mut composites = 0u64;
     let mut at = 0u64;
     while at <= span {
-        if pacer.admit(at, true) {
+        if pacer.admit(at, true, true) {
             composites += 1;
         }
         at += SAMPLE_NS;
@@ -74,9 +74,9 @@ fn a_sustained_flood_costs_no_more_than_one_composite_per_period() {
 #[test]
 fn a_held_frame_arms_exactly_the_time_left_of_its_period() {
     let mut pacer = FramePacer::new();
-    assert!(pacer.admit(0, true));
+    assert!(pacer.admit(0, true, true));
     assert!(
-        !pacer.admit(SAMPLE_NS, true),
+        !pacer.admit(SAMPLE_NS, true, true),
         "the screen cannot show it yet"
     );
     assert_eq!(
@@ -88,7 +88,7 @@ fn a_held_frame_arms_exactly_the_time_left_of_its_period() {
     // counting down: the flood never re-arms and never shortens to nothing.
     for step in 2..8 {
         let now = SAMPLE_NS * step;
-        assert!(!pacer.admit(now, true));
+        assert!(!pacer.admit(now, true, true));
         let park = pacer.park_deadline_ns(now, WAITSET_TIMEOUT_NONE);
         assert_eq!(park, Timeline::FRAME_NS - now);
         assert!(park > 0, "a deadline of nothing would be a busy poll");
@@ -98,8 +98,8 @@ fn a_held_frame_arms_exactly_the_time_left_of_its_period() {
 #[test]
 fn a_park_already_shorter_than_the_deadline_is_left_alone() {
     let mut pacer = FramePacer::new();
-    assert!(pacer.admit(0, true));
-    assert!(!pacer.admit(SAMPLE_NS, true));
+    assert!(pacer.admit(0, true, true));
+    assert!(!pacer.admit(SAMPLE_NS, true, true));
     assert_eq!(
         pacer.park_deadline_ns(SAMPLE_NS, SAMPLE_NS),
         SAMPLE_NS,
@@ -110,10 +110,10 @@ fn a_park_already_shorter_than_the_deadline_is_left_alone() {
 #[test]
 fn admitting_the_held_frame_folds_the_park_back_to_indefinite() {
     let mut pacer = FramePacer::new();
-    assert!(pacer.admit(0, true));
-    assert!(!pacer.admit(SAMPLE_NS, true));
+    assert!(pacer.admit(0, true, true));
+    assert!(!pacer.admit(SAMPLE_NS, true, true));
     assert!(
-        pacer.admit(Timeline::FRAME_NS, true),
+        pacer.admit(Timeline::FRAME_NS, true, true),
         "the deadline elapsed, so the accumulated damage is composited"
     );
     assert_eq!(
@@ -130,12 +130,15 @@ fn an_idle_session_arms_no_timer() {
         WAITSET_TIMEOUT_NONE,
         "a session that has composited nothing owes nothing"
     );
-    assert!(pacer.admit(0, true));
+    assert!(pacer.admit(0, true, true));
     // Woken repeatedly with nothing to draw — a served call, a reaped child,
     // a pressure band — the pacer arms nothing at any of them.
     for step in 1..4 {
         let now = SAMPLE_NS * step;
-        assert!(pacer.admit(now, false), "an undamaged frame is never held");
+        assert!(
+            pacer.admit(now, false, true),
+            "an undamaged frame is never held"
+        );
         assert_eq!(
             pacer.park_deadline_ns(now, WAITSET_TIMEOUT_NONE),
             WAITSET_TIMEOUT_NONE
@@ -149,9 +152,9 @@ fn an_undamaged_frame_does_not_start_the_period() {
     // The frame-report deadline wakes an otherwise idle desktop to present
     // its undamaged frame. The motion that follows a moment later must not
     // be held behind a frame that moved no pixels.
-    assert!(pacer.admit(0, false));
+    assert!(pacer.admit(0, false, true));
     assert!(
-        pacer.admit(SAMPLE_NS, true),
+        pacer.admit(SAMPLE_NS, true, true),
         "the first frame that changed something is still the first frame"
     );
 }
@@ -162,7 +165,7 @@ fn a_frame_slower_than_the_period_is_never_held() {
     let mut at = 0u64;
     for _ in 0..4 {
         assert!(
-            pacer.admit(at, true),
+            pacer.admit(at, true, true),
             "an interaction slower than the screen pays no latency at all"
         );
         at += Timeline::FRAME_NS;
@@ -182,7 +185,7 @@ fn an_animations_cadence_frames_are_never_deferred() {
         .next_frame_in(at)
         .is_some_and(|delta| delta == Timeline::FRAME_NS)
     {
-        assert!(pacer.admit(at, true), "at {at}");
+        assert!(pacer.admit(at, true, true), "at {at}");
         frames += 1;
         at += Timeline::FRAME_NS;
     }
@@ -195,9 +198,9 @@ fn an_animations_cadence_frames_are_never_deferred() {
 #[test]
 fn a_clock_that_jumped_backwards_admits_rather_than_stalling() {
     let mut pacer = FramePacer::new();
-    assert!(pacer.admit(Timeline::FRAME_NS * 4, true));
+    assert!(pacer.admit(Timeline::FRAME_NS * 4, true, true));
     assert!(
-        pacer.admit(0, true),
+        pacer.admit(0, true, true),
         "a jump behind the last frame must not freeze the screen for its length"
     );
     assert_eq!(
@@ -212,9 +215,9 @@ fn a_long_hold_across_a_background_spell_comes_due_rather_than_waiting() {
     // stepped aside is armed by nothing. It must be due the moment the
     // session is woken again rather than waiting for a deadline nobody armed.
     let mut pacer = FramePacer::new();
-    assert!(pacer.admit(0, true));
-    assert!(!pacer.admit(SAMPLE_NS, true));
-    assert!(pacer.admit(Timeline::FRAME_NS * 10_000, true));
+    assert!(pacer.admit(0, true, true));
+    assert!(!pacer.admit(SAMPLE_NS, true, true));
+    assert!(pacer.admit(Timeline::FRAME_NS * 10_000, true, true));
 }
 
 #[test]
@@ -226,7 +229,7 @@ fn a_flood_of_samples_inside_one_period_steps_the_animations_once() {
         if pacer.due(at) {
             steps += 1;
         }
-        let _ = pacer.admit(at, true);
+        let _ = pacer.admit(at, true, true);
         at += SAMPLE_NS;
     }
     assert_eq!(steps, 4, "one step a frame period, not one a sample");
@@ -235,7 +238,7 @@ fn a_flood_of_samples_inside_one_period_steps_the_animations_once() {
 #[test]
 fn an_animation_overdue_between_frames_parks_until_its_frame() {
     let mut pacer = FramePacer::new();
-    assert!(pacer.admit(0, true));
+    assert!(pacer.admit(0, true, true));
     let now = SAMPLE_NS;
     assert_eq!(
         pacer.step_deadline_ns(now, WAITSET_TIMEOUT_NONE, 0),
@@ -261,5 +264,37 @@ fn an_animation_overdue_between_frames_parks_until_its_frame() {
         pacer.step_deadline_ns(Timeline::FRAME_NS, WAITSET_TIMEOUT_NONE, 0),
         0,
         "a frame that is due takes the step at once"
+    );
+}
+
+#[test]
+fn a_frame_the_display_cannot_take_waits_for_its_latch_with_no_deadline() {
+    let mut pacer = FramePacer::new();
+    assert!(pacer.admit(0, true, true));
+    pacer.presented(true);
+    assert!(
+        !pacer.admit(Timeline::FRAME_NS * 2, true, false),
+        "the display still reads the last frame"
+    );
+    assert_eq!(
+        pacer.park_deadline_ns(Timeline::FRAME_NS * 2, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
+        "the latch wakes the session, so nothing is armed for it"
+    );
+}
+
+#[test]
+fn a_flipping_display_takes_the_next_frame_on_its_latch_however_soon() {
+    let mut pacer = FramePacer::new();
+    assert!(pacer.admit(0, true, true));
+    pacer.presented(true);
+    assert!(
+        pacer.admit(SAMPLE_NS, true, true),
+        "the flip, not the period, is what paces a display that flips"
+    );
+    pacer.presented(false);
+    assert!(
+        !pacer.admit(SAMPLE_NS * 2, true, true),
+        "a display that shows each frame at once is paced by the period again"
     );
 }

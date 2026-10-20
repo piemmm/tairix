@@ -1,0 +1,31 @@
+[package]
+name = "tairix-test-virtio-gpu-qemu-x86-64"
+description = "plans/FIX-DISPLAY-ACCELERATION.md C QEMU vertical: boot the production x86_64 pipeline on a q35 board whose only display is a virtio GPU, the console hosted on it, and prove devmgr autoloads the virtio-gpu driver and the device takes the login screen's frame."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-virtio-gpu-qemu-x86-64"
+path = "src/main.rs"
+
+# Freestanding: the production x86_64 boot pipeline through `tairix-kernel`'s
+# library half, unchanged, with an observer of the audit and diagnostic streams
+# that ends the run on the login screen's witnesses.
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

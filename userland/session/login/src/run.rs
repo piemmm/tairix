@@ -101,6 +101,7 @@ mod program {
     use tairix_login::elevate::ElevateLauncher;
 
     use tairix_abi::DESKTOP_RUN_PATH;
+    use tairix_abi::GREETER_RUN_PATH;
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_login::{
         audit_launch_ended_abnormally, configured_session_kind, drain_bounded,
@@ -111,7 +112,6 @@ mod program {
         ElevateDirectory, GuessMeter, InputWait, InputWake, LiveSessions, Login, LoginConfig,
         LoginError, LoginStatus, LoginView, ProgramRequests, SessionDirectory, SessionKind,
         SessionLauncher, SessionOutcome, SessionWaker, StatusSource, ZoneStoreGrant,
-        GREETER_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -1318,7 +1318,7 @@ mod program {
             let zone = machine_zone_variable();
             let env: Vec<&[u8]> = zone.iter().map(String::as_bytes).collect();
             let ret = tairix_rt::spawn_attached(
-                GREETER_SERVICE_PATH.as_bytes(),
+                GREETER_RUN_PATH.as_bytes(),
                 &session_attach(GREETER_UID.0),
                 &[],
                 &env,
@@ -1672,7 +1672,7 @@ mod program {
         if !bundle_present(DESKTOP_RUN_PATH) {
             return Graphical::NoDesktop;
         }
-        if !bundle_present(GREETER_SERVICE_PATH) {
+        if !bundle_present(GREETER_RUN_PATH) {
             return Graphical::NoGreeter;
         }
         let request = DisplayRequest::Query {

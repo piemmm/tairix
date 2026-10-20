@@ -6,9 +6,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use tairix_theme::motion::SceneClock;
 
-use tairix_abi::driver::display::{Display, DisplayFormat, DisplayMode, DisplayPower};
+use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, DisplayPower};
 use tairix_abi::time::Duration64;
 use tairix_abi::DriverError;
+use tairix_display::Presenter;
 use tairix_theme::Theme;
 use tairix_wallpaper::{ScreensaverKind, ScreensaverOptions, SlideOrder};
 use tairix_window::WallpaperName;
@@ -45,17 +46,21 @@ impl Panel {
     }
 }
 
-impl Display for Panel {
-    fn output(&self) -> Option<DisplayMode> {
-        Some(DisplayMode {
+impl Presenter for Panel {
+    fn mode(&self) -> DisplayMode {
+        DisplayMode {
             width_px: 1920,
             height_px: 1080,
             stride_bytes: 1920 * 4,
             format: DisplayFormat::Rgba8888,
-        })
+        }
     }
 
-    fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+    fn ready(&self) -> bool {
+        true
+    }
+
+    fn present(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
         Ok(())
     }
 

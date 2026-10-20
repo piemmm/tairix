@@ -6,8 +6,9 @@
 //! hardware requires, and sets every mode itself. The HVS composites the
 //! seat's surface into each HDMI output's pixel valve, the encoder behind the
 //! valve is driven over `encoder-v1`, and the seat's display is served from
-//! frames no channel reads while they are written, so a present neither
-//! tears nor waits.
+//! the buffers its presenter fills: a present hands each channel a list of
+//! one plane per layer, the pointer on its own plane above them, and is
+//! complete once every channel latches it at a frame start.
 //!
 //! [`Engine`] is the display over its register windows and its links'
 //! clients; the `Run` binary maps the windows, opens the links and serves it.
@@ -16,9 +17,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod buffers;
 mod dlist;
 mod engine;
-mod frames;
 mod hvs;
 mod regs;
 mod valve;
@@ -30,22 +31,21 @@ mod model;
 
 pub use dlist::Surface;
 pub use engine::{pipe_limits, Engine, Parts, Record, OUTPUTS_MAX};
-pub use frames::{FrameAllocator, FrameMemory};
 pub use hvs::Output;
 pub use valve::{Load, ValveKind};
 
-use tairix_abi::driver::dma::{DmaHost, DmaSlab};
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost};
 use tairix_vcmailbox::{DISPLAY_ENGINE_KEY, ENGINE_OUTPUTS};
 
 /// The capabilities the engine runs with, which its signed manifest requests:
-/// the register windows, the scan-out frames, the client frames it presents,
-/// the calls to its encoders and its core clock, the seat's display endpoint,
-/// the firmware notice, and the log.
+/// the register windows, the buffers it carves and grants its presenter, the
+/// frame-end interrupt, the calls to its encoders and its core clock, the
+/// seat's display endpoint, the firmware notice, and the log.
 pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::MMIO_MAP,
     CapabilityId::MEM_DMA,
     CapabilityId::SHM,
+    CapabilityId::IRQ_BIND,
     CapabilityId::IPC_ENDPOINT,
     CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::MAILBOX,
@@ -88,50 +88,6 @@ pub const VALVES: [ValveKind; 2] = [
 
 /// The HVS's register window's name on the engine's node.
 pub const HVS_WINDOW: &[u8] = b"hvs";
-
-/// Scan-out frames in DMA memory the HVS reaches.
-pub struct DmaFrames<'h>(pub &'h dyn DmaHost);
-
-/// One scan-out frame in DMA memory.
-pub struct DmaFrame {
-    slab: DmaSlab,
-    bus: u32,
-}
-
-impl FrameMemory for DmaFrame {
-    fn bus(&self) -> u32 {
-        self.bus
-    }
-
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        self.slab.as_bytes_mut()
-    }
-
-    fn flush(&self, offset: usize, len: usize) {
-        self.slab.sync_range(offset, len);
-    }
-}
-
-impl FrameAllocator for DmaFrames<'_> {
-    type Memory = DmaFrame;
-
-    /// # Errors
-    ///
-    /// The host's refusal, or [`DriverError::OutOfRange`] for memory past
-    /// the HVS's 32-bit reach.
-    fn alloc(&self, len: usize) -> Result<DmaFrame, DriverError> {
-        let slab = self.0.alloc_dma_zeroed(len)?;
-        let end = slab
-            .device_addr()
-            .checked_add(len as u64)
-            .ok_or(DriverError::OutOfRange)?;
-        if end > 1 << 32 {
-            return Err(DriverError::OutOfRange);
-        }
-        let bus = u32::try_from(slab.device_addr()).map_err(|_| DriverError::OutOfRange)?;
-        Ok(DmaFrame { slab, bus })
-    }
-}
 
 /// Handle marker [`register`] returns; the host re-issues its own. `"HVS5"`.
 const REGISTER_HANDLE_MARKER: u64 = 0x4856_5335_0000_0001;

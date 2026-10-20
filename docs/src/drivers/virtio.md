@@ -65,24 +65,28 @@ and the device drivers carry only the device-specific wire format.
   hold them with `VirtioError::QueueTooShallow`, before any ring is carved or
   handed to the device, rather than capping the queue silently and failing a
   request once the driver has begun it.
-- **One request at a time** (`RequestQueue`), over a split queue: the one
-  submit-and-wait the request/response drivers (virtio-blk, virtio-crypto, the
-  virtio-sound and virtio-net control queues) share. A request waits at most
-  its budget in all — each wait after a wake is given what is left of it,
+- **One batch of requests at a time** (`RequestQueue`), over a split queue:
+  the one submit-and-wait the request/response drivers (virtio-blk,
+  virtio-crypto, the virtio-sound and virtio-net control queues, virtio-gpu's
+  control and cursor queues) share. `submit_and_wait` is a batch of one;
+  `submit_all_and_wait` publishes a chain per request with one notify, and
+  publishes nothing unless the queue holds every chain at once. A batch waits
+  at most its budget in all — each wait after a wake is given what is left of it,
   measured on the host's clock (`VirtioHost::now_ns`), so a device that keeps
   waking the driver cannot stretch it — and a storm of wakes ends sooner at
   `MAX_COMPLETION_WAKES`. A wait that times out, or could not be made at all
   (a host answers a revoked or refused interrupt binding with an immediate
-  `TimedOut`), ends the request `DeviceOffline` once the ring has been read
-  again, so a completion whose interrupt was lost is still taken. With
-  nothing out, a completion in the ring answers nothing, so a request is
-  refused rather than published over it. A request the device leaves
-  unanswered fails to its caller, but its chain and every buffer it names
-  stay the device's: `settle` retires the chain once the device hands it
-  back, notifying the device again meanwhile at most once per the request's
-  budget however often it is called, and until then nothing is published, so
-  a late completion is never taken for a later request's and no request
-  stages over memory the device may still read or write. Every driver stages
+  `TimedOut`), ends the batch `DeviceOffline` once the ring has been read
+  again, so a completion whose interrupt was lost is still taken; a wake that
+  brings part of a batch is no idle wake. With nothing out, a completion in
+  the ring answers nothing, so a batch is refused rather than published over
+  it. A batch the device leaves unanswered fails to its caller, but every
+  chain not yet back, and every buffer it names, stays the device's: `settle`
+  retires the batch once the device hands its last chain back, notifying the
+  device again meanwhile at most once per the batch's budget however often it
+  is called, and until then nothing is published, so a late completion is
+  never taken for a later request's and no request stages over memory the
+  device may still read or write. Every driver stages
   a status no device writes into each reply before the request, so a
   completion that wrote none is refused rather than read as the last
   request's, and a payload the device writes into reused staging — a

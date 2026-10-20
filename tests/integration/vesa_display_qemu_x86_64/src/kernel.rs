@@ -12,7 +12,7 @@
 //! 3. loads the signed vesa display `.rxe` through
 //!    [`tairix_drvhost::Host`] (the load gate) and drives it through
 //!    `load -> use -> unload -> reload`, where "use" decodes the block
-//!    with `VesaFramebuffer::open`, maps the surface through the
+//!    with `tairix_drv_display_vesa::open`, maps the surface through the
 //!    capability-gated [`tairix_kernel_virtio::KernelMmioMapper`], and
 //!    `present`s a frame; a second independently-mapped window reads the
 //!    pixels back to confirm they landed in the scan-out memory.

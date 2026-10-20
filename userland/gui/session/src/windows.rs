@@ -5897,7 +5897,6 @@ mod tests {
             0,
             "the sibling window is untouched"
         );
-        assert!(host.compositor.has_backdrop_blur());
 
         host.backdrop_blur_set(7, 0);
         assert_eq!(
@@ -5910,15 +5909,13 @@ mod tests {
             "no app window frosts once the request is withdrawn"
         );
 
-        // The compositor still reports a frost, and the desktop's own bar is
-        // why: it is floating chrome and asks for one for as long as it is on
-        // screen, so the flag can no longer stand in for "no app frosts".
+        // The desktop's own bar still frosts: it is floating chrome and asks
+        // for a blur for as long as it is on screen.
         let bar = shell
             .presenter()
             .bar_window()
             .expect("the desktop paints its bar");
         assert!(compositor.window(bar).expect("live").blur_radius() > 0);
-        assert!(compositor.has_backdrop_blur());
     }
 
     #[test]

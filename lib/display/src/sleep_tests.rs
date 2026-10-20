@@ -3,10 +3,11 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{Display, DisplayFormat, DisplayMode, DisplayPower};
+use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, DisplayPower};
 use tairix_abi::DriverError;
 
 use super::{DisplaySleep, SwitchedOff};
+use crate::presenter::Presenter;
 
 /// A panel that records the switches asked of it and refuses as told.
 struct Panel {
@@ -30,17 +31,21 @@ impl Panel {
     }
 }
 
-impl Display for Panel {
-    fn output(&self) -> Option<DisplayMode> {
-        Some(DisplayMode {
+impl Presenter for Panel {
+    fn mode(&self) -> DisplayMode {
+        DisplayMode {
             width_px: 4,
             height_px: 4,
             stride_bytes: 16,
             format: DisplayFormat::Rgba8888,
-        })
+        }
     }
 
-    fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+    fn ready(&self) -> bool {
+        true
+    }
+
+    fn present(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
         Ok(())
     }
 

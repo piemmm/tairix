@@ -9,6 +9,10 @@
 //! what each part left and where it now lies. A halo's footprint is its band
 //! cut into slabs, never the square around it, because the rings are thin and
 //! everything inside them is left as it was.
+//!
+//! The overlay is drawn where its route says: into the frame, on a
+//! display's cursor plane, or on a hardware layer of its own. A part the frame
+//! does not draw has no footprint there, so moving it damages nothing.
 
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_inline::ArrayVec;
@@ -140,6 +144,7 @@ impl<'a> Sprite<'a> {
 
     /// The sprite's pixel at its own `(lx, ly)` at the strength it is laid, or
     /// `None` where it draws nothing.
+    #[cfg(test)]
     pub(crate) fn sample_local(&self, lx: u32, ly: u32) -> Option<Pixel> {
         let pixel = self.surface.get(lx, ly).filter(|pixel| pixel.a > 0)?;
         Some(pixel.scale_alpha(self.opacity))
@@ -173,6 +178,19 @@ impl Footprint {
     }
 }
 
+/// Where the overlay is drawn.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PointerRoute {
+    /// Composited into the frame over every window.
+    #[default]
+    Frame,
+    /// The cursor on the display's cursor plane, which only a pointer with no
+    /// aid is given.
+    Plane,
+    /// All of it on a hardware layer of its own above every window.
+    Layer,
+}
+
 /// The cursor and the aids drawn with it.
 pub(crate) struct PointerOverlay {
     cursor: Option<PlacedCursor>,
@@ -190,6 +208,10 @@ pub(crate) struct PointerOverlay {
     changed: Changed,
     /// Each part's footprint as of the last composite.
     drawn: Footprint,
+    route: PointerRoute,
+    /// Bumped whenever what the overlay draws changes other than by moving
+    /// with the pointer, so a plane or a layer re-takes its pixels only then.
+    shape: u64,
 }
 
 impl PointerOverlay {
@@ -212,7 +234,58 @@ impl PointerOverlay {
                 trail: ArrayVec::new(),
                 halo: ArrayVec::new(),
             },
+            route: PointerRoute::Frame,
+            shape: 0,
         }
+    }
+
+    /// Where the overlay is drawn.
+    pub(crate) const fn route(&self) -> PointerRoute {
+        self.route
+    }
+
+    /// Draw the overlay through `route` from the next composite, which
+    /// erases from the frame whatever it no longer draws there.
+    pub(crate) fn set_route(&mut self, route: PointerRoute) {
+        self.route = route;
+    }
+
+    /// What the overlay draws, as a count that moves only when that changes
+    /// other than by following the pointer.
+    pub(crate) const fn shape(&self) -> u64 {
+        self.shape
+    }
+
+    /// The cursor a cursor plane `caps` can carry: one is shown, no aid is
+    /// drawn with it, and it fits. The image, and where its hot spot is.
+    pub(crate) fn plane_cursor(&self, caps: (u32, u32)) -> Option<(&CursorImage, Point)> {
+        let cursor = self.shown_cursor()?;
+        let image = cursor.image();
+        (self.trail.is_empty()
+            && self.shown_art().is_none()
+            && image.width() <= caps.0
+            && image.height() <= caps.1)
+            .then_some((image, self.pointer))
+    }
+
+    /// Everything the overlay draws, bottom to top, that the frame carries:
+    /// all of it, the aids alone, or nothing, by route.
+    pub(crate) fn frame_sprites_over(&self, area: Rect) -> ArrayVec<Sprite<'_>, MAX_SPRITES> {
+        let mut sprites = match self.route {
+            PointerRoute::Frame => self.laid(true),
+            PointerRoute::Plane => self.laid(false),
+            PointerRoute::Layer => return ArrayVec::new(),
+        };
+        sprites.retain(|sprite| !sprite.bounds().intersection(&area).is_empty());
+        sprites
+    }
+
+    /// The rectangle every sprite lies in, while any is drawn.
+    pub(crate) fn sprite_bounds(&self) -> Option<Rect> {
+        self.sprites()
+            .iter()
+            .map(Sprite::bounds)
+            .reduce(|all, bounds| all.union(&bounds))
     }
 
     /// Show `image` as the cursor with its hotspot at `pointer`, handing back
@@ -220,6 +293,7 @@ impl PointerOverlay {
     pub(crate) fn set_cursor(&mut self, image: CursorImage, pointer: Point) -> Option<CursorImage> {
         self.pointer = pointer;
         self.changed.cursor = true;
+        self.shape = self.shape.wrapping_add(1);
         self.cursor
             .replace(PlacedCursor::new(image, pointer))
             .map(PlacedCursor::into_image)
@@ -241,6 +315,9 @@ impl PointerOverlay {
     pub(crate) fn set_hidden(&mut self, hidden: bool) -> bool {
         let changed = self.hidden != hidden;
         self.hidden = hidden;
+        if changed {
+            self.shape = self.shape.wrapping_add(1);
+        }
         changed
     }
 
@@ -276,6 +353,7 @@ impl PointerOverlay {
         }
         self.trail = drawn;
         self.changed.trail = true;
+        self.shape = self.shape.wrapping_add(1);
         true
     }
 
@@ -287,6 +365,7 @@ impl PointerOverlay {
             return false;
         }
         self.changed.halo = true;
+        self.shape = self.shape.wrapping_add(1);
         if halo.rings().is_empty() {
             self.halo = Halo::new();
             self.art = None;
@@ -325,6 +404,11 @@ impl PointerOverlay {
     /// Everything the overlay draws, bottom to top: the trail oldest first,
     /// the halo, then the cursor. Nothing while hidden.
     pub(crate) fn sprites(&self) -> ArrayVec<Sprite<'_>, MAX_SPRITES> {
+        self.laid(true)
+    }
+
+    /// [`sprites`](Self::sprites), the cursor itself only `with_cursor`.
+    fn laid(&self, with_cursor: bool) -> ArrayVec<Sprite<'_>, MAX_SPRITES> {
         let mut sprites = ArrayVec::new();
         if self.hidden {
             return sprites;
@@ -345,20 +429,13 @@ impl PointerOverlay {
                 opacity: u8::MAX,
             });
         }
-        if let Some(cursor) = &self.cursor {
+        if let Some(cursor) = self.cursor.as_ref().filter(|_| with_cursor) {
             let _ = sprites.try_push(Sprite {
                 surface: cursor.image().surface(),
                 bounds: cursor.bounds(),
                 opacity: u8::MAX,
             });
         }
-        sprites
-    }
-
-    /// What of [`sprites`](Self::sprites) reaches `area`, bottom to top.
-    pub(crate) fn sprites_over(&self, area: Rect) -> ArrayVec<Sprite<'_>, MAX_SPRITES> {
-        let mut sprites = self.sprites();
-        sprites.retain(|sprite| !sprite.bounds().intersection(&area).is_empty());
         sprites
     }
 
@@ -377,14 +454,16 @@ impl PointerOverlay {
         )
     }
 
-    /// Where each part would lie if the overlay were composed now.
+    /// Where each part the frame draws would lie if it were composed now.
     fn footprint(&self) -> Footprint {
         let mut now = Footprint::default();
-        if self.hidden {
+        if self.hidden || self.route == PointerRoute::Layer {
             return now;
         }
         if let Some(cursor) = &self.cursor {
-            now.cursor = Some(cursor.bounds());
+            if self.route == PointerRoute::Frame {
+                now.cursor = Some(cursor.bounds());
+            }
             for ghost in &self.trail {
                 let _ = now.trail.try_push(cursor.bounds_at(ghost.at));
             }

@@ -3443,24 +3443,27 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         audit: false,
     },
     SyscallSpec {
-        number: SyscallNumber::CONSOLE_RELOCATE,
-        name: "console_relocate",
-        arg_count: 2,
+        number: SyscallNumber::CONSOLE_ADOPT,
+        name: "console_adopt",
+        arg_count: 6,
         args: [
+            // The `Dma` grant handle, the mode's width and height, the
+            // address bits the device drives, then the buffer the hosted
+            // console's record is written to and its capacity.
+            AbiType::Handle,
+            AbiType::U32,
+            AbiType::U32,
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
-            AbiType::Unit,
-            AbiType::Unit,
-            AbiType::Unit,
         ],
-        // `U64` carries the bytes-written-or-`-errno` convention: the
-        // console's new surface as one framebuffer `HwResource`.
+        // `U64` carries the bytes-written-or-`-errno` convention.
         ret: AbiType::U64,
-        // The caller's device reads the surface by DMA, so the DMA grant
-        // gates it; the handler answers only the driver of the node
-        // discovery marked `BootConsole`, once the boot has handed the
-        // console on. Audited: it moves the console.
+        // The caller's device reads the console's memory by DMA, so the DMA
+        // grant gates it; the handler answers only the driver of the node
+        // discovery marked `ConsoleHost`, and moves a console the firmware lit
+        // a screen for only once the boot has handed it on. Audited: it gives
+        // a device the console.
         required_capability: Some(CapabilityId::MEM_DMA),
         audit: true,
     },
@@ -3575,6 +3578,40 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // A path is told only to a principal that may name one; the telling
         // is audited.
         required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CONSOLE_DAMAGE,
+        name: "console_damage",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` convention; `0` when
+        // nothing is owed.
+        ret: AbiType::U64,
+        // Answered only for the driver instance the console is hosted for,
+        // which the handler checks from kernel state. Not audited: a high-volume read
+        // of what the caller's own display shows.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CONSOLE_RELINQUISH,
+        name: "console_relinquish",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        // `Errno` register convention: `Ok(0)` once the memory is given back.
+        ret: AbiType::Errno,
+        // The caller vouches for its device's DMA, so the DMA grant gates it;
+        // the handler answers only the live driver of the hosting node.
+        // Audited: it takes the console off a device.
+        required_capability: Some(CapabilityId::MEM_DMA),
         audit: true,
     },
 ];

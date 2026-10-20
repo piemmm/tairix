@@ -13,13 +13,13 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ptr;
 
-use tairix_abi::driver::display::Display;
 use tairix_abi::{CapabilityId, DriverHost, DriverKind, Errno, MmioMapper};
 use tairix_arch_x86_64::qemu_exit;
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
+use tairix_display::testkit::HeapMemory;
 use tairix_drv_display_vesa::{
-    register as vesa_register, VesaFramebuffer, VBE_MODE_INFO_BLOCK_LEN,
+    open as vesa_open, register as vesa_register, VBE_MODE_INFO_BLOCK_LEN,
 };
 use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
@@ -182,7 +182,7 @@ impl DriverSpawner for ResolveVesa {
     }
 }
 
-/// Driver-host view used for `VesaFramebuffer::open`: grants
+/// Driver-host view used for `tairix_drv_display_vesa::open`: grants
 /// `CAP_MMIO_MAP` and exposes the real [`KernelMmioMapper`]. Distinct
 /// from the [`Host`]-installed view, mirroring how the bus-driver
 /// verticals separate the load gate from the map gate.
@@ -329,7 +329,7 @@ fn drive_lifecycle(block: &[u8], phys_base: u64) {
     };
     let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
 
-    // Driver-host view for `VesaFramebuffer::open` (CAP_MMIO_MAP granted).
+    // Driver-host view for `tairix_drv_display_vesa::open` (CAP_MMIO_MAP granted).
     let mut open_grants = CapabilitySet::empty();
     open_grants.insert(CapabilityId::MMIO_MAP);
     let vesa_host = VesaHost {
@@ -412,10 +412,11 @@ fn present_and_verify(
     phase: &str,
 ) {
     {
-        let Ok(mut fb) = VesaFramebuffer::open(vesa_host, block) else {
-            fail(phase_msg(phase, "VesaFramebuffer::open"));
+        let memory = HeapMemory::default();
+        let Ok(mut fb) = vesa_open(vesa_host, block, memory.clone()) else {
+            fail(phase_msg(phase, "open"));
         };
-        if fb.present(frame).is_err() {
+        if memory.present_whole(&mut fb, frame).is_err() {
             fail(phase_msg(phase, "present"));
         }
         // `fb` drops here, releasing its window handle (the quiesce step).
@@ -427,9 +428,9 @@ fn present_and_verify(
 /// allocator (no `format!` on the fail path).
 fn phase_msg(phase: &str, op: &str) -> &'static str {
     match (phase, op) {
-        ("first", "VesaFramebuffer::open") => "VesaFramebuffer::open (first)",
+        ("first", "open") => "open (first)",
         ("first", _) => "present (first)",
-        (_, "VesaFramebuffer::open") => "VesaFramebuffer::open (reloaded)",
+        (_, "open") => "open (reloaded)",
         _ => "present (reloaded)",
     }
 }

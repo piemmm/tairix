@@ -110,6 +110,7 @@ fn frame_model(damaged_px: u64) -> PanelModel {
             present_calls: 1,
             chrome_hits: 12,
             chrome_misses: 1,
+            layers: 0,
         }),
     };
     build_model(

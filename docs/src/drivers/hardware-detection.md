@@ -451,10 +451,9 @@ band its harmonics would otherwise land in.
 
 Two facts are the kernel's alone, and a node a driver publishes carrying
 either is refused: **kernel-driven**, on a device the kernel programs itself
-(an interrupt controller), and **boot console**, on the display engine that
-takes the screen over from the firmware which lit it, whose driver alone may
-have the kernel move its framebuffer console off the firmware's memory
-(`console_relocate`).
+(an interrupt controller), and **console host**, on the display engine the
+kernel's framebuffer console is shown on, whose driver alone may host the
+console on memory the kernel allocates (`console_adopt`).
 
 ## The user-space driver chain
 

@@ -172,7 +172,9 @@ const NUM_HW_NODE_HEALTH: u64 = SyscallNumber::HW_NODE_HEALTH.as_u16() as u64;
 const NUM_HW_SELF_NODE: u64 = SyscallNumber::HW_SELF_NODE.as_u16() as u64;
 const NUM_HW_NODE_SETTLE: u64 = SyscallNumber::HW_NODE_SETTLE.as_u16() as u64;
 const NUM_HW_NODE_KEY_SOURCE: u64 = SyscallNumber::HW_NODE_KEY_SOURCE.as_u16() as u64;
-const NUM_CONSOLE_RELOCATE: u64 = SyscallNumber::CONSOLE_RELOCATE.as_u16() as u64;
+const NUM_CONSOLE_ADOPT: u64 = SyscallNumber::CONSOLE_ADOPT.as_u16() as u64;
+const NUM_CONSOLE_DAMAGE: u64 = SyscallNumber::CONSOLE_DAMAGE.as_u16() as u64;
+const NUM_CONSOLE_RELINQUISH: u64 = SyscallNumber::CONSOLE_RELINQUISH.as_u16() as u64;
 const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
@@ -2393,22 +2395,66 @@ pub extern "C" fn sys_hw_node_key_source() -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_HW_NODE_KEY_SOURCE, [0, 0, 0, 0, 0, 0])) }
 }
 
-/// `console_relocate`: move the kernel's framebuffer console off the
-/// firmware's memory onto memory the kernel owns and the caller's device
-/// reaches, writing that surface into `buf` (a buffer of `len` bytes) as one
-/// framebuffer `tairix_hw_resource_t` (`SyscallNumber::CONSOLE_RELOCATE`).
-/// Returns the bytes written, or a `TAIRIX_E_*` code reinterpreted into the
-/// result.
+/// `console_adopt`: host the kernel's framebuffer console on the caller's
+/// display at `width` × `height`, on memory the kernel carves under the
+/// caller's `Dma` grant `handle` for a device driving `reach` address bits,
+/// writing one `tairix_hosted_console_t` into `buf` (a buffer of `len` bytes)
+/// (`SyscallNumber::CONSOLE_ADOPT`). Returns the bytes written, or a
+/// `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// Requires `TAIRIX_CAP_MEM_DMA`; the kernel answers only the driver of a
-/// node discovery marked `TAIRIX_HW_PROPERTY_BOOT_CONSOLE`, and validates the
+/// node discovery marked `TAIRIX_HW_PROPERTY_CONSOLE_HOST`, and validates the
 /// `(buf, len)` pair against the caller's address space before writing it.
 #[must_use]
-#[export_name = "tairix_sys_console_relocate"]
-pub extern "C" fn sys_console_relocate(buf: *mut c_void, len: usize) -> u64 {
+#[export_name = "tairix_sys_console_adopt"]
+pub extern "C" fn sys_console_adopt(
+    handle: u64,
+    width: u32,
+    height: u32,
+    reach: u32,
+    buf: *mut c_void,
+    len: usize,
+) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates the `(buf, len)` pair
     // against the caller's address space before writing it.
-    unsafe { raw_syscall(NUM_CONSOLE_RELOCATE, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+    unsafe {
+        raw_syscall(
+            NUM_CONSOLE_ADOPT,
+            [
+                handle,
+                u64::from(width),
+                u64::from(height),
+                u64::from(reach),
+                ptr_arg(buf),
+                len as u64,
+            ],
+        )
+    }
+}
+
+/// `console_damage`: write the rows the hosted console painted since the last
+/// call into `buf` (a buffer of `len` bytes) as one `tairix_damage_rect_t`
+/// (`SyscallNumber::CONSOLE_DAMAGE`). Returns the bytes written, `0` when
+/// none are owed, or a `TAIRIX_E_*` code reinterpreted into the result.
+/// Answered only for the driver instance the console is hosted for.
+#[must_use]
+#[export_name = "tairix_sys_console_damage"]
+pub extern "C" fn sys_console_damage(buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates the `(buf, len)` pair
+    // against the caller's address space before writing it.
+    unsafe { raw_syscall(NUM_CONSOLE_DAMAGE, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+}
+
+/// `console_relinquish`: give back the memory the console is hosted on, the
+/// caller vouching that its device no longer reads it
+/// (`SyscallNumber::CONSOLE_RELINQUISH`). Requires `TAIRIX_CAP_MEM_DMA`, for
+/// the live driver of the hosting node. Returns a `TAIRIX_E_*` code (`0` on
+/// success).
+#[must_use]
+#[export_name = "tairix_sys_console_relinquish"]
+pub extern "C" fn sys_console_relinquish() -> i32 {
+    // SAFETY: see `sys_yield`. No memory operand is passed.
+    unsafe { ret_i32(raw_syscall(NUM_CONSOLE_RELINQUISH, [0; 6])) }
 }
 
 /// `msi_alloc`: allocate a message-signalled interrupt (MSI) vector for a PCI
@@ -3794,7 +3840,7 @@ mod tests {
         (NUM_HW_SELF_NODE, "hw_self_node", 2),
         (NUM_HW_NODE_SETTLE, "hw_node_settle", 0),
         (NUM_HW_NODE_KEY_SOURCE, "hw_node_key_source", 0),
-        (NUM_CONSOLE_RELOCATE, "console_relocate", 2),
+        (NUM_CONSOLE_ADOPT, "console_adopt", 6),
         (NUM_MSI_ALLOC, "msi_alloc", 2),
         (NUM_SHM_CREATE, "shm_create", 2),
         (NUM_SHM_MAP, "shm_map", 2),
@@ -3856,6 +3902,8 @@ mod tests {
         (NUM_FD_REDEEM_FROM, "fd_redeem_from", 3),
         (NUM_FD_GRANT_LOCATION, "fd_grant_location", 3),
         (NUM_FD_REDEEM_LOCATION, "fd_redeem_location", 5),
+        (NUM_CONSOLE_DAMAGE, "console_damage", 2),
+        (NUM_CONSOLE_RELINQUISH, "console_relinquish", 0),
         (NUM_SHM_MAP_FROM, "shm_map_from", 4),
         (NUM_TOUCH_INJECT, "touch_inject", 3),
         (NUM_TOUCH_READ, "touch_read", 3),
@@ -4454,17 +4502,40 @@ mod tests {
     }
 
     #[test]
-    fn console_relocate_marshals_pointer_and_len() {
-        let mut buf = [0u8; tairix_abi::HwResource::WIRE_LEN];
+    fn console_adopt_marshals_the_grant_mode_reach_and_record() {
+        let mut buf = [0u8; tairix_abi::driver::display::HostedConsole::WIRE_LEN];
         let ptr = buf.as_mut_ptr().cast::<c_void>();
         let len = buf.len();
         let (number, args) = capture(len as u64, || {
-            assert_eq!(sys_console_relocate(ptr, len), len as u64);
+            assert_eq!(sys_console_adopt(5, 1280, 800, 32, ptr, len), len as u64);
         });
-        assert_eq!(number, NUM_CONSOLE_RELOCATE);
+        assert_eq!(number, NUM_CONSOLE_ADOPT);
+        assert_eq!(&args[..4], &[5, 1280, 800, 32]);
+        assert_eq!(args[4], ptr as usize as u64);
+        assert_eq!(args[5], len as u64);
+    }
+
+    #[test]
+    fn console_damage_marshals_pointer_and_len() {
+        let mut buf = [0u8; tairix_abi::driver::display::DamageRect::WIRE_LEN];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let len = buf.len();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_console_damage(ptr, len), 0);
+        });
+        assert_eq!(number, NUM_CONSOLE_DAMAGE);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], len as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn console_relinquish_marshals_no_arguments() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_console_relinquish(), 0);
+        });
+        assert_eq!(number, NUM_CONSOLE_RELINQUISH);
+        assert_eq!(args, [0; 6]);
     }
 
     #[test]

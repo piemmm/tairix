@@ -1626,7 +1626,9 @@ mod tests {
                             max_width_px: 1920,
                             max_height_px: 1080,
                             per_layer_opacity: true,
+                            hw_scaling: false,
                         }),
+                        cursor: None,
                     },
                     mode: Some(DisplayMode {
                         width_px: 1920,

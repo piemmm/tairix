@@ -117,7 +117,6 @@ pub use session::{
     configured_session_kind, effective_session_kind, elevated_attach, session_attach,
     session_environment, session_program, AuthenticatedUser, Authenticator, ConfigStore,
     Credentials, Gid, LoginView, SessionKind, SessionLauncher, SessionOutcome, Uid,
-    GREETER_SERVICE_PATH,
 };
 pub use supervise::{supervise, DbLoad};
 pub use table::{

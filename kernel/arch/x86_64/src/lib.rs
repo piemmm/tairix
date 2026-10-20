@@ -246,6 +246,7 @@ pub mod uaccess;
 /// neither this module nor the dependency.
 #[cfg(feature = "sched-arch")]
 pub mod userentry;
+pub mod video;
 pub mod viot;
 /// Per-task extended register state (x87/MMX, the YMM and ZMM upper halves,
 /// the AVX-512 opmask): the per-CPU XSAVE setup, the area at the top of each

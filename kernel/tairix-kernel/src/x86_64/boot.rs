@@ -72,7 +72,6 @@ use tairix_kernel_sched_api::SchedulerConfig;
 use tairix_log::{Event, EventId, Field, Level, Sink, TeeSink};
 
 use tairix_arch_x86_64::irqmask::RflagsIrqControl;
-use tairix_arch_x86_64::serial::SERIAL_SINK;
 
 use crate::x86_64::arch_wrapper::BinArch;
 use crate::x86_64::dispatch::{
@@ -80,7 +79,6 @@ use crate::x86_64::dispatch::{
 };
 use crate::x86_64::init_spawn::X86_64_INIT_SPAWN;
 use crate::x86_64::ioapic_controller::IoApicController;
-use crate::x86_64::serial_sink::COM1_CONSOLES;
 
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11). Enabling
 /// `NXE` lets the W^X No-Execute leaf bit the process-image builder sets on
@@ -322,14 +320,16 @@ pub static BOOT_AUDIT_RING: BootAuditRing<BOOT_AUDIT_RING_CAPACITY, RflagsIrqCon
     BootAuditRing::new(boot_audit_clock);
 
 /// The production boot **audit** channel: a fan-out delivering each record to
-/// both the COM1 serial console ([`SERIAL_SINK`]) and the retained
+/// both the kernel's log sink ([`crate::console_layout::LOG_SINK`], COM1 and
+/// the screen a user sees) and the retained
 /// [`BOOT_AUDIT_RING`].
 ///
 /// `main.rs` passes this as [`BootInfo`]'s audit sink for the production
 /// binary; the QEMU boot verticals substitute their own audit sink through
 /// [`boot`] directly, so retaining the trail is a production-only wiring and
 /// never disturbs a test's audit interception.
-pub static AUDIT_SINK: TeeSink<'static, 2> = TeeSink::new([&SERIAL_SINK, &BOOT_AUDIT_RING]);
+pub static AUDIT_SINK: TeeSink<'static, 2> =
+    TeeSink::new([&crate::console_layout::LOG_SINK, &BOOT_AUDIT_RING]);
 
 // --- The boot entry -------------------------------------------------
 
@@ -510,6 +510,8 @@ pub struct BspBringUp {
     /// it did, and whether the administrator chose to publish the functions
     /// they would have confined untranslated.
     pub malformed_units: Option<tairix_kernel_core::iommu::MalformedUnits>,
+    /// Where discovery decided the framebuffer console is shown.
+    pub console: crate::boot_display::ConsolePlacement,
 }
 
 /// Bring the BSP and its board up: per-CPU tables, the dedicated `#PF`
@@ -793,7 +795,7 @@ pub fn bring_up_bsp(
     // (and the MCFG the ECAM branch reads) sit in the identity-mapped
     // 0..4 GiB window (`boot.s` SAFETY-INVARIANT 4), and the ECAM window is
     // re-validated against that window before it is mapped.
-    let (tree, malformed_units) =
+    let (tree, malformed_units, console) =
         unsafe { seed_hardware_tree(madt_bytes, &rsdp, &boot_data, command_line, log_sink) };
 
     Ok(BspBringUp {
@@ -806,6 +808,7 @@ pub fn bring_up_bsp(
         irq_routing,
         tree,
         malformed_units,
+        console,
     })
 }
 
@@ -855,8 +858,14 @@ fn try_boot(
         installed_memory_bytes,
         irq_routing,
         malformed_units,
+        console,
         ..
     } = board;
+    // The port lights no surface of its own, so the framebuffer console is
+    // console 0 only where a display will host it.
+    if console == crate::boot_display::ConsolePlacement::Hosted {
+        let _ = crate::console_layout::CONSOLE.attach(Some(tairix_fbcon::Geometry::UNHOSTED));
+    }
 
     // Assemble the `BootInfo` and hand off to `kernel_core`.
     //
@@ -874,6 +883,7 @@ fn try_boot(
         crate::x86_64::panic_ctx::publish_arch(Arc::as_ptr(&arch_arc));
     }
     let scheduler_config = SchedulerConfig::defaults_for(1);
+    let (consoles, seat_registry) = crate::console_layout::console_layout();
     let boot_info: BootInfo<'static, BinArch> = BootInfo::new(
         /* boot_cpu       = */ 0,
         /* cpu_count      = */ 1,
@@ -892,12 +902,11 @@ fn try_boot(
         &DISPATCH_SLOT,
         heap,
     )
-    // The COM1 console list for the standard streams: `stream_write` on
-    // fd 1/2/3 reaches the same serial line the log sink uses, so PID 1
-    // `init`'s banner lands (`plans/PI.md` X3a). It is a
-    // stream *backing*, not a program-facing device; the read half fails
-    // closed (no COM1 RX drain is wired on this slice).
-    .with_consoles(&COM1_CONSOLES)
+    // One decision for the console list and the boot seat, so the seat's
+    // text sink, the console whose surface its lease hands over, and the
+    // console a descriptor's index names cannot disagree.
+    .with_consoles(consoles)
+    .with_seat_registry(seat_registry)
     // Record the firmware-reported installed-RAM total so the core mints
     // the `boot_facts_get` machine summary from it.
     .with_installed_memory(installed_memory_bytes)
@@ -1024,6 +1033,7 @@ unsafe fn seed_hardware_tree(
 ) -> (
     Vec<tairix_abi::HwNode>,
     Option<tairix_kernel_core::iommu::MalformedUnits>,
+    crate::boot_display::ConsolePlacement,
 ) {
     use tairix_arch_api::PlatformDiscovery;
     use tairix_arch_x86_64::platform::AcpiDiscovery;
@@ -1057,7 +1067,9 @@ unsafe fn seed_hardware_tree(
             "pci apertures unrecorded; none probed",
         ),
     }
-    (sink.into_vec(), malformed)
+    let host = crate::boot_display::virtio_gpu(&sink);
+    let console = crate::boot_display::place_console(&mut sink, host, None);
+    (sink.into_vec(), malformed, console)
 }
 
 /// Where a firmware-assigned BAR may decode: anywhere the physical address
@@ -1878,6 +1890,7 @@ fn observe_interrupt_driven(
     let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(walk, &route_irq, sink, log);
     let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(walk, &route_irq, sink, log);
     let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(walk, &route_irq, sink, log);
+    let _ = crate::hwdiscovery::observe_virtio_pci_display_devices(walk, &route_irq, sink, log);
     for class in [
         crate::hwdiscovery::XHCI_CONTROLLERS,
         crate::hwdiscovery::HD_AUDIO_CONTROLLERS,

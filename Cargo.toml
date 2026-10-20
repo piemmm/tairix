@@ -374,6 +374,8 @@ members = [
     "tests/integration/audio_qemu_aarch64",
     "tests/integration/audio_qemu_riscv64",
     "tests/integration/audio_qemu_x86_64",
+    "tests/integration/virtio_gpu_qemu_riscv64",
+    "tests/integration/virtio_gpu_qemu_x86_64",
     "tests/integration/audio_wire",
     "tests/integration/bootguard",
     "tests/integration/bootguard_qemu_aarch64",

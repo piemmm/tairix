@@ -107,6 +107,9 @@ tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
 tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 tairix-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
+# The one framebuffer console the kernel hosts, over grids from its heap, and
+# the device the console layout lists it as.
+tairix-fbcon = { path = "../../lib/fbcon", version = "=0.0.0" }
 # A function's aliases, held without allocating.
 tairix-inline = { path = "../../lib/inline", version = "=0.0.0" }
 # The PCI configuration-access library: the mechanisms a port's probe reaches

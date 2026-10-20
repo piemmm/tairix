@@ -1,6 +1,6 @@
-//! Display lists as the fifth-generation HVS reads them: one plane of a
-//! linear RGB surface, placed and scaled onto a channel's output, after
-//! Linux's `vc4_plane_mode_set`.
+//! Display lists as the fifth-generation HVS reads them: planes of linear RGB
+//! surfaces, each placed and scaled onto a channel's output and blended over
+//! those before it, after Linux's `vc4_plane_mode_set`.
 
 use tairix_abi::driver::display::DisplayFormat;
 use tairix_abi::DriverError;
@@ -39,7 +39,15 @@ const FORMAT_RGBA8888: u32 = 7;
 const ORDER_ARGB: u32 = 2;
 const ORDER_ABGR: u32 = 3;
 const CTL2_ALPHA_FIXED: u32 = 1 << 30;
+const CTL2_ALPHA_PREMULT: u32 = 1 << 29;
+const CTL2_ALPHA_MIX: u32 = 1 << 28;
 const OPAQUE: u32 = 0xFFF;
+
+/// Where an unscaled plane holds its position, its size and its pointer: the
+/// words a cursor moved in a live list rewrites.
+pub(crate) const UNITY_POSITION: usize = 1;
+pub(crate) const UNITY_SIZE: usize = 3;
+pub(crate) const UNITY_POINTER: usize = 5;
 /// A word the HVS writes as it walks the list.
 const CONTEXT: u32 = 0xC0C0_C0C0;
 const PPF_AGC: u32 = 1 << 30;
@@ -80,6 +88,30 @@ impl Scaling {
             (Self::None, Self::Ppf) => 5,
             (Self::None, Self::Tpz) => 6,
             (Self::Tpz, Self::None) => 7,
+        }
+    }
+}
+
+/// How a plane's pixels blend over the planes before it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Alpha {
+    /// Opaque, whatever its alpha bytes hold.
+    Opaque,
+    /// Its own premultiplied alpha, scaled by a constant opacity.
+    Premultiplied(u8),
+}
+
+impl Alpha {
+    /// The control word that says so.
+    const fn control(self) -> u32 {
+        match self {
+            Self::Opaque => CTL2_ALPHA_FIXED | field(OPAQUE, 4, 12),
+            Self::Premultiplied(u8::MAX) => CTL2_ALPHA_PREMULT | field(OPAQUE, 4, 12),
+            // Twelve bits of constant alpha, scaling the plane's own.
+            Self::Premultiplied(opacity) => {
+                let wide = (opacity as u32 * OPAQUE + 127) / 255;
+                CTL2_ALPHA_PREMULT | CTL2_ALPHA_MIX | field(wide, 4, 12)
+            }
         }
     }
 }
@@ -176,8 +208,9 @@ fn tpz(src: u32, dst: u32) -> [u32; 2] {
     [field(scale, 8, 21), field(recip, 0, 16)]
 }
 
-/// The words placing `surface` at `place`, `kernel` the word offset of the
-/// filter kernel and `lbm` the line-buffer base it scales through.
+/// The words placing `surface` at `place`, blended by `alpha`, `kernel` the
+/// word offset of the filter kernel and `lbm` the line-buffer base it scales
+/// through.
 ///
 /// # Errors
 ///
@@ -185,8 +218,8 @@ fn tpz(src: u32, dst: u32) -> [u32; 2] {
 pub(crate) fn plane(
     surface: &Surface,
     place: &Place,
-    kernel: u32,
-    lbm: u32,
+    (kernel, lbm): (u32, u32),
+    alpha: Alpha,
 ) -> Result<PlaneWords, DriverError> {
     let fits = surface.width.max(surface.height) < 1 << 13
         && place.width.max(place.height) < 1 << 13
@@ -221,12 +254,12 @@ pub(crate) fn plane(
             | CTL0_ALPHA_EXPAND
             | CTL0_RGB_EXPAND,
     )?;
-    push(field(place.x, 0, 14) | field(place.y, 16, 12))?;
-    push(CTL2_ALPHA_FIXED | field(OPAQUE, 4, 12))?;
+    push(position(place))?;
+    push(alpha.control())?;
     if !unity {
         push(field(place.width, 0, 13) | field(place.height, 16, 13))?;
     }
-    push(field(surface.width, 0, 13) | field(surface.height, 16, 13))?;
+    push(size(surface))?;
     push(CONTEXT)?;
     push(surface.bus)?;
     push(CONTEXT)?;
@@ -260,6 +293,34 @@ pub(crate) fn plane(
     let size = u32::try_from(words.len()).map_err(|_| DriverError::OutOfRange)?;
     words[0] |= field(size, CTL0_SIZE_SHIFT, 6);
     Ok(words)
+}
+
+/// A plane's position word.
+pub(crate) const fn position(place: &Place) -> u32 {
+    field(place.x, 0, 14) | field(place.y, 16, 12)
+}
+
+/// Bits of each side in a plane's source size word.
+const SIZE_BITS: u32 = 13;
+
+/// A plane's source size word.
+pub(crate) const fn size(surface: &Surface) -> u32 {
+    field(surface.width, 0, SIZE_BITS) | field(surface.height, 16, SIZE_BITS)
+}
+
+/// The size word no larger, on either axis, than both size words `a` and
+/// `b`.
+pub(crate) const fn narrower(a: u32, b: u32) -> u32 {
+    const fn least(a: u32, b: u32) -> u32 {
+        if a < b {
+            a
+        } else {
+            b
+        }
+    }
+    let side = (1 << SIZE_BITS) - 1;
+    field(least(a & side, b & side), 0, SIZE_BITS)
+        | field(least((a >> 16) & side, (b >> 16) & side), 16, SIZE_BITS)
 }
 
 /// Three nine-bit filter coefficients packed into one word.

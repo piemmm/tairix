@@ -11,10 +11,11 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use tairix_abi::driver::display::{
-    DamageRect, Display, DisplayFormat, DisplayMode, DisplayPower, SeatGate,
+    BufferId, DamageRect, Display, DisplayFormat, DisplayMode, DisplayPower, Presented, SeatGate,
 };
 use tairix_abi::driver::DriverKind;
 use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapError, MmioMapper, RegisterWindow};
+use tairix_display::testkit::HeapMemory;
 use tairix_display::{Framebuffer, FramebufferConfig};
 
 /// Stand-in for the kernel's MMIO-map facility. Backs every minted
@@ -126,28 +127,65 @@ fn config(width: u32, height: u32, stride: u32) -> FramebufferConfig {
     }
 }
 
+type Engine<'h> = Framebuffer<'h, HeapMemory>;
+
+fn open(
+    host: &MockHost,
+    config: FramebufferConfig,
+) -> Result<(Engine<'_>, HeapMemory), DriverError> {
+    let memory = HeapMemory::default();
+    Framebuffer::open(host, config, memory.clone()).map(|fb| (fb, memory))
+}
+
+/// Allocate a whole-output buffer holding `content`.
+fn drawn(fb: &mut Engine<'_>, memory: &HeapMemory, content: &[u8]) -> BufferId {
+    let mode = fb.output().expect("an output");
+    let buffer = fb
+        .alloc_buffer(mode.width_px, mode.height_px)
+        .expect("allocated");
+    memory.fill(buffer.region, content).expect("drawn");
+    buffer.id
+}
+
+fn rect(x: u32, y: u32, width_px: u32, height_px: u32) -> DamageRect {
+    DamageRect {
+        x,
+        y,
+        width_px,
+        height_px,
+    }
+}
+
 #[test]
-fn open_reports_configured_mode() {
-    // 4x2 BGRA, stride 16 → 32-byte surface, 8 backing words.
+fn open_reports_the_configured_mode_and_presents_from_one_buffer() {
     let host = MockHost::full(8);
-    let fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
+    let (fb, _) = open(&host, config(4, 2, 16)).expect("open");
     assert_eq!(
-        fb.output().expect("an output"),
-        DisplayMode {
+        fb.output(),
+        Some(DisplayMode {
             width_px: 4,
             height_px: 2,
             stride_bytes: 16,
             format: DisplayFormat::Bgra8888,
-        }
+        })
+    );
+    assert_eq!(
+        fb.frame_count(),
+        1,
+        "a present has copied its buffer on return"
     );
 }
 
 #[test]
-fn present_copies_frame_bytes_into_surface() {
+fn a_presented_buffer_reaches_the_surface() {
     let host = MockHost::full(8);
-    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
+    let (mut fb, memory) = open(&host, config(4, 2, 16)).expect("open");
     let frame: Vec<u8> = (0..32u8).collect();
-    fb.present(&frame).expect("present");
+    let buffer = drawn(&mut fb, &memory, &frame.clone());
+    assert_eq!(
+        fb.present(buffer, &[rect(0, 0, 4, 2)]),
+        Ok(Presented::Shown)
+    );
     let mapper = host.mapper.as_ref().expect("mapper");
     for (off, expected) in frame.iter().enumerate() {
         assert_eq!(mapper.byte(off), *expected, "byte {off}");
@@ -155,84 +193,56 @@ fn present_copies_frame_bytes_into_surface() {
 }
 
 #[test]
-fn present_handles_non_word_multiple_surface() {
-    // stride 13 (one byte of scanline padding past 3*4) × 2 rows = 26
-    // bytes: exercises the `u32` bulk path plus the 2-byte tail.
-    let host = MockHost::full(8); // 32 bytes backing ≥ 26.
-    let mut fb = Framebuffer::open(&host, config(3, 2, 13)).expect("open");
-    let frame: Vec<u8> = (0..26u8).map(|b| b.wrapping_mul(7)).collect();
-    fb.present(&frame).expect("present");
-    let mapper = host.mapper.as_ref().expect("mapper");
-    for (off, expected) in frame.iter().enumerate() {
-        assert_eq!(mapper.byte(off), *expected, "byte {off}");
-    }
-}
-
-#[test]
-fn present_rects_blits_only_the_damaged_spans() {
+fn a_padded_surface_takes_each_row_at_its_own_stride() {
+    // Three 4-byte pixels a row, the surface padding each row to 13 bytes.
     let host = MockHost::full(8);
-    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
-    let frame = vec![0xEEu8; 32];
-    let damage = DamageRect {
-        x: 1,
-        y: 1,
-        width_px: 2,
-        height_px: 1,
-    };
-    fb.present_rects(&frame, &[damage]).expect("region present");
+    let (mut fb, memory) = open(&host, config(3, 2, 13)).expect("open");
+    let frame: Vec<u8> = (0..24u8).map(|b| b.wrapping_mul(7)).collect();
+    let buffer = drawn(&mut fb, &memory, &frame.clone());
+    fb.present(buffer, &[rect(0, 0, 3, 2)]).expect("present");
     let mapper = host.mapper.as_ref().expect("mapper");
-    // Row 1, pixels 1..3 (bytes 20..28) carry the frame; all else is 0.
+    for row in 0..2 {
+        for column in 0..12 {
+            assert_eq!(
+                mapper.byte(row * 13 + column),
+                frame[row * 12 + column],
+                "row {row} byte {column}"
+            );
+        }
+    }
+}
+
+#[test]
+fn only_the_damaged_spans_are_copied() {
+    let host = MockHost::full(8);
+    let (mut fb, memory) = open(&host, config(4, 2, 16)).expect("open");
+    let buffer = drawn(&mut fb, &memory, &[0xEEu8; 32]);
+    fb.present(buffer, &[rect(1, 1, 2, 1)])
+        .expect("region present");
+    let mapper = host.mapper.as_ref().expect("mapper");
     for off in 0..32 {
         let expected = if (20..28).contains(&off) { 0xEE } else { 0x00 };
         assert_eq!(mapper.byte(off), expected, "byte {off}");
     }
 }
 
-/// One call carries a whole frame's damage: each rectangle is blitted at
-/// its own size, and a bad one anywhere in the list leaves the surface
-/// untouched rather than half-updated.
 #[test]
-fn present_rects_blits_a_whole_list_or_none_of_it() {
+fn a_whole_damage_list_is_copied_or_none_of_it() {
     let host = MockHost::full(8);
-    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
-    let frame = vec![0xEEu8; 32];
-    let corners = [
-        DamageRect {
-            x: 0,
-            y: 0,
-            width_px: 1,
-            height_px: 1,
-        },
-        DamageRect {
-            x: 3,
-            y: 1,
-            width_px: 1,
-            height_px: 1,
-        },
-    ];
-
-    // A rectangle escaping the surface refuses the whole list, including
-    // the good rectangle ahead of it.
-    let escaping = [
-        corners[0],
-        DamageRect {
-            x: 3,
-            y: 0,
-            width_px: 2,
-            height_px: 1,
-        },
-    ];
-    assert_eq!(
-        fb.present_rects(&frame, &escaping),
-        Err(DriverError::LengthOutOfRange)
-    );
+    let (mut fb, memory) = open(&host, config(4, 2, 16)).expect("open");
+    let buffer = drawn(&mut fb, &memory, &[0xEEu8; 32]);
     let mapper = host.mapper.as_ref().expect("mapper");
-    for off in 0..32 {
-        assert_eq!(mapper.byte(off), 0x00, "byte {off} was written anyway");
+    for bad in [
+        [rect(0, 0, 1, 1), rect(3, 0, 2, 1)],
+        [rect(0, 0, 1, 1), rect(0, 0, 0, 1)],
+    ] {
+        assert_eq!(fb.present(buffer, &bad), Err(DriverError::LengthOutOfRange));
+        for off in 0..32 {
+            assert_eq!(mapper.byte(off), 0x00, "byte {off} was written anyway");
+        }
     }
-
-    fb.present_rects(&frame, &corners).expect("both corners");
-    // Only the two corner pixels: bytes 0..4 and 28..32.
+    fb.present(buffer, &[rect(0, 0, 1, 1), rect(3, 1, 1, 1)])
+        .expect("both corners");
     for off in 0..32 {
         let expected = if (4..28).contains(&off) { 0x00 } else { 0xEE };
         assert_eq!(mapper.byte(off), expected, "byte {off}");
@@ -240,95 +250,74 @@ fn present_rects_blits_a_whole_list_or_none_of_it() {
 }
 
 #[test]
-fn present_rects_fails_closed_on_bad_damage_and_short_frame() {
+fn only_a_live_buffer_of_the_outputs_size_is_shown() {
     let host = MockHost::full(8);
-    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
-    let frame = vec![0xEEu8; 32];
-    // Escaping and empty rectangles are refused before any write.
-    for damage in [
-        DamageRect {
-            x: 3,
-            y: 0,
-            width_px: 2,
-            height_px: 1,
-        },
-        DamageRect {
-            x: 0,
-            y: 0,
-            width_px: 0,
-            height_px: 1,
-        },
-    ] {
+    let (mut fb, memory) = open(&host, config(4, 2, 16)).expect("open");
+    let whole = rect(0, 0, 4, 2);
+    let small = fb.alloc_buffer(2, 2).expect("a smaller buffer").id;
+    assert_eq!(fb.present(small, &[whole]), Err(DriverError::Stale));
+    let buffer = drawn(&mut fb, &memory, &[0x11u8; 32]);
+    assert_eq!(fb.free_buffer(buffer), Ok(()));
+    assert_eq!(fb.present(buffer, &[whole]), Err(DriverError::NotFound));
+    assert_eq!(fb.free_buffer(buffer), Err(DriverError::NotFound));
+    let mapper = host.mapper.as_ref().expect("mapper");
+    assert_eq!(mapper.byte(0), 0x00);
+}
+
+#[test]
+fn allocation_is_bounded_by_the_output_and_a_few_surfaces_of_memory() {
+    let host = MockHost::full(8);
+    let (mut fb, _) = open(&host, config(4, 2, 16)).expect("open");
+    for (width, height) in [(0, 2), (4, 0), (5, 2), (4, 3)] {
         assert_eq!(
-            fb.present_rects(&frame, &[damage]),
-            Err(DriverError::LengthOutOfRange)
+            fb.alloc_buffer(width, height).err(),
+            Some(DriverError::LengthOutOfRange)
         );
     }
-    // A short frame is refused after the bounds pass.
-    let full = DamageRect {
-        x: 0,
-        y: 0,
-        width_px: 4,
-        height_px: 2,
-    };
+    let held: Vec<_> = (0..4)
+        .map(|_| fb.alloc_buffer(4, 2).expect("within the budget").id)
+        .collect();
+    assert_eq!(fb.alloc_buffer(1, 1).err(), Some(DriverError::NoSpace));
+    fb.free_buffer(held[0]).expect("freed");
+    assert!(fb.alloc_buffer(4, 2).is_ok(), "freeing returns its bytes");
+    let ids: Vec<_> = held.iter().map(|id| id.get()).collect();
     assert_eq!(
-        fb.present_rects(&frame[..16], &[full]),
-        Err(DriverError::BufferTooSmall)
+        ids,
+        [1, 2, 3, 4],
+        "ids are the engine's, never reused within a load"
     );
-    let mapper = host.mapper.as_ref().expect("mapper");
-    for off in 0..32 {
-        assert_eq!(mapper.byte(off), 0x00, "surface untouched at byte {off}");
-    }
 }
 
 #[test]
-fn present_rects_is_seat_gated_before_any_write() {
-    let host = MockHost {
-        mmio_map: true,
-        mapper: Some(MockMapper::new(8, true)),
-        gate: Some(MockGate {
-            verdict: Cell::new(Err(DriverError::SeatRevoked)),
-        }),
-    };
-    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
-    let frame = vec![0xEEu8; 32];
-    let damage = DamageRect {
-        x: 0,
-        y: 0,
-        width_px: 1,
-        height_px: 1,
-    };
-    assert_eq!(
-        fb.present_rects(&frame, &[damage]),
-        Err(DriverError::SeatRevoked)
-    );
-    let mapper = host.mapper.as_ref().expect("mapper");
-    assert_eq!(mapper.byte(0), 0x00, "a revoked present writes nothing");
-}
-
-#[test]
-fn present_rejects_short_frame() {
+fn shared_memory_that_cannot_be_had_is_refused() {
     let host = MockHost::full(8);
-    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
-    let short = vec![0u8; 31];
-    assert_eq!(fb.present(&short), Err(DriverError::BufferTooSmall));
+    let memory = HeapMemory::refusing();
+    let mut fb = Framebuffer::open(&host, config(4, 2, 16), memory).expect("open");
+    assert_eq!(fb.alloc_buffer(4, 2).err(), Some(DriverError::OutOfMemory));
 }
 
 #[test]
-fn present_ignores_trailing_bytes_of_oversized_frame() {
-    // 9 backing words (36 bytes) so the post-surface probe at byte 32
-    // stays in bounds.
-    let host = MockHost::full(9);
-    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
-    let mut frame = vec![0xABu8; 32];
-    frame.extend_from_slice(&[0xFFu8; 16]); // 48 bytes; last 16 ignored.
-    fb.present(&frame).expect("present");
-    let mapper = host.mapper.as_ref().expect("mapper");
-    for off in 0..32 {
-        assert_eq!(mapper.byte(off), 0xAB, "byte {off}");
+fn a_present_is_seat_gated_before_any_write() {
+    let mut host = MockHost::full(8);
+    host.gate = Some(MockGate {
+        verdict: Cell::new(Ok(())),
+    });
+    let (mut fb, memory) = open(&host, config(4, 2, 16)).expect("open");
+    let whole = rect(0, 0, 4, 2);
+    let first = drawn(&mut fb, &memory, &[0x11u8; 32]);
+    fb.present(first, &[whole]).expect("live lease presents");
+    let gate = host.gate.as_ref().expect("gate installed");
+    let mapper = host.mapper.as_ref().expect("mapper installed");
+    let overwrite = drawn(&mut fb, &memory, &[0x22u8; 32]);
+    for refusal in [DriverError::SeatRevoked, DriverError::PermissionDenied] {
+        gate.verdict.set(Err(refusal));
+        assert_eq!(fb.present(overwrite, &[whole]), Err(refusal));
+        assert_eq!(mapper.byte(0), 0x11, "a refused present writes nothing");
     }
-    // Bytes past the surface stay zero in the backing.
-    assert_eq!(mapper.byte(32), 0x00);
+    gate.verdict.set(Ok(()));
+    fb.present(overwrite, &[whole])
+        .expect("live lease presents again");
+    assert_eq!(mapper.byte(31), 0x22);
 }
 
 #[test]
@@ -339,21 +328,20 @@ fn open_requires_mmio_map_capability_on_host() {
         gate: None,
     };
     assert_eq!(
-        Framebuffer::open(&host, config(4, 2, 16)).err(),
+        open(&host, config(4, 2, 16)).err(),
         Some(DriverError::PermissionDenied)
     );
 }
 
 #[test]
 fn open_surfaces_mapper_capability_denial() {
-    // Host advertises the grant but the mapper itself fails closed.
     let host = MockHost {
         mmio_map: true,
         mapper: Some(MockMapper::new(8, false)),
         gate: None,
     };
     assert_eq!(
-        Framebuffer::open(&host, config(4, 2, 16)).err(),
+        open(&host, config(4, 2, 16)).err(),
         Some(DriverError::PermissionDenied)
     );
 }
@@ -366,17 +354,16 @@ fn open_without_mapper_is_unsupported() {
         gate: None,
     };
     assert_eq!(
-        Framebuffer::open(&host, config(4, 2, 16)).err(),
+        open(&host, config(4, 2, 16)).err(),
         Some(DriverError::Unsupported)
     );
 }
 
 #[test]
 fn open_rejects_region_larger_than_platform_can_map() {
-    // 4x2 stride 16 = 32 bytes, but only 4 backing words (16 bytes).
     let host = MockHost::full(4);
     assert_eq!(
-        Framebuffer::open(&host, config(4, 2, 16)).err(),
+        open(&host, config(4, 2, 16)).err(),
         Some(DriverError::Unsupported)
     );
 }
@@ -384,64 +371,26 @@ fn open_rejects_region_larger_than_platform_can_map() {
 #[test]
 fn open_rejects_degenerate_geometry() {
     let host = MockHost::full(8);
-    assert_eq!(
-        Framebuffer::open(&host, config(0, 2, 16)).err(),
-        Some(DriverError::LengthOutOfRange)
-    );
-    assert_eq!(
-        Framebuffer::open(&host, config(4, 0, 16)).err(),
-        Some(DriverError::LengthOutOfRange)
-    );
-    // Stride too small to hold one 4-pixel BGRA scanline (needs 16).
-    assert_eq!(
-        Framebuffer::open(&host, config(4, 2, 12)).err(),
-        Some(DriverError::LengthOutOfRange)
-    );
-}
-
-#[test]
-fn present_gates_on_the_live_seat_lease() {
-    let mut host = MockHost::full(8);
-    host.gate = Some(MockGate {
-        verdict: Cell::new(Ok(())),
-    });
-    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
-    let first = vec![0x11u8; 32];
-    fb.present(&first).expect("live lease presents");
-
-    // The lease is revoked between frames: the very next present is
-    // refused with the distinct error before any surface access, so the
-    // scan-out keeps the last-presented frame even though the mapping
-    // still exists.
-    let gate = host.gate.as_ref().expect("gate installed");
-    gate.verdict.set(Err(DriverError::SeatRevoked));
-    let overwrite = vec![0x22u8; 32];
-    assert_eq!(fb.present(&overwrite), Err(DriverError::SeatRevoked));
-    let mapper = host.mapper.as_ref().expect("mapper installed");
-    assert_eq!(mapper.byte(0), 0x11);
-    assert_eq!(mapper.byte(31), 0x11);
-
-    // A stale handle also stays refused as a plain authority failure.
-    gate.verdict.set(Err(DriverError::PermissionDenied));
-    assert_eq!(fb.present(&overwrite), Err(DriverError::PermissionDenied));
-
-    // Once the host's gate reports a live lease again (the new
-    // foreground's grant), presents flow.
-    gate.verdict.set(Ok(()));
-    fb.present(&overwrite).expect("live lease presents again");
-    assert_eq!(mapper.byte(0), 0x22);
+    for geometry in [config(0, 2, 16), config(4, 0, 16), config(4, 2, 12)] {
+        assert_eq!(
+            open(&host, geometry).err(),
+            Some(DriverError::LengthOutOfRange)
+        );
+    }
 }
 
 #[test]
 fn unload_then_reload_presents_again() {
     let host = MockHost::full(8);
+    let whole = rect(0, 0, 4, 2);
     {
-        let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("first load");
-        fb.present(&[0x11u8; 32]).expect("present");
-        // `fb` drops here — the unload step (the window is released).
+        let (mut fb, memory) = open(&host, config(4, 2, 16)).expect("first load");
+        let buffer = drawn(&mut fb, &memory, &[0x11u8; 32]);
+        fb.present(buffer, &[whole]).expect("present");
     }
-    let mut reloaded = Framebuffer::open(&host, config(4, 2, 16)).expect("reload");
-    reloaded.present(&[0x22u8; 32]).expect("present");
+    let (mut reloaded, memory) = open(&host, config(4, 2, 16)).expect("reload");
+    let buffer = drawn(&mut reloaded, &memory, &[0x22u8; 32]);
+    reloaded.present(buffer, &[whole]).expect("present");
     let mapper = host.mapper.as_ref().expect("mapper");
     for off in 0..32 {
         assert_eq!(mapper.byte(off), 0x22, "byte {off}");
@@ -451,10 +400,8 @@ fn unload_then_reload_presents_again() {
 #[test]
 fn a_linear_surface_has_no_power_control_to_switch() {
     let host = MockHost::full(8);
-    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("load");
+    let (mut fb, _) = open(&host, config(4, 2, 16)).expect("load");
     for power in [DisplayPower::Off, DisplayPower::On] {
         assert_eq!(fb.set_power(power), Err(DriverError::Unsupported));
     }
-    fb.present(&[0x33u8; 32])
-        .expect("the surface still presents");
 }

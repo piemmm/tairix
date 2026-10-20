@@ -240,11 +240,12 @@ impl FrameStatsPublisher {
 mod tests {
     use super::{FrameStatsPublisher, FrameStatsSink, MIN_FRAME_PUBLISH_INTERVAL_NS};
     use alloc::vec::Vec;
-    use tairix_abi::driver::display::{DamageRect, Display, DisplayMode};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode, DisplayPower};
     use tairix_abi::sysinfo::{
         DesktopFrameTotals, SysinfoQueryId, SysinfoRequestHeader, SYSINFO_MAX_REQUEST,
     };
     use tairix_abi::{DriverError, Errno};
+    use tairix_display::Presenter;
     use tairix_geometry::Point;
     use tairix_wm::{Compositor, Surface};
 
@@ -324,20 +325,20 @@ mod tests {
         mode: DisplayMode,
     }
 
-    impl Display for AcceptingDisplay {
-        fn output(&self) -> Option<DisplayMode> {
-            Some(self.mode)
+    impl Presenter for AcceptingDisplay {
+        fn mode(&self) -> DisplayMode {
+            self.mode
         }
 
-        fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+        fn ready(&self) -> bool {
+            true
+        }
+
+        fn present(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
             Ok(())
         }
 
-        fn present_rects(
-            &mut self,
-            _frame: &[u8],
-            _damage: &[DamageRect],
-        ) -> Result<(), DriverError> {
+        fn set_power(&mut self, _power: DisplayPower) -> Result<(), DriverError> {
             Ok(())
         }
     }

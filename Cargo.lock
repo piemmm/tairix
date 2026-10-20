@@ -1021,6 +1021,7 @@ dependencies = [
  "tairix-abi",
  "tairix-arch-api",
  "tairix-conout",
+ "tairix-fbcon",
  "tairix-fdt",
  "tairix-log",
  "tairix-memguard",
@@ -1047,6 +1048,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-conout",
+ "tairix-fbcon",
  "tairix-fuzzseed",
  "tairix-kernel-mem",
  "tairix-log",
@@ -1661,8 +1663,10 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-display",
  "tairix-drvrt",
  "tairix-geometry",
+ "tairix-inline",
  "tairix-log",
  "tairix-parallel",
  "tairix-raster",
@@ -1973,12 +1977,24 @@ dependencies = [
 [[package]]
 name = "tairix-drv-display-gpu-virtio"
 version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-display",
+ "tairix-drvrt",
+ "tairix-edid",
+ "tairix-inline",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-virtio",
+]
 
 [[package]]
 name = "tairix-drv-display-vesa"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-display",
 ]
 
 [[package]]
@@ -2397,7 +2413,9 @@ dependencies = [
 name = "tairix-fbcon"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-font",
+ "tairix-sync",
  "tairix-vt",
 ]
 
@@ -2841,6 +2859,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-log",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2887,6 +2906,7 @@ dependencies = [
  "tairix-drv-storage-virtio-blk",
  "tairix-drvhost",
  "tairix-enrolment",
+ "tairix-fbcon",
  "tairix-fdt",
  "tairix-fsprobe",
  "tairix-hash",
@@ -5471,16 +5491,15 @@ dependencies = [
 name = "tairix-test-greeter-default-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
- "tairix-abi",
  "tairix-appload",
  "tairix-arch-aarch64",
+ "tairix-display",
  "tairix-itest-harness",
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-ipc",
  "tairix-log",
- "tairix-util",
 ]
 
 [[package]]
@@ -7642,6 +7661,7 @@ dependencies = [
  "tairix-arch-x86_64",
  "tairix-caps",
  "tairix-crypto",
+ "tairix-display",
  "tairix-drv-display-vesa",
  "tairix-drvhost",
  "tairix-fwcfg",
@@ -7685,6 +7705,35 @@ dependencies = [
  "tairix-drvhost",
  "tairix-itest-harness",
  "tairix-test-virtio-qemu-support",
+]
+
+[[package]]
+name = "tairix-test-virtio-gpu-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-appload",
+ "tairix-arch-riscv64",
+ "tairix-display",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-ipc",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-virtio-gpu-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-appload",
+ "tairix-arch-x86_64",
+ "tairix-display",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kernel",
+ "tairix-kernel-ipc",
+ "tairix-log",
 ]
 
 [[package]]
@@ -8499,6 +8548,7 @@ dependencies = [
  "tairix-drv-display-bcm2711-hdmi",
  "tairix-drv-display-bcm2711-hvs",
  "tairix-drv-display-framebuffer",
+ "tairix-drv-display-gpu-virtio",
  "tairix-drv-dma-bcm2835",
  "tairix-drv-input-usb-hid",
  "tairix-drv-input-virtio-input",

@@ -822,6 +822,7 @@ fn sound_frame() -> FrameReport {
         present_calls: 2,
         chrome_hits: 1,
         chrome_misses: 0,
+        layers: 0,
     }
 }
 
@@ -836,6 +837,7 @@ fn round_trips_frame_reports_at_the_bounds() {
         present_calls: 0,
         chrome_hits: 0,
         chrome_misses: 0,
+        layers: 0,
     };
     assert!(idle.is_idle());
     assert!(!sound_frame().is_idle());
@@ -851,6 +853,7 @@ fn round_trips_frame_reports_at_the_bounds() {
         present_calls: 1,
         chrome_hits: u32::MAX,
         chrome_misses: u32::MAX,
+        layers: 8,
     };
     for report in [idle, sound_frame(), whole_screen] {
         let command = SwitchboardCommand::FrameReport { report };
@@ -952,4 +955,17 @@ fn frame_command_rejects_a_dirty_tail_and_contradictory_counts() {
             Err(Errno::OutOfRange)
         );
     }
+}
+
+#[test]
+fn a_frame_report_naming_more_layers_than_one_present_can_is_refused() {
+    let report = FrameReport {
+        layers: 9,
+        ..sound_frame()
+    };
+    let command = SwitchboardCommand::FrameReport { report };
+    assert_eq!(
+        SwitchboardCommand::from_bytes(&command.to_le_bytes()),
+        Err(Errno::OutOfRange)
+    );
 }

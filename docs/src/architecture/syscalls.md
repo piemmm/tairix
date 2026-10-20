@@ -193,13 +193,15 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 138 | `port_admit`   | `IpcEndpoint` (own port), `IpcEndpoint` (server) | `errno` | —                       | yes     |
 | 139 | `foreground_held` | `u32 fd`                             | `u64` (`1` held, `0` not) | `CAP_CONSOLE_READ` | no |
 | 140 | `hw_node_settle` | —                                     | `errno`       | `CAP_HW_EMIT`    | no    |
-| 141 | `console_relocate` | `user_ptr` (out: framebuffer `HwResource`), `len` | `u64` (bytes) | `CAP_MEM_DMA` | yes |
+| 141 | `console_adopt` | `Handle` (`Dma` grant), `u32 width`, `u32 height`, `u32 reach`, `user_ptr` (out: `HostedConsole`), `len` | `u64` (bytes) | `CAP_MEM_DMA` | yes |
 | 142 | `waitset_close` | `Handle` (set)                         | `errno`       | —                       | no      |
 | 143 | `port_unbind`  | `IpcEndpoint` (own port)                | `errno`       | —                       | yes     |
 | 144 | `call_peer_port` | `IpcEndpoint`, `Handle` (ticket), `IpcEndpoint` (port) | `errno` | —             | no      |
 | 145 | `hw_node_key_source` | —                                 | `errno`       | `CAP_INPUT_INJECT` | no    |
 | 146 | `fd_grant_location` | `u32 fd`, `*const ProcId recipient`, `usize len` | `u64` (handle) | —           | no      |
 | 147 | `fd_redeem_location` | `Handle` (location), `*const ProcId grantor`, `usize len`, `user_ptr` (path out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | yes |
+| 148 | `console_damage` | `user_ptr` (out: `DamageRect`), `len` | `u64` (bytes, `0` when none owed) | — | no |
+| 149 | `console_relinquish` | — | `errno` | `CAP_MEM_DMA` | yes |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -526,7 +528,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SHM`          | `shm_create`, `shm_map`, `shm_map_from`, `shm_grant`, `shm_grant_peer`, and `shm_create_dma` (checked in-handler, in addition to the dispatcher's `CAP_MEM_DMA`) |
 | `CAP_IPC_ENDPOINT` | `call_grant` (the dispatch gate); also the per-endpoint gate a grant-restricted endpoint's *senders* must hold, enforced in `ipc_call`/`call_post` alongside the per-endpoint grant |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
-| `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`, `dma_quiesced`, `shm_create_dma`, `console_relocate` |
+| `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`, `dma_quiesced`, `shm_create_dma`, `console_adopt`, `console_relinquish` |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
@@ -748,26 +750,45 @@ node fails `NotFound`, one whose node has left the tree `DeviceOffline`, and a
 buffer shorter than the record `BufferTooSmall`. The Rust wrapper is
 `tairix_rt::hw_self_node`; the C stub is `tairix_sys_hw_self_node`.
 
-`console_relocate` (no. 141) moves the kernel's framebuffer console off the
-firmware's memory, so a display engine can take the screen over from the
-firmware that lit it: once told, the firmware may take its own framebuffer
-back. Only the driver of a node discovery marked `BootConsole` is answered —
-no driver can publish that mark — and it holds `CAP_MEM_DMA`, since its
-device reads the memory; a driver confined by a translation unit is refused
-`NotSupported`, as the block is mapped into no domain. An admitted caller is
-parked until the boot has handed the console to `login`: the Supervisor window
-and a passphrase prompt are drawn on this screen, and the mode set a takeover
-makes would blank the sink under them. A termination unwinds the wait. The
-kernel then takes a
-zeroed, contiguous block below the node's DMA window that starts at the
-bottom of memory, has the console repaint there from its retained screen in
-the disposition it holds, and writes the surface into `(buf, len)` as one
-framebuffer `HwResource`. The block is the console's for the kernel's life,
-so a second call — a restarted engine's — answers the same surface. A
-console that cannot move stays where it was: `NotFound` with none to move,
-`OutOfRange` with no such window, `OutOfMemory` with no block below it. The
-Rust wrapper is `tairix_rt::console_relocate`; the C stub is
-`tairix_sys_console_relocate`.
+`console_adopt` (no. 141) hosts the kernel's framebuffer console on the
+caller's display. Only the driver of a node discovery marked `ConsoleHost` is
+answered — no driver can publish that mark — and it holds `CAP_MEM_DMA`, since
+its device reads the console. The kernel carves a zeroed, physically
+contiguous block for `width` × `height` under the caller's `Dma` grant, below
+the device's `reach`: below the grant's window, which must start at the
+bottom of memory, for an untranslated device, and mapped into its domain for
+a translated one. It moves the console onto the block, re-cut to that size,
+and writes one `HostedConsole` — the block's device address and stride — into
+`(buf, len)`. A console still on a screen the firmware lit moves only once
+the boot has handed it to `login`, and the call waits until then: the
+Supervisor window and a passphrase prompt are drawn there, and an engine's
+takeover blanks the sink while it re-locks. A termination unwinds the wait.
+The block outlives the driver: another call at the same size — a restarted
+driver's — answers the same block, mapped for its own instance, and another
+size is `Busy` until the block is relinquished, since the device may still
+read it. `NotFound` with no console to host, `LengthOutOfRange` for a size no
+glyph fits, `OutOfRange` for a block the device cannot reach, and
+`OutOfMemory` with none to be had leave the console where it was.
+
+From then on the rows the console paints are owed to the driver instance it
+is hosted for. `console_damage` (no. 148) writes them as one full-width
+`DamageRect` and answers `0` when none are owed; a `ConsoleDamage` wait-set member
+(id `0`, admitted for the host node's driver before it hosts as well as after)
+is ready while any are owed to it. A driver
+whose device scans the block directly never asks. Neither is audited: they
+read what the caller's own screen shows.
+
+`console_relinquish` (no. 149) gives the block back, the caller vouching that
+its device no longer reads it. Only the live driver of the hosting node is
+answered (`NotFound` with nothing hosted there). The console keeps its text
+and paints nothing until it is adopted again; the block returns to the
+allocator once the device is known to have lost it — its translation confirms
+the unmap, or, untranslated, on the driver's word. A hosting node that leaves
+the tree takes the console off its device the same way, its block passing to
+the node's custody, since no driver vouched for it. The Rust wrappers are
+`tairix_rt::console_adopt`, `console_damage` and `console_relinquish`; the C
+stubs are `tairix_sys_console_adopt`, `tairix_sys_console_damage` and
+`tairix_sys_console_relinquish`.
 
 `hw_tree_read` (no. 29) and `hw_tree_wait` (no. 30) expose the discovered
 hardware tree the kernel built at boot (`AGENTS.md` §16.6 / §18.1 / §18.4) —
@@ -1562,6 +1583,13 @@ It is ready when that terminal has changed hands since the member was added
 or last reported — granted, claimed, released, or cleared with a dead owner —
 an edge on the terminal's ownership generation, consumed when reported. The
 woken program asks `foreground_held` (no. 139) where it now stands.
+
+It accepts a `ConsoleDamage` member: `id` is `0`, admitted only for the driver
+of the node discovery marked to host the kernel console (anyone else refuses
+with `PermissionDenied`), so a display that hosts the console only once it
+finds a sink can join before it does. It is level-triggered, ready while the
+console is hosted for that driver instance (`console_adopt`, no. 141) and owes
+it painted rows; taking them with `console_damage` (no. 148) idles it.
 
 `self_origin` (no. 68) is the self-directed twin of `call_peer_origin` (no.
 58): where that lets a server read the kernel-attested identity of the *peer*

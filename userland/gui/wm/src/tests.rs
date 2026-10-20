@@ -3,11 +3,11 @@
 extern crate alloc;
 
 use tairix_abi::driver::display::{
-    AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayFormat, DisplayMode,
-    MAX_DAMAGE_RECTS,
+    DamageRect, DisplayFormat, DisplayMode, DisplayPower, MAX_DAMAGE_RECTS,
 };
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::DriverError;
+use tairix_display::Presenter;
 
 use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
@@ -113,14 +113,13 @@ fn frame_pixel(comp: &Compositor, x: u32, y: u32) -> [u8; 4] {
     [frame[off], frame[off + 1], frame[off + 2], frame[off + 3]]
 }
 
-/// A display seam that records the last presented frame and, separately,
-/// how many times each of [`Display::present`] (a whole-frame present) and
-/// [`Display::present_rects`] (naming the exact rectangles presented) were
-/// called, or always fails when `fail` is set.
+/// A presenter that records the last presented frame and, separately, how
+/// many presents covered the whole output and how many named the exact
+/// rectangles they changed, or always fails when `fail` is set.
 pub(crate) struct MockDisplay {
     mode: DisplayMode,
     last: alloc::vec::Vec<u8>,
-    fail: bool,
+    pub(crate) fail: bool,
     full_presents: usize,
     /// Every rectangle presented, in order.
     regions: alloc::vec::Vec<DamageRect>,
@@ -141,35 +140,33 @@ impl MockDisplay {
             rect_presents: 0,
         }
     }
+}
 
-    /// Record `frame` as the latest presented bytes, or fail when `fail`
-    /// is set. Shared by both [`Display`] methods so only the call-count
-    /// bookkeeping differs between a whole-frame and a region present.
-    fn record(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+impl Presenter for MockDisplay {
+    fn mode(&self) -> DisplayMode {
+        self.mode
+    }
+
+    fn ready(&self) -> bool {
+        true
+    }
+
+    fn present(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
+        DamageRect::validate_list(damage, &self.mode)?;
         if self.fail {
             return Err(DriverError::DeviceFault);
         }
         self.last = frame.to_vec();
-        Ok(())
-    }
-}
-
-impl Display for MockDisplay {
-    fn output(&self) -> Option<DisplayMode> {
-        Some(self.mode)
-    }
-
-    fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-        self.record(frame)?;
-        self.full_presents += 1;
+        if damage == [DamageRect::full(&self.mode)] {
+            self.full_presents += 1;
+        } else {
+            self.regions.extend_from_slice(damage);
+            self.rect_presents += 1;
+        }
         Ok(())
     }
 
-    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
-        DamageRect::validate_list(damage, &self.mode)?;
-        self.record(frame)?;
-        self.regions.extend_from_slice(damage);
-        self.rect_presents += 1;
+    fn set_power(&mut self, _power: DisplayPower) -> Result<(), DriverError> {
         Ok(())
     }
 }
@@ -2500,46 +2497,6 @@ fn hiding_the_pointer_takes_its_trail_and_halo_with_it() {
     assert_eq!(frame_pixel(&c, 51, 51), [0, 0, 255, 255]);
 }
 
-#[test]
-fn the_engine_is_handed_the_trail_and_halo_beneath_the_cursor() {
-    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
-    c.set_cursor(solid_cursor(4, RED), Point::new(32, 32));
-    c.set_pointer_trail(&[Ghost {
-        at: Point::new(8, 8),
-        opacity: 128,
-    }]);
-    let mut halo = Halo::new();
-    halo.push(HaloRing {
-        radius: 10,
-        width: 2,
-        color: Color::rgb(0, 255, 0),
-    });
-    c.set_pointer_halo(&halo);
-    let mut display = MockAccel::new(mode(64, 64), generous_caps());
-    c.present_accelerated(&mut display).expect("present");
-    let placed: alloc::vec::Vec<(u32, u32, i32, i32)> = display
-        .layers
-        .iter()
-        .map(|layer| (layer.width, layer.height, layer.dst_x, layer.dst_y))
-        .collect();
-    assert_eq!(
-        placed,
-        [
-            (64, 64, 0, 0),
-            (4, 4, 8, 8),
-            (20, 20, 22, 22),
-            (4, 4, 32, 32)
-        ],
-        "background, ghost, halo, cursor"
-    );
-    let ghost = display.layers.get(1).expect("the ghost's layer");
-    assert_eq!(
-        layer_pixel(ghost, 1, 1)[3],
-        128,
-        "at the ghost's own opacity"
-    );
-}
-
 // ---- cursor selection from interaction state -------------------------
 
 use crate::select::{desired_cursor, CursorController, ENLARGED_SIDE_PX, FULLY_ENLARGED};
@@ -3069,201 +3026,6 @@ fn window_scale_reports_the_output_scale_for_a_known_window() {
     assert_eq!(c.window_scale(WindowId(9_999)), None, "unknown id is None");
 }
 
-// ---- hardware-accelerated present ------------------------------------
-
-/// One layer the mock engine was asked to composite, captured by value
-/// so the test can inspect it after the borrowed slice is gone.
-struct CapturedLayer {
-    pixels: alloc::vec::Vec<u8>,
-    width: u32,
-    height: u32,
-    dst_x: i32,
-    dst_y: i32,
-}
-
-/// A hardware-layer engine seam that records the layer stack handed to
-/// it, the software frame presented on fallback, and reports a
-/// configurable [`AccelCaps`].
-struct MockAccel {
-    mode: DisplayMode,
-    caps: AccelCaps,
-    layers: alloc::vec::Vec<CapturedLayer>,
-    software_frame: alloc::vec::Vec<u8>,
-}
-
-impl MockAccel {
-    fn new(mode: DisplayMode, caps: AccelCaps) -> Self {
-        Self {
-            mode,
-            caps,
-            layers: alloc::vec::Vec::new(),
-            software_frame: alloc::vec::Vec::new(),
-        }
-    }
-}
-
-impl Display for MockAccel {
-    fn output(&self) -> Option<DisplayMode> {
-        Some(self.mode)
-    }
-    fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-        self.software_frame = frame.to_vec();
-        Ok(())
-    }
-}
-
-impl AcceleratedDisplay for MockAccel {
-    fn accel_caps(&self) -> Result<AccelCaps, DriverError> {
-        Ok(self.caps)
-    }
-    fn present_layers(&mut self, layers: &[AccelLayer<'_>]) -> Result<(), DriverError> {
-        self.layers = layers
-            .iter()
-            .map(|l| CapturedLayer {
-                pixels: l.pixels.to_vec(),
-                width: l.width_px,
-                height: l.height_px,
-                dst_x: l.dst_x,
-                dst_y: l.dst_y,
-            })
-            .collect();
-        Ok(())
-    }
-}
-
-fn generous_caps() -> AccelCaps {
-    AccelCaps {
-        max_layers: 8,
-        max_width_px: 1024,
-        max_height_px: 1024,
-        per_layer_opacity: true,
-    }
-}
-
-/// Read the RGBA bytes of pixel `(x, y)` in a captured layer.
-fn layer_pixel(layer: &CapturedLayer, x: u32, y: u32) -> [u8; 4] {
-    let off = usize::try_from((y * layer.width + x) * 4).expect("offset");
-    [
-        layer.pixels[off],
-        layer.pixels[off + 1],
-        layer.pixels[off + 2],
-        layer.pixels[off + 3],
-    ]
-}
-
-#[test]
-fn accelerated_present_encodes_background_and_window_layers() {
-    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
-    c.add_window(Point::new(1, 1), opaque(2, 2, RED));
-    let mut display = MockAccel::new(mode(8, 8), generous_caps());
-
-    c.present_accelerated(&mut display)
-        .expect("accelerated present");
-
-    // Background layer + one window layer, in back-to-front order.
-    assert_eq!(display.layers.len(), 2, "background + window");
-    let bg = &display.layers[0];
-    assert_eq!((bg.width, bg.height, bg.dst_x, bg.dst_y), (8, 8, 0, 0));
-    assert_eq!(
-        layer_pixel(bg, 4, 4),
-        [0, 0, 255, 255],
-        "background is blue"
-    );
-
-    let win = &display.layers[1];
-    assert_eq!((win.width, win.height, win.dst_x, win.dst_y), (2, 2, 1, 1));
-    assert_eq!(layer_pixel(win, 0, 0), [255, 0, 0, 255], "window is red");
-    assert_eq!(layer_pixel(win, 1, 1), [255, 0, 0, 255]);
-
-    // The software fallback was not taken.
-    assert!(display.software_frame.is_empty());
-}
-
-#[test]
-fn hidden_window_is_omitted_from_the_layer_stack() {
-    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
-    let win = c.add_window(Point::new(1, 1), opaque(2, 2, RED));
-    assert!(c.set_visible(win, false));
-    let mut display = MockAccel::new(mode(8, 8), generous_caps());
-
-    c.present_accelerated(&mut display).expect("present");
-    assert_eq!(display.layers.len(), 1, "only the background remains");
-}
-
-/// An engine blends a layer over what is beneath it in the scan-out's own 8
-/// bits with a fixed rounding, which is exactly what bands a picture under a
-/// translucent field. The compositor keeps such a scene for itself, where the
-/// blend can spread its rounding across the area, as it already does for a
-/// backdrop blur.
-#[test]
-fn a_translucent_window_takes_the_software_path_the_engine_cannot_dither() {
-    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
-    let win = c.add_window(Point::new(1, 1), opaque(2, 2, RED));
-    assert!(c.set_opacity(win, 200));
-    let mut display = MockAccel::new(mode(8, 8), generous_caps());
-
-    c.present_accelerated(&mut display).expect("present");
-
-    assert!(display.layers.is_empty(), "no layer stack was handed over");
-    assert!(
-        !display.software_frame.is_empty(),
-        "the frame went through the software composite"
-    );
-
-    // Opaque again, and the engine serves the scene as before.
-    assert!(c.set_opacity(win, 255));
-    c.present_accelerated(&mut display).expect("present");
-    assert_eq!(display.layers.len(), 2, "background + window");
-}
-
-#[test]
-fn accelerated_present_falls_back_when_over_layer_budget() {
-    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
-    c.add_window(Point::new(1, 1), opaque(2, 2, RED));
-    // One plane only: background + window needs two, so the engine cannot
-    // serve the scene and the compositor uses the software path.
-    let caps = AccelCaps {
-        max_layers: 1,
-        ..generous_caps()
-    };
-    let mut display = MockAccel::new(mode(8, 8), caps);
-
-    c.present_accelerated(&mut display).expect("present");
-    assert!(display.layers.is_empty(), "no hardware layers used");
-    assert_eq!(
-        display.software_frame.len(),
-        8 * 8 * 4,
-        "software frame sent"
-    );
-    // The window's red is composited into the software frame at (1,1).
-    let off: usize = (8 + 1) * 4; // pixel (1,1) in an 8-wide RGBA frame
-    assert_eq!(
-        &display.software_frame[off..off + 4],
-        &[255, 0, 0, 255],
-        "software fallback composited the window"
-    );
-}
-
-#[test]
-fn accelerated_present_falls_back_when_a_layer_is_too_large() {
-    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
-    // The background layer is the full 8×8 screen; an engine that can
-    // only source 4-px-wide planes cannot take it.
-    let caps = AccelCaps {
-        max_width_px: 4,
-        ..generous_caps()
-    };
-    let mut display = MockAccel::new(mode(8, 8), caps);
-
-    c.present_accelerated(&mut display).expect("present");
-    assert!(display.layers.is_empty(), "no hardware layers used");
-    assert_eq!(
-        display.software_frame.len(),
-        8 * 8 * 4,
-        "software frame sent"
-    );
-}
-
 // ---- backdrop blur ---------------------------------------------------
 
 /// A fully transparent surface: a window made of it draws nothing of its
@@ -3522,48 +3284,17 @@ fn a_rounded_frosted_window_leaves_its_corners_alone() {
 }
 
 #[test]
-fn an_unknown_or_hidden_window_asks_for_no_blur() {
+fn only_a_known_window_can_be_given_a_blur() {
     let mut c = new_compositor(mode(4, 4), BLUE).expect("compositor");
     let id = c.add_window(Point::ORIGIN, opaque(2, 2, RED));
-    assert!(!c.has_backdrop_blur());
+    assert_eq!(c.window(id).expect("live").blur_radius(), 0);
     assert!(c.set_backdrop_blur(id, 4));
-    assert!(c.has_backdrop_blur());
-    assert!(c.set_visible(id, false));
-    assert!(
-        !c.has_backdrop_blur(),
-        "a hidden window frosts nothing, so the hardware path stays open"
-    );
+    assert_eq!(c.window(id).expect("live").blur_radius(), 4);
     assert!(c.remove(id));
     assert!(
         !c.set_backdrop_blur(id, 4),
         "an unknown window fails closed"
     );
-}
-
-#[test]
-fn accelerated_present_falls_back_for_a_backdrop_blur() {
-    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
-    let id = c.add_window(Point::new(1, 1), opaque(2, 2, RED));
-    assert!(c.set_backdrop_blur(id, 3));
-    let mut display = MockAccel::new(mode(8, 8), generous_caps());
-
-    c.present_accelerated(&mut display).expect("present");
-    assert!(
-        display.layers.is_empty(),
-        "a hardware layer cannot sample what is behind it"
-    );
-    assert_eq!(
-        display.software_frame.len(),
-        8 * 8 * 4,
-        "software frame sent"
-    );
-
-    // Dropping the blur puts the scene back within the engine's reach.
-    assert!(c.set_backdrop_blur(id, 0));
-    let mut display = MockAccel::new(mode(8, 8), generous_caps());
-    c.present_accelerated(&mut display).expect("present");
-    assert_eq!(display.layers.len(), 2, "background + window");
-    assert!(display.software_frame.is_empty());
 }
 
 // ---- root-viewport scrollbars ----------------------------------------
@@ -6928,64 +6659,6 @@ fn a_fullscreen_state_change_is_refused_where_it_cannot_apply() {
         .is_none());
 }
 
-#[test]
-fn a_fullscreen_surface_is_promoted_to_the_single_layer() {
-    let (mut c, id) = fullscreenable_compositor();
-    let mut display = MockAccel::new(mode(320, 240), generous_caps());
-
-    // Windowed: the background is beneath the window, so both are encoded.
-    c.present_accelerated(&mut display).expect("present");
-    assert_eq!(display.layers.len(), 2, "background + window");
-
-    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
-        .expect("fullscreen");
-    c.present_accelerated(&mut display).expect("present");
-
-    // Nothing behind it can contribute a pixel, so the scene *is* the one
-    // surface: no background fill, no composition pass, one flip.
-    assert_eq!(display.layers.len(), 1, "the fullscreen surface alone");
-    let only = &display.layers[0];
-    assert_eq!(
-        (only.width, only.height, only.dst_x, only.dst_y),
-        (320, 240, 0, 0)
-    );
-    assert_eq!(
-        layer_pixel(only, 0, 0),
-        [255, 0, 0, 255],
-        "the window's own pixels"
-    );
-    assert_eq!(layer_pixel(only, 319, 239), [255, 0, 0, 255]);
-    assert!(display.software_frame.is_empty());
-}
-
-#[test]
-fn promotion_waits_for_a_frame_that_genuinely_covers() {
-    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
-    // Presenting a surface smaller than the screen: going fullscreen
-    // resizes the window before its client has pixels for the new extent.
-    let id = c.add_window(Point::new(20, 20), opaque(200, 120, RED));
-    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
-    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
-        .expect("fullscreen");
-
-    let mut display = MockAccel::new(mode(320, 240), generous_caps());
-    c.present_accelerated(&mut display).expect("present");
-
-    // Promoted with nothing beneath it, the margin the client has not
-    // painted would show whatever the scan-out last held. So it is not
-    // promoted: the background is still encoded under it.
-    assert_eq!(
-        display.layers.len(),
-        2,
-        "background still beneath a window that does not yet cover"
-    );
-
-    // Once the client presents at the new extent, the cover is genuine.
-    assert!(c.set_surface(id, opaque(320, 240, RED)));
-    c.present_accelerated(&mut display).expect("present");
-    assert_eq!(display.layers.len(), 1, "promoted now it truly covers");
-}
-
 /// A frame the display refused is still owed: the next present sends it even
 /// though nothing changed in between, and only what it composited, not the
 /// whole screen again.
@@ -7039,32 +6712,6 @@ fn an_owed_output_is_sent_whole_by_the_next_present() {
     assert!(!c.has_damage(), "nothing is owed once the display took it");
 }
 
-/// A layer stack carries the whole scene, so a frame the display refused
-/// earlier is owed no longer once the engine takes one.
-#[test]
-fn a_layered_frame_settles_a_frame_the_display_refused() {
-    let m = mode(8, 8);
-    let mut c = new_compositor(m, BLUE).expect("compositor");
-    c.add_window(Point::new(1, 1), opaque(2, 2, RED));
-    let mut refusing = MockDisplay::new(m);
-    refusing.fail = true;
-    assert_eq!(c.present(&mut refusing), Err(DriverError::DeviceFault));
-    assert!(c.has_damage(), "the refused frame is owed");
-
-    let mut engine = MockAccel::new(m, generous_caps());
-    c.present_accelerated(&mut engine)
-        .expect("the layered present");
-    assert_eq!(engine.layers.len(), 2, "the engine took the scene");
-    assert!(!c.has_damage(), "nothing is owed once the engine holds it");
-
-    let mut display = MockDisplay::new(m);
-    c.present(&mut display).expect("an idle wake");
-    assert!(
-        display.regions.is_empty() && display.full_presents == 0,
-        "the settled frame is not sent again"
-    );
-}
-
 /// The compositor records how the frame on the display was produced once
 /// the display takes it, and nothing before then; a wake with nothing to
 /// present, or a present the display refused, leaves the record as it was.
@@ -7091,52 +6738,6 @@ fn the_presentation_is_recorded_once_the_display_takes_a_frame() {
     assert!(c.set_visible(id, false));
     c.present(&mut display).expect("presents");
     assert!(!c.on_display(id), "a hidden window is not on display");
-}
-
-/// A layer stack and a promoted surface are each recorded as what they are,
-/// and only the promoted window is on the display while it is promoted.
-#[test]
-fn a_promoted_frame_carries_its_window_and_nothing_under_it() {
-    let (mut c, id) = fullscreenable_compositor();
-    let under = c.add_window(Point::new(4, 4), opaque(10, 10, GREEN));
-    c.raise(id);
-    let mut display = MockAccel::new(mode(320, 240), generous_caps());
-
-    c.present_accelerated(&mut display).expect("present");
-    assert_eq!(c.presentation(), Some(Presentation::Layered));
-    assert!(c.on_display(id) && c.on_display(under));
-
-    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
-        .expect("fullscreen");
-    c.present_accelerated(&mut display).expect("present");
-    assert_eq!(c.presentation(), Some(Presentation::Promoted(id)));
-    assert!(c.on_display(id));
-    assert!(
-        !c.on_display(under),
-        "nothing beneath a promoted surface is shown"
-    );
-    assert_eq!(Presentation::Promoted(id).as_str(), "promoted");
-
-    // A software fallback is a composite, whatever path was asked for.
-    assert!(c.set_opacity(id, 200));
-    c.present_accelerated(&mut display).expect("present");
-    assert_eq!(c.presentation(), Some(Presentation::Composited));
-}
-
-#[test]
-fn a_translucent_fullscreen_window_is_not_promoted() {
-    let (mut c, id) = fullscreenable_compositor();
-    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
-        .expect("fullscreen");
-    assert!(c.set_opacity(id, 200));
-    let mut display = MockAccel::new(mode(320, 240), generous_caps());
-
-    c.present_accelerated(&mut display).expect("present");
-
-    // What is behind it is visible through it, so the scene is not one
-    // layer and the engine's fixed rounding would band it anyway.
-    assert!(display.layers.is_empty(), "no layer stack was handed over");
-    assert!(!display.software_frame.is_empty(), "composited in software");
 }
 
 #[test]
@@ -10028,18 +9629,21 @@ struct TakingDisplay {
     presents: usize,
 }
 
-impl Display for TakingDisplay {
-    fn output(&self) -> Option<DisplayMode> {
-        Some(self.mode)
+impl Presenter for TakingDisplay {
+    fn mode(&self) -> DisplayMode {
+        self.mode
     }
 
-    fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+    fn ready(&self) -> bool {
+        true
+    }
+
+    fn present(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
         self.presents += 1;
         Ok(())
     }
 
-    fn present_rects(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
-        self.presents += 1;
+    fn set_power(&mut self, _power: DisplayPower) -> Result<(), DriverError> {
         Ok(())
     }
 }
@@ -10273,29 +9877,6 @@ fn repainting_the_desktop_layer_re_allocates_when_the_screen_size_changed() {
 }
 
 #[test]
-fn the_accelerated_scene_carries_the_desktop_layer_beneath_the_windows() {
-    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
-    c.set_desktop(opaque(16, 16, GREEN));
-    c.add_window(Point::new(2, 2), opaque(4, 4, RED));
-    let mut display = MockAccel::new(mode(16, 16), generous_caps());
-
-    c.present_accelerated(&mut display)
-        .expect("accelerated present");
-
-    // Back to front: background, the desktop layer, then the window — the
-    // same order the software path blends them in.
-    assert_eq!(display.layers.len(), 3, "background + desktop + window");
-    let desktop = &display.layers[1];
-    assert_eq!(
-        (desktop.width, desktop.height, desktop.dst_x, desktop.dst_y),
-        (16, 16, 0, 0)
-    );
-    assert_eq!(layer_pixel(desktop, 8, 8), [0, 255, 0, 255]);
-    let win = &display.layers[2];
-    assert_eq!((win.width, win.height, win.dst_x, win.dst_y), (4, 4, 2, 2));
-}
-
-#[test]
 fn a_new_mode_is_adopted_whole_and_keeps_the_served_windows() {
     // A desktop resumed onto a different monitor keeps its apps.
     let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
@@ -10476,23 +10057,6 @@ fn the_outputs_own_size_composes_straight_into_the_frame_again() {
         Rect::new(0, 0, 24, 20),
         "a new mode is its own size"
     );
-}
-
-#[test]
-fn a_smaller_desktop_is_never_handed_to_the_layer_engine() {
-    let mut c = new_compositor(mode(32, 24), BLUE).expect("compositor");
-    c.add_window(Point::new(2, 2), opaque(4, 4, RED));
-    assert!(c.set_desktop_size(16, 12));
-    let mut display = MockAccel::new(mode(32, 24), generous_caps());
-
-    c.present_accelerated(&mut display).expect("presents");
-
-    assert!(
-        display.layers.is_empty(),
-        "no layer was placed in desktop pixels"
-    );
-    assert_eq!(display.software_frame.len(), 32 * 4 * 24);
-    assert_eq!(c.presentation(), Some(Presentation::Composited));
 }
 
 // ---- screen reveal ---------------------------------------------------
@@ -10710,35 +10274,6 @@ fn a_fade_step_landing_with_a_repaint_encodes_each_pixel_once() {
         reference.frame(),
         "and the repaint and the re-encode together present what one whole \
          recomposite would"
-    );
-}
-
-#[test]
-fn the_hardware_layer_path_declines_while_a_reveal_is_in_flight() {
-    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
-    c.add_window(Point::new(2, 2), opaque(4, 4, RED));
-    let mut display = MockAccel::new(mode(16, 16), generous_caps());
-
-    assert!(c.set_reveal(128));
-    c.present_accelerated(&mut display).expect("present");
-
-    assert!(
-        display.layers.is_empty(),
-        "a layer the engine scans out directly would skip the dimming"
-    );
-    assert_eq!(display.software_frame.len(), 16 * 16 * 4);
-    assert_eq!(
-        frame_pixel(&c, 4, 4),
-        [div255(255 * 128), 0, 0, 255],
-        "the software fallback carried the reveal"
-    );
-
-    assert!(c.set_reveal(u8::MAX));
-    c.present_accelerated(&mut display).expect("present");
-    assert_eq!(
-        display.layers.len(),
-        2,
-        "background + window once the fade is over"
     );
 }
 
@@ -12228,52 +11763,6 @@ fn a_painted_plate_keeps_its_one_edge_and_a_cut_one_is_weakened_again() {
         }
     }
     assert!(arc > 0, "the corner has an arc to compare");
-}
-
-#[test]
-fn a_casters_layer_spans_its_footprint_and_carries_its_shadow() {
-    let mut c = new_compositor(mode(200, 160), BLUE).expect("compositor");
-    let bounds = Rect::new(60, 40, 60, 40);
-    caster(&mut c, bounds, Corners::Square);
-    let mut display = MockAccel::new(mode(200, 160), generous_caps());
-    c.present_accelerated(&mut display)
-        .expect("accelerated present");
-    assert_eq!(display.layers.len(), 2, "background + the caster");
-    let layer = &display.layers[1];
-    let footprint = crate::shadow_footprint(bounds, c.scale(), c.theme());
-    assert_eq!(
-        (layer.dst_x, layer.dst_y, layer.width, layer.height),
-        (
-            footprint.left(),
-            footprint.top(),
-            footprint.width,
-            footprint.height
-        ),
-        "the layer is the footprint, not the window's rectangle"
-    );
-    let local = |x: i32, y: i32| {
-        (
-            (x - footprint.left()).cast_unsigned(),
-            (y - footprint.top()).cast_unsigned(),
-        )
-    };
-    let (sx, sy) = local(90, bounds.bottom() + 2);
-    let shadow = layer_pixel(layer, sx, sy);
-    assert_eq!(
-        &shadow[..3],
-        &[0, 0, 0],
-        "the shadow is premultiplied black"
-    );
-    assert!(
-        shadow[3] > 0 && shadow[3] < 255,
-        "and translucent: {shadow:?}"
-    );
-    let (wx, wy) = local(90, 60);
-    assert_eq!(
-        layer_pixel(layer, wx, wy),
-        [255, 0, 0, 255],
-        "the body over it"
-    );
 }
 
 /// A present that changed two far-apart places marks those two, not the box

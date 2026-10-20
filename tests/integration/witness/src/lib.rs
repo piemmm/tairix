@@ -11,7 +11,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use tairix_log::{Event, FieldValue};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use tairix_log::{Event, EventId, FieldValue};
+use tairix_util::fmt::format_hex_u64;
 
 /// The value `event` carries under `key`: the first field so named.
 #[must_use]
@@ -61,13 +64,92 @@ pub fn names_bundle(bundle: &str, store: &str, name: &str) -> bool {
         .is_some_and(|leaf| leaf == name)
 }
 
+/// The login screen's witnesses that its frame reached a display: the system
+/// service store's greeter bundle was verified and loaded, and then the
+/// process the kernel names as serving the display endpoint reported the first
+/// client frame its display took — a report the service makes only once a
+/// present was accepted, and the kernel attributes to its emitter. The greeter
+/// is the only graphical client alive at that point, so the frame is its own;
+/// ordering it after the load is what attributes it.
+pub struct GreeterFrame {
+    loaded: AtomicBool,
+    /// The process serving the display endpoint, [`NO_SERVER`] until the
+    /// kernel names one.
+    display: AtomicU64,
+    presented: AtomicBool,
+}
+
+/// No process is known to serve the display endpoint.
+const NO_SERVER: u64 = u64::MAX;
+
+/// The records a [`GreeterFrame`] reads.
+#[derive(Copy, Clone, Debug)]
+pub struct GreeterRecords {
+    /// The bundle loader's record of a verified, loaded bundle.
+    pub app_loaded: EventId,
+    /// The IPC layer's record of a call endpoint bound, naming its process.
+    pub endpoint_created: EventId,
+    /// The display service's record of the first frame its display took.
+    pub first_present: EventId,
+}
+
+impl GreeterFrame {
+    /// Neither witness in.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            loaded: AtomicBool::new(false),
+            display: AtomicU64::new(NO_SERVER),
+            presented: AtomicBool::new(false),
+        }
+    }
+
+    /// Read `event`, an audit record or a process's own record as the kernel
+    /// passes it on, answering whether both witnesses are in.
+    pub fn observe(&self, event: &Event<'_>, records: GreeterRecords) -> bool {
+        if event.id == records.app_loaded {
+            let greeter = tairix_abi::GREETER_RUN_PATH
+                .rsplit_once('/')
+                .map(|(bundle, _)| bundle);
+            if greeter.is_some() && field_str(event, "bundle") == greeter {
+                self.loaded.store(true, Ordering::Release);
+            }
+        } else if event.id == records.endpoint_created {
+            let mut hex = [0u8; 16];
+            let endpoint = format_hex_u64(tairix_abi::display_ipc::DISPLAY_ENDPOINT, &mut hex);
+            if let (Some(bound), Some(process)) =
+                (field_str(event, "endpoint"), field_u64(event, "process"))
+            {
+                if bound == endpoint {
+                    self.display.store(process, Ordering::Release);
+                }
+            }
+        } else if event.id == records.first_present && self.loaded.load(Ordering::Acquire) {
+            let server = self.display.load(Ordering::Acquire);
+            // The kernel stamps a process's record with its emitter first.
+            if server != NO_SERVER && field_u64(event, "task") == Some(server) {
+                self.presented.store(true, Ordering::Release);
+            }
+        }
+        self.loaded.load(Ordering::Acquire) && self.presented.load(Ordering::Acquire)
+    }
+}
+
+impl Default for GreeterFrame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
 
     use std::format;
 
-    use super::{field, field_str, field_u64, names_bundle, sector0_byte};
+    use super::{
+        field, field_str, field_u64, names_bundle, sector0_byte, GreeterFrame, GreeterRecords,
+    };
     use tairix_abi::{SYSTEM_APPLICATION_STORE, SYSTEM_SERVICE_STORE};
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
 
@@ -172,5 +254,69 @@ mod tests {
             "terminal"
         ));
         assert!(!bundle(""));
+    }
+
+    #[test]
+    fn a_greeter_frame_is_the_display_server_s_first_frame_after_the_greeter_loaded() {
+        const RECORDS: GreeterRecords = GreeterRecords {
+            app_loaded: EventId(11_001),
+            endpoint_created: EventId(3_040),
+            first_present: EventId(15_001),
+        };
+        let event = |id, fields: &'static [Field<'static>]| Event {
+            level: Level::Info,
+            id,
+            message: "",
+            fields,
+        };
+        let leak = |fields: std::vec::Vec<Field<'static>>| -> &'static [Field<'static>] {
+            std::boxed::Box::leak(fields.into_boxed_slice())
+        };
+        let text = |value: std::string::String| -> &'static str {
+            std::boxed::Box::leak(value.into_boxed_str())
+        };
+        let greeter = text(format!("{SYSTEM_SERVICE_STORE}/greeter.app"));
+        let display = text(format!(
+            "{:016x}",
+            tairix_abi::display_ipc::DISPLAY_ENDPOINT
+        ));
+        let loaded = leak(std::vec![Field {
+            key: "bundle",
+            value: FieldValue::Str(greeter),
+        }]);
+        let bound = |endpoint: &'static str, process: u64| {
+            leak(std::vec![
+                Field {
+                    key: "endpoint",
+                    value: FieldValue::Str(endpoint),
+                },
+                Field {
+                    key: "process",
+                    value: FieldValue::UnsignedInt(process),
+                },
+            ])
+        };
+        let shown_by = |task: u64| {
+            leak(std::vec![Field {
+                key: "task",
+                value: FieldValue::UnsignedInt(task),
+            }])
+        };
+        let witness = GreeterFrame::new();
+        let observe = |id, fields| witness.observe(&event(id, fields), RECORDS);
+        assert!(!observe(RECORDS.endpoint_created, bound(display, 40)));
+        assert!(
+            !observe(RECORDS.first_present, shown_by(40)),
+            "a frame before the greeter is nobody's"
+        );
+        assert!(!observe(RECORDS.app_loaded, loaded));
+        assert!(
+            !observe(RECORDS.first_present, shown_by(41)),
+            "a report from a process not serving the display proves nothing"
+        );
+        let other = text(format!("{:016x}", 7));
+        assert!(!observe(RECORDS.endpoint_created, bound(other, 41)));
+        assert!(!observe(RECORDS.first_present, shown_by(41)));
+        assert!(observe(RECORDS.first_present, shown_by(40)));
     }
 }

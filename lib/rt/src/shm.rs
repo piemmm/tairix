@@ -14,6 +14,8 @@
 //! only in where the mapping came from, and a grant carries no region id
 //! because the holder is not the owner and may not re-grant it.
 
+use core::ptr::NonNull;
+
 /// The address a kernel-reported mapping base can be read as, or `None`
 /// when it is not one a slice may be built over.
 ///
@@ -24,9 +26,15 @@ fn mapped_at(base: u64) -> Option<usize> {
     usize::try_from(base).ok().filter(|addr| *addr != 0)
 }
 
+/// The kernel's mapping at `addr`, which it made outside the abstract
+/// machine, so its provenance is exposed by definition.
+fn mapping(addr: usize) -> Option<NonNull<u8>> {
+    NonNull::new(core::ptr::with_exposed_provenance_mut(addr))
+}
+
 /// A shared-memory region this task created and mapped, unmapped on drop.
 pub struct SharedRegion {
-    base: usize,
+    base: NonNull<u8>,
     len: usize,
     id: u64,
 }
@@ -45,12 +53,51 @@ impl SharedRegion {
             return None;
         }
         #[allow(clippy::cast_sign_loss)] // `base >= 0` checked above; it is a user VA.
-        let addr = mapped_at(base as u64)?;
+        let addr = mapping(mapped_at(base as u64)?)?;
         Some(Self {
             base: addr,
             len,
             id,
         })
+    }
+
+    /// Carve and map a `len`-byte region a DMA master driving `reach` address
+    /// bits may reach, under this driver's `Dma` grant `handle`
+    /// ([`shm_create_dma`](crate::shm_create_dma)), with the address the
+    /// device reaches it at.
+    ///
+    /// The mapping's memory type is the device's coherence, for every task
+    /// the region is granted to: no cache maintenance is owed to it.
+    /// Dropping the region unmaps it, which tells the kernel the device no
+    /// longer reaches it, so it is dropped only once the device has stopped.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal, or [`tairix_abi::Errno::LengthOutOfRange`] for
+    /// a base no slice may be built over.
+    pub fn create_dma(
+        handle: u64,
+        len: usize,
+        reach: tairix_abi::driver::DmaReach,
+    ) -> Result<(Self, u64), tairix_abi::Errno> {
+        let (mut id, mut device) = (0u64, 0u64);
+        let base = crate::shm_create_dma(handle, len, reach, &mut id, &mut device);
+        if base < 0 {
+            return Err(tairix_abi::Errno::from_syscall(base));
+        }
+        #[allow(clippy::cast_sign_loss)] // `base >= 0` checked above; it is a user VA.
+        let Some(addr) = mapped_at(base as u64).and_then(mapping) else {
+            let _ = crate::shm_unmap(base as u64, len);
+            return Err(tairix_abi::Errno::LengthOutOfRange);
+        };
+        Ok((
+            Self {
+                base: addr,
+                len,
+                id,
+            },
+            device,
+        ))
     }
 
     /// The region's kernel id, for granting it to an endpoint
@@ -73,6 +120,15 @@ impl SharedRegion {
         self.len == 0
     }
 
+    /// The region's bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY: as `bytes_mut`, with `&self` excluding every mutable
+        // reference on this side; a peer granted the region writes it under
+        // the owning protocol's serialisation, and at worst tears values.
+        unsafe { core::slice::from_raw_parts(self.base.as_ptr(), self.len) }
+    }
+
     /// The region as a mutable byte slice.
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         // SAFETY: the kernel mapped exactly `len` zeroed bytes read/write at
@@ -81,7 +137,7 @@ impl SharedRegion {
         // only on drop. `&mut self` is what excludes every other reference to
         // these bytes on this side; a peer that was *granted* the region
         // reads it under the owning protocol's own serialisation.
-        unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.len) }
+        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
     }
 }
 
@@ -93,9 +149,18 @@ impl AsMut<[u8]> for SharedRegion {
 
 impl Drop for SharedRegion {
     fn drop(&mut self) {
-        let _ = crate::shm_unmap(self.base as u64, self.len);
+        let _ = crate::shm_unmap(self.base.as_ptr().addr() as u64, self.len);
     }
 }
+
+// SAFETY: the mapping is the process's, not a thread's: every thread reaches
+// the same bytes at `base`, and the unmap on drop is a process-wide call, so
+// the region may change threads with its owner.
+unsafe impl Send for SharedRegion {}
+
+// SAFETY: `&self` hands out shared byte slices alone and writing takes
+// `&mut self`, so a reference shared between threads permits only reads.
+unsafe impl Sync for SharedRegion {}
 
 /// A shared-memory region another task granted to this one, mapped
 /// read/write and unmapped on drop.
@@ -105,7 +170,7 @@ impl Drop for SharedRegion {
 /// writing into a client's region writes inside what the kernel actually
 /// mapped.
 pub struct MappedGrant {
-    base: usize,
+    base: NonNull<u8>,
     len: usize,
 }
 
@@ -138,7 +203,8 @@ impl MappedGrant {
         }
         #[allow(clippy::cast_sign_loss)] // `ret >= 0` checked above; it is a user VA.
         let base = ret as u64;
-        let (Some(addr), Ok(len)) = (mapped_at(base), usize::try_from(raw_len)) else {
+        let (Some(addr), Ok(len)) = (mapped_at(base).and_then(mapping), usize::try_from(raw_len))
+        else {
             // A base or length this target cannot build a slice over names
             // no reachable mapping; release it (the kernel resolves an unmap
             // by its base) and refuse rather than truncate.
@@ -176,25 +242,35 @@ impl MappedGrant {
         // side; the granting task's own access is the owning protocol's to
         // serialise, and at worst tears pixel values rather than breaking
         // this borrow.
-        unsafe { core::slice::from_raw_parts(self.base as *const u8, self.len) }
+        unsafe { core::slice::from_raw_parts(self.base.as_ptr(), self.len) }
     }
 
     /// The mapped bytes, for writing.
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         // SAFETY: as `bytes`, with `&mut self` excluding every other
         // reference on this side.
-        unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.len) }
+        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
     }
 }
 
 impl Drop for MappedGrant {
     fn drop(&mut self) {
-        let _ = crate::shm_unmap(self.base as u64, self.len);
+        let _ = crate::shm_unmap(self.base.as_ptr().addr() as u64, self.len);
     }
 }
 
+// SAFETY: as for `SharedRegion`: the mapping is the process's, and the unmap
+// on drop is a process-wide call.
+unsafe impl Send for MappedGrant {}
+
+// SAFETY: as for `SharedRegion`: only `&mut self` writes.
+unsafe impl Sync for MappedGrant {}
+
 #[cfg(test)]
 mod tests {
+    use core::ptr::NonNull;
+    use std::vec;
+
     use super::{mapped_at, MappedGrant, SharedRegion};
 
     /// A slice over a null pointer is undefined behaviour even when it is
@@ -207,13 +283,71 @@ mod tests {
     }
 
     /// On a host there is no kernel behind the trap, so neither mapping is
-    /// ever established — which is why no slice is ever built over an
-    /// address this build fabricated, and why the interpreter has nothing
-    /// of this module to look at.
+    /// ever established, and no slice is built over an address this build
+    /// fabricated.
     #[test]
     fn neither_mapping_is_established_without_a_kernel() {
         let grantor = tairix_abi::ProcId::from_raw([1; tairix_abi::PROC_ID_LEN]);
         assert!(MappedGrant::map(grantor, 1, 0).is_err());
         assert!(SharedRegion::create(4096).is_none());
+        assert!(
+            SharedRegion::create_dma(1, 4096, tairix_abi::driver::DmaReach::of::<32>()).is_err()
+        );
+    }
+
+    /// A region's views are its mapping's own bytes, written and read in
+    /// place: over memory the test owns, so the interpreter checks every
+    /// borrow the views make.
+    #[test]
+    fn a_created_region_s_views_are_its_mapped_bytes() {
+        let mut memory = vec![0u8; 64];
+        let base = NonNull::new(memory.as_mut_ptr()).expect("a heap pointer");
+        let mut region = SharedRegion {
+            base,
+            len: memory.len(),
+            id: 7,
+        };
+        region.bytes_mut()[3] = 9;
+        assert_eq!(region.bytes()[3], 9);
+        assert_eq!(region.bytes().len(), 64);
+        assert_eq!(region.as_mut().len(), 64);
+        drop(region);
+        assert_eq!(memory[3], 9, "written where it lies");
+    }
+
+    #[test]
+    fn a_granted_region_s_views_are_its_mapped_bytes() {
+        let mut memory = vec![0u8; 16];
+        let base = NonNull::new(memory.as_mut_ptr()).expect("a heap pointer");
+        let mut grant = MappedGrant {
+            base,
+            len: memory.len(),
+        };
+        grant.bytes_mut()[15] = 1;
+        assert_eq!(grant.bytes()[15], 1);
+        assert!(grant.bytes()[..15].iter().all(|&byte| byte == 0));
+        drop(grant);
+        assert_eq!(memory[15], 1);
+    }
+
+    /// A mapping belongs to the process, so it changes threads with its
+    /// owner and is read from wherever it went, as the desktop hands a
+    /// granted window frame to a worker.
+    #[test]
+    fn a_mapping_moves_to_another_thread_and_is_read_there() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<SharedRegion>();
+        shareable::<MappedGrant>();
+        let mut memory = vec![0u8; 16];
+        memory[2] = 5;
+        let base = NonNull::new(memory.as_mut_ptr()).expect("a heap pointer");
+        let grant = MappedGrant {
+            base,
+            len: memory.len(),
+        };
+        let read = std::thread::spawn(move || grant.bytes()[2])
+            .join()
+            .expect("the worker ran");
+        assert_eq!(read, 5);
     }
 }

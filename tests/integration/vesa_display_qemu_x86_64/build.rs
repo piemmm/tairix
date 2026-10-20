@@ -15,7 +15,7 @@
 //! `tairix_drv_display_vesa::register` gates on it, and the host installs
 //! the manifest's requested set intersected with the caller's grants. The `CAP_MMIO_MAP` the surface mapping
 //! additionally requires is granted on the separate `DriverHost` the bin
-//! builds for `VesaFramebuffer::open`, never through the manifest,
+//! builds for `open`, never through the manifest,
 //! mirroring how the framebuffer and bus-driver verticals separate the
 //! load gate from the map gate.
 //!

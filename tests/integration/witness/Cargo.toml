@@ -17,3 +17,5 @@ path = "src/lib.rs"
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The hex spelling the IPC layer's records name an endpoint in.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }

@@ -60,8 +60,8 @@ fn a_dense_panel_draws_a_glyph_at_its_authored_size() {
     let geometry = Geometry::for_display(1920, 1080, 1920 * 4).expect("geometry");
     assert_eq!((geometry.columns(), geometry.rows()), (240, 67));
     let mut pixels = vec![0u32; geometry.pixel_count()];
-    let main: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
-    let alt: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let main = vec![Cell::BLANK; geometry.cell_count()];
+    let alt = vec![Cell::BLANK; geometry.cell_count()];
     let mut console = TextConsole::new(geometry, main, alt);
     console.clear(&mut pixels);
     console.write_bytes(&mut pixels, b"\x1b[?25lW");
@@ -89,16 +89,28 @@ fn geometry_rejects_unusable_surfaces() {
     assert!(Geometry::for_display(4, 4, 4 * 4).is_none());
 }
 
+#[test]
+fn an_unhosted_console_keeps_a_terminal_s_starting_grid() {
+    let unhosted = Geometry::UNHOSTED;
+    assert_eq!((unhosted.columns(), unhosted.rows()), (80, 25));
+    assert_eq!(
+        Geometry::for_display(
+            unhosted.width_px,
+            unhosted.height_px,
+            unhosted.stride_px * 4
+        ),
+        Some(unhosted)
+    );
+}
+
 // --- Renderer / terminal ---------------------------------------------------
 
 /// A test surface `cols`×`rows` cells with the cursor left visible
 /// (the console's default), stride two pixels wider than the visible width so
 /// tests exercise `stride != width`.
 ///
-/// The two cell grids are leaked to `&'static mut [Cell]` (a host test runs
-/// once and exits, so the leak is harmless) so the returned console borrows
-/// them for `'static`, mirroring how a kernel caller leaks heap grid storage.
-fn cursor_console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
+/// The console owns its two cell grids, as the console a port hosts does.
+fn cursor_console_of(cols: u32, rows: u32) -> (TextConsole<Vec<Cell>>, Vec<u32>) {
     let width_px = cols * CELL_WIDTH;
     let height_px = rows * CELL_HEIGHT;
     let geometry = Geometry {
@@ -108,8 +120,8 @@ fn cursor_console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
     };
     assert_eq!((geometry.columns(), geometry.rows()), (cols, rows));
     let mut pixels = vec![0u32; geometry.pixel_count()];
-    let main: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
-    let alt: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let main = vec![Cell::BLANK; geometry.cell_count()];
+    let alt = vec![Cell::BLANK; geometry.cell_count()];
     let mut console = TextConsole::new(geometry, main, alt);
     console.clear(&mut pixels);
     (console, pixels)
@@ -118,29 +130,29 @@ fn cursor_console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
 /// [`cursor_console_of`] with the cursor hidden (`CSI ? 25 l`), so the tests
 /// of glyphs, scrolling, and screens assert their own subject without the
 /// cursor overlay standing on a cell; the overlay has its own test section.
-fn console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
+fn console_of(cols: u32, rows: u32) -> (TextConsole<Vec<Cell>>, Vec<u32>) {
     let (mut console, mut pixels) = cursor_console_of(cols, rows);
     console.write_bytes(&mut pixels, b"\x1b[?25l");
     (console, pixels)
 }
 
 /// A 2-column × 2-row test surface.
-fn small_console() -> (TextConsole<'static>, Vec<u32>) {
+fn small_console() -> (TextConsole<Vec<Cell>>, Vec<u32>) {
     console_of(2, 2)
 }
 
 /// A `cols`-column surface one pixel taller than a whole number of cell rows,
 /// so it has a bottom margin as well as stride slack: the pixels no cell flush
 /// can reach.
-fn console_with_margin(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>, Geometry) {
+fn console_with_margin(cols: u32, rows: u32) -> (TextConsole<Vec<Cell>>, Vec<u32>, Geometry) {
     let geometry = Geometry {
         width_px: cols * CELL_WIDTH,
         height_px: rows * CELL_HEIGHT + 1,
         stride_px: cols * CELL_WIDTH + 3,
     };
     let mut pixels = vec![0u32; geometry.pixel_count()];
-    let main: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
-    let alt: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let main = vec![Cell::BLANK; geometry.cell_count()];
+    let alt = vec![Cell::BLANK; geometry.cell_count()];
     let console = TextConsole::new(geometry, main, alt);
     pixels.fill(0);
     (console, pixels, geometry)
@@ -1159,7 +1171,7 @@ fn adjacent_blank_runs_keep_their_own_backgrounds() {
 /// No surface is needed: the screen is a pure model, so the script checks
 /// exactly what a hidden console would record.
 struct ConformanceConsole {
-    console: TextConsole<'static>,
+    console: TextConsole<Vec<Cell>>,
 }
 
 impl ConformanceConsole {
@@ -1208,4 +1220,114 @@ fn the_screen_model_passes_the_shared_conformance_script() {
     if let Err(divergence) = tairix_vt::conformance::check(&mut screen) {
         panic!("screen conformance: {divergence:?}");
     }
+}
+
+// --- Re-cutting to a new surface -------------------------------------------
+
+/// A console `cols`×`rows` cells over owned grids, the storage a console that
+/// follows its surface to new sizes keeps.
+fn owned_console(cols: u32, rows: u32) -> TextConsole<Vec<Cell>> {
+    let geometry = cell_geometry(cols, rows);
+    TextConsole::new(
+        geometry,
+        vec![Cell::BLANK; geometry.cell_count()],
+        vec![Cell::BLANK; geometry.cell_count()],
+    )
+}
+
+fn cell_geometry(cols: u32, rows: u32) -> Geometry {
+    Geometry {
+        width_px: cols * CELL_WIDTH,
+        height_px: rows * CELL_HEIGHT,
+        stride_px: cols * CELL_WIDTH,
+    }
+}
+
+fn recut(console: TextConsole<Vec<Cell>>, cols: u32, rows: u32) -> TextConsole<Vec<Cell>> {
+    let geometry = cell_geometry(cols, rows);
+    console.resized(
+        geometry,
+        vec![Cell::BLANK; geometry.cell_count()],
+        vec![Cell::BLANK; geometry.cell_count()],
+    )
+}
+
+fn row_text(console: &TextConsole<Vec<Cell>>, row: u32) -> alloc::string::String {
+    (0..console.screen.cols())
+        .map(|col| console.screen.cell_at(col, row).ch)
+        .collect::<alloc::string::String>()
+        .trim_end()
+        .into()
+}
+
+#[test]
+fn a_console_grown_onto_a_larger_surface_keeps_its_text_where_it_was() {
+    let mut console = owned_console(8, 3);
+    console.write_output_bytes(&mut [], b"one\ntwo");
+    let console = recut(console, 12, 6);
+    assert_eq!(row_text(&console, 0), "one");
+    assert_eq!(row_text(&console, 1), "two");
+    assert_eq!((console.screen.column, console.screen.row), (3, 1));
+    assert_eq!(
+        console.screen.region_bottom, 5,
+        "the scroll region is the new screen"
+    );
+}
+
+#[test]
+fn a_console_shrunk_keeps_the_rows_ending_at_its_cursor() {
+    let mut console = owned_console(8, 4);
+    console.write_output_bytes(&mut [], b"a\nb\nc\nd");
+    let console = recut(console, 8, 2);
+    assert_eq!(row_text(&console, 0), "c");
+    assert_eq!(row_text(&console, 1), "d");
+    assert_eq!(console.screen.row, 1, "the line being typed stays in view");
+}
+
+#[test]
+fn a_wide_glyph_a_narrower_grid_would_split_is_blanked() {
+    let mut console = owned_console(4, 1);
+    console.write_output_bytes(&mut [], "ab\u{4E2D}".as_bytes());
+    let console = recut(console, 3, 1);
+    assert_eq!(
+        row_text(&console, 0),
+        "ab",
+        "the lead cell is not left without its half"
+    );
+}
+
+#[test]
+fn a_sequence_split_across_a_recut_completes_on_the_new_surface() {
+    let mut console = owned_console(8, 2);
+    console.write_output_bytes(&mut [], b"x\x1b[");
+    let mut console = recut(console, 10, 2);
+    console.write_output_bytes(&mut [], b"2Jy");
+    assert_eq!(
+        row_text(&console, 0),
+        " y",
+        "the erase arrived whole, then the glyph"
+    );
+}
+
+#[test]
+fn the_primary_screen_follows_its_own_cursor_under_the_alternate_one() {
+    let mut console = owned_console(6, 4);
+    console.write_output_bytes(&mut [], b"p1\np2");
+    console.write_output_bytes(&mut [], b"\x1b[?1049h\x1b[4;1Halt");
+    let mut console = recut(console, 6, 2);
+    console.write_output_bytes(&mut [], b"\x1b[?1049l");
+    assert_eq!(row_text(&console, 0), "p1");
+    assert_eq!(row_text(&console, 1), "p2");
+    assert_eq!(
+        console.screen.row, 1,
+        "the primary cursor came back on its row"
+    );
+}
+
+#[test]
+fn a_recut_console_keeps_its_disposition_and_paints_nothing() {
+    let mut console = owned_console(4, 2);
+    console.hide();
+    let console = recut(console, 5, 2);
+    assert_eq!(console.surface(), Surface::Hidden);
 }

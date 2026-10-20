@@ -814,7 +814,7 @@ fn property_name(key: HwProperty) -> &'static str {
         HwProperty::FixedClockRate => "FIXED_CLOCK_RATE",
         HwProperty::BusSpeed => "BUS_SPEED",
         HwProperty::RadioCoexistence => "RADIO_COEXISTENCE",
-        HwProperty::BootConsole => "BOOT_CONSOLE",
+        HwProperty::ConsoleHost => "CONSOLE_HOST",
         HwProperty::BlockMedium => "BLOCK_MEDIUM",
     }
 }
@@ -2729,9 +2729,10 @@ fn generate_driver() -> String {
 /// static text. The field names/order are the frozen `abi-v1` view; the
 /// in-module pinning test checks each mirror's size/align against `lib/abi`.
 ///
-/// Every struct is the naturally-aligned in-memory layout. None of these
-/// types has a packed wire encoder (unlike [`DriverManifest`]), so the C
-/// mirror *is* the layout and there is no separate `*_WIRE_LEN` macro. The
+/// Every struct is the naturally-aligned in-memory layout. A type with a wire
+/// encoder (`DamageRect`, `HostedConsole`) encodes exactly this layout,
+/// little-endian, unlike the packed [`DriverManifest`], so the C mirror *is*
+/// the layout and there is no separate `*_WIRE_LEN` macro. The
 /// `BusDevice::class` field is spelled `device_class` here because `class`
 /// is reserved in C++ and the umbrella header must compile under a C++
 /// `extern "C"` include; only the byte layout is part of the ABI, not the
@@ -2786,13 +2787,40 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   uint32_t stride_bytes;\n\
          \x20   uint8_t format;\n\
          } tairix_display_mode_t;\n\n",
-    "/* What a hardware compositor back-end can do this frame. */\n\
+    "/* What a display's hardware layer compositor can do. */\n\
          typedef struct tairix_accel_caps {\n\
          \x20   uint32_t max_layers;\n\
          \x20   uint32_t max_width_px;\n\
          \x20   uint32_t max_height_px;\n\
          \x20   uint8_t per_layer_opacity;\n\
+         \x20   uint8_t hw_scaling;\n\
          } tairix_accel_caps_t;\n\n",
+    "/* The pointer image size a display's cursor plane shows. */\n\
+         typedef struct tairix_cursor_caps {\n\
+         \x20   uint32_t max_width_px;\n\
+         \x20   uint32_t max_height_px;\n\
+         } tairix_cursor_caps_t;\n\n",
+    "/* A display driver's name for a buffer it allocated; never zero. */\n\
+         typedef struct tairix_buffer_id {\n\
+         \x20   uint32_t raw;\n\
+         } tairix_buffer_id_t;\n\n",
+    "/* A rectangle of a display mode, in pixels from its top-left: what a\n\
+         * present changed, or the rows the hosted console painted\n\
+         * (console_damage). */\n\
+         typedef struct tairix_damage_rect {\n\
+         \x20   uint32_t x;\n\
+         \x20   uint32_t y;\n\
+         \x20   uint32_t width_px;\n\
+         \x20   uint32_t height_px;\n\
+         } tairix_damage_rect_t;\n\n",
+    "/* Where a display driver's device reaches the kernel console it hosts\n\
+         * (console_adopt): the device address of its first pixel and its row\n\
+         * stride, laid out as TAIRIX_DISPLAY_FORMAT_BGRA8888. reserved0 is zero. */\n\
+         typedef struct tairix_hosted_console {\n\
+         \x20   uint64_t device_addr;\n\
+         \x20   uint32_t stride_bytes;\n\
+         \x20   uint32_t reserved0;\n\
+         } tairix_hosted_console_t;\n\n",
     "/* The four AGENTS.md sec.21 timestamps stored for a filesystem node. A\n\
          * stamp the backing format does not keep is the epoch (never a\n\
          * fabricated wall time). */\n\
@@ -3254,6 +3282,7 @@ const fn wait_source_macro_suffix(kind: WaitSourceKind) -> &'static str {
         WaitSourceKind::DirWatch => "DIR_WATCH",
         WaitSourceKind::Foreground => "FOREGROUND",
         WaitSourceKind::HardwareTree => "HARDWARE_TREE",
+        WaitSourceKind::ConsoleDamage => "CONSOLE_DAMAGE",
     }
 }
 
@@ -5792,7 +5821,9 @@ mod tests {
         use core::mem::{align_of, size_of};
         use tairix_abi::driver::block::{BlockGeometry, DiscardCapability, HealthSnapshot};
         use tairix_abi::driver::bus::BusDevice;
-        use tairix_abi::driver::display::{AccelCaps, DisplayMode};
+        use tairix_abi::driver::display::{
+            AccelCaps, BufferId, CursorCaps, DamageRect, DisplayMode, HostedConsole,
+        };
         use tairix_abi::driver::filesystem::{DirEntry, NodeInfo, NodeTimes, VolumeStats};
         use tairix_abi::driver::input::InputEvent;
         use tairix_abi::driver::net::MacAddress;
@@ -5837,6 +5868,10 @@ mod tests {
             ("tairix_driver.h", "} tairix_bus_device_t;", size_of::<BusDevice>(), 24, align_of::<BusDevice>(), 8),
             ("tairix_driver.h", "} tairix_display_mode_t;", size_of::<DisplayMode>(), 16, align_of::<DisplayMode>(), 4),
             ("tairix_driver.h", "} tairix_accel_caps_t;", size_of::<AccelCaps>(), 16, align_of::<AccelCaps>(), 4),
+            ("tairix_driver.h", "} tairix_cursor_caps_t;", size_of::<CursorCaps>(), 8, align_of::<CursorCaps>(), 4),
+            ("tairix_driver.h", "} tairix_buffer_id_t;", size_of::<BufferId>(), 4, align_of::<BufferId>(), 4),
+            ("tairix_driver.h", "} tairix_damage_rect_t;", size_of::<DamageRect>(), 16, align_of::<DamageRect>(), 4),
+            ("tairix_driver.h", "} tairix_hosted_console_t;", size_of::<HostedConsole>(), 16, align_of::<HostedConsole>(), 8),
             ("tairix_driver.h", "} tairix_node_info_t;", size_of::<NodeInfo>(), 96, align_of::<NodeInfo>(), 8),
             ("tairix_driver.h", "} tairix_dir_entry_t;", size_of::<DirEntry>(), 112, align_of::<DirEntry>(), 8),
             ("tairix_driver.h", "} tairix_node_times_t;", size_of::<NodeTimes>(), 64, align_of::<NodeTimes>(), 8),
@@ -5849,6 +5884,9 @@ mod tests {
             ("tairix_sysinfo.h", "} tairix_dma_group_record_t;", size_of::<DmaGroupRecord>(), 24, align_of::<DmaGroupRecord>(), 8),
             ("tairix_sysinfo.h", "} tairix_dma_node_record_t;", size_of::<DmaNodeRecord>(), 40, align_of::<DmaNodeRecord>(), 8),
         ];
+        // A record with a wire encoder encodes exactly its C layout.
+        assert_eq!(DamageRect::WIRE_LEN, size_of::<DamageRect>());
+        assert_eq!(HostedConsole::WIRE_LEN, size_of::<HostedConsole>());
         for &(header, typedef, size, want_size, align, want_align) in registry {
             let h = body(header);
             assert!(

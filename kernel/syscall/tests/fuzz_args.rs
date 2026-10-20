@@ -710,7 +710,25 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn console_relocate(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+    #[allow(clippy::too_many_arguments)] // Matches the trait declaration's justified count.
+    fn console_adopt(
+        &self,
+        _c: &CallerContext<'_>,
+        _handle: u64,
+        _width: u32,
+        _height: u32,
+        _reach: tairix_abi::driver::DmaReach,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn console_damage(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn console_relinquish(&self, _c: &CallerContext<'_>) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -1242,6 +1260,9 @@ const CLOSED_U32_ARGS: &[ClosedArg] = &[
     (SyscallNumber::SHM_CREATE_DMA, 2, |raw| {
         tairix_abi::driver::DmaReach::new(raw).is_some()
     }),
+    (SyscallNumber::CONSOLE_ADOPT, 3, |raw| {
+        tairix_abi::driver::DmaReach::new(raw).is_some()
+    }),
 ];
 
 /// Whether the dispatcher's **per-operand** decodes accept `args`.
@@ -1625,12 +1646,16 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
                     args[i] = base;
                 }
             }
-            // A carve's reach (arg 2) is one to 64 address bits.
+            // A carve's reach (arg 2, arg 3 for the console's) is one to
+            // 64 address bits.
             if matches!(
                 spec.number,
                 SyscallNumber::DMA_ALLOC | SyscallNumber::SHM_CREATE_DMA
             ) {
                 args[2] = 64;
+            }
+            if spec.number == SyscallNumber::CONSOLE_ADOPT {
+                args[3] = 64;
             }
             // The attribute calls bound their key length (arg 3) to
             // `1..=FS_ATTR_KEY_MAX` at dispatch; seed the zeroed slot with

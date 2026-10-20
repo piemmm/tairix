@@ -2844,22 +2844,33 @@ impl SyscallNumber {
     /// ([`Errno::PermissionDenied`] / [`Errno::NotImplemented`]).
     pub const HW_NODE_SETTLE: Self = Self(140);
 
-    /// Move the kernel's framebuffer console off the firmware's memory onto
-    /// memory the kernel owns and the caller's device reaches, so a display
-    /// engine can take the screen over from the firmware that lit it.
+    /// Host the kernel's framebuffer console on the caller's display.
     ///
-    /// `(buf, len)`: the console's surface is written into `buf` as one
-    /// framebuffer [`crate::HwResource`]. Returns the bytes written, or
-    /// `-errno`. Only the driver of a node discovery marked
-    /// [`crate::HwProperty::BootConsole`] is answered
+    /// Arguments: `handle`, the caller's `Dma` grant the memory is carved
+    /// under; `width: u32`, `height: u32`, the mode the display shows the
+    /// console at; `reach: u32`, the address bits the device drives; then
+    /// `(buf, len)`, into which one
+    /// [`crate::driver::display::HostedConsole`] is written. Returns the bytes
+    /// written, or `-errno`. Only the driver of a node discovery marked
+    /// [`crate::HwProperty::ConsoleHost`] is answered
     /// ([`Errno::PermissionDenied`] otherwise), and it holds
-    /// [`crate::CapabilityId::MEM_DMA`], since its device reads the memory.
-    /// The surface lies below the node's untranslated DMA reach and is the
-    /// console's for the life of the kernel, so a second call answers the
-    /// same one. A console that cannot move — none to move, no memory below
-    /// the reach — stays where it was ([`Errno::NotFound`],
-    /// [`Errno::OutOfMemory`], [`Errno::OutOfRange`]).
-    pub const CONSOLE_RELOCATE: Self = Self(141);
+    /// [`crate::CapabilityId::MEM_DMA`], since its device reads the console.
+    ///
+    /// The kernel paints the console into zeroed, physically contiguous memory
+    /// below the node's DMA reach, mapped into its translation domain where it
+    /// has one, and answers where the device reaches it; from then on the rows
+    /// it paints are owed to the caller ([`Self::CONSOLE_DAMAGE`],
+    /// [`crate::WaitSourceKind::ConsoleDamage`]). A console the firmware lit a screen
+    /// for moves only once the boot has handed it on, so the engine's mode set
+    /// never lands under a prompt; the call waits until then. Another call at
+    /// the same mode answers the same memory, mapped for the caller's own
+    /// instance; another mode is [`Errno::Busy`] until the memory is
+    /// relinquished ([`Self::CONSOLE_RELINQUISH`]). No console to host
+    /// ([`Errno::NotFound`]), a mode no glyph fits
+    /// ([`Errno::LengthOutOfRange`]), memory the device cannot reach
+    /// ([`Errno::OutOfRange`]) and none to be had ([`Errno::OutOfMemory`])
+    /// leave the console where it was.
+    pub const CONSOLE_ADOPT: Self = Self(141);
 
     /// Close a wait-set the caller created with [`Self::WAITSET_CREATE`],
     /// releasing its members and returning what the set and its members were
@@ -2955,6 +2966,30 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::FS_ACCESS`], the authority to name a path at
     /// all, and audited as the disclosure.
     pub const FD_REDEEM_LOCATION: Self = Self(147);
+
+    /// Take the rows the hosted console painted since the last take.
+    ///
+    /// Arguments: `(buf, len)`, into which one
+    /// [`crate::driver::display::DamageRect`] covering them is written.
+    /// Returns the bytes written, `0` when nothing is owed, or `-errno`:
+    /// [`Errno::PermissionDenied`] for any caller but the driver instance the
+    /// console is hosted for. Ungated beyond that, and not audited: a
+    /// high-volume read of what the caller's own screen shows.
+    pub const CONSOLE_DAMAGE: Self = Self(148);
+
+    /// Give back the memory the console is hosted on: the caller vouches that
+    /// its device no longer reads it.
+    ///
+    /// Takes no arguments. Returns `0`, or `-errno`. The console keeps its
+    /// text and paints nothing until it is adopted again; the memory returns
+    /// to the allocator once the device is known to have lost it — its
+    /// translation confirms the unmap, or, with none, on the caller's word as
+    /// the node's live driver. Only that driver is answered
+    /// ([`Errno::PermissionDenied`] otherwise, [`Errno::NotFound`] with
+    /// nothing hosted on its node), and it holds
+    /// [`crate::CapabilityId::MEM_DMA`]. Audited: it takes the console off a
+    /// device.
+    pub const CONSOLE_RELINQUISH: Self = Self(149);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -3243,13 +3278,15 @@ mod tests {
         assert_eq!(SyscallNumber::PORT_ADMIT.as_u16(), 138);
         assert_eq!(SyscallNumber::FOREGROUND_HELD.as_u16(), 139);
         assert_eq!(SyscallNumber::HW_NODE_SETTLE.as_u16(), 140);
-        assert_eq!(SyscallNumber::CONSOLE_RELOCATE.as_u16(), 141);
+        assert_eq!(SyscallNumber::CONSOLE_ADOPT.as_u16(), 141);
         assert_eq!(SyscallNumber::WAITSET_CLOSE.as_u16(), 142);
         assert_eq!(SyscallNumber::PORT_UNBIND.as_u16(), 143);
         assert_eq!(SyscallNumber::CALL_PEER_PORT.as_u16(), 144);
         assert_eq!(SyscallNumber::HW_NODE_KEY_SOURCE.as_u16(), 145);
         assert_eq!(SyscallNumber::FD_GRANT_LOCATION.as_u16(), 146);
         assert_eq!(SyscallNumber::FD_REDEEM_LOCATION.as_u16(), 147);
+        assert_eq!(SyscallNumber::CONSOLE_DAMAGE.as_u16(), 148);
+        assert_eq!(SyscallNumber::CONSOLE_RELINQUISH.as_u16(), 149);
     }
 
     #[test]

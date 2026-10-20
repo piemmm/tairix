@@ -1,10 +1,11 @@
 //! The HVS: its global setup, its channels, the outputs they are muxed to,
 //! and the display-list memory every list lives in.
 
+use tairix_abi::driver::display::MAX_ACCEL_LAYERS;
 use tairix_abi::driver::mmio::RegisterBlock;
 use tairix_abi::DriverError;
 
-use crate::dlist::{kernel, END, KERNEL_WORDS, PLANE_WORDS_MAX};
+use crate::dlist::{kernel, PlaneWords, END, KERNEL_WORDS, PLANE_WORDS_MAX};
 use crate::regs::field;
 use crate::regs::hvs as reg;
 
@@ -34,35 +35,44 @@ pub(crate) enum List {
     Black,
     /// The boot console's surface.
     Console,
-    /// A scan-out frame.
-    Frame(usize),
+    /// A presented stack of layers, in one of the channel's two stack slots.
+    Stack(usize),
 }
 
-/// Scan-out frames a channel has lists for.
-pub(crate) const FRAMES_MAX: usize = 4;
+/// Stack slots each channel has: the one it composites, and the one the next
+/// present is written to, which a present in flight holds until it latches.
+pub(crate) const STACKS: usize = 2;
+
+/// Planes one stack holds: its layers, then the pointer.
+pub(crate) const STACK_PLANES: usize = MAX_ACCEL_LAYERS + 1;
 
 /// Words one list slot holds: a plane and the end word.
 const SLOT_WORDS: usize = PLANE_WORDS_MAX + 1;
 
+/// Words one stack slot holds: its planes and the end word.
+const STACK_WORDS: usize = STACK_PLANES * PLANE_WORDS_MAX + 1;
+
 /// Where the filter kernel lives: past the firmware's own lists.
 pub(crate) const KERNEL_AT: usize = reg::BOOTLOADER_DLIST_END;
 
+/// Words each channel's lists take.
+const CHANNEL_WORDS: usize = 2 * SLOT_WORDS + STACKS * STACK_WORDS;
+
 /// Where channel `channel`'s lists start, past the kernel.
 const fn lists_at(channel: usize) -> usize {
-    (KERNEL_AT + KERNEL_WORDS).next_multiple_of(SLOT_WORDS)
-        + channel * (2 + FRAMES_MAX) * SLOT_WORDS
+    (KERNEL_AT + KERNEL_WORDS).next_multiple_of(SLOT_WORDS) + channel * CHANNEL_WORDS
 }
 
 const _: () = assert!(lists_at(reg::CHANNELS) <= reg::DLIST_WORDS);
 
 /// The word offset of channel `channel`'s `list`.
 pub(crate) const fn slot(channel: usize, list: List) -> usize {
-    let index = match list {
-        List::Black => 0,
-        List::Console => 1,
-        List::Frame(frame) => 2 + frame,
-    };
-    lists_at(channel) + index * SLOT_WORDS
+    let base = lists_at(channel);
+    match list {
+        List::Black => base,
+        List::Console => base + SLOT_WORDS,
+        List::Stack(index) => base + 2 * SLOT_WORDS + index * STACK_WORDS,
+    }
 }
 
 /// The list a channel's `DISPLACT` or `DISPLIST` names, if it is one of the
@@ -70,14 +80,21 @@ pub(crate) const fn slot(channel: usize, list: List) -> usize {
 pub(crate) const fn list_at(channel: usize, offset: u32) -> Option<List> {
     let offset = offset as usize;
     let base = lists_at(channel);
-    if offset < base || !(offset - base).is_multiple_of(SLOT_WORDS) {
+    if offset == base {
+        return Some(List::Black);
+    }
+    if offset == base + SLOT_WORDS {
+        return Some(List::Console);
+    }
+    let stacks = base + 2 * SLOT_WORDS;
+    if offset < stacks || !(offset - stacks).is_multiple_of(STACK_WORDS) {
         return None;
     }
-    match (offset - base) / SLOT_WORDS {
-        0 => Some(List::Black),
-        1 => Some(List::Console),
-        index if index < 2 + FRAMES_MAX => Some(List::Frame(index - 2)),
-        _ => None,
+    let index = (offset - stacks) / STACK_WORDS;
+    if index < STACKS {
+        Some(List::Stack(index))
+    } else {
+        None
     }
 }
 
@@ -210,6 +227,14 @@ impl<R: RegisterBlock> Hvs<R> {
         )
     }
 
+    /// The word at `at` of display-list memory.
+    pub fn read_list(&self, at: usize) -> Result<u32, DriverError> {
+        if at >= reg::DLIST_WORDS {
+            return Err(DriverError::OutOfRange);
+        }
+        self.regs.read32(reg::DLIST + 4 * at)
+    }
+
     /// Write `words` into display-list memory at word `at`.
     pub fn write_list(&self, at: usize, words: &[u32]) -> Result<(), DriverError> {
         if at + words.len() > reg::DLIST_WORDS {
@@ -229,6 +254,50 @@ impl<R: RegisterBlock> Hvs<R> {
         let at = slot(channel, list);
         self.write_list(at, plane)?;
         self.write_list(at + plane.len(), &[END])
+    }
+
+    /// Write channel `channel`'s stack slot `index`: `planes` in order, then
+    /// the end, answering the word offset each plane starts at.
+    pub fn write_stack(
+        &self,
+        channel: usize,
+        index: usize,
+        planes: &[PlaneWords],
+    ) -> Result<tairix_inline::ArrayVec<usize, STACK_PLANES>, DriverError> {
+        if index >= STACKS || planes.len() > STACK_PLANES {
+            return Err(DriverError::OutOfRange);
+        }
+        let mut at = slot(channel, List::Stack(index));
+        let mut starts = tairix_inline::ArrayVec::new();
+        for words in planes {
+            starts.try_push(at).map_err(|_| DriverError::OutOfRange)?;
+            self.write_list(at, words)?;
+            at += words.len();
+        }
+        self.write_list(at, &[END])?;
+        Ok(starts)
+    }
+
+    /// Raise an interrupt at the end of each of `channel`'s frames, or stop.
+    pub fn watch_frames(&self, channel: usize, on: bool) -> Result<(), DriverError> {
+        let source = reg::dispctrl_dspeieof(channel);
+        self.modify(reg::DISPCTRL, source, if on { source } else { 0 })
+    }
+
+    /// Clear and answer the channels that finished a frame since last asked.
+    pub fn take_frame_ends(&self) -> Result<[bool; reg::CHANNELS], DriverError> {
+        let status = self.regs.read32(reg::DISPSTAT)?;
+        let mut ended = [false; reg::CHANNELS];
+        let mut clear = 0;
+        for (channel, end) in ended.iter_mut().enumerate() {
+            let bit = reg::dispstat_eof(channel);
+            *end = status & bit != 0;
+            clear |= status & bit;
+        }
+        if clear != 0 {
+            self.regs.write32(reg::DISPSTAT, clear)?;
+        }
+        Ok(ended)
     }
 
     /// Have `channel` latch `list` at its next frame start.

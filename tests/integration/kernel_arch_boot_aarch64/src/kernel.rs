@@ -105,7 +105,7 @@ impl Sink for BootCompletedExitSink {
         // records the full boot timeline.
         SerialSink::new().write_event(event);
         if event.id == BOOT_COMPLETED_EVENT_ID {
-            if !tairix_arch_aarch64::video::is_active() {
+            if !tairix_kernel::console_layout::CONSOLE.is_active() {
                 qemu_exit::exit_failure(FAIL_VIDEO_INACTIVE);
             }
             // Boot proved the remap window exists; this proves the heap

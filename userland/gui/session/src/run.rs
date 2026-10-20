@@ -79,7 +79,7 @@ mod program {
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::audio::StreamDirection;
-    use tairix_abi::driver::display::{Display, DisplayMode};
+    use tairix_abi::driver::display::DisplayMode;
     use tairix_abi::elevate::{
         elevate_endpoint, ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY,
     };
@@ -187,7 +187,8 @@ mod program {
         ScreensaverServe,
     };
     use tairix_display::{
-        DisplayClient, DisplayTransport, FramesRefused, RemoteDisplay, RtShmMapper, SwitchedOff,
+        DisplayClient, DisplayTransport, FramesRefused, Presenter, RtDisplay, RtShmMapper,
+        SwitchedOff,
     };
     use tairix_greeter::AccountTile;
     use tairix_greeter::{Asking, Courier, Ticket, Tickets, Verdict};
@@ -201,7 +202,6 @@ mod program {
     use tairix_procinfo::IpcTransport;
     use tairix_raytrace::Detail;
     use tairix_rt::io::{self, Stderr, Write};
-    use tairix_rt::shm::SharedRegion;
     use tairix_rt::work::Worker;
     use tairix_rt::ServedCall;
     use tairix_sandbox::imagerender::{
@@ -310,10 +310,6 @@ mod program {
     /// supervisor that started the desktop prompts again.
     const EXIT_LOGGED_OUT: i32 = 0;
 
-    /// Frames in the shared region: a double buffer, so the session renders
-    /// into one frame while the service scans out the other.
-    const FRAME_COUNT: u32 = 2;
-
     /// Exit code when a resumed session could not take its screen back: the
     /// seat, the mode, the frame region, or the compositor's adoption of the
     /// new mode refused. Reserved, so the supervisor can tell a desktop that
@@ -327,6 +323,10 @@ mod program {
 
     /// The wait-set token of the session's `SeatInput` member.
     const SEAT_TOKEN: u64 = 1;
+
+    /// The wait-set token of the port the display driver posts its latches
+    /// to.
+    const DISPLAY_EVENT_TOKEN: u64 = 25;
 
     /// The wait-set token of the served `WINDOW_ENDPOINT` member.
     const WINDOW_TOKEN: u64 = 2;
@@ -555,9 +555,10 @@ mod program {
         publish_desktop(compositor, shell);
     }
 
-    /// The frame ring the session presents through: its own frames, owned by
-    /// the ring and unmapped with it.
-    type Ring = RemoteDisplay<SharedRegion, RtDisplayTransport>;
+    /// The display the session presents through: the frames its driver
+    /// allocated, mapped by the ring and unmapped with it, and the port the
+    /// driver posts each latch to.
+    type Ring = RtDisplay<RtDisplayTransport>;
 
     /// Queued-wake capacity of the mailbox. The authority sends one wake per
     /// switch and the loop drains it on the very next turn, so a handful of
@@ -1302,7 +1303,11 @@ mod program {
             return;
         };
         fade.depart(tairix_rt::clock_get(), compositor);
-        while compositor.present(display).is_ok() {
+        loop {
+            display.take_events();
+            if compositor.present(display).is_err() {
+                return;
+            }
             if fade.settled() {
                 return;
             }
@@ -1373,6 +1378,7 @@ mod program {
                     "seat lease lost; tearing the session down",
                 ))
             }
+            Refusal::Owed => Ok(()),
             Refusal::Failed => {
                 shell.teardown(compositor);
                 Err(app::fail(
@@ -2148,21 +2154,55 @@ mod program {
         }
     }
 
-    /// Establish frames for `mode` the one way every presenter does
-    /// (`tairix_display::establish_frames`).
+    /// Take the frames the display allocated for `mode` the one way every
+    /// presenter does (`tairix_display::establish_display`).
     fn establish_frames(mode: &DisplayMode) -> Result<Ring, FramesRefused> {
-        tairix_display::establish_frames(
+        tairix_display::establish_display(
             DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY),
-            mode,
-            FRAME_COUNT,
+            *mode,
         )
+    }
+
+    /// Hold `ring` as the session's display in place of whatever it held,
+    /// its latch port waited on in `set` in place of the last one's.
+    ///
+    /// # Errors
+    ///
+    /// The wait-set's refusal of the port, which leaves the session holding
+    /// no display: a present the device queued would never be heard to
+    /// latch.
+    fn hold_display(set: u64, display: &mut Option<Ring>, ring: Option<Ring>) -> Result<(), Errno> {
+        if let Some(old) = display.take() {
+            let _ = tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Del,
+                WaitSourceKind::Port,
+                old.events_port(),
+                DISPLAY_EVENT_TOKEN,
+            );
+        }
+        let Some(ring) = ring else {
+            return Ok(());
+        };
+        let added = tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Port,
+            ring.events_port(),
+            DISPLAY_EVENT_TOKEN,
+        );
+        if added != 0 {
+            return Err(Errno::from_syscall(added));
+        }
+        *display = Some(ring);
+        Ok(())
     }
 
     /// The exit code a bring-up whose frames were refused ends with.
     const fn refused_exit(refused: FramesRefused) -> i32 {
         match refused {
-            FramesRefused::Geometry => EXIT_BAD_MODE,
-            FramesRefused::Region | FramesRefused::Grant => EXIT_NO_FRAMES,
+            FramesRefused::Configure(Errno::LengthOutOfRange) => EXIT_BAD_MODE,
+            FramesRefused::Port(_) => EXIT_NO_FRAMES,
             FramesRefused::Configure(_) => EXIT_NO_DISPLAY,
         }
     }
@@ -2205,7 +2245,7 @@ mod program {
             // goes with them: a parked session must not be woken by the next
             // account's typing, and ignoring such a wake instead would spin on
             // a member that stays ready.
-            *self.display = None;
+            let _ = hold_display(self.set, self.display, None);
             let _ = tairix_rt::waitset_ctl(
                 self.set,
                 WaitSetOp::Del,
@@ -2259,11 +2299,12 @@ mod program {
         }
 
         fn reconfigure(&mut self, mode: DisplayMode) -> Result<(), Errno> {
-            *self.display = match establish_frames(&mode) {
-                Ok(ring) => Some(ring),
+            let ring = match establish_frames(&mode) {
+                Ok(ring) => ring,
                 Err(FramesRefused::Configure(Errno::Stale)) => return Err(Errno::Stale),
                 Err(_) => return Err(Errno::DeviceFault),
             };
+            hold_display(self.set, self.display, Some(ring)).map_err(|_| Errno::DeviceFault)?;
             // The compositor adopts the mode before anything is laid out
             // against it; a mode it cannot take leaves it untouched, and the
             // session ends rather than showing a screen it cannot draw.
@@ -2322,7 +2363,7 @@ mod program {
     /// The exit code a lost seat ends the session with.
     fn follow_output<S: DirectorySource, C, T>(
         forgotten: bool,
-        display: &mut Option<Ring>,
+        (display, set): (&mut Option<Ring>, u64),
         parts: &mut Resize<'_, S, C, T>,
     ) -> Result<Followed, i32> {
         let output = match DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query() {
@@ -2343,10 +2384,14 @@ mod program {
                 return Ok(Followed::Settled);
             }
         };
-        let held = display.as_ref().and_then(Display::output);
+        let held = display.as_ref().map(Presenter::mode);
+        // A present still waiting to latch when the output is announced again
+        // went to a driver that may not be there to latch it.
+        let forgotten = forgotten || display.as_ref().is_some_and(|ring| !ring.ready());
         match Follow::of(output, held, forgotten) {
             Follow::Release => {
-                if display.take().is_some() {
+                if display.is_some() {
+                    let _ = hold_display(set, display, None);
                     io::write_stderr_line("desktop: no display output is connected");
                 }
                 Ok(Followed::Settled)
@@ -2356,9 +2401,17 @@ mod program {
                 Ok(Followed::Settled)
             }
             Follow::Reconfigure(mode) => {
-                *display = None;
+                let _ = hold_display(set, display, None);
                 match establish_frames(&mode) {
-                    Ok(ring) => *display = Some(ring),
+                    Ok(ring) => {
+                        if let Err(err) = hold_display(set, display, Some(ring)) {
+                            app::report(
+                                APP_NAME,
+                                format_args!("the display's latches cannot be waited on ({err:?})"),
+                            );
+                            return Ok(Followed::Settled);
+                        }
+                    }
                     // It moved again, and that announcement brings the
                     // session onto where it went.
                     Err(FramesRefused::Configure(Errno::Stale)) => return Ok(Followed::Settled),
@@ -2368,7 +2421,7 @@ mod program {
                     }
                 }
                 if !adopt_output(mode, parts) {
-                    *display = None;
+                    let _ = hold_display(set, display, None);
                     app::report(
                         APP_NAME,
                         format_args!(
@@ -2497,7 +2550,10 @@ mod program {
         // Held as an option so a step-aside, or an output that went away, can
         // give the frames back and a resume or a new output build them again
         // for the mode then in force — there is no second bring-up path.
-        let mut display = Some(ring);
+        let mut display = None;
+        if hold_display(set, &mut display, Some(ring)).is_err() {
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "display latch wait refused");
+        }
         // Set while the service refuses the frames, until its next
         // announcement of the output: whether it holds no configuration for
         // them at all.
@@ -3859,7 +3915,9 @@ mod program {
                         IdleAction::SwitchDisplayOff => {
                             let asked = saver.switch_display_off(
                                 &mut compositor,
-                                display.as_mut().map(|display| display as &mut dyn Display),
+                                display
+                                    .as_mut()
+                                    .map(|display| display as &mut dyn Presenter),
                             );
                             match asked {
                                 Some(SwitchedOff::Blanked) if !told_unswitchable => {
@@ -3907,7 +3965,11 @@ mod program {
                 // the session around it.
                 if !saver.is_dark()
                     && !lock.uncovered(&compositor)
-                    && pacer.admit(now_ns, compositor.has_damage())
+                    && pacer.admit(
+                        now_ns,
+                        compositor.has_damage(),
+                        display.as_ref().is_none_or(Presenter::ready),
+                    )
                 {
                     if let Err(code) = present(
                         &mut shell,
@@ -3926,6 +3988,7 @@ mod program {
                     ) {
                         return code;
                     }
+                    pacer.presented(display.as_ref().is_some_and(|ring| !ring.ready()));
                 }
                 frames.maybe_send(
                     &compositor,
@@ -4615,7 +4678,7 @@ mod program {
                 if !switch.is_background() {
                     let followed = follow_output(
                         forgotten,
-                        &mut display,
+                        (&mut display, set),
                         &mut Resize {
                             compositor: &mut compositor,
                             shell: &mut shell,
@@ -4738,6 +4801,12 @@ mod program {
                         machine_watch.forget(pid);
                     },
                 );
+            } else if token == DISPLAY_EVENT_TOKEN {
+                // A latch frees the frame a held present waits for; the
+                // frame path below presents it.
+                if let Some(ring) = display.as_mut() {
+                    ring.take_events();
+                }
             } else if token == WAKE_TOKEN {
                 // The session authority speaking to this desktop: it is the
                 // foreground session again, or the authority is going away
@@ -4863,7 +4932,9 @@ mod program {
                 let dismissed = saver.woken_by(waking, now_ns).then(|| {
                     saver.dismiss(
                         &mut compositor,
-                        display.as_mut().map(|display| display as &mut dyn Display),
+                        display
+                            .as_mut()
+                            .map(|display| display as &mut dyn Presenter),
                     )
                 });
                 match dismissed {
@@ -5018,6 +5089,11 @@ mod program {
                         });
                     }
                     Err(err) => return drain_fault(&mut shell, &mut compositor, err),
+                }
+                // The pointer on a cursor plane follows the batch now, ahead
+                // of any frame: moving it presents nothing.
+                if let Some(ring) = display.as_mut() {
+                    compositor.place_pointer(ring);
                 }
                 // An answer already back — carried here for want of a thread —
                 // is adopted on the same turn.
@@ -5205,7 +5281,11 @@ mod program {
             // A frame the lock does not cover is never presented.
             if !saver.is_dark()
                 && !lock.uncovered(&compositor)
-                && pacer.admit(now_ns, compositor.has_damage())
+                && pacer.admit(
+                    now_ns,
+                    compositor.has_damage(),
+                    display.as_ref().is_none_or(Presenter::ready),
+                )
             {
                 if let Err(code) = present(
                     &mut shell,
@@ -5224,6 +5304,7 @@ mod program {
                 ) {
                     return code;
                 }
+                pacer.presented(display.as_ref().is_some_and(|ring| !ring.ready()));
             }
             // What that frame cost, for the monitor's Resources page. After
             // the present, so the counts describe pixels already on screen,

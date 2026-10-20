@@ -874,30 +874,9 @@ pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
     })
 }
 
-/// The DMA window among `resources` that starts at the bottom of memory and
-/// reaches furthest, or `None` when none starts there.
-///
-/// The frame allocator places a block below a ceiling and above no floor, so
-/// only such a window is certain to hold a block placed below its top.
-#[must_use]
-pub(crate) fn bottom_window(resources: &[HwResource]) -> Option<DmaConstraint> {
-    resources
-        .iter()
-        .filter_map(|resource| dma_constraint(resource).ok())
-        .filter(|window| !window.translated || window.addr_limit == window.max_len)
-        .max_by_key(|window| match window.addr_limit {
-            0 => u64::MAX,
-            limit => limit,
-        })
-}
-
 /// Resolve the **device-visible** base address a driver programs into its
-/// hardware from the CPU-physical base the carve produced, honouring the
+/// hardware for the `len` bytes at CPU-physical `cpu_phys`, honouring the
 /// grant's inbound-viewport translation.
-///
-/// This is the output half of the `dma_alloc` handler, kept here as a pure
-/// function so the translation arithmetic is exercised directly by unit
-/// tests:
 ///
 /// * An **untranslated** (coherent) constraint (`translated_base == 0`) — a
 ///   coherent bus, the QEMU `virt` stand-in, the `VideoCore` mailbox carve —
@@ -906,22 +885,20 @@ pub(crate) fn bottom_window(resources: &[HwResource]) -> Option<DmaConstraint> {
 ///   root complex's `dma-ranges`, e.g. the Pi 4's `IB MEM 0x0..0x1ffffffff
 ///   -> 0x4_0000_0000` — maps the CPU window `[cpu_base, addr_limit)` onto
 ///   the bus window `[translated_base, translated_base + max_len)`, where
-///   `cpu_base = addr_limit - max_len`. A buffer carved at CPU-physical
-///   `cpu_phys` is therefore seen by the device at
-///   `translated_base + (cpu_phys - cpu_base)`. The carve was already
-///   bounded below `addr_limit` by the facility, so it cannot exceed the
-///   viewport's top; this only re-bases it onto the far side.
-///
-/// Every step is checked: a `cpu_phys` below the viewport's CPU base, a
-/// base at or past the aperture top, or a far-side overflow fails closed
-/// with [`Errno::OutOfRange`] rather than handing back a
-/// wrapped or out-of-aperture device address.
+///   `cpu_base = addr_limit - max_len`. A buffer at `cpu_phys` is seen by
+///   the device at `translated_base + (cpu_phys - cpu_base)`, and only a
+///   buffer the window holds whole is named at all: memory carved under
+///   another grant may lie partly outside this one.
 ///
 /// # Errors
 ///
-/// [`Errno::OutOfRange`] when the CPU-physical base does not lie within the
+/// [`Errno::OutOfRange`] when the `len` bytes do not lie wholly within the
 /// translating viewport's CPU window, or the translated address overflows.
-pub fn translate_device_addr(constraint: &DmaConstraint, cpu_phys: u64) -> Result<u64, Errno> {
+pub fn translate_device_addr(
+    constraint: &DmaConstraint,
+    cpu_phys: u64,
+    len: u64,
+) -> Result<u64, Errno> {
     if !constraint.translated {
         return Ok(cpu_phys);
     }
@@ -930,7 +907,7 @@ pub fn translate_device_addr(constraint: &DmaConstraint, cpu_phys: u64) -> Resul
         constraint.max_len,
         constraint.translated_base,
         cpu_phys,
-        1,
+        len.max(1),
     )
     .ok_or(Errno::OutOfRange)
 }
@@ -1194,38 +1171,6 @@ mod tests {
     }
 
     #[test]
-    fn the_bottom_window_is_the_widest_that_starts_at_the_bottom_of_memory() {
-        let coherence = tairix_abi::DmaCoherence::Unsnooped;
-        // A Pi 4 display engine: memory through [0, 1 GiB), the peripherals'
-        // aperture through [0xFC00_0000, 0xFF80_0000).
-        let memory = HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xC000_0000, coherence);
-        let peripherals =
-            HwResource::dma_translated(0xFF80_0000, 0x0380_0000, 0x7C00_0000, coherence);
-        let window = HwResource::mmio(0xFE40_0000, 0x8000);
-        assert_eq!(
-            bottom_window(&[window, peripherals, memory]),
-            dma_constraint(&memory).ok()
-        );
-        assert_eq!(
-            bottom_window(&[window, peripherals]),
-            None,
-            "a window above the bottom of memory cannot be trusted to hold a block"
-        );
-        let narrow = HwResource::dma(0x1000_0000, 0, coherence);
-        let unbounded = HwResource::dma(0, 0, coherence);
-        assert_eq!(
-            bottom_window(&[narrow, memory]),
-            dma_constraint(&memory).ok()
-        );
-        assert_eq!(
-            bottom_window(&[narrow, unbounded, memory]),
-            dma_constraint(&unbounded).ok(),
-            "a device that reaches everywhere reaches furthest"
-        );
-        assert_eq!(bottom_window(&[]), None);
-    }
-
-    #[test]
     fn translate_device_addr_passes_an_untranslated_constraint_through() {
         // A coherent (untranslated) constraint names the device by the
         // CPU-physical base unchanged.
@@ -1235,9 +1180,12 @@ mod tests {
             tairix_abi::DmaCoherence::Snooped,
         ))
         .unwrap();
-        assert_eq!(translate_device_addr(&coherent, 0x10_0000), Ok(0x10_0000));
+        assert_eq!(
+            translate_device_addr(&coherent, 0x10_0000, 1),
+            Ok(0x10_0000)
+        );
         // A zero base passes through too.
-        assert_eq!(translate_device_addr(&coherent, 0), Ok(0));
+        assert_eq!(translate_device_addr(&coherent, 0, 1), Ok(0));
     }
 
     #[test]
@@ -1254,11 +1202,11 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            translate_device_addr(&viewport, 0x10_0000),
+            translate_device_addr(&viewport, 0x10_0000, 1),
             Ok(0x4_0010_0000)
         );
         // The lowest CPU address maps to the far-side base exactly.
-        assert_eq!(translate_device_addr(&viewport, 0), Ok(0x4_0000_0000));
+        assert_eq!(translate_device_addr(&viewport, 0, 1), Ok(0x4_0000_0000));
     }
 
     #[test]
@@ -1272,16 +1220,25 @@ mod tests {
             tairix_abi::DmaCoherence::Snooped,
         ))
         .unwrap();
-        assert_eq!(translate_device_addr(&viewport, 0x2000), Ok(0x9000_0000));
-        assert_eq!(translate_device_addr(&viewport, 0x2800), Ok(0x9000_0800));
+        assert_eq!(translate_device_addr(&viewport, 0x2000, 1), Ok(0x9000_0000));
+        assert_eq!(translate_device_addr(&viewport, 0x2800, 1), Ok(0x9000_0800));
         // A base below the viewport's CPU base fails closed (never wraps).
         assert_eq!(
-            translate_device_addr(&viewport, 0x1000),
+            translate_device_addr(&viewport, 0x1000, 1),
             Err(Errno::OutOfRange)
         );
         // A base at the aperture top is out of the viewport.
         assert_eq!(
-            translate_device_addr(&viewport, 0x3000),
+            translate_device_addr(&viewport, 0x3000, 1),
+            Err(Errno::OutOfRange)
+        );
+        // So is a buffer that starts inside it and ends past its top.
+        assert_eq!(
+            translate_device_addr(&viewport, 0x2800, 0x800),
+            Ok(0x9000_0800)
+        );
+        assert_eq!(
+            translate_device_addr(&viewport, 0x2800, 0x801),
             Err(Errno::OutOfRange)
         );
     }
@@ -1327,7 +1284,7 @@ mod tests {
             Ok(0x8000_0000 + 0xC000_0000)
         );
         assert_eq!(
-            translate_device_addr(&viewport, 0x8000_0000 + 0xC000_0000 - 0x1000),
+            translate_device_addr(&viewport, 0x8000_0000 + 0xC000_0000 - 0x1000, 1),
             Ok(0xFFFF_F000)
         );
         // A device whose reach ends at or below the bus base reaches none.
@@ -1346,9 +1303,9 @@ mod tests {
         ))
         .unwrap();
         assert!(window.translated);
-        assert_eq!(translate_device_addr(&window, 0x8000_1000), Ok(0x1000));
+        assert_eq!(translate_device_addr(&window, 0x8000_1000, 1), Ok(0x1000));
         assert_eq!(
-            translate_device_addr(&window, 0x7FFF_F000),
+            translate_device_addr(&window, 0x7FFF_F000, 1),
             Err(Errno::OutOfRange)
         );
     }

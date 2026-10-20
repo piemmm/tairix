@@ -750,7 +750,25 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn console_relocate(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+    #[allow(clippy::too_many_arguments)] // Matches the trait declaration's justified count.
+    fn console_adopt(
+        &self,
+        _c: &CallerContext<'_>,
+        _handle: u64,
+        _width: u32,
+        _height: u32,
+        _reach: tairix_abi::driver::DmaReach,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn console_damage(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn console_relinquish(&self, _c: &CallerContext<'_>) -> SyscallResult {
         self.bump();
         Ok(0)
     }

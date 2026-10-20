@@ -8,10 +8,11 @@ use tairix_abi::{Errno, HwDeviceClass, HwMatchKey, HwNode};
 use super::{admit_request, Refusal};
 use crate::{
     encode_clock_rate_query, encode_clock_rate_write, encode_display_done,
-    encode_firmware_revision_query, encode_gpio_state_write, encode_rtc_register_query,
-    encode_rtc_register_write, encode_xhci_reset, request, ClockRateQuery, FirmwareClock,
-    FramebufferRequest, RtcRegister, DISPLAY_ENGINE_KEY, FIRMWARE_CLOCKS_KEY, PROPERTY_WORDS,
-    RPI_RTC_KEY, SKIP_SETTING_TURBO, TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG, VL805_KEY,
+    encode_display_size_query, encode_firmware_revision_query, encode_gpio_state_write,
+    encode_rtc_register_query, encode_rtc_register_write, encode_xhci_reset, request,
+    ClockRateQuery, FirmwareClock, FramebufferRequest, RtcRegister, DISPLAY_ENGINE_KEY,
+    FIRMWARE_CLOCKS_KEY, PROPERTY_WORDS, RPI_RTC_KEY, SKIP_SETTING_TURBO, TAG_SET_CLOCK_RATE,
+    TAG_SET_RTC_REG, VL805_KEY,
 };
 
 const EXECUTE_CODE: u32 = 0x0003_0010;
@@ -38,9 +39,10 @@ fn clients() -> [HwNode; 4] {
 
 /// Each driver's working set: the index of its driver in [`clients`], and one
 /// request of it.
-fn working_sets() -> [(usize, [u32; PROPERTY_WORDS]); 21] {
+fn working_sets() -> [(usize, [u32; PROPERTY_WORDS]); 22] {
     [
         (3, encode_display_done()),
+        (3, encode_display_size_query()),
         (0, encode_xhci_reset()),
         (1, encode_rtc_register_query(RtcRegister::Time)),
         (1, encode_rtc_register_query(RtcRegister::BackupVolts)),
@@ -247,6 +249,14 @@ fn a_tag_in_a_shape_its_driver_never_sends_is_refused() {
     assert_eq!(
         admit_request(&another_controller, Some(&vl805)),
         refused(&another_controller, Errno::PermissionDenied)
+    );
+
+    let [.., engine] = clients();
+    let mut stray_size_slot = encode_display_size_query();
+    stray_size_slot[6] = 1920;
+    assert_eq!(
+        admit_request(&stray_size_slot, Some(&engine)),
+        refused(&stray_size_slot, Errno::PermissionDenied)
     );
 }
 

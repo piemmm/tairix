@@ -48,6 +48,9 @@ pub enum Refusal {
         /// The service knows nothing of the frames.
         forgotten: bool,
     },
+    /// The display is still taking the last frame: the damage waits for the
+    /// next.
+    Owed,
     /// The display failed.
     Failed,
 }
@@ -60,6 +63,7 @@ impl Refusal {
             DriverError::SeatRevoked | DriverError::PermissionDenied => Self::SeatLost,
             DriverError::Stale => Self::Follow { forgotten: false },
             DriverError::NotFound => Self::Follow { forgotten: true },
+            DriverError::Busy => Self::Owed,
             _ => Self::Failed,
         }
     }
@@ -136,5 +140,10 @@ mod tests {
             Refusal::Follow { forgotten: true }
         );
         assert_eq!(Refusal::of(DriverError::DeviceFault), Refusal::Failed);
+        assert_eq!(
+            Refusal::of(DriverError::Busy),
+            Refusal::Owed,
+            "a frame the display is still taking never ends the session"
+        );
     }
 }

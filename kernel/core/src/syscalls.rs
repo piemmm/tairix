@@ -80,6 +80,7 @@ use crate::sched::{
     level_of_priority, priority_of_level, CpuId, SchedClass, Scheduler, SchedulerArch,
 };
 use tairix_abi::cpufreq::CpuFreqLimits;
+use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::DirVisit;
 use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
@@ -122,7 +123,7 @@ use tairix_kernel_irq::{
 };
 use tairix_kernel_mem::sensitive::alloc_sensitive;
 use tairix_kernel_mem::{
-    copy_in, copy_out, AllocError, DmaCustodian, FrameAllocator, PageCandidate, PhysMap,
+    copy_in, copy_out, AllocError, DmaCustodian, DmaError, FrameAllocator, PageCandidate, PhysMap,
     RamzipFaultOutcome, Retire, SharedMemory, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::{Priority, TaskId as SchedTaskId};
@@ -150,12 +151,12 @@ use crate::aspace::{
 };
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
-use crate::console::{ConsoleDevice, ConsoleSurface, ConsoleWrite, Relocation, NO_CONSOLES};
+use crate::console::{ConsoleDevice, ConsoleWrite, NO_CONSOLES};
 use crate::devres::{
     addressable_port, dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility,
     DmaQuarantineFacility, MmioMapFacility, MmioMemoryKind, MsiAllocFacility, PortIoFacility,
-    SharedMemFacility, NULL_DMA_ALLOC_FACILITY, NULL_DMA_QUARANTINE, NULL_MMIO_MAP_FACILITY,
-    NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
+    SharedChunk, SharedMemFacility, NULL_DMA_ALLOC_FACILITY, NULL_DMA_QUARANTINE,
+    NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction, UserFaultOutcome};
 use crate::filelock::{Held, OwnerId, Refusal, Request as LockRequest, Wakes};
@@ -330,6 +331,9 @@ where
     /// Held as a `'static` borrow because the installed consoles live
     /// for the lifetime of the running kernel.
     consoles: &'static [ConsoleDevice],
+    /// The memory the framebuffer console is hosted on, and the driver
+    /// instance hosting it (`console_adopt`).
+    console_host: crate::console_host::ConsoleHost,
     /// The kernel's live physical-frame allocator, the source of the
     /// frames a spawned process's pages are mapped to (`plans/SPAWN.md`
     /// SP3). [`None`] until the boot path threads it through
@@ -675,6 +679,8 @@ impl StreamPos {
 /// The terms a DMA carve is made on.
 struct CarveTerms {
     constraint: crate::devres::DmaConstraint,
+    /// The grant holds every block placed below its top.
+    from_bottom: bool,
     /// The bound the carve is placed below: its frames untranslated, its
     /// IOVA translated.
     limit: u64,
@@ -961,6 +967,7 @@ where
             // `stream_write` / `stream_read` returns `NotImplemented`
             // rather than touching a device that does not exist.
             consoles: &NO_CONSOLES,
+            console_host: crate::console_host::ConsoleHost::new(),
             // Spawn subsystem unwired until the boot path threads a frame
             // allocator + populated registry (`plans/SPAWN.md` SP3): `spawn`
             // fails closed (`NotFound` for an unknown path; the deferred
@@ -1268,49 +1275,266 @@ where
         released
     }
 
-    /// Move `console`, which paints `surface`, onto a block of kernel memory
-    /// a device with DMA windows among `resources` reaches untranslated.
+    /// Host `console` at `mode` on memory the caller's device reaches under
+    /// `terms`, answering where the device reaches it.
     ///
-    /// `OutOfRange` with no window starting at the bottom of memory or a
-    /// block outside it, the facility's refusal when no block can be had, and
-    /// `NotFound` for a console that no longer paints a surface.
-    fn move_console(
+    /// The memory the console is hosted on at `mode` is kept, mapped afresh
+    /// for a new instance of the node's driver; another mode, another node,
+    /// or the hosting instance asking under other terms is `Busy` until the
+    /// hosting is relinquished, since the device may still be reading the
+    /// memory it was given. A refusal leaves the console where it was.
+    fn host_console(
         &self,
         console: &dyn ConsoleWrite,
-        surface: &ConsoleSurface,
-        resources: &[HwResource],
-    ) -> Result<ConsoleSurface, Errno> {
-        let window = crate::devres::bottom_window(resources).ok_or(Errno::OutOfRange)?;
-        let len = surface.len_bytes().ok_or(Errno::OutOfRange)?;
-        let chunks = self.shared_mem_facility.alloc_dma_region(
-            len.div_ceil(PAGE_SIZE as u64),
-            crate::devres::DmaBacking::Contiguous {
-                limit: window.addr_limit,
-            },
-        )?;
-        let release = || {
+        mode: DisplayMode,
+        bytes: u64,
+        terms: &CarveTerms,
+    ) -> Result<u64, Errno> {
+        use crate::console_host::{discard, release, Hosted};
+        let custodian = terms.custodian;
+        let mut hosted = self.console_host.lock();
+        // A removal unhosts under this lock once its node has left the tree,
+        // so a node found here is one its removal will unhost.
+        self.hw_tree
+            .node(custodian.node)?
+            .ok_or(Errno::DeviceOffline)?;
+        if let Some(current) = *hosted {
+            return self.rehost_console(&mut hosted, current, console, bytes, terms, mode);
+        }
+        if !terms.from_bottom {
+            return Err(Errno::OutOfRange);
+        }
+        custodian
+            .custody()
+            .reserve(custodian.node)
+            .map_err(crate::live_producer::dma_errno)?;
+        // A translated device reaches any frame its unit can name, so the
+        // block need only lie below the unit's output; the reach bounds its
+        // IOVA instead.
+        let limit = match custodian.translation() {
+            Some(_) => custodian.output_limit(),
+            None => terms.limit,
+        };
+        let chunks = match self.shared_mem_facility.alloc_dma_region(
+            bytes.div_ceil(PAGE_SIZE as u64),
+            crate::devres::DmaBacking::Contiguous { limit },
+        ) {
+            Ok(chunks) => chunks,
+            Err(err) => {
+                custodian.custody().unreserve(custodian.node);
+                return Err(err);
+            }
+        };
+        let [block] = *chunks.as_slice() else {
             self.shared_mem_facility
-                .free_region(&chunks, SharedMemory::DmaCoherent);
+                .free_region(&chunks, SharedMemory::dma(custodian.coherence()));
+            custodian.custody().unreserve(custodian.node);
+            return Err(Errno::BadAddress);
         };
-        let block = match chunks.as_slice() {
-            [block] if translate_device_addr(&window, block.phys_base).is_ok() => *block,
-            _ => {
-                release();
-                return Err(Errno::OutOfRange);
+        let device_base = match custodian.translation() {
+            None => block.phys_base,
+            Some(translation) => {
+                match crate::sharedreg::dma_blocks(&[block]).and_then(|blocks| {
+                    translation.map(custodian.node, custodian.generation, &blocks, terms.limit)
+                }) {
+                    Ok(iova) => iova,
+                    // The unit could not confirm the device lost a partial
+                    // mapping, so the block is the node's to keep.
+                    Err(DmaError::Unconfirmed) => {
+                        self.shared_mem_facility
+                            .surrender_region(&[block], &custodian);
+                        return Err(crate::live_producer::dma_errno(DmaError::Unconfirmed));
+                    }
+                    Err(err) => {
+                        discard(self.shared_mem_facility, &custodian, block);
+                        return Err(crate::live_producer::dma_errno(err));
+                    }
+                }
             }
         };
-        match console.relocate(block.phys_base, block.pages * PAGE_SIZE as u64) {
-            // The block is the console's for the kernel's life.
-            Relocation::Moved(moved) => Ok(moved),
-            Relocation::Owned(owned) => {
-                release();
-                Ok(owned)
+        let next = Hosted {
+            custodian,
+            block,
+            mode,
+            device_base,
+        };
+        // The device has been told nothing yet, so the block goes straight
+        // back once its mapping, if any, is undone.
+        let device_addr = match translate_device_addr(&terms.constraint, device_base, bytes) {
+            Ok(addr) => addr,
+            Err(err) => {
+                release(self.shared_mem_facility, &next, true);
+                return Err(err);
             }
-            Relocation::Refused => {
-                release();
-                Err(Errno::NotFound)
+        };
+        if let Err(err) = console.adopt(block.phys_base, mode, custodian.coherence()) {
+            release(self.shared_mem_facility, &next, true);
+            return Err(err);
+        }
+        *hosted = Some(next);
+        Ok(device_addr)
+    }
+
+    /// Answer a driver adopting the console hosted as `current` at `mode`:
+    /// the instance it is hosted for, or its node's next instance, mapped the
+    /// same memory. The next instance is recorded only once its device is
+    /// known to reach the whole block.
+    fn rehost_console(
+        &self,
+        hosted: &mut Option<crate::console_host::Hosted>,
+        current: crate::console_host::Hosted,
+        console: &dyn ConsoleWrite,
+        bytes: u64,
+        terms: &CarveTerms,
+        mode: DisplayMode,
+    ) -> Result<u64, Errno> {
+        let custodian = terms.custodian;
+        if current.mode != mode || current.custodian.node != custodian.node {
+            return Err(Errno::Busy);
+        }
+        if current.custodian.same_as(&custodian) {
+            return translate_device_addr(&terms.constraint, current.device_base, bytes);
+        }
+        // The instance it is hosted for, asking under other terms: a second
+        // mapping would leave the first behind, never undone.
+        if current.custodian.generation == custodian.generation {
+            return Err(Errno::Busy);
+        }
+        let device_base = match rehost(current.block, &custodian, terms.limit) {
+            Ok(device_base) => device_base,
+            Err(DmaError::Unconfirmed) => {
+                self.surrender_hosting(hosted, console, &custodian);
+                return Err(crate::live_producer::dma_errno(DmaError::Unconfirmed));
+            }
+            Err(err) => return Err(crate::live_producer::dma_errno(err)),
+        };
+        match translate_device_addr(&terms.constraint, device_base, bytes) {
+            Ok(device_addr) => {
+                *hosted = Some(crate::console_host::Hosted {
+                    custodian,
+                    device_base,
+                    ..current
+                });
+                Ok(device_addr)
+            }
+            Err(err) => {
+                // A window that does not hold the whole block is never named
+                // to the device, and its mapping, if any, is undone.
+                let undone = custodian.translation().map_or(Ok(()), |translation| {
+                    translation.unmap(custodian.node, custodian.generation, device_base)
+                });
+                if undone.is_err() {
+                    self.surrender_hosting(hosted, console, &custodian);
+                }
+                Err(err)
             }
         }
+    }
+
+    /// Give up `hosted`, whose block a domain of `custodian`'s may reach in a
+    /// way its unit could not confirm undone, so the block is never reused:
+    /// the console leaves it for a fresh one, and the node keeps it.
+    fn surrender_hosting(
+        &self,
+        hosted: &mut Option<crate::console_host::Hosted>,
+        console: &dyn ConsoleWrite,
+        custodian: &DmaCustodian,
+    ) {
+        if let Some(left) = hosted.take() {
+            if console.vacate(left.block.phys_base) {
+                self.shared_mem_facility
+                    .surrender_region(&[left.block], custodian);
+            }
+        }
+    }
+
+    /// Take the console off the memory it is hosted on where `leaving` names
+    /// that hosting, answering whether its caller's word vouches that the
+    /// device stopped reading it, and give the memory back: on that word where
+    /// it vouches, else to the node's custody.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when nothing `leaving` names is hosted, and `Busy` when the
+    /// console paints other memory, which keeps the hosting's block hosted
+    /// and allocated for good.
+    fn unhost_console(
+        &self,
+        leaving: impl FnOnce(&crate::console_host::Hosted) -> Option<bool>,
+    ) -> Result<(), Errno> {
+        let mut hosted = self.console_host.lock();
+        let Some((current, vouched)) =
+            (*hosted).and_then(|current| leaving(&current).map(|vouched| (current, vouched)))
+        else {
+            return Err(Errno::NotFound);
+        };
+        let vacated = self
+            .consoles
+            .iter()
+            .find(|device| device.write.can_host())
+            .is_some_and(|device| device.write.vacate(current.block.phys_base));
+        if !vacated {
+            return Err(Errno::Busy);
+        }
+        *hosted = None;
+        drop(hosted);
+        crate::console_host::release(self.shared_mem_facility, &current, vouched);
+        Ok(())
+    }
+
+    /// Retire what the devices of `removed`, sorted, could still reach: every
+    /// carve their drivers made, the console hosted on one, and the DMA memory
+    /// their drivers left quarantined. A device that vanished can master
+    /// nothing, so that memory frees; an `orderly` retirement of a device still
+    /// present proves nothing about it, so the memory stays held until a reset
+    /// by a driver of that node.
+    fn retire_removed_dma(&self, removed: &[u32], orderly: bool) {
+        if let Some(translation) = self.dma_translation {
+            for &node in removed {
+                translation.forget(node);
+            }
+        }
+        // No driver vouched that a removed device stopped reading the
+        // console, so its custody decides when the memory frees.
+        let _ = self.unhost_console(|hosted| {
+            removed
+                .binary_search(&hosted.custodian.node)
+                .is_ok()
+                .then_some(false)
+        });
+        for &node in removed {
+            if orderly {
+                self.dma_quarantine.detach(node);
+            } else if let Ok(freed @ 1..) = self.dma_quarantine.retire(node) {
+                self.audit_dma_released(node, freed, DmaReleaseCause::Removed);
+            }
+        }
+    }
+
+    /// `Ok` when the caller is the driver of the node discovery marked to host
+    /// the console. The node is the caller's own, from kernel-trusted state,
+    /// and no driver can publish the mark.
+    fn drives_console_host(&self, caller: &CallerContext<'_>) -> Result<(), Errno> {
+        let driver = self
+            .aspaces
+            .read()
+            .loaded_driver(caller.process())
+            .ok_or(Errno::PermissionDenied)?;
+        let node = self
+            .hw_tree
+            .node(driver.node)?
+            .ok_or(Errno::DeviceOffline)?;
+        if node.property(tairix_abi::HwProperty::ConsoleHost).is_none() {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(())
+    }
+
+    /// The mode of the console hosted for `caller`, when `caller` is the live
+    /// driver instance it is hosted for.
+    fn console_hosted_for(&self, caller: &CallerContext<'_>) -> Option<DisplayMode> {
+        let driver = self.aspaces.read().loaded_driver(caller.process())?;
+        self.console_host.mode_for(driver.node, driver.generation)
     }
 
     /// The addressing constraint and custody a DMA carve of `len` bytes under
@@ -1339,7 +1563,8 @@ where
                 aspaces.loaded_driver(caller.process()),
             )
         };
-        let constraint = dma_constraint(&resource.ok_or(Errno::NotFound)?)?;
+        let resource = resource.ok_or(Errno::NotFound)?;
+        let constraint = dma_constraint(&resource)?;
         if len == 0 {
             return Err(Errno::LengthOutOfRange);
         }
@@ -1375,6 +1600,7 @@ where
         };
         Ok(CarveTerms {
             constraint,
+            from_bottom: resource.dma_from_bottom_of_memory(),
             limit,
             custodian,
             hand_over,
@@ -3942,6 +4168,16 @@ where
                 self.with_terminal_ownership(caller, fd, |fg| fg.generation() != m.observed)
                     .unwrap_or(false)
             }),
+            // Rows the hosted console owes, for the driver it is hosted for;
+            // a driver that no longer hosts it sees nothing.
+            WaitSourceKind::ConsoleDamage => {
+                m.id == 0
+                    && self.console_hosted_for(caller).is_some()
+                    && self
+                        .consoles
+                        .iter()
+                        .any(|device| device.write.can_host() && device.write.owes_damage())
+            }
         };
         if ready {
             crate::fswatch::MemberState::Ready
@@ -5458,6 +5694,41 @@ fn emit_fs_mutation(
             );
         }
     }
+}
+
+/// Where a new instance of the hosting node's driver, holding `custodian`,
+/// reaches the console's `block`: mapped into its domain below `limit`, or
+/// untranslated where the block lies below `limit`.
+fn rehost(block: SharedChunk, custodian: &DmaCustodian, limit: u64) -> Result<u64, DmaError> {
+    let beyond = DmaError::Alloc(AllocError::OutOfRange);
+    let end = block
+        .pages
+        .checked_mul(PAGE_SIZE as u64)
+        .and_then(|len| block.phys_base.checked_add(len))
+        .ok_or(beyond)?;
+    match custodian.translation() {
+        Some(translation) if end <= custodian.output_limit() => {
+            crate::sharedreg::dma_blocks(&[block]).and_then(|blocks| {
+                translation.map(custodian.node, custodian.generation, &blocks, limit)
+            })
+        }
+        None if limit == 0 || end <= limit => Ok(block.phys_base),
+        _ => Err(beyond),
+    }
+}
+
+/// The mode a hosted console is cut to: `width` × `height` of
+/// [`DisplayFormat::Bgra8888`], tightly packed, refused unless a glyph fits.
+fn hosted_console_mode(width: u32, height: u32) -> Result<DisplayMode, Errno> {
+    let stride_bytes = width.checked_mul(4).ok_or(Errno::LengthOutOfRange)?;
+    tairix_fbcon::Geometry::for_display(width, height, stride_bytes)
+        .ok_or(Errno::LengthOutOfRange)?;
+    Ok(DisplayMode {
+        width_px: width,
+        height_px: height,
+        stride_bytes,
+        format: DisplayFormat::Bgra8888,
+    })
 }
 
 /// Collapse every [`UaccessError`] onto the single stable
@@ -7791,7 +8062,7 @@ where
         // onto the far side of the viewport — checked, never wrapped. The carve
         // already lies below the limit, so this only re-bases it; a base
         // below the viewport's CPU window fails closed.
-        let device_addr = match translate_device_addr(constraint, carve.device_addr) {
+        let device_addr = match translate_device_addr(constraint, carve.device_addr, len as u64) {
             Ok(device_addr) => device_addr,
             Err(err) => {
                 // No device was handed a block its window cannot name, so it
@@ -10157,26 +10428,7 @@ where
             self.audit_grants_revoked(node_id, revoked);
         }
 
-        // A translated device loses every carve its drivers made, whatever
-        // became of them.
-        if let Some(translation) = self.dma_translation {
-            for &removed_node in &removed {
-                translation.forget(removed_node);
-            }
-        }
-
-        // Either way no carve is taken for a removed node again. A device that
-        // vanished can master nothing, so the DMA memory its drivers left
-        // quarantined is freed. An orderly retirement of a device still
-        // present proves nothing about it, so what its drivers left stays
-        // held until a reset by a driver of that node.
-        for &removed_node in &removed {
-            if flags.is_orderly() {
-                self.dma_quarantine.detach(removed_node);
-            } else if let Ok(freed @ 1..) = self.dma_quarantine.retire(removed_node) {
-                self.audit_dma_released(removed_node, freed, DmaReleaseCause::Removed);
-            }
-        }
+        self.retire_removed_dma(&removed, flags.is_orderly());
 
         // Any display node that just left the tree — the named child or a
         // transitive descendant — takes its seat with it, through the same
@@ -10272,59 +10524,109 @@ where
         Ok(0)
     }
 
-    fn console_relocate(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+    fn console_adopt(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        width: u32,
+        height: u32,
+        reach: tairix_abi::driver::DmaReach,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        use tairix_abi::driver::display::HostedConsole;
+        // The dispatcher enforced `CAP_MEM_DMA`.
+        self.drives_console_host(caller)?;
+        if len < HostedConsole::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // A buffer that cannot take the answer is refused before anything
+        // moves.
+        self.copy_out_user(caller, buf, &[0; HostedConsole::WIRE_LEN])?;
+        let mode = hosted_console_mode(width, height)?;
+        let bytes = mode.len_bytes();
+        let console = self
+            .consoles
+            .iter()
+            .map(|device| device.write)
+            .find(|write| write.can_host())
+            .ok_or(Errno::NotFound)?;
+        let terms = self.dma_carve_terms(
+            caller,
+            handle,
+            usize::try_from(bytes).map_err(|_| Errno::LengthOutOfRange)?,
+            reach,
+        )?;
+        // An engine taking over a screen the firmware lit re-trains the sink,
+        // which blanks while it re-locks, so it waits out the boot's prompts.
+        if console
+            .surface()
+            .is_some_and(|surface| !surface.kernel_owned)
+        {
+            self.await_screen_release(caller, console)?;
+        }
+        let device_addr = self.host_console(console, mode, bytes, &terms)?;
+        let record = HostedConsole {
+            device_addr,
+            stride_bytes: mode.stride_bytes,
+        }
+        .to_le_bytes();
+        self.copy_out_user(caller, buf, &record)?;
+        self.hand_over_untranslated(caller.process(), &terms);
+        Ok(record.len() as u64)
+    }
+
+    fn console_damage(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+        use tairix_abi::driver::display::DamageRect;
+        let mode = self
+            .console_hosted_for(caller)
+            .ok_or(Errno::PermissionDenied)?;
+        if len < DamageRect::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let Some(console) = self
+            .consoles
+            .iter()
+            .map(|device| device.write)
+            .find(|write| write.can_host())
+        else {
+            return Ok(0);
+        };
+        let Some((start, end)) = console.take_damage() else {
+            return Ok(0);
+        };
+        let bottom = end.min(mode.height_px);
+        let rows = DamageRect {
+            x: 0,
+            y: start.min(bottom),
+            width_px: mode.width_px,
+            height_px: bottom - start.min(bottom),
+        }
+        .to_le_bytes();
+        if let Err(err) = self.copy_out_user(caller, buf, &rows) {
+            // Rows that never reached the host are owed to it again.
+            console.owe_damage(start, end);
+            return Err(err);
+        }
+        Ok(rows.len() as u64)
+    }
+
+    fn console_relinquish(&self, caller: &CallerContext<'_>) -> SyscallResult {
         // The dispatcher enforced `CAP_MEM_DMA`. The node is the caller's own,
-        // from kernel-trusted state, and only one discovery marked may move
-        // the console: no driver can publish the mark.
+        // from kernel-trusted state. Only the instance the console is hosted
+        // for told its device of the memory, so only its word that the device
+        // stopped reading it frees the memory; another instance's leaves it to
+        // the node's custody.
         let driver = self
             .aspaces
             .read()
             .loaded_driver(caller.process())
             .ok_or(Errno::PermissionDenied)?;
-        let node = self
-            .hw_tree
-            .node(driver.node)?
-            .ok_or(Errno::DeviceOffline)?;
-        if node.property(tairix_abi::HwProperty::BootConsole).is_none() {
-            return Err(Errno::PermissionDenied);
-        }
-        if len < HwResource::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        // The block is mapped into no translation unit's domain, so only a
-        // device reaching memory untranslated could scan it out.
-        if matches!(driver.dma, crate::iommu::DmaPath::Stranded { .. }) {
-            return Err(Errno::PermissionDenied);
-        }
-        if self.translation_of(&driver).is_some() {
-            return Err(Errno::NotSupported);
-        }
-        let console = self
-            .consoles
-            .iter()
-            .map(|device| device.write)
-            .find(|write| write.surface().is_some())
-            .ok_or(Errno::NotFound)?;
-        self.await_screen_release(caller, console)?;
-        let surface = console.surface().ok_or(Errno::NotFound)?;
-        let surface = if surface.kernel_owned {
-            surface
-        } else {
-            self.move_console(console, &surface, node.resources())?
-        };
-        let bytes = HwResource::framebuffer(
-            surface.phys,
-            &surface.mode,
-            tairix_abi::hwtree::FramebufferMemory::WriteBack,
-        )?
-        .to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        let (node, generation) = (driver.node, driver.generation);
+        self.unhost_console(|hosted| {
+            (hosted.custodian.node == node).then(|| hosted.hosted_for(node, generation))
+        })
+        .map(|()| 0)
     }
 
     fn hw_self_node(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
@@ -10548,7 +10850,11 @@ where
         )?;
         // A block the grant's bus window cannot name is released before the
         // caller learns anything about it.
-        let device_addr = match translate_device_addr(&terms.constraint, made.device_addr) {
+        let device_addr = match translate_device_addr(
+            &terms.constraint,
+            made.device_addr,
+            pages * PAGE_SIZE as u64,
+        ) {
             Ok(addr) => addr,
             Err(err) => {
                 self.release_shared_mapping(caller.process(), made.base_va);
@@ -10997,6 +11303,15 @@ where
                             return Err(Errno::PermissionDenied);
                         }
                     }
+                    // The hosted console, observed only by its host node's
+                    // driver, which may join before it hosts: a display that
+                    // finds its sink later must still be woken.
+                    WaitSourceKind::ConsoleDamage => {
+                        if id != 0 {
+                            return Err(Errno::NotFound);
+                        }
+                        self.drives_console_host(caller)?;
+                    }
                     // The one tree, observed on the authority reading it
                     // demands; a build with no store wired has no tree to
                     // watch.
@@ -11215,6 +11530,11 @@ where
         let observes_tree = members
             .iter()
             .any(|m| m.kind == WaitSourceKind::HardwareTree);
+        // `CONSOLE_DAMAGE_WAITQ` is joined only by the console's host, and
+        // woken when rows become owed to it.
+        let observes_hosted = members
+            .iter()
+            .any(|m| m.kind == WaitSourceKind::ConsoleDamage);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
         if let Some(key) = child_key {
@@ -11243,6 +11563,9 @@ where
         }
         if observes_tree {
             crate::waitq::HW_TREE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
+        if observes_hosted {
+            crate::waitq::CONSOLE_DAMAGE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
         if observes_room {
             crate::waitq::PORT_ROOM_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -11452,6 +11775,9 @@ where
         }
         if observes_tree {
             crate::waitq::HW_TREE_WAITQ.deregister(sched_task);
+        }
+        if observes_hosted {
+            crate::waitq::CONSOLE_DAMAGE_WAITQ.deregister(sched_task);
         }
         if observes_callreply {
             crate::waitq::CALL_WAITQ.deregister(sched_task);
@@ -38743,99 +39069,18 @@ mod tests {
         );
     }
 
-    /// A framebuffer console double: it records every block it is offered and
-    /// takes one only while it paints firmware memory, unless told to refuse.
-    struct MovableConsole {
-        surface: RwLock<Option<crate::console::ConsoleSurface>>,
-        refuses: bool,
-        offered: RwLock<alloc::vec::Vec<(u64, u64)>>,
-        /// How many more times the boot answers that it holds the screen.
-        held_for: core::sync::atomic::AtomicUsize,
-        /// How many times the hold was asked about.
-        hold_checks: core::sync::atomic::AtomicUsize,
-        moved_while_held: core::sync::atomic::AtomicBool,
-    }
-
-    impl MovableConsole {
-        fn leaked(surface: Option<crate::console::ConsoleSurface>, refuses: bool) -> &'static Self {
-            Self::held(surface, refuses, 0)
-        }
-
-        fn held(
-            surface: Option<crate::console::ConsoleSurface>,
-            refuses: bool,
-            checks: usize,
-        ) -> &'static Self {
-            crate::forever(Box::new(Self {
-                surface: RwLock::new(surface),
-                refuses,
-                offered: RwLock::new(alloc::vec::Vec::new()),
-                held_for: core::sync::atomic::AtomicUsize::new(checks),
-                hold_checks: core::sync::atomic::AtomicUsize::new(0),
-                moved_while_held: core::sync::atomic::AtomicBool::new(false),
-            }))
-        }
-
-        fn installed(&'static self) -> &'static [ConsoleDevice] {
-            crate::forever(Box::new([ConsoleDevice::new(
-                self,
-                &crate::console::NULL_CONSOLE_READ,
-            )]))
-        }
-    }
-
-    impl crate::console::ConsoleWrite for MovableConsole {
-        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
-            Ok(bytes.len())
-        }
-
-        fn surface(&self) -> Option<crate::console::ConsoleSurface> {
-            *self.surface.read()
-        }
-
-        fn relocate(&self, phys: u64, len: u64) -> Relocation {
-            use core::sync::atomic::Ordering::Relaxed;
-            if self.held_for.load(Relaxed) > 0 {
-                self.moved_while_held.store(true, Relaxed);
-            }
-            self.offered.write().push((phys, len));
-            let mut surface = self.surface.write();
-            let held = *surface;
-            match held {
-                Some(current) if current.kernel_owned => Relocation::Owned(current),
-                Some(current)
-                    if !self.refuses && current.len_bytes().is_some_and(|needed| needed <= len) =>
-                {
-                    let moved = crate::console::ConsoleSurface {
-                        phys,
-                        kernel_owned: true,
-                        ..current
-                    };
-                    *surface = Some(moved);
-                    Relocation::Moved(moved)
-                }
-                _ => Relocation::Refused,
-            }
-        }
-
-        fn boot_holds_screen(&self) -> bool {
-            use core::sync::atomic::Ordering::Relaxed;
-            self.hold_checks.fetch_add(1, Relaxed);
-            self.held_for
-                .fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1))
-                .is_ok()
-        }
-    }
-
     /// Where [`ConsoleBlocks`] places the console's block.
     const CONSOLE_BLOCK_PHYS: u64 = 0x3000_0000;
 
     /// A shared-memory facility double for the console's block: one block at
-    /// [`CONSOLE_BLOCK_PHYS`] where the limit admits it, every request and
-    /// release recorded.
+    /// [`CONSOLE_BLOCK_PHYS`] where the limit admits it, every request, free
+    /// and surrender recorded.
     struct ConsoleBlocks {
         requested: RwLock<alloc::vec::Vec<(u64, u64)>>,
         freed: RwLock<alloc::vec::Vec<u64>>,
+        /// Each block surrendered, and the generation of the driver whose
+        /// custody took it.
+        surrendered: RwLock<alloc::vec::Vec<(u64, u64)>>,
     }
 
     impl ConsoleBlocks {
@@ -38843,6 +39088,7 @@ mod tests {
             crate::forever(Box::new(Self {
                 requested: RwLock::new(alloc::vec::Vec::new()),
                 freed: RwLock::new(alloc::vec::Vec::new()),
+                surrendered: RwLock::new(alloc::vec::Vec::new()),
             }))
         }
     }
@@ -38893,343 +39139,1002 @@ mod tests {
                 .write()
                 .extend(chunks.iter().map(|chunk| chunk.phys_base));
         }
+
+        fn surrender_region(
+            &self,
+            chunks: &[crate::devres::SharedChunk],
+            custodian: &DmaCustodian,
+        ) {
+            self.surrendered.write().extend(
+                chunks
+                    .iter()
+                    .map(|chunk| (chunk.phys_base, custodian.generation)),
+            );
+        }
     }
 
     /// The firmware's 1080p console surface on a Pi 4.
     fn firmware_console() -> crate::console::ConsoleSurface {
         crate::console::ConsoleSurface {
             phys: 0x3E40_2000,
-            mode: tairix_abi::driver::display::DisplayMode {
+            mode: DisplayMode {
                 width_px: 1920,
                 height_px: 1080,
                 stride_bytes: 1920 * 4,
-                format: tairix_abi::driver::display::DisplayFormat::Bgra8888,
+                format: DisplayFormat::Bgra8888,
             },
             kernel_owned: false,
         }
     }
 
-    /// A Pi 4 display engine's node: memory through `[0, 1 GiB)`, the
-    /// peripherals through `[0xFC00_0000, 0xFF80_0000)`, and the boot console
-    /// where `boot_console`.
-    fn engine_node(id: u32, boot_console: bool, memory: bool) -> tairix_abi::HwNode {
-        let coherence = tairix_abi::DmaCoherence::Unsnooped;
-        let mut node = tairix_abi::HwNode::new(
-            id,
-            tairix_abi::HW_NODE_ROOT_ID,
-            tairix_abi::HwDeviceClass::Display,
-        );
-        node.push_resource(HwResource::dma_translated(
+    /// A console a display driver may host: the surface it paints, every
+    /// adoption it was asked for, the rows a test says it owes, and a boot
+    /// that holds its screen for a given number of answers.
+    struct HostableConsole {
+        surface: RwLock<Option<crate::console::ConsoleSurface>>,
+        refuses: bool,
+        adopted: RwLock<alloc::vec::Vec<(u64, DisplayMode)>>,
+        owed: RwLock<Option<(u32, u32)>>,
+        /// How many more times the boot answers that it holds the screen.
+        held_for: core::sync::atomic::AtomicUsize,
+        /// How many times the hold was asked about.
+        hold_checks: core::sync::atomic::AtomicUsize,
+        adopted_while_held: core::sync::atomic::AtomicBool,
+    }
+
+    impl HostableConsole {
+        /// A console showing `surface`, refusing every adoption where
+        /// `refuses`, whose boot holds the screen for `held_for` answers.
+        fn leaked(
+            surface: Option<crate::console::ConsoleSurface>,
+            refuses: bool,
+            held_for: usize,
+        ) -> &'static Self {
+            crate::forever(Box::new(Self {
+                surface: RwLock::new(surface),
+                refuses,
+                adopted: RwLock::new(alloc::vec::Vec::new()),
+                owed: RwLock::new(None),
+                held_for: core::sync::atomic::AtomicUsize::new(held_for),
+                hold_checks: core::sync::atomic::AtomicUsize::new(0),
+                adopted_while_held: core::sync::atomic::AtomicBool::new(false),
+            }))
+        }
+
+        fn installed(&'static self) -> &'static [ConsoleDevice] {
+            crate::forever(Box::new([ConsoleDevice::new(
+                self,
+                &crate::console::NULL_CONSOLE_READ,
+            )]))
+        }
+
+        fn paints(&self) -> Option<u64> {
+            self.surface
+                .read()
+                .filter(|surface| surface.kernel_owned)
+                .map(|surface| surface.phys)
+        }
+    }
+
+    impl crate::console::ConsoleWrite for HostableConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            Ok(bytes.len())
+        }
+
+        fn surface(&self) -> Option<crate::console::ConsoleSurface> {
+            *self.surface.read()
+        }
+
+        fn can_host(&self) -> bool {
+            true
+        }
+
+        fn adopt(
+            &self,
+            phys: u64,
+            mode: DisplayMode,
+            _coherence: tairix_abi::hwtree::DmaCoherence,
+        ) -> Result<(), Errno> {
+            use core::sync::atomic::Ordering::Relaxed;
+            if self.held_for.load(Relaxed) > 0 {
+                self.adopted_while_held.store(true, Relaxed);
+            }
+            self.adopted.write().push((phys, mode));
+            if self.refuses {
+                return Err(Errno::OutOfMemory);
+            }
+            *self.surface.write() = Some(crate::console::ConsoleSurface {
+                phys,
+                mode,
+                kernel_owned: true,
+            });
+            Ok(())
+        }
+
+        fn owes_damage(&self) -> bool {
+            self.owed.read().is_some()
+        }
+
+        fn take_damage(&self) -> Option<(u32, u32)> {
+            self.owed.write().take()
+        }
+
+        fn owe_damage(&self, start: u32, end: u32) {
+            let mut owed = self.owed.write();
+            *owed = Some(owed.map_or((start, end), |(a, b)| (a.min(start), b.max(end))));
+        }
+
+        fn vacate(&self, phys: u64) -> bool {
+            let mut surface = self.surface.write();
+            if surface.is_some_and(|painted| painted.kernel_owned && painted.phys == phys) {
+                *surface = None;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn boot_holds_screen(&self) -> bool {
+            use core::sync::atomic::Ordering::Relaxed;
+            self.hold_checks.fetch_add(1, Relaxed);
+            self.held_for
+                .fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1))
+                .is_ok()
+        }
+    }
+
+    /// A tree of display nodes, each one discovery marked to host the console
+    /// where it says so.
+    fn display_tree(nodes: &[(u32, bool)]) -> &'static StaticHwTree {
+        let nodes: alloc::vec::Vec<_> = nodes
+            .iter()
+            .map(|&(id, host)| {
+                let mut node = tairix_abi::HwNode::new(
+                    id,
+                    tairix_abi::HW_NODE_ROOT_ID,
+                    tairix_abi::HwDeviceClass::Display,
+                );
+                if host {
+                    node.push_resource(HwResource::property(
+                        tairix_abi::HwProperty::ConsoleHost,
+                        1,
+                    ))
+                    .expect("room");
+                }
+                node
+            })
+            .collect();
+        crate::forever(Box::new(StaticHwTree::new(
+            0,
+            encode_hw_snapshot(0, &nodes),
+        )))
+    }
+
+    /// The Pi 4 display engine's aperture onto its peripherals: a window that
+    /// starts above the bottom of memory.
+    fn peripheral_window() -> HwResource {
+        HwResource::dma_translated(
             0xFF80_0000,
             0x0380_0000,
             0x7C00_0000,
-            coherence,
-        ))
-        .expect("room");
-        if memory {
-            node.push_resource(HwResource::dma_translated(
-                0x4000_0000,
-                0x4000_0000,
-                0xC000_0000,
-                coherence,
-            ))
-            .expect("room");
-        }
-        if boot_console {
-            node.push_resource(HwResource::property(tairix_abi::HwProperty::BootConsole, 1))
-                .expect("room");
-        }
-        node
+            tairix_abi::DmaCoherence::Snooped,
+        )
     }
 
-    /// `console_relocate` moves a console painting firmware memory onto a
-    /// block below the engine's memory window, answers it as a framebuffer
-    /// resource, and answers the same surface again without a second block.
-    #[test]
-    fn console_relocate_moves_the_console_below_the_engine_s_reach_once() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        let (space, physmap) =
-            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
-        aspaces
-            .write()
-            .register(ProcessId(2), space, physmap)
-            .expect("registration succeeds");
-        aspaces
-            .write()
-            .admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
-            .expect("the node has no live driver");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
-            0,
-            encode_hw_snapshot(0, &[engine_node(9, true, true)]),
-        )));
-        let console = MovableConsole::leaked(Some(firmware_console()), false);
-        let blocks = ConsoleBlocks::leaked();
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_hw_tree(source)
-        .with_consoles(console.installed())
-        .with_shared_mem_facility(blocks);
-        let caps = make_caps_record(2, &[CapabilityId::MEM_DMA], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &caps,
-        };
-        let len = HwResource::WIRE_LEN;
-        let pages = (1920u64 * 4 * 1080).div_ceil(tairix_kernel_mem::PAGE_SIZE as u64);
-        let block_len = pages.next_power_of_two() * tairix_kernel_mem::PAGE_SIZE as u64;
+    fn mode_of(width: u32, height: u32) -> DisplayMode {
+        DisplayMode {
+            width_px: width,
+            height_px: height,
+            stride_bytes: width * 4,
+            format: DisplayFormat::Bgra8888,
+        }
+    }
 
+    /// A display driver of the console scene: its task, the grant it carves
+    /// under, and its capabilities.
+    struct ConsoleDriver {
+        task: u64,
+        handle: u64,
+        caps: TaskCapabilities,
+    }
+
+    impl ConsoleDriver {
+        fn ctx(&self) -> CallerContext<'_> {
+            CallerContext {
+                task_id: SecTaskId(self.task),
+                caps: &self.caps,
+            }
+        }
+    }
+
+    /// The kernel state a hosted console is decided in, its drivers added one
+    /// at a time.
+    struct ConsoleScene {
+        arch: Arc<TestArch>,
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        sched: Scheduler<TestArch>,
+        ctl: UnsupportedController,
+        sink: &'static TestSink,
+    }
+
+    impl ConsoleScene {
+        fn new() -> Self {
+            let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+            let sched = make_sched(arch.clone());
+            Self {
+                arch,
+                table,
+                ipc,
+                aspaces,
+                rng,
+                irq,
+                sched,
+                ctl: UnsupportedController,
+                sink: make_sink(),
+            }
+        }
+
+        /// A driver loaded for `node` along `path`, granted `window`, holding
+        /// `caps`.
+        fn driver(
+            &self,
+            node: u32,
+            path: crate::iommu::DmaPath,
+            window: HwResource,
+            caps: &[CapabilityId],
+        ) -> ConsoleDriver {
+            let task = crate::test_boot::claim_peer_task();
+            let (space, physmap) = call_aspace(b"");
+            let mut aspaces = self.aspaces.write();
+            aspaces
+                .register(ProcessId(task), space, physmap)
+                .expect("registration succeeds");
+            aspaces
+                .admit_driver(ProcessId(task), node, path)
+                .expect("the node has no live driver");
+            let handle = aspaces.mint_grant(ProcessId(task), window);
+            drop(aspaces);
+            ConsoleDriver {
+                task,
+                handle,
+                caps: make_caps_record(task, caps, self.sink),
+            }
+        }
+
+        /// A display engine's driver: untranslated, for node `0x44`, granted
+        /// the bottom gibibyte through a bus window.
+        fn engine(&self) -> ConsoleDriver {
+            self.driver(
+                0x44,
+                crate::iommu::DmaPath::Untranslated,
+                legacy_dma_window(),
+                &[CapabilityId::MEM_DMA],
+            )
+        }
+
+        fn handlers(
+            &self,
+            tree: &'static StaticHwTree,
+            console: &'static HostableConsole,
+            blocks: &'static ConsoleBlocks,
+            quarantine: &'static RecordingQuarantine,
+        ) -> KernelSyscallHandlers<'_, TestArch> {
+            KernelSyscallHandlers::new(
+                &self.sched,
+                &self.table,
+                &self.arch,
+                self.sink,
+                &self.irq,
+                &self.ctl,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+            )
+            .with_hw_tree(tree)
+            .with_consoles(console.installed())
+            .with_shared_mem_facility(blocks)
+            .with_dma_quarantine(quarantine)
+        }
+
+        /// The record `driver`'s last answered adoption wrote.
+        fn generation(&self, driver: &ConsoleDriver) -> u64 {
+            self.aspaces
+                .read()
+                .loaded_driver(ProcessId(driver.task))
+                .expect("a loaded driver")
+                .generation
+        }
+
+        fn hosted(&self, driver: &ConsoleDriver) -> tairix_abi::driver::display::HostedConsole {
+            let page = read_reply_page(
+                self.aspaces
+                    .read()
+                    .resolve(ProcessId(driver.task))
+                    .expect("registered")
+                    .1,
+                tairix_abi::driver::display::HostedConsole::WIRE_LEN,
+            );
+            tairix_abi::driver::display::HostedConsole::from_bytes(&page).expect("a record")
+        }
+    }
+
+    fn adopt(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        driver: &ConsoleDriver,
+        width: u32,
+        height: u32,
+    ) -> SyscallResult {
+        h.console_adopt(
+            &driver.ctx(),
+            driver.handle,
+            width,
+            height,
+            tairix_abi::driver::DmaReach::FULL,
+            0x2000,
+            tairix_abi::driver::display::HostedConsole::WIRE_LEN,
+        )
+    }
+
+    /// `console_adopt` moves a console the firmware lit onto one block below
+    /// the engine's window, answers where the engine reaches it, and answers
+    /// the same block again.
+    #[test]
+    fn console_adopt_moves_a_firmware_lit_console_below_the_engine_s_reach_once() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let console = HostableConsole::leaked(Some(firmware_console()), false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
         for _ in 0..2 {
-            assert_eq!(h.console_relocate(&ctx, 0x1000, len), Ok(len as u64));
-            let written = h
-                .with_caller_aspace(&ctx, |space, physmap| {
-                    let mut buf = [0u8; HwResource::WIRE_LEN];
-                    copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
-                    buf
-                })
-                .expect("registered");
-            let surface = HwResource::from_bytes(&written).expect("a resource");
-            assert_eq!(surface.kind(), Some(HwResourceKind::Framebuffer));
-            assert_eq!(surface.base(), CONSOLE_BLOCK_PHYS);
-            assert_eq!(surface.framebuffer_mode(), Ok(firmware_console().mode));
+            assert_eq!(adopt(&h, &engine, 1920, 1080), Ok(16));
             assert_eq!(
-                surface.framebuffer_memory(),
-                Ok(tairix_abi::hwtree::FramebufferMemory::WriteBack)
+                scene.hosted(&engine),
+                tairix_abi::driver::display::HostedConsole {
+                    device_addr: 0xC000_0000 + CONSOLE_BLOCK_PHYS,
+                    stride_bytes: 1920 * 4,
+                },
+                "named on the far side of the engine's window"
             );
         }
+        let pages = (1920u64 * 4 * 1080).div_ceil(PAGE_SIZE as u64);
         assert_eq!(
             *blocks.requested.read(),
             alloc::vec![(pages, 0x4000_0000)],
-            "one block, below the window that starts at the bottom of memory"
+            "one block, below the window"
         );
         assert_eq!(
-            *console.offered.read(),
-            alloc::vec![(CONSOLE_BLOCK_PHYS, block_len)]
+            *console.adopted.read(),
+            alloc::vec![(CONSOLE_BLOCK_PHYS, firmware_console().mode)]
         );
-        assert!(
-            blocks.freed.read().is_empty(),
-            "the console keeps its block"
-        );
+        assert!(blocks.freed.read().is_empty());
+        assert!(blocks.surrendered.read().is_empty());
     }
 
-    /// `console_relocate` answers only the driver of a node discovery marked
-    /// `BootConsole`, and takes no block for a device it cannot place one for.
+    /// `console_adopt` answers only the driver of a node discovery marked,
+    /// and carves nothing for a call it refuses.
     #[test]
-    fn console_relocate_answers_only_the_boot_console_s_engine() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        for task in 2..=6 {
-            let (space, physmap) =
-                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
-            aspaces
-                .write()
-                .register(ProcessId(task), space, physmap)
-                .expect("registration succeeds");
-        }
-        for (task, node, path) in [
-            (2, 9, crate::iommu::DmaPath::Untranslated),
-            (3, 10, crate::iommu::DmaPath::Untranslated),
-            (5, 11, crate::iommu::DmaPath::Untranslated),
-            (6, 12, crate::iommu::DmaPath::Stranded { unit: None }),
-        ] {
-            aspaces
-                .write()
-                .admit_driver(ProcessId(task), node, path)
-                .expect("the node has no live driver");
-        }
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
-            0,
-            encode_hw_snapshot(
-                0,
-                &[
-                    engine_node(9, true, true),
-                    engine_node(10, false, true),
-                    engine_node(11, true, false),
-                    engine_node(12, true, true),
-                ],
-            ),
-        )));
-        let console = MovableConsole::leaked(Some(firmware_console()), false);
-        let blocks = ConsoleBlocks::leaked();
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_hw_tree(source)
-        .with_consoles(console.installed())
-        .with_shared_mem_facility(blocks);
-        let caller = |task| (task, make_caps_record(task, &[CapabilityId::MEM_DMA], sink));
-        let relocate = |task: u64, len: usize| {
-            let (task, caps) = caller(task);
-            let ctx = CallerContext {
-                task_id: SecTaskId(task),
-                caps: &caps,
-            };
-            h.console_relocate(&ctx, 0x1000, len)
+    fn console_adopt_answers_only_the_console_host_s_driver() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let unmarked = scene.driver(
+            0x45,
+            crate::iommu::DmaPath::Untranslated,
+            legacy_dma_window(),
+            &[CapabilityId::MEM_DMA],
+        );
+        let stranded = scene.driver(
+            0x46,
+            crate::iommu::DmaPath::Stranded { unit: None },
+            legacy_dma_window(),
+            &[CapabilityId::MEM_DMA],
+        );
+        let peripherals = scene.driver(
+            0x47,
+            crate::iommu::DmaPath::Untranslated,
+            peripheral_window(),
+            &[CapabilityId::MEM_DMA],
+        );
+        let stranger = ConsoleDriver {
+            task: crate::test_boot::claim_task(),
+            handle: engine.handle,
+            caps: make_caps_record(0, &[CapabilityId::MEM_DMA], scene.sink),
         };
-        let len = HwResource::WIRE_LEN;
+        let console = HostableConsole::leaked(Some(firmware_console()), false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(
+            display_tree(&[(0x44, true), (0x45, false), (0x46, true), (0x47, true)]),
+            console,
+            blocks,
+            &QUARANTINE,
+        );
+        let forged = ConsoleDriver {
+            task: engine.task,
+            handle: engine.handle + 0x100,
+            caps: make_caps_record(engine.task, &[CapabilityId::MEM_DMA], scene.sink),
+        };
+        for (driver, width, height, refused, why) in [
+            (&unmarked, 1280, 800, Errno::PermissionDenied, "not marked"),
+            (&stranger, 1280, 800, Errno::PermissionDenied, "no driver"),
+            (
+                &stranded,
+                1280,
+                800,
+                Errno::PermissionDenied,
+                "masters no DMA",
+            ),
+            (&engine, 4, 4, Errno::LengthOutOfRange, "no glyph fits"),
+            (&engine, 0, 800, Errno::LengthOutOfRange, "no width"),
+            (
+                &forged,
+                1280,
+                800,
+                Errno::NotFound,
+                "a grant it was not given",
+            ),
+            (
+                &peripherals,
+                1280,
+                800,
+                Errno::OutOfRange,
+                "above the bottom of memory",
+            ),
+        ] {
+            assert_eq!(adopt(&h, driver, width, height), Err(refused), "{why}");
+        }
         assert_eq!(
-            relocate(3, len),
-            Err(Errno::PermissionDenied),
-            "a node discovery did not mark"
+            h.console_adopt(
+                &engine.ctx(),
+                engine.handle,
+                1280,
+                800,
+                tairix_abi::driver::DmaReach::FULL,
+                0x2000,
+                tairix_abi::driver::display::HostedConsole::WIRE_LEN - 1,
+            ),
+            Err(Errno::BufferTooSmall)
         );
-        assert_eq!(
-            relocate(4, len),
-            Err(Errno::PermissionDenied),
-            "no node at all"
-        );
-        assert_eq!(relocate(2, len - 1), Err(Errno::BufferTooSmall));
-        assert_eq!(
-            relocate(6, len),
-            Err(Errno::PermissionDenied),
-            "a device that may master no DMA"
-        );
-        assert_eq!(
-            relocate(5, len),
-            Err(Errno::OutOfRange),
-            "no window starts at the bottom of memory"
-        );
-        assert!(
-            blocks.requested.read().is_empty(),
-            "none of those took a block"
-        );
+        assert!(blocks.requested.read().is_empty(), "no refusal carved");
+        assert!(console.adopted.read().is_empty());
         assert_eq!(*console.surface.read(), Some(firmware_console()));
     }
 
-    /// `console_relocate` moves the console only once the boot lets go of its
-    /// screen, and refuses a caller it would refuse anyway without waiting.
+    /// `console_adopt` takes a screen the firmware lit only once the boot lets
+    /// go of it, and answers a refused caller without waiting.
     #[test]
-    fn console_relocate_takes_the_screen_only_once_the_boot_lets_go() {
+    fn console_adopt_takes_a_firmware_lit_screen_only_once_the_boot_lets_go() {
         use core::sync::atomic::Ordering::Relaxed;
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        for (task, node) in [(2, 9), (3, 10)] {
-            let (space, physmap) =
-                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
-            aspaces
-                .write()
-                .register(ProcessId(task), space, physmap)
-                .expect("registration succeeds");
-            aspaces
-                .write()
-                .admit_driver(ProcessId(task), node, crate::iommu::DmaPath::Untranslated)
-                .expect("the node has no live driver");
-        }
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
-            0,
-            encode_hw_snapshot(
-                0,
-                &[engine_node(9, true, true), engine_node(10, false, true)],
-            ),
-        )));
-        let console = MovableConsole::held(Some(firmware_console()), false, 3);
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let console = HostableConsole::leaked(Some(firmware_console()), false, 3);
         let blocks = ConsoleBlocks::leaked();
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_hw_tree(source)
-        .with_consoles(console.installed())
-        .with_shared_mem_facility(blocks);
-        let relocate = |task: u64| {
-            let caps = make_caps_record(task, &[CapabilityId::MEM_DMA], sink);
-            let ctx = CallerContext {
-                task_id: SecTaskId(task),
-                caps: &caps,
-            };
-            h.console_relocate(&ctx, 0x1000, HwResource::WIRE_LEN)
-        };
-
-        assert_eq!(relocate(3), Err(Errno::PermissionDenied));
+        let unmarked = scene.handlers(display_tree(&[(0x44, false)]), console, blocks, &QUARANTINE);
+        assert_eq!(
+            adopt(&unmarked, &engine, 1920, 1080),
+            Err(Errno::PermissionDenied)
+        );
         assert_eq!(
             console.hold_checks.load(Relaxed),
             0,
             "a refused caller is answered without waiting"
         );
-        assert_eq!(relocate(2), Ok(HwResource::WIRE_LEN as u64));
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        assert_eq!(adopt(&h, &engine, 1920, 1080), Ok(16));
         assert!(
             console.hold_checks.load(Relaxed) > 3,
             "the hold is asked until the boot lets go"
         );
-        assert!(!console.moved_while_held.load(Relaxed));
-        assert_eq!(console.offered.read().len(), 1);
+        assert!(!console.adopted_while_held.load(Relaxed));
+        assert_eq!(console.adopted.read().len(), 1);
     }
 
-    /// `console_relocate` gives back a block the console does not take, and
-    /// takes none where there is no console to move.
+    /// A console no firmware lit has nothing on screen for a takeover to
+    /// blank, so it is adopted while the boot still holds the screen.
     #[test]
-    fn console_relocate_frees_a_block_the_console_does_not_take() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        let (space, physmap) =
-            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
-        aspaces
-            .write()
-            .register(ProcessId(2), space, physmap)
-            .expect("registration succeeds");
-        aspaces
-            .write()
-            .admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
-            .expect("the node has no live driver");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
-            0,
-            encode_hw_snapshot(0, &[engine_node(9, true, true)]),
-        )));
-        let refusing = MovableConsole::leaked(Some(firmware_console()), true);
-        let blocks = ConsoleBlocks::leaked();
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_hw_tree(source)
-        .with_consoles(refusing.installed())
-        .with_shared_mem_facility(blocks);
-        let caps = make_caps_record(2, &[CapabilityId::MEM_DMA], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &caps,
-        };
-        let len = HwResource::WIRE_LEN;
-        assert_eq!(h.console_relocate(&ctx, 0x1000, len), Err(Errno::NotFound));
-        assert_eq!(*blocks.freed.read(), alloc::vec![CONSOLE_BLOCK_PHYS]);
+    fn console_adopt_hosts_a_console_no_firmware_lit_without_waiting() {
+        use core::sync::atomic::Ordering::Relaxed;
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let console = HostableConsole::leaked(None, false, 3);
+        let h = scene.handlers(
+            display_tree(&[(0x44, true)]),
+            console,
+            ConsoleBlocks::leaked(),
+            &QUARANTINE,
+        );
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        assert_eq!(console.hold_checks.load(Relaxed), 0);
+        assert_eq!(console.paints(), Some(CONSOLE_BLOCK_PHYS));
+    }
 
-        let h = h.with_consoles(MovableConsole::leaked(None, false).installed());
+    /// `console_adopt` gives back a block the console does not take, and
+    /// carves none with no console to host.
+    #[test]
+    fn console_adopt_gives_back_a_block_the_console_does_not_take() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let refusing = HostableConsole::leaked(None, true, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), refusing, blocks, &QUARANTINE);
+        assert_eq!(adopt(&h, &engine, 1280, 800), Err(Errno::OutOfMemory));
         assert_eq!(
-            h.console_relocate(&ctx, 0x1000, len),
-            Err(Errno::NotFound),
-            "a UART-only board has no console to move"
+            *blocks.freed.read(),
+            alloc::vec![CONSOLE_BLOCK_PHYS],
+            "the device was told nothing, so the block goes straight back"
+        );
+
+        let h = h.with_consoles(&NO_CONSOLES);
+        assert_eq!(adopt(&h, &engine, 1280, 800), Err(Errno::NotFound));
+        assert_eq!(blocks.requested.read().len(), 1);
+    }
+
+    /// The console keeps its one block at its mode: another mode waits until
+    /// the host relinquishes it, which frees it on the host's word, and the
+    /// next adoption carves afresh.
+    #[test]
+    fn console_adopt_keeps_one_block_until_its_host_relinquishes_it() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        assert_eq!(
+            adopt(&h, &engine, 1024, 768),
+            Err(Errno::Busy),
+            "the device may still read the memory it was given"
         );
         assert_eq!(blocks.requested.read().len(), 1);
+        assert_eq!(console.adopted.read().len(), 1);
+
+        assert_eq!(h.console_relinquish(&engine.ctx()), Ok(0));
+        assert_eq!(console.paints(), None);
+        assert_eq!(*blocks.freed.read(), alloc::vec![CONSOLE_BLOCK_PHYS]);
+        assert!(blocks.surrendered.read().is_empty());
+        assert_eq!(h.console_relinquish(&engine.ctx()), Err(Errno::NotFound));
+        assert_eq!(
+            h.console_damage(&engine.ctx(), 0x2000, 16),
+            Err(Errno::PermissionDenied)
+        );
+
+        assert_eq!(adopt(&h, &engine, 1024, 768), Ok(16));
+        assert_eq!(blocks.requested.read().len(), 2);
+        assert_eq!(
+            console.adopted.read().last().map(|adopted| adopted.1),
+            Some(mode_of(1024, 768))
+        );
+    }
+
+    /// Only the hosting node's live driver may relinquish the console, and a
+    /// refusal leaves it hosted.
+    #[test]
+    fn console_relinquish_answers_only_the_hosting_node_s_driver() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let other = scene.driver(
+            0x45,
+            crate::iommu::DmaPath::Untranslated,
+            legacy_dma_window(),
+            &[CapabilityId::MEM_DMA],
+        );
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        let stranger_caps = make_caps_record(0, &[CapabilityId::MEM_DMA], scene.sink);
+        let stranger = CallerContext {
+            task_id: SecTaskId(crate::test_boot::claim_task()),
+            caps: &stranger_caps,
+        };
+        assert_eq!(
+            h.console_relinquish(&stranger),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.console_relinquish(&other.ctx()), Err(Errno::NotFound));
+        assert_eq!(console.paints(), Some(CONSOLE_BLOCK_PHYS));
+        assert!(blocks.freed.read().is_empty());
+    }
+
+    /// The hosted console's rows are told only to the driver it is hosted
+    /// for, as whole rows of its mode, and its `ConsoleDamage` wait-set member is
+    /// ready exactly while some are owed.
+    #[test]
+    fn console_damage_is_told_only_to_its_host() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let unmarked = scene.driver(
+            0x45,
+            crate::iommu::DmaPath::Untranslated,
+            legacy_dma_window(),
+            &[CapabilityId::MEM_DMA],
+        );
+        let console = HostableConsole::leaked(None, false, 0);
+        let h = scene.handlers(
+            display_tree(&[(0x44, true), (0x45, false)]),
+            console,
+            ConsoleBlocks::leaked(),
+            &QUARANTINE,
+        );
+        let ctx = engine.ctx();
+        let kind = tairix_abi::WaitSourceKind::ConsoleDamage as u32;
+        let set = h.waitset_create(&ctx).expect("create");
+        let other = h.waitset_create(&unmarked.ctx()).expect("create");
+        assert_eq!(
+            h.waitset_ctl(&unmarked.ctx(), other, WS_OP_ADD, kind, 0, 0xC0),
+            Err(Errno::PermissionDenied),
+            "not the console host's driver"
+        );
+
+        assert_eq!(
+            h.console_damage(&ctx, 0x2000, 16),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, kind, 1, 0xC0),
+            Err(Errno::NotFound)
+        );
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, kind, 0, 0xC0)
+            .expect("its host's driver observes the console before hosting it");
+        *console.owed.write() = Some((0, 8));
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Err(Errno::TimedOut),
+            "nothing is owed to a driver that hosts nothing"
+        );
+        *console.owed.write() = None;
+
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        assert_eq!(h.console_damage(&ctx, 0x2000, 16), Ok(0), "nothing owed");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        *console.owed.write() = Some((16, 48));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        assert_eq!(
+            h.console_damage(&ctx, 0x2000, 15),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(h.console_damage(&ctx, 0x2000, 16), Ok(16));
+        let page = read_reply_page(
+            scene
+                .aspaces
+                .read()
+                .resolve(ProcessId(engine.task))
+                .expect("registered")
+                .1,
+            16,
+        );
+        assert_eq!(
+            tairix_abi::driver::display::DamageRect::from_bytes(&page),
+            Ok(tairix_abi::driver::display::DamageRect {
+                x: 0,
+                y: 16,
+                width_px: 1280,
+                height_px: 32,
+            })
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+    }
+
+    /// A translated host's every instance reaches the console's one block
+    /// through its own domain: a restarted driver at the same mode is mapped
+    /// the block it left, and the block frees once its unmap is confirmed.
+    #[test]
+    fn a_translated_host_reaches_the_one_block_through_each_instance_s_domain() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let (translation, model, _) =
+            translation_over(&[0x44], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let translated = crate::iommu::DmaPath::Translated {
+            output_limit: u64::MAX,
+        };
+        let anywhere = HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped);
+        let first = scene.driver(0x44, translated, anywhere, &[CapabilityId::MEM_DMA]);
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene
+            .handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE)
+            .with_dma_translation(translation);
+        assert_eq!(adopt(&h, &first, 1280, 800), Ok(16));
+        assert_ne!(
+            scene.hosted(&first).device_addr,
+            CONSOLE_BLOCK_PHYS,
+            "the device names the block by its address in the domain"
+        );
+        assert!(model.attached(FIRST_TRANSLATED_STREAM).is_some());
+
+        let _ = h.reclaim_process_resources(ProcessId(first.task), DriverEnding::Clean);
+        assert_eq!(model.attached(FIRST_TRANSLATED_STREAM), None);
+        assert_eq!(
+            console.paints(),
+            Some(CONSOLE_BLOCK_PHYS),
+            "the console outlives its driver"
+        );
+
+        let second = scene.driver(0x44, translated, anywhere, &[CapabilityId::MEM_DMA]);
+        assert_eq!(adopt(&h, &second, 1280, 800), Ok(16));
+        assert!(model.attached(FIRST_TRANSLATED_STREAM).is_some());
+        assert_eq!(blocks.requested.read().len(), 1, "the block it left");
+        assert_eq!(console.adopted.read().len(), 1, "the console never moved");
+        assert_eq!(adopt(&h, &second, 1024, 768), Err(Errno::Busy));
+
+        assert_eq!(h.console_relinquish(&second.ctx()), Ok(0));
+        assert_eq!(*blocks.freed.read(), alloc::vec![CONSOLE_BLOCK_PHYS]);
+        assert!(blocks.surrendered.read().is_empty());
+    }
+
+    /// A reply buffer that cannot take the answer is refused before the
+    /// console moves or a row is taken, so a failed call loses nothing.
+    #[test]
+    fn a_console_call_whose_answer_cannot_be_written_changes_nothing() {
+        use tairix_abi::driver::display::{DamageRect, HostedConsole};
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        const UNMAPPED: u64 = 0x7000_0000;
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        let ctx = engine.ctx();
+        assert_eq!(
+            h.console_adopt(
+                &ctx,
+                engine.handle,
+                1280,
+                800,
+                tairix_abi::driver::DmaReach::FULL,
+                UNMAPPED,
+                HostedConsole::WIRE_LEN,
+            ),
+            Err(Errno::BadAddress)
+        );
+        assert!(blocks.requested.read().is_empty(), "nothing carved");
+        assert_eq!(console.paints(), None, "nothing hosted");
+
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        *console.owed.write() = Some((16, 48));
+        assert_eq!(
+            h.console_damage(&ctx, UNMAPPED, DamageRect::WIRE_LEN),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(*console.owed.read(), Some((16, 48)), "still owed");
+        assert_eq!(
+            h.console_damage(&ctx, 0x2000, DamageRect::WIRE_LEN),
+            Ok(DamageRect::WIRE_LEN as u64)
+        );
+    }
+
+    /// A restarted driver's mapping of the console's block that its unit
+    /// could not confirm undone may still reach the block, so the block is
+    /// never reused: the console leaves it for the node's custody and is
+    /// hosted afresh on the next adoption.
+    #[test]
+    fn a_rehosting_the_unit_cannot_confirm_undone_surrenders_the_block() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let (translation, model, _) =
+            translation_over(&[0x44], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let translated = crate::iommu::DmaPath::Translated {
+            output_limit: u64::MAX,
+        };
+        let anywhere = HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped);
+        let first = scene.driver(0x44, translated, anywhere, &[CapabilityId::MEM_DMA]);
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene
+            .handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE)
+            .with_dma_translation(translation);
+        assert_eq!(adopt(&h, &first, 1280, 800), Ok(16));
+        let _ = h.reclaim_process_resources(ProcessId(first.task), DriverEnding::Clean);
+
+        let second = scene.driver(0x44, translated, anywhere, &[CapabilityId::MEM_DMA]);
+        model.behave(tairix_kernel_iommu_api::model::Behaviour::UnconfirmedMap);
+        assert_eq!(adopt(&h, &second, 1280, 800), Err(Errno::DeviceFault));
+        assert_eq!(console.paints(), None, "the console left the block");
+        assert_eq!(
+            *blocks.surrendered.read(),
+            alloc::vec![(CONSOLE_BLOCK_PHYS, scene.generation(&second))],
+            "to the instance whose domain may reach it"
+        );
+        assert!(
+            blocks.freed.read().is_empty(),
+            "never back to the allocator"
+        );
+
+        model.behave(tairix_kernel_iommu_api::model::Behaviour::Correct);
+        assert_eq!(adopt(&h, &second, 1280, 800), Ok(16));
+        assert_eq!(blocks.requested.read().len(), 2, "a fresh block");
+        assert_eq!(console.paints(), Some(CONSOLE_BLOCK_PHYS));
+    }
+
+    /// Only the driver instance the console is hosted for told its device of
+    /// the console's memory, so a later instance's relinquishment leaves the
+    /// memory to the node's custody rather than freeing it on its word.
+    #[test]
+    fn a_relinquishment_by_another_instance_than_the_host_frees_nothing() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        let host = scene.generation(&engine);
+        let _ = h.reclaim_process_resources(ProcessId(engine.task), DriverEnding::Clean);
+        assert_eq!(console.paints(), Some(CONSOLE_BLOCK_PHYS));
+
+        let successor = scene.engine();
+        assert_eq!(h.console_relinquish(&successor.ctx()), Ok(0));
+        assert_eq!(console.paints(), None);
+        assert_eq!(
+            *blocks.surrendered.read(),
+            alloc::vec![(CONSOLE_BLOCK_PHYS, host)],
+            "to the custody of the instance its device was told of"
+        );
+        assert!(blocks.freed.read().is_empty());
+    }
+
+    /// A successor whose window does not hold the whole block is never told
+    /// of it, and the hosting stays the instance's that its device was told
+    /// of: the successor's later word frees nothing.
+    #[test]
+    fn a_successor_whose_window_misses_the_block_is_refused_and_records_nothing() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        let host = scene.generation(&engine);
+        let _ = h.reclaim_process_resources(ProcessId(engine.task), DriverEnding::Clean);
+
+        let successor = scene.driver(
+            0x44,
+            crate::iommu::DmaPath::Untranslated,
+            peripheral_window(),
+            &[CapabilityId::MEM_DMA],
+        );
+        assert_eq!(adopt(&h, &successor, 1280, 800), Err(Errno::OutOfRange));
+        assert_eq!(h.console_relinquish(&successor.ctx()), Ok(0));
+        assert_eq!(
+            *blocks.surrendered.read(),
+            alloc::vec![(CONSOLE_BLOCK_PHYS, host)]
+        );
+        assert!(blocks.freed.read().is_empty());
+    }
+
+    /// The instance the console is hosted for, asking again under other
+    /// terms, is refused: a second mapping would leave the first undone.
+    #[test]
+    fn the_hosting_instance_under_other_terms_is_refused() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        let unsnooped = scene.aspaces.write().mint_grant(
+            ProcessId(engine.task),
+            HwResource::dma_translated(
+                0x4000_0000,
+                0x4000_0000,
+                0xC000_0000,
+                tairix_abi::DmaCoherence::Unsnooped,
+            ),
+        );
+        let again = h.console_adopt(
+            &engine.ctx(),
+            unsnooped,
+            1280,
+            800,
+            tairix_abi::driver::DmaReach::FULL,
+            0x2000,
+            tairix_abi::driver::display::HostedConsole::WIRE_LEN,
+        );
+        assert_eq!(again, Err(Errno::Busy));
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16), "its own terms stand");
+        assert_eq!(blocks.requested.read().len(), 1);
+    }
+
+    /// A removal that takes the node out of the tree while an adoption is
+    /// under way finds nothing hosted to unhost, so the adoption is what
+    /// refuses: it never hosts the console for a node that has gone.
+    #[test]
+    fn an_adoption_racing_its_node_s_removal_hosts_nothing() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let bus = scene.driver(
+            9,
+            crate::iommu::DmaPath::Untranslated,
+            legacy_dma_window(),
+            &[CapabilityId::HW_EMIT],
+        );
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        let mode = hosted_console_mode(1280, 800).expect("a mode");
+        let bytes = mode.len_bytes();
+        let terms = h
+            .dma_carve_terms(
+                &engine.ctx(),
+                engine.handle,
+                usize::try_from(bytes).expect("fits"),
+                tairix_abi::driver::DmaReach::FULL,
+            )
+            .expect("the engine's terms");
+        assert_eq!(h.hw_remove_node(&bus.ctx(), 0x44, 0), Ok(0));
+        assert_eq!(
+            h.host_console(console, mode, bytes, &terms),
+            Err(Errno::DeviceOffline)
+        );
+        assert!(blocks.requested.read().is_empty());
+        assert_eq!(console.paints(), None);
+    }
+
+    /// A relinquishment while the console paints other memory leaves the
+    /// hosting and its block as they are, and says so.
+    #[test]
+    fn a_relinquishment_the_console_cannot_leave_is_busy_and_keeps_the_block() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        *console.surface.write() = Some(firmware_console());
+        assert_eq!(h.console_relinquish(&engine.ctx()), Err(Errno::Busy));
+        assert!(blocks.freed.read().is_empty());
+        assert!(blocks.surrendered.read().is_empty());
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16), "still hosted");
+    }
+
+    /// A console hosted on a device whose node leaves the tree leaves it, and
+    /// its memory passes to the node's custody, since no driver vouched that
+    /// the device stopped reading it.
+    #[test]
+    fn a_console_hosted_on_a_removed_device_leaves_it() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let scene = ConsoleScene::new();
+        let engine = scene.engine();
+        let bus = scene.driver(
+            9,
+            crate::iommu::DmaPath::Untranslated,
+            legacy_dma_window(),
+            &[CapabilityId::HW_EMIT],
+        );
+        let console = HostableConsole::leaked(None, false, 0);
+        let blocks = ConsoleBlocks::leaked();
+        let h = scene.handlers(display_tree(&[(0x44, true)]), console, blocks, &QUARANTINE);
+        assert_eq!(adopt(&h, &engine, 1280, 800), Ok(16));
+        let host = scene.generation(&engine);
+
+        assert_eq!(h.hw_remove_node(&bus.ctx(), 0x44, 0), Ok(0));
+        assert_eq!(console.paints(), None);
+        assert_eq!(
+            *blocks.surrendered.read(),
+            alloc::vec![(CONSOLE_BLOCK_PHYS, host)]
+        );
+        assert!(blocks.freed.read().is_empty());
+        assert!(QUARANTINE.retired.lock().contains(&0x44));
+        assert_eq!(
+            h.console_damage(&engine.ctx(), 0x2000, 16),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.console_relinquish(&engine.ctx()), Err(Errno::NotFound));
     }
 
     /// `hw_self_node` writes the caller's *own* matched node record — its id
@@ -41004,7 +41909,7 @@ mod tests {
         let console_claim = {
             let mut node = tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::Display);
             node.push_resource(tairix_abi::HwResource::property(
-                tairix_abi::HwProperty::BootConsole,
+                tairix_abi::HwProperty::ConsoleHost,
                 1,
             ))
             .expect("resource fits");

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-display"
-description = "TAIRiX display-service protocol engine: the one definition of the zero-copy, lease-gated frame-presentation semantics — the server engine a display driver's Run binary hosts and the RemoteDisplay client a desktop session presents through (plans/DISPLAY.md D7b)."
+description = "TAIRiX display-service protocol engine: the one definition of the lease-gated presentation of driver-allocated buffers — the server engine a display driver's Run binary hosts and the RemoteDisplay client a compositor presents through (plans/DISPLAY.md D7b, plans/FIX-DISPLAY-ACCELERATION.md)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,15 +18,21 @@ tairix-raster = { path = "../raster", version = "=0.0.0" }
 # handed through. Default features off: only the trait and the calling-thread
 # runner are wanted here, never the thread pool — an embedder supplies that.
 tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
+# The buffer tables a server keeps for its presenter, and a presenter's frame
+# ring, bounded and allocation-free.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # The display service's `Run` loop (`service` feature): the empty
 # capability sets its endpoint is bound with, the driver host its surface is
 # mapped through, and the one-shot event it emits.
 tairix-caps = { path = "../caps", version = "=0.0.0", optional = true }
 tairix-drvrt = { path = "../drvrt", version = "=0.0.0", optional = true }
-tairix-log = { path = "../log", version = "=0.0.0", optional = true }
+# The service's event identifiers, which a reader of the log keys on.
+tairix-log = { path = "../log", version = "=0.0.0" }
 
 [dev-dependencies]
+# The heap-backed buffers the framebuffer integration tests present through.
+tairix-display = { path = ".", features = ["test-support"] }
 # The shared order-shuffling runner the window-frame codec's bit-identity tests
 # split a conversion with.
 tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = [
@@ -41,7 +47,10 @@ rt = ["dep:tairix-rt"]
 # The one display-service `Run` loop every display driver's service binary
 # runs (`service` module): the framebuffer service and the Raspberry Pi
 # firmware-framebuffer service.
-service = ["rt", "dep:tairix-caps", "dep:tairix-drvrt", "dep:tairix-log"]
+service = ["rt", "dep:tairix-caps", "dep:tairix-drvrt"]
+# Heap-backed buffers a harness with no shared memory presents through
+# (`testkit` module): the framebuffer tests and its QEMU verticals.
+test-support = []
 
 [lints]
 workspace = true

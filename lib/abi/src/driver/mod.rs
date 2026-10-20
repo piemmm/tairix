@@ -360,6 +360,9 @@ pub enum DeviceWake {
     /// A call endpoint the driver serves for the device beside the one its
     /// loop serves: a second protocol the same hardware speaks.
     Calls(u64),
+    /// Rows the kernel console the driver hosts has painted and not yet
+    /// told it of.
+    ConsoleDamage,
 }
 
 impl DeviceWake {
@@ -371,6 +374,7 @@ impl DeviceWake {
             Self::Port(port) => (WaitSourceKind::Port, port),
             Self::CallReply(endpoint) => (WaitSourceKind::CallReply, endpoint),
             Self::Calls(endpoint) => (WaitSourceKind::Endpoint, endpoint),
+            Self::ConsoleDamage => (WaitSourceKind::ConsoleDamage, 0),
         }
     }
 }
@@ -1461,6 +1465,11 @@ mod tests {
         use super::DeviceWake;
         use crate::waitset::WaitSourceKind;
         assert_eq!(DeviceWake::Irq(3).member(), (WaitSourceKind::Irq, 3));
+        assert_eq!(
+            DeviceWake::ConsoleDamage.member(),
+            (WaitSourceKind::ConsoleDamage, 0),
+            "the one hosted console, observed by the driver it is hosted for"
+        );
         assert_eq!(DeviceWake::Port(5).member(), (WaitSourceKind::Port, 5));
         assert_eq!(
             DeviceWake::CallReply(7).member(),

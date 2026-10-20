@@ -14,6 +14,10 @@
 use super::dma::DmaHost;
 use super::CompletionSignal;
 
+/// The virtio device id of a GPU (virtio 1.2 §5.7): what discovery publishes
+/// as a display, and what the virtio-gpu driver binds.
+pub const VIRTIO_GPU_DEVICE_ID: u32 = 16;
+
 /// Trait every virtio driver consumes to wait for queue
 /// notifications, on top of the bus-neutral DMA-allocation surface it
 /// inherits from [`DmaHost`].

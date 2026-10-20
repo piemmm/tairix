@@ -53,7 +53,7 @@ mod kernel {
 
     use alloc::vec::Vec;
 
-    use tairix_abi::driver::display::{Display, DisplayFormat};
+    use tairix_abi::driver::display::DisplayFormat;
     use tairix_abi::driver::{MmioMapError, MmioMapper, RegisterWindow};
     use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno};
     use tairix_arch_wasm32::bindings::{host_has_display, host_present_framebuffer};
@@ -61,6 +61,7 @@ mod kernel {
     use tairix_arch_wasm32::handle_panic_via_console;
     use tairix_caps::CapabilitySet;
     use tairix_crypto::Ed25519PublicKey;
+    use tairix_display::testkit::HeapMemory;
     use tairix_display::{Framebuffer, FramebufferConfig};
     use tairix_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
@@ -326,10 +327,11 @@ mod kernel {
         present_msg: &'static str,
     ) {
         {
-            let Ok(mut fb) = Framebuffer::open(fb_host, config) else {
+            let memory = HeapMemory::default();
+            let Ok(mut fb) = Framebuffer::open(fb_host, config, memory.clone()) else {
                 fail(open_msg);
             };
-            if fb.present(frame).is_err() {
+            if memory.present_whole(&mut fb, frame).is_err() {
                 fail(present_msg);
             }
             // `fb` drops here, releasing its window handle (quiesce).

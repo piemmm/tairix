@@ -883,6 +883,12 @@ malformed tree seeds an empty inventory (fail closed), never a boot
 failure. The bootstrap-floor virtio-MMIO `DeviceID` probe then reads each
 transport and publishes its device for autoload.
 
+The port lights no screen of its own. Where discovery finds a virtio GPU, on
+either transport, its node is marked `ConsoleHost` and the framebuffer console
+becomes console 0, interpreting what the boot writes into its grid until the
+virtio-gpu driver hosts it ([Display drivers](../drivers/display.md));
+otherwise the serial console is console 0.
+
 ### The generic PCI host
 
 The kernel takes the `virt` board's `pci-host-ecam-generic` host as it

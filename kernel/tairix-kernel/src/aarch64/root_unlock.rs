@@ -28,7 +28,7 @@ use tairix_arch_aarch64::paging::{
 };
 use tairix_arch_aarch64::platform::{Aarch64Fdt, EMMC2_COMPATIBLE};
 use tairix_arch_aarch64::sd_supply::{find_sd_supplies, FirmwareSdSupply, SdSupplies};
-use tairix_arch_aarch64::{video, SERIAL_SINK};
+use tairix_arch_aarch64::SERIAL_SINK;
 use tairix_caps::CapabilitySet;
 use tairix_drv_storage_emmc2::{
     Board, BringUpFault, CardSupply, CompletionWait, Link, SignalVoltage, DMA_DATA_BYTES,
@@ -54,11 +54,10 @@ use tairix_vcmailbox::{
     MmioMailbox, APERTURE_LIMIT, DEFAULT_BUS_ALIAS, MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
 };
 
-use crate::aarch64::arch_wrapper::{
-    UART_CONSOLE, UART_CONSOLE_READ, VIDEO_CONSOLE, VIDEO_KEYBOARD,
-};
+use crate::aarch64::arch_wrapper::{UART_CONSOLE, UART_CONSOLE_READ};
 use crate::aarch64::gic_irq::{published_irq_table, COMPOSITE_IRQ_CONTROLLER};
 use crate::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
+use crate::console_layout::framebuffer_console0;
 use crate::driver_catalog::{EMMC2_PATH, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::floor_dma::Confinement;
@@ -314,7 +313,7 @@ fn release_console0_to_login() {
     // session-free debug log line — no console is installed on it, so its
     // receive interrupt is left disabled rather than armed for a reader
     // that can never exist.
-    if !video::is_active() {
+    if !crate::console_layout::CONSOLE.is_active() {
         crate::aarch64::gic_irq::enable_uart_console_irq();
     }
 }
@@ -334,31 +333,19 @@ static AARCH64_UNLOCK_CONSOLE: Aarch64UnlockConsole = Aarch64UnlockConsole;
 
 impl UnlockConsole for Aarch64UnlockConsole {
     fn acquire_console0(&self) -> Console0 {
-        // Primary console (index 0): the video console + its keyboard queue
-        // when a framebuffer console is active, else the discovered UART. Both
-        // input halves are interrupt-fed console queues (the keyboard
-        // injection queue, or the UART's `UART_INPUT`-backed read half) whose
-        // `push` wakes `CONSOLE_WAITQ`, so the kthread reader parks for input
-        // rather than busy-polling a raw FIFO.
-        if video::is_active() {
-            Console0 {
-                write: &VIDEO_CONSOLE,
-                read: &VIDEO_KEYBOARD,
-                keys: KeySource::InputDevice,
-            }
-        } else {
-            // Switch the UART console to interrupt-driven receive for the
-            // unlock window so a keystroke wakes the parked reader
-            // (`console_wake`) — the RX ISR drains the FIFO into `UART_INPUT`,
-            // which `UART_CONSOLE_READ` reads. Idempotent with the
-            // `release_console0_to_login` handoff enable.
+        // Both input halves are interrupt-fed queues whose push wakes the
+        // console wait-queue, so the reader parks for input rather than
+        // polling a raw FIFO.
+        framebuffer_console0().unwrap_or_else(|| {
+            // Interrupt-driven receive for the unlock window, so a keystroke
+            // wakes the parked reader; idempotent with the `login` handoff.
             crate::aarch64::gic_irq::enable_uart_console_irq();
             Console0 {
                 write: &UART_CONSOLE,
                 read: &UART_CONSOLE_READ,
                 keys: KeySource::Live,
             }
-        }
+        })
     }
 
     fn release_console0_to_login(&self) {
@@ -964,7 +951,7 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> Emmc2DmaHost<'a, P, S> {
         let base = pool
             .slot_base(&buf)
             .map_err(|_| DriverError::LengthOutOfRange)?;
-        let device = translate_device_addr(window, buf.phys().as_u64())
+        let device = translate_device_addr(window, buf.phys().as_u64(), buf.len() as u64)
             .map_err(|_| DriverError::LengthOutOfRange)?;
         Ok((base, device, buf.len()))
     }

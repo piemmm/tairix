@@ -2,13 +2,14 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{Display, DisplayFormat, DisplayMode, DisplayPower};
+use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, DisplayPower};
 use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::session_ipc::{SessionRequest, SessionVerdict};
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{DriverError, Errno, WAITSET_TIMEOUT_NONE};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_display::ChannelOrder;
+use tairix_display::Presenter;
 use tairix_display::SwitchedOff;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_greeter::{AccountTile, Verdict};
@@ -664,6 +665,34 @@ fn the_fade_ends_on_the_clock_and_the_budget_alone() {
     assert!(
         !stuck.session_fade_finished(),
         "a clock that never advances never finishes the fade — the budget is\n         what lets the login leave anyway"
+    );
+}
+
+/// A display that queues its presents wakes the fade's loop with each latch
+/// beside each frame's deadline; the budget still carries the fade to black.
+#[test]
+fn the_fade_finishes_within_its_budget_when_every_frame_also_latches() {
+    let mut login = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+    login.repaint();
+    assert!(offer(&mut login, SECRET, 0).verified);
+    let start = settled_ns();
+    refreshed(&mut login, start, None);
+    let _ = login.begin_session_fade(start);
+    let mut now = start;
+    let mut wakes = 0u32;
+    while let Some(due) = login.session_fade_due(now) {
+        // The last present's latch, then this frame's deadline.
+        wakes += 2;
+        now += due;
+        login.session_fade_step(now);
+    }
+    assert!(login.session_fade_finished());
+    assert!(
+        wakes <= login.session_fade_budget(),
+        "{wakes} wakes outran the budget"
     );
 }
 
@@ -1579,6 +1608,8 @@ enum Seen {
 struct Panel {
     can_switch: bool,
     refuse: Option<DriverError>,
+    /// Still latching a present, so it takes no other.
+    busy: bool,
     seen: Vec<Seen>,
 }
 
@@ -1587,6 +1618,7 @@ impl Panel {
         Self {
             can_switch: true,
             refuse: None,
+            busy: false,
             seen: Vec::new(),
         }
     }
@@ -1609,12 +1641,19 @@ impl Panel {
     }
 }
 
-impl Display for Panel {
-    fn output(&self) -> Option<DisplayMode> {
-        Some(mode())
+impl Presenter for Panel {
+    fn mode(&self) -> DisplayMode {
+        mode()
     }
 
-    fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+    fn ready(&self) -> bool {
+        !self.busy
+    }
+
+    fn present(&mut self, frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
+        if self.busy {
+            return Err(DriverError::Busy);
+        }
         let black = frame
             .as_chunks::<4>()
             .0
@@ -1727,6 +1766,29 @@ fn a_screen_left_alone_puts_its_display_to_sleep_after_thirty_minutes() {
         None,
         "asleep already"
     );
+}
+
+/// A display still latching the last frame as the screen goes to sleep is
+/// owed the black, which the next present delivers, rather than left
+/// showing the chooser.
+#[test]
+fn a_sleep_a_latching_display_missed_owes_it_the_black() {
+    let mut login = ready();
+    let mut panel = Panel::fixed();
+    panel.busy = true;
+    assert_eq!(
+        login.sleep_if_idle(&mut panel, SLEPT),
+        Some(SwitchedOff::Blanked)
+    );
+    assert!(panel.seen.is_empty(), "nothing was taken");
+    assert_eq!(login.draw(), Present::Whole, "the black is owed");
+    assert!(login
+        .frame()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|pixel| pixel[..3] == [0, 0, 0]));
+    assert_eq!(login.draw(), Present::Nothing, "and owed once");
 }
 
 /// Any input puts the sleep off by the whole wait again.

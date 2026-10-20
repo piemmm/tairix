@@ -165,12 +165,9 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     argv.push(format!("{}M", spec.ram_mib()).into());
     argv.push("-smp".into());
     argv.push(spec.cpus.to_string().into());
-    // Attach QEMU's `ramfb` display device when requested (firmware-
-    // programmed linear framebuffer in guest RAM, programmed over
-    // `fw_cfg`), the display-class analogue of the virtio-mmio devices.
-    if spec.devices.ramfb {
+    if let Some(display) = spec.devices.display.device(None) {
         argv.push("-device".into());
-        argv.push("ramfb".into());
+        argv.push(display.into());
     }
     // Present every virtio-mmio transport as a *modern* (virtio 1.x,
     // version 2) device, matching the riscv64 `virt` board policy.
@@ -607,8 +604,24 @@ mod tests {
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(!argv.iter().any(|a| a.starts_with("virtio-blk-device")));
         assert!(!argv.iter().any(|a| a.starts_with("virtio-net-device")));
-        assert!(!argv.iter().any(|a| a == "ramfb"));
+        assert!(!argv.iter().any(|a| a.starts_with("ramfb")));
+        assert!(!argv.iter().any(|a| a.starts_with("virtio-gpu")));
         assert!(!argv.iter().any(|a| a == "virtio-keyboard-device"));
+    }
+
+    #[test]
+    fn argv_attaches_a_virtio_gpu_at_its_mode_on_virtio_mmio() {
+        let mut spec = fixture_spec(1);
+        spec.devices.display = crate::Display::VirtioGpu {
+            width: 1024,
+            height: 768,
+        };
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let pos = argv
+            .iter()
+            .position(|a| a == "virtio-gpu-device,id=display0,xres=1024,yres=768")
+            .expect("argv contains the virtio GPU");
+        assert_eq!(argv[pos - 1], "-device");
     }
 
     #[test]

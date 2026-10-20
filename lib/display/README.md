@@ -14,17 +14,17 @@ and the client can never drift apart.
   `call_peer_seat`, an oracle-free fact about the in-flight caller), and
   gates the seatless `QueryStats` device read on that same seam's
   capability question (`CAP_SYSINFO_HW`, since a monitor holds no lease).
-  It maps the client's
-  endpoint-directed `shm_grant` region **once** at `Configure` through
-  the injected `ShmMapper` seam, and scans out on `Present` by frame
-  index through the `Display` trait — damage-aware via
-  `Display::present_rects`, whose whole rectangle list it validates before
-  blitting any of it, with no per-present mapping, allocation, or copy of
-  its own. A `Configure` binds the mapped frames to the granting
-  lease's generation; a `Present` under any other lease (a revoked or
-  re-acquired seat) is refused fail-closed until the new owner
-  reconfigures, so one owner's frames can never be scanned out under
-  another's lease. A refused request leaves the configuration exactly
+  At `Configure` it
+  has the driver allocate the presenter's frames (`Display::alloc_buffer`)
+  and grants each to the configuring caller alone (`shm_grant_peer`,
+  through the injected `Delivery` seam). `Present` names one of those
+  buffers and its damage, the whole rectangle list validated before the
+  driver sees any of it, and the driver shows the buffer where it lies:
+  no mapping, allocation, or copy per present. A `Configure` binds its
+  buffers to the granting lease's generation; a `Present` under any other
+  lease (a revoked or re-acquired seat) is refused fail-closed until the
+  new owner reconfigures, so one owner's frames can never be scanned out
+  under another's lease. A refused request leaves the configuration exactly
   as it was: only the kernel's lease notice (`lease_moved`) or a newer
   owner's `Configure` releases it, so no caller can unconfigure the
   display by sending something malformed.

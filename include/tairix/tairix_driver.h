@@ -209,13 +209,44 @@ typedef struct tairix_display_mode {
     uint8_t format;
 } tairix_display_mode_t;
 
-/* What a hardware compositor back-end can do this frame. */
+/* What a display's hardware layer compositor can do. */
 typedef struct tairix_accel_caps {
     uint32_t max_layers;
     uint32_t max_width_px;
     uint32_t max_height_px;
     uint8_t per_layer_opacity;
+    uint8_t hw_scaling;
 } tairix_accel_caps_t;
+
+/* The pointer image size a display's cursor plane shows. */
+typedef struct tairix_cursor_caps {
+    uint32_t max_width_px;
+    uint32_t max_height_px;
+} tairix_cursor_caps_t;
+
+/* A display driver's name for a buffer it allocated; never zero. */
+typedef struct tairix_buffer_id {
+    uint32_t raw;
+} tairix_buffer_id_t;
+
+/* A rectangle of a display mode, in pixels from its top-left: what a
+* present changed, or the rows the hosted console painted
+* (console_damage). */
+typedef struct tairix_damage_rect {
+    uint32_t x;
+    uint32_t y;
+    uint32_t width_px;
+    uint32_t height_px;
+} tairix_damage_rect_t;
+
+/* Where a display driver's device reaches the kernel console it hosts
+* (console_adopt): the device address of its first pixel and its row
+* stride, laid out as TAIRIX_DISPLAY_FORMAT_BGRA8888. reserved0 is zero. */
+typedef struct tairix_hosted_console {
+    uint64_t device_addr;
+    uint32_t stride_bytes;
+    uint32_t reserved0;
+} tairix_hosted_console_t;
 
 /* The four AGENTS.md sec.21 timestamps stored for a filesystem node. A
 * stamp the backing format does not keep is the epoch (never a

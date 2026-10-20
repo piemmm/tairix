@@ -125,6 +125,8 @@ pub const ENCODER: EventRange = EventRange::new(24_800, 24_900);
 pub const BCM2711_HVS: EventRange = EventRange::new(24_900, 24_910);
 /// The BCM2711 HDMI driver.
 pub const BCM2711_HDMI: EventRange = EventRange::new(24_910, 24_920);
+/// The virtio-gpu display driver.
+pub const VIRTIO_GPU: EventRange = EventRange::new(24_920, 24_930);
 /// Link-local service discovery.
 pub const DISCOVERYD: EventRange = EventRange::new(25_000, 26_000);
 /// The userland runtime.
@@ -291,6 +293,10 @@ pub const OWNERS: &[Owner] = &[
     Owner {
         range: BCM2711_HDMI,
         crates: &["drivers/display/bcm2711_hdmi"],
+    },
+    Owner {
+        range: VIRTIO_GPU,
+        crates: &["drivers/display/gpu_virtio"],
     },
     Owner {
         range: DISCOVERYD,

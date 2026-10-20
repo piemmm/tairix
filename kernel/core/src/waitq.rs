@@ -1027,6 +1027,20 @@ pub fn irq_wake() {
 /// (see [`notice_wake`]).
 pub static NOTICE_WAITQ: WaitQueue = WaitQueue::new();
 
+/// The wait-queue holding `waitset_wait` callers with a `ConsoleDamage` member:
+/// the driver hosting the kernel console, woken when the console comes to owe
+/// it painted rows.
+pub static CONSOLE_DAMAGE_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Request a wake of the console's host because rows became owed to it.
+///
+/// Deferred, as [`notice_wake`] is: the console paints from any context — a
+/// log record written from an interrupt handler included — and must take no
+/// wait-queue lock from inside its renderer.
+pub fn console_damage_wake() {
+    CONSOLE_DAMAGE_WAITQ.request_wake();
+}
+
 /// Request a wake of every system-notice watcher because some topic moved.
 ///
 /// **Lock-free by requirement, not by preference.** The memory-pressure topic
@@ -1471,6 +1485,11 @@ static ALL_QUEUES: &[GlobalQueue] = &[
     GlobalQueue {
         queue: &CPUFREQ_WAITQ,
         timed: true,
+        deferred: true,
+    },
+    GlobalQueue {
+        queue: &CONSOLE_DAMAGE_WAITQ,
+        timed: false,
         deferred: true,
     },
     GlobalQueue {

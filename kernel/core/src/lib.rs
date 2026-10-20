@@ -83,6 +83,7 @@ pub mod bootinfo;
 pub mod cache_control;
 pub mod callreg;
 pub mod console;
+pub(crate) mod console_host;
 mod cpu_state;
 pub mod cpufreq;
 pub mod cpuops;
@@ -211,9 +212,8 @@ pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_
 pub use cache_control::{CacheClass, CacheControl, CacheMode, CACHE_CONTROL};
 pub use console::{
     BlockingConsoleRead, ConsoleDevice, ConsoleInput, ConsoleInputQueue, ConsoleRead,
-    ConsoleSurface, ConsoleWrite, NullConsole, NullConsoleInput, NullConsoleRead, Relocation,
-    SecretFeedback, CONSOLE_INPUT_QUEUE_CAPACITY, NO_CONSOLES, NULL_CONSOLE, NULL_CONSOLE_INPUT,
-    NULL_CONSOLE_READ,
+    ConsoleSurface, ConsoleWrite, NullConsole, NullConsoleInput, NullConsoleRead, SecretFeedback,
+    CONSOLE_INPUT_QUEUE_CAPACITY, NO_CONSOLES, NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
 };
 pub use cpu_state::{install as initialize_cpu_state, CpuStateInitError};
 pub use devres::{
@@ -322,11 +322,12 @@ pub use users::{
     USERS_DB_PATH,
 };
 pub use waitq::{
-    call_wake, call_wake_task, console_deregister, console_wake, drain_pending_wakes, hw_tree_wake,
-    install_wait_arch, irq_wake, nearest_timed_deadline, procwait_wake, rearm_timed_wakeup,
-    seat_input_wake, serve_wake, serve_wake_task, timed_wake_sweep, wait_now_ns,
-    WaitArchAlreadyInstalled, WaitQueue, WaitQueueArch, CALL_WAITQ, CONSOLE_WAITQ, HW_TREE_WAITQ,
-    IRQ_WAITQ, NO_DEADLINE, PROCWAIT_WAITQ, SEAT_INPUT_WAITQ, SERVE_WAITQ,
+    call_wake, call_wake_task, console_damage_wake, console_deregister, console_wake,
+    drain_pending_wakes, hw_tree_wake, install_wait_arch, irq_wake, nearest_timed_deadline,
+    procwait_wake, rearm_timed_wakeup, seat_input_wake, serve_wake, serve_wake_task,
+    timed_wake_sweep, wait_now_ns, WaitArchAlreadyInstalled, WaitQueue, WaitQueueArch, CALL_WAITQ,
+    CONSOLE_WAITQ, HW_TREE_WAITQ, IRQ_WAITQ, NO_DEADLINE, PROCWAIT_WAITQ, SEAT_INPUT_WAITQ,
+    SERVE_WAITQ,
 };
 pub use wallclock::{KernelWallClock, NullWallClock, WallClockSource, NULL_WALL_CLOCK};
 pub use watchdog::{

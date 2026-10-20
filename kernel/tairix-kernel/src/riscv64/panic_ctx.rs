@@ -26,7 +26,6 @@ use tairix_arch_api::backtrace::CpuStateCapture;
 use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::fault::{set_fault_handler, SetFaultHandlerError};
 use tairix_arch_riscv64::backtrace::Backtracer;
-use tairix_arch_riscv64::SERIAL_SINK;
 use tairix_log::Sink;
 
 use crate::fatal_bridge::{report_kernel_fault, report_panic, FatalReport};
@@ -78,7 +77,7 @@ impl FatalReport for RiscvFatal {
     }
 
     fn audit_sink() -> &'static (dyn Sink + Sync) {
-        &SERIAL_SINK
+        &crate::console_layout::LOG_SINK
     }
 
     fn backtrace() -> &'static dyn CpuStateCapture {

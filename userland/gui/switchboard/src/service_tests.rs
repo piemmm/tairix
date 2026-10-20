@@ -616,6 +616,7 @@ fn frame_report() -> FrameReport {
         present_calls: 1,
         chrome_hits: 12,
         chrome_misses: 1,
+        layers: 0,
     }
 }
 

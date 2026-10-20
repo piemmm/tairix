@@ -377,9 +377,13 @@ pub(crate) mod test_support {
     use std::cell::RefCell;
     use tairix_log::{set_max_level, Event, Level, Sink};
 
+    /// One record as a test reads it: its level, id, message, and the fields
+    /// holding unsigned integers.
+    type Recorded = (Level, u32, String, Vec<(String, u64)>);
+
     /// Single-threaded recording sink used by `kernel/ipc` tests.
     pub(crate) struct RecordingSink {
-        events: RefCell<Vec<(Level, u32, String)>>,
+        events: RefCell<Vec<Recorded>>,
     }
 
     impl RecordingSink {
@@ -400,13 +404,41 @@ pub(crate) mod test_support {
         pub(crate) fn len(&self) -> usize {
             self.events.borrow().len()
         }
+
+        /// The unsigned field `key` of the first record `id` carries it in.
+        pub(crate) fn unsigned(&self, id: u32, key: &str) -> Option<u64> {
+            self.events
+                .borrow()
+                .iter()
+                .filter(|event| event.1 == id)
+                .find_map(|event| {
+                    event
+                        .3
+                        .iter()
+                        .find(|(name, _)| name == key)
+                        .map(|&(_, value)| value)
+                })
+        }
     }
 
     impl Sink for RecordingSink {
         fn write_event(&self, event: &Event<'_>) {
-            self.events
-                .borrow_mut()
-                .push((event.level, event.id.0, event.message.to_string()));
+            let unsigned = event
+                .fields
+                .iter()
+                .filter_map(|field| match field.value {
+                    tairix_log::FieldValue::UnsignedInt(value) => {
+                        Some((field.key.to_string(), value))
+                    }
+                    _ => None,
+                })
+                .collect();
+            self.events.borrow_mut().push((
+                event.level,
+                event.id.0,
+                event.message.to_string(),
+                unsigned,
+            ));
         }
     }
 }

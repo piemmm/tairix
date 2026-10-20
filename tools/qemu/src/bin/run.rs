@@ -111,7 +111,7 @@ fn main() -> ExitCode {
         spec = spec.with_virtio_net_dgram(qemu_sock, peer_sock, pcap);
     }
     if ramfb {
-        spec = spec.with_ramfb();
+        spec = spec.with_display(tairix_qemu::Display::Ramfb);
     }
     if let Some((marker, key)) = keyboard {
         spec = spec.with_virtio_keyboard(marker, key);

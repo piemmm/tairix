@@ -132,17 +132,6 @@ pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
     ]
 }
 
-/// Absolute path of the graphical login screen's `Run` binary — the
-/// service the authority starts as the `greeter` account when a graphical
-/// login round begins (`plans/NEW-DESKTOP-LOGIN.md` G3). It draws the login
-/// screen and asks the authority's `session-v1` endpoint; it can neither
-/// read the user database nor start a process.
-///
-/// One OS-wide spelling, matching the bundle the image plants under
-/// `/System/Services`: the launcher spawns this path and the availability
-/// probe checks the same one, so the two can never name different bundles.
-pub const GREETER_SERVICE_PATH: &str = "/System/Services/greeter.app/Run";
-
 /// The program a session of `kind` runs for `user`: the authenticated
 /// account's own shell of choice for a text session, the desktop session
 /// component ([`DESKTOP_RUN_PATH`]) for a graphical one.

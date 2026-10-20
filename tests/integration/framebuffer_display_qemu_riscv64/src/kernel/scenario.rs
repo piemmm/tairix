@@ -13,11 +13,12 @@ use alloc::vec::Vec;
 use core::num::NonZeroU16;
 use core::ptr;
 
-use tairix_abi::driver::display::{Display, DisplayFormat};
+use tairix_abi::driver::display::DisplayFormat;
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
 use tairix_arch_riscv64::{qemu_exit, SERIAL_SINK};
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
+use tairix_display::testkit::HeapMemory;
 use tairix_display::{Framebuffer, FramebufferConfig};
 use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
@@ -349,10 +350,11 @@ fn present_and_verify(
     phase: &str,
 ) {
     {
-        let Ok(mut fb) = Framebuffer::open(fb_host, config) else {
+        let memory = HeapMemory::default();
+        let Ok(mut fb) = Framebuffer::open(fb_host, config, memory.clone()) else {
             fail(phase_msg(phase, "Framebuffer::open"));
         };
-        if fb.present(frame).is_err() {
+        if memory.present_whole(&mut fb, frame).is_err() {
             fail(phase_msg(phase, "present"));
         }
         // `fb` drops here, releasing its window handle (the quiesce step).

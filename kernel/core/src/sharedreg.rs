@@ -113,7 +113,7 @@ impl DmaRegion {
 }
 
 /// `chunks` as the blocks a translation maps, end to end.
-fn dma_blocks(chunks: &[SharedChunk]) -> Result<SmallVec<FrameBlock, 1>, DmaError> {
+pub(crate) fn dma_blocks(chunks: &[SharedChunk]) -> Result<SmallVec<FrameBlock, 1>, DmaError> {
     let mut blocks = SmallVec::new();
     blocks
         .try_reserve(chunks.len())

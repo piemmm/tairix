@@ -1,6 +1,6 @@
-//! Unit tests for the VESA driver: the VBE `ModeInfoBlock` decoder and
-//! the linear-framebuffer surface against an in-process mock
-//! [`MmioMapper`] (mirrors the framebuffer and bus drivers' `MockMapper`).
+//! Unit tests for the VESA driver: the VBE `ModeInfoBlock` decoder, and the
+//! surface it opens through the shared engine against an in-process mock
+//! [`MmioMapper`].
 
 extern crate alloc;
 
@@ -12,8 +12,10 @@ use core::ptr::NonNull;
 
 use super::*;
 use core::cell::Cell;
+use tairix_abi::driver::display::{DamageRect, Display, DisplayMode, Presented, SeatGate};
 use tairix_abi::driver::DriverKind;
 use tairix_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
+use tairix_display::testkit::HeapMemory;
 
 /// Build a well-formed VBE `ModeInfoBlock` describing a 32-bpp
 /// direct-colour linear-framebuffer mode with the `Bgra8888` layout
@@ -159,129 +161,108 @@ fn register_requires_drv_load() {
 #[test]
 fn parse_decodes_bgra_geometry() {
     let block = bgra_block(4, 2, 16, 0xFD00_0000);
-    let info = VbeModeInfo::parse(&block).expect("valid block");
     assert_eq!(
-        info,
-        VbeModeInfo {
+        parse_mode_info(&block),
+        Ok(FramebufferConfig {
             phys_base: 0xFD00_0000,
             width_px: 4,
             height_px: 2,
             stride_bytes: 16,
             format: DisplayFormat::Bgra8888,
-        }
+        })
     );
 }
 
 #[test]
 fn parse_decodes_rgba_layout() {
     let mut block = bgra_block(4, 2, 16, 0xFD00_0000);
-    // Swap red/blue field positions: red at byte 0 → Rgba8888.
     block[field::RED_FIELD_POSITION] = 0;
     block[field::BLUE_FIELD_POSITION] = 16;
-    let info = VbeModeInfo::parse(&block).expect("valid block");
-    assert_eq!(info.format, DisplayFormat::Rgba8888);
+    assert_eq!(
+        parse_mode_info(&block).map(|config| config.format),
+        Ok(DisplayFormat::Rgba8888)
+    );
 }
 
 #[test]
 fn parse_rejects_short_block() {
     let short = vec![0u8; VBE_MODE_INFO_BLOCK_LEN - 1];
-    assert_eq!(VbeModeInfo::parse(&short), Err(DriverError::BufferTooSmall));
+    assert_eq!(parse_mode_info(&short), Err(DriverError::BufferTooSmall));
 }
 
 #[test]
-fn parse_rejects_unsupported_mode_attribute() {
-    let mut block = bgra_block(4, 2, 16, 0xFD00_0000);
-    // Clear the "mode supported" bit (bit 0); keep the LFB bit.
-    let attrs = MODE_ATTR_LINEAR_FRAMEBUFFER;
-    block[field::MODE_ATTRIBUTES..field::MODE_ATTRIBUTES + 2].copy_from_slice(&attrs.to_le_bytes());
-    assert_eq!(VbeModeInfo::parse(&block), Err(DriverError::Unsupported));
-}
-
-#[test]
-fn parse_rejects_non_linear_framebuffer() {
-    let mut block = bgra_block(4, 2, 16, 0xFD00_0000);
-    // Keep supported, drop the linear-framebuffer bit.
-    let attrs = MODE_ATTR_SUPPORTED;
-    block[field::MODE_ATTRIBUTES..field::MODE_ATTRIBUTES + 2].copy_from_slice(&attrs.to_le_bytes());
-    assert_eq!(VbeModeInfo::parse(&block), Err(DriverError::Unsupported));
-}
-
-#[test]
-fn parse_rejects_non_direct_colour_model() {
-    let mut block = bgra_block(4, 2, 16, 0xFD00_0000);
-    block[field::MEMORY_MODEL] = 4; // packed-pixel, not direct colour.
-    assert_eq!(VbeModeInfo::parse(&block), Err(DriverError::Unsupported));
-}
-
-#[test]
-fn parse_rejects_non_32bpp() {
-    let mut block = bgra_block(4, 2, 16, 0xFD00_0000);
-    block[field::BITS_PER_PIXEL] = 24;
-    assert_eq!(VbeModeInfo::parse(&block), Err(DriverError::Unsupported));
-}
-
-#[test]
-fn parse_rejects_non_8bit_channel_masks() {
-    let mut block = bgra_block(4, 2, 16, 0xFD00_0000);
-    block[field::GREEN_MASK_SIZE] = 6; // 5-6-5-style mask.
-    assert_eq!(VbeModeInfo::parse(&block), Err(DriverError::Unsupported));
-}
-
-#[test]
-fn parse_rejects_unknown_channel_layout() {
-    let mut block = bgra_block(4, 2, 16, 0xFD00_0000);
-    // Green at byte 0 is neither Bgra8888 nor Rgba8888.
-    block[field::RED_FIELD_POSITION] = 8;
-    block[field::GREEN_FIELD_POSITION] = 0;
-    block[field::BLUE_FIELD_POSITION] = 16;
-    assert_eq!(VbeModeInfo::parse(&block), Err(DriverError::Unsupported));
-}
-
-#[test]
-fn parse_rejects_zero_phys_base() {
-    let block = bgra_block(4, 2, 16, 0);
-    assert_eq!(VbeModeInfo::parse(&block), Err(DriverError::DeviceFault));
-}
-
-#[test]
-fn parse_rejects_degenerate_geometry() {
+fn parse_rejects_every_mode_it_cannot_present() {
+    let set = |block: &mut Vec<u8>, at: usize, value: u8| block[at] = value;
+    let mut cases: Vec<Vec<u8>> = Vec::new();
+    for attrs in [MODE_ATTR_LINEAR_FRAMEBUFFER, MODE_ATTR_SUPPORTED] {
+        let mut block = bgra_block(4, 2, 16, 0xFD00_0000);
+        block[field::MODE_ATTRIBUTES..field::MODE_ATTRIBUTES + 2]
+            .copy_from_slice(&attrs.to_le_bytes());
+        cases.push(block);
+    }
+    for (at, value) in [
+        (field::MEMORY_MODEL, 4),
+        (field::BITS_PER_PIXEL, 24),
+        (field::GREEN_MASK_SIZE, 6),
+    ] {
+        let mut block = bgra_block(4, 2, 16, 0xFD00_0000);
+        set(&mut block, at, value);
+        cases.push(block);
+    }
+    let mut layout = bgra_block(4, 2, 16, 0xFD00_0000);
+    set(&mut layout, field::RED_FIELD_POSITION, 8);
+    set(&mut layout, field::GREEN_FIELD_POSITION, 0);
+    set(&mut layout, field::BLUE_FIELD_POSITION, 16);
+    cases.push(layout);
+    for block in cases {
+        assert_eq!(parse_mode_info(&block), Err(DriverError::Unsupported));
+    }
     assert_eq!(
-        VbeModeInfo::parse(&bgra_block(0, 2, 16, 0xFD00_0000)),
-        Err(DriverError::LengthOutOfRange)
-    );
-    assert_eq!(
-        VbeModeInfo::parse(&bgra_block(4, 0, 16, 0xFD00_0000)),
-        Err(DriverError::LengthOutOfRange)
-    );
-    // Stride too small to hold one 4-pixel 32-bpp scanline (needs 16).
-    assert_eq!(
-        VbeModeInfo::parse(&bgra_block(4, 2, 12, 0xFD00_0000)),
-        Err(DriverError::LengthOutOfRange)
+        parse_mode_info(&bgra_block(4, 2, 16, 0)),
+        Err(DriverError::DeviceFault),
+        "a block naming no surface"
     );
 }
 
 #[test]
-fn open_reports_decoded_mode() {
-    // 4x2 32-bpp, stride 16 → 32-byte surface, 8 backing words.
+fn open_refuses_a_degenerate_geometry_the_block_carries() {
     let host = MockHost::full(8);
-    let fb = VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0xFD00_0000)).expect("open");
+    for block in [
+        bgra_block(0, 2, 16, 0xFD00_0000),
+        bgra_block(4, 0, 16, 0xFD00_0000),
+        bgra_block(4, 2, 12, 0xFD00_0000),
+    ] {
+        assert_eq!(
+            open(&host, &block, HeapMemory::default()).err(),
+            Some(DriverError::LengthOutOfRange)
+        );
+    }
+}
+
+#[test]
+fn open_reports_the_decoded_mode_and_presents_through_the_engine() {
+    let host = MockHost::full(8);
+    let frame: Vec<u8> = (0..32u8).collect();
+    let memory = HeapMemory::default();
+    let mut fb = open(&host, &bgra_block(4, 2, 16, 0xFD00_0000), memory.clone()).expect("open");
     assert_eq!(
-        fb.output().expect("an output"),
-        DisplayMode {
+        fb.output(),
+        Some(DisplayMode {
             width_px: 4,
             height_px: 2,
             stride_bytes: 16,
             format: DisplayFormat::Bgra8888,
-        }
+        })
     );
-}
-
-#[test]
-fn present_copies_frame_bytes_into_surface() {
-    let host = MockHost::full(8);
-    let mut fb = VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0xFD00_0000)).expect("open");
-    let frame: Vec<u8> = (0..32u8).collect();
-    fb.present(&frame).expect("present");
+    let buffer = fb.alloc_buffer(4, 2).expect("a buffer");
+    memory.fill(buffer.region, &frame).expect("drawn");
+    let whole = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 4,
+        height_px: 2,
+    };
+    assert_eq!(fb.present(buffer.id, &[whole]), Ok(Presented::Shown));
     let mapper = host.mapper.as_ref().expect("mapper");
     for (off, expected) in frame.iter().enumerate() {
         assert_eq!(mapper.byte(off), *expected, "byte {off}");
@@ -289,148 +270,72 @@ fn present_copies_frame_bytes_into_surface() {
 }
 
 #[test]
-fn present_handles_non_word_multiple_surface() {
-    // stride 13 (one byte of scanline padding past 3*4) × 2 rows = 26
-    // bytes: exercises the `u32` bulk path plus the 2-byte tail. The
-    // stride still holds a 3-pixel 32-bpp scanline (needs 12).
-    let host = MockHost::full(8); // 32 bytes backing ≥ 26.
-    let mut fb = VesaFramebuffer::open(&host, &bgra_block(3, 2, 13, 0xFD00_0000)).expect("open");
-    let frame: Vec<u8> = (0..26u8).map(|b| b.wrapping_mul(7)).collect();
-    fb.present(&frame).expect("present");
-    let mapper = host.mapper.as_ref().expect("mapper");
-    for (off, expected) in frame.iter().enumerate() {
-        assert_eq!(mapper.byte(off), *expected, "byte {off}");
-    }
-}
-
-#[test]
-fn present_rejects_short_frame() {
-    let host = MockHost::full(8);
-    let mut fb = VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0xFD00_0000)).expect("open");
-    let short = vec![0u8; 31];
-    assert_eq!(fb.present(&short), Err(DriverError::BufferTooSmall));
-}
-
-#[test]
-fn present_ignores_trailing_bytes_of_oversized_frame() {
-    // 9 backing words (36 bytes) so the post-surface probe at byte 32
-    // stays in bounds.
-    let host = MockHost::full(9);
-    let mut fb = VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0xFD00_0000)).expect("open");
-    let mut frame = vec![0xABu8; 32];
-    frame.extend_from_slice(&[0xFFu8; 16]); // 48 bytes; last 16 ignored.
-    fb.present(&frame).expect("present");
-    let mapper = host.mapper.as_ref().expect("mapper");
-    for off in 0..32 {
-        assert_eq!(mapper.byte(off), 0xAB, "byte {off}");
-    }
-    assert_eq!(mapper.byte(32), 0x00);
-}
-
-#[test]
-fn open_requires_mmio_map_capability_on_host() {
-    let host = MockHost {
+fn open_surfaces_every_refusal() {
+    let block = bgra_block(4, 2, 16, 0xFD00_0000);
+    let no_cap = MockHost {
         drv_load: true,
         mmio_map: false,
         mapper: Some(MockMapper::new(8, true)),
         gate: None,
     };
     assert_eq!(
-        VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0xFD00_0000)).err(),
+        open(&no_cap, &block, HeapMemory::default()).err(),
         Some(DriverError::PermissionDenied)
     );
-}
-
-#[test]
-fn open_surfaces_mapper_capability_denial() {
-    let host = MockHost {
+    let refused = MockHost {
         drv_load: true,
         mmio_map: true,
         mapper: Some(MockMapper::new(8, false)),
         gate: None,
     };
     assert_eq!(
-        VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0xFD00_0000)).err(),
+        open(&refused, &block, HeapMemory::default()).err(),
         Some(DriverError::PermissionDenied)
     );
-}
-
-#[test]
-fn open_without_mapper_is_unsupported() {
-    let host = MockHost {
+    let no_mapper = MockHost {
         drv_load: true,
         mmio_map: true,
         mapper: None,
         gate: None,
     };
     assert_eq!(
-        VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0xFD00_0000)).err(),
+        open(&no_mapper, &block, HeapMemory::default()).err(),
         Some(DriverError::Unsupported)
     );
-}
-
-#[test]
-fn open_rejects_region_larger_than_platform_can_map() {
-    // 4x2 stride 16 = 32 bytes, but only 4 backing words (16 bytes).
-    let host = MockHost::full(4);
     assert_eq!(
-        VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0xFD00_0000)).err(),
-        Some(DriverError::Unsupported)
+        open(&MockHost::full(4), &block, HeapMemory::default()).err(),
+        Some(DriverError::Unsupported),
+        "a surface larger than the platform maps"
+    );
+    assert_eq!(
+        open(&MockHost::full(8), &block[..8], HeapMemory::default()).err(),
+        Some(DriverError::BufferTooSmall)
     );
 }
 
 #[test]
-fn open_surfaces_parse_failure() {
-    let host = MockHost::full(8);
-    // Zero phys base fails the parse before any mapping is attempted.
-    assert_eq!(
-        VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0)).err(),
-        Some(DriverError::DeviceFault)
-    );
-}
-
-#[test]
-fn present_gates_on_the_live_seat_lease() {
+fn a_present_is_gated_on_the_live_seat_lease() {
     let mut host = MockHost::full(8);
     host.gate = Some(MockGate {
-        verdict: Cell::new(Ok(())),
+        verdict: Cell::new(Err(DriverError::SeatRevoked)),
     });
-    let block = bgra_block(4, 2, 16, 0xFD00_0000);
-    let mut fb = VesaFramebuffer::open(&host, &block).expect("open");
-    fb.present(&[0x11u8; 32]).expect("live lease presents");
-
-    // The lease is revoked between frames: the very next present is
-    // refused with the distinct error before any surface access, so the
-    // scan-out keeps the last-presented frame even though the mapping
-    // still exists.
-    let gate = host.gate.as_ref().expect("gate installed");
-    gate.verdict.set(Err(DriverError::SeatRevoked));
-    assert_eq!(fb.present(&[0x22u8; 32]), Err(DriverError::SeatRevoked));
-    let mapper = host.mapper.as_ref().expect("mapper installed");
-    assert_eq!(mapper.byte(0), 0x11);
-    assert_eq!(mapper.byte(31), 0x11);
-
-    // Once the host's gate reports a live lease again (the new
-    // foreground's grant), presents flow.
-    gate.verdict.set(Ok(()));
-    fb.present(&[0x22u8; 32])
-        .expect("live lease presents again");
-    assert_eq!(mapper.byte(0), 0x22);
-}
-
-#[test]
-fn unload_then_reload_presents_again() {
-    let host = MockHost::full(8);
-    let block = bgra_block(4, 2, 16, 0xFD00_0000);
-    {
-        let mut fb = VesaFramebuffer::open(&host, &block).expect("first load");
-        fb.present(&[0x11u8; 32]).expect("present");
-        // `fb` drops here — the unload step (the window is released).
-    }
-    let mut reloaded = VesaFramebuffer::open(&host, &block).expect("reload");
-    reloaded.present(&[0x22u8; 32]).expect("present");
+    let memory = HeapMemory::default();
+    let mut fb = open(&host, &bgra_block(4, 2, 16, 0xFD00_0000), memory.clone()).expect("open");
+    let allocated = fb.alloc_buffer(4, 2).expect("a buffer");
+    memory.fill(allocated.region, &[0x11; 32]).expect("drawn");
+    let buffer = allocated.id;
+    let whole = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 4,
+        height_px: 2,
+    };
+    assert_eq!(fb.present(buffer, &[whole]), Err(DriverError::SeatRevoked));
     let mapper = host.mapper.as_ref().expect("mapper");
-    for off in 0..32 {
-        assert_eq!(mapper.byte(off), 0x22, "byte {off}");
+    assert_eq!(mapper.byte(0), 0x00);
+    if let Some(gate) = host.gate.as_ref() {
+        gate.verdict.set(Ok(()));
     }
+    assert_eq!(fb.present(buffer, &[whole]), Ok(Presented::Shown));
+    assert_eq!(mapper.byte(0), 0x11);
 }

@@ -1,38 +1,19 @@
-//! Boot-display publication (`plans/DISPLAY.md` D7d).
+//! Where the framebuffer console is shown, decided once discovery is done
+//! ([`place_console`], `plans/DISPLAY.md` D7d).
 //!
-//! When an architecture port's boot path brings a framebuffer boot
-//! console up, the machine has exactly one platform-programmed linear
-//! scan-out surface — and until now it existed only as console state, so
-//! the user-space display service (`drivers/display/framebuffer`) had no
-//! display node to autoload against. This module is the arch-neutral
-//! publication step: it turns the port's *discovered* scan-out facts
-//! (base, geometry, pixel format — never a board constant) into a
-//! [`HwDeviceClass::Display`] hardware-tree node carrying the
-//! geometry-carrying [`HwResource::framebuffer`] grant request and the
-//! canonical [`SIMPLE_FRAMEBUFFER_COMPATIBLE`] match key the display
-//! service's `BIND_KEYS` binds.
+//! A display engine discovery found takes the screen over and hosts the
+//! console: its node states [`HwProperty::ConsoleHost`], its driver hosts the
+//! console on memory the kernel owns (`console_adopt`), and every firmware
+//! surface is withheld, so nothing writes or scans out memory the firmware may
+//! take back. Otherwise a surface the firmware lit is published as a
+//! [`HwDeviceClass::Display`] node carrying its [`HwResource::framebuffer`]
+//! grant and the [`SIMPLE_FRAMEBUFFER_COMPATIBLE`] key the framebuffer driver
+//! binds, in place of the firmware's own `simple-framebuffer` nodes, which
+//! carry no geometry a grant needs.
 //!
-//! Where the port knows a display engine that takes the screen over from the
-//! firmware, no boot display node is published: the engine's node states
-//! [`HwProperty::BootConsole`] instead ([`mark_boot_console`]), and its driver
-//! moves the console onto memory the kernel owns (`console_relocate`) before
-//! it tells the firmware the display is the ARM's, so nothing scans out or
-//! writes the firmware's surface once the firmware may take it back.
-//!
-//! The firmware's own `simple-framebuffer` nodes describing that surface are
-//! withheld ([`withhold_firmware_surfaces`]): the walk publishes one with only
-//! its register window, never the geometry a grant needs, so a driver bound to
-//! it could serve nothing, and the console is already described.
-//!
-//! The node rides the same boot-discovered tree the block and input
-//! probes buffer, so the pre-unlock autoload matches it exactly like any
-//! other discovered device: the signed store scan finds the display
-//! bundle, `lib/devmatch` resolves the node to it, and the spawn path
-//! mints exactly one `CAP_MMIO_MAP`-gated surface grant. Seat identity is
-//! untouched: the boot display *is* the boot seat's display
-//! (`SEAT_PRIMARY` always exists), so no seat is minted here — only a
-//! runtime `hw_emit_node` display publication creates a further seat
-//! (`plans/DISPLAY.md` D6).
+//! The node joins the boot-discovered tree, so autoload matches it as any
+//! other device. The boot display is the boot seat's display, so no seat is
+//! minted here (`plans/DISPLAY.md` D6).
 
 use alloc::vec::Vec;
 
@@ -73,18 +54,22 @@ pub struct BootScanout {
 }
 
 impl BootScanout {
+    /// The mode the surface runs.
+    const fn mode(&self) -> DisplayMode {
+        DisplayMode {
+            width_px: self.width_px,
+            height_px: self.height_px,
+            stride_bytes: self.stride_bytes,
+            format: self.format,
+        }
+    }
+
     /// The surface as the one [`HwResource::framebuffer`] grant request a
     /// node carries, sized and validated from the discovered mode, or `None`
     /// for a degenerate mode (zero extent, an under-sized stride, an
     /// overflowing length) no correct, bounded grant can be minted for.
     fn grant(&self) -> Option<HwResource> {
-        let mode = DisplayMode {
-            width_px: self.width_px,
-            height_px: self.height_px,
-            stride_bytes: self.stride_bytes,
-            format: self.format,
-        };
-        HwResource::framebuffer(self.base, &mode, self.memory).ok()
+        HwResource::framebuffer(self.base, &self.mode(), self.memory).ok()
     }
 }
 
@@ -101,7 +86,7 @@ impl BootScanout {
 ///
 /// Propagates the sink's [`DiscoveryError`] verbatim (a full bounded sink);
 /// the caller leaves the display unpublished on any error (fail closed).
-pub fn observe_boot_display(
+fn observe_boot_display(
     scanout: &BootScanout,
     sink: &mut dyn HwNodeSink,
 ) -> Result<(), DiscoveryError> {
@@ -125,7 +110,7 @@ pub fn observe_boot_display(
 /// The firmware surfaces the platform's own description of the display stands
 /// in for.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum FirmwareSurfaces {
+enum FirmwareSurfaces {
     /// A display engine takes the screen over, and every firmware surface
     /// with it, as Linux's `vc4` removes every firmware framebuffer.
     TakenOver,
@@ -147,9 +132,11 @@ impl FirmwareSurfaces {
         is_surface
             && match self {
                 Self::TakenOver => true,
+                // A surface stands for the window at its base, however
+                // degenerate the mode its length came from.
                 Self::Published { base, len } => node.resources().iter().any(|window| {
                     window.kind() == Some(HwResourceKind::Mmio)
-                        && window.base() < base.saturating_add(len)
+                        && window.base() < base.saturating_add(len.max(1))
                         && base < window.base().saturating_add(window.length())
                 }),
             }
@@ -158,7 +145,7 @@ impl FirmwareSurfaces {
 
 /// Withhold from `sink` the firmware's `simple-framebuffer` nodes `surfaces`
 /// stands in for, and anything discovered beneath one.
-pub fn withhold_firmware_surfaces(sink: &mut CollectingHwNodeSink, surfaces: FirmwareSurfaces) {
+fn withhold_firmware_surfaces(sink: &mut CollectingHwNodeSink, surfaces: FirmwareSurfaces) {
     let mut withheld: Vec<u32> = Vec::new();
     sink.retain(|node| {
         let excluded = withheld.contains(&node.parent()) || surfaces.stands_in_for(node);
@@ -169,15 +156,73 @@ pub fn withhold_firmware_surfaces(sink: &mut CollectingHwNodeSink, surfaces: Fir
     });
 }
 
-/// State on `engine`, the node of the display engine that takes the screen
-/// over, that the boot console is its to move; answers whether it was stated.
-///
-/// An engine node with no room left states nothing, and its driver then
-/// sets its outputs up without the console.
-pub fn mark_boot_console(engine: &mut HwNode) -> bool {
-    engine
-        .push_resource(HwResource::property(HwProperty::BootConsole, 1))
-        .is_ok()
+/// Where [`place_console`] decided the framebuffer console is shown.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ConsolePlacement {
+    /// A display engine hosts it, taking the screen over from any firmware
+    /// surface.
+    Hosted,
+    /// The firmware's surface shows it, published as the boot display.
+    Firmware,
+    /// An engine takes the screen over but could not be told it hosts the
+    /// console, so nothing may paint the firmware's surface.
+    Displaced,
+    /// No display exists.
+    Nowhere,
+}
+
+/// The first virtio GPU discovery found: a display engine that takes the
+/// screen over and hosts the console.
+#[must_use]
+pub fn virtio_gpu(sink: &CollectingHwNodeSink) -> Option<u32> {
+    let key = HwMatchKey::virtio(tairix_abi::driver::virtio::VIRTIO_GPU_DEVICE_ID);
+    sink.nodes()
+        .iter()
+        .find(|node| {
+            node.class() == Some(HwDeviceClass::Display) && node.match_keys().contains(&key)
+        })
+        .map(HwNode::id)
+}
+
+/// Decide, once discovery is done, where the framebuffer console is shown:
+/// on `host`, the node of the display engine that takes the screen over,
+/// which is told it hosts the console and takes every firmware surface with
+/// it; else on the firmware's `scanout`, published as the boot display node in
+/// place of the firmware's own description of it.
+pub fn place_console(
+    sink: &mut CollectingHwNodeSink,
+    host: Option<u32>,
+    scanout: Option<&BootScanout>,
+) -> ConsolePlacement {
+    if let Some(host) = host {
+        let marked = sink
+            .nodes_mut()
+            .iter_mut()
+            .find(|node| node.id() == host)
+            .is_some_and(|node| {
+                node.push_resource(HwResource::property(HwProperty::ConsoleHost, 1))
+                    .is_ok()
+            });
+        withhold_firmware_surfaces(sink, FirmwareSurfaces::TakenOver);
+        return if marked {
+            ConsolePlacement::Hosted
+        } else {
+            ConsolePlacement::Displaced
+        };
+    }
+    let Some(scanout) = scanout else {
+        return ConsolePlacement::Nowhere;
+    };
+    withhold_firmware_surfaces(
+        sink,
+        FirmwareSurfaces::Published {
+            base: scanout.base,
+            len: scanout.mode().len_bytes(),
+        },
+    );
+    // The collecting sink never fills; a degenerate mode publishes nothing.
+    let _ = observe_boot_display(scanout, sink);
+    ConsolePlacement::Firmware
 }
 
 #[cfg(test)]
@@ -245,24 +290,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_engine_taking_the_screen_over_is_told_the_console_and_granted_no_surface() {
-        let mut engine = HwNode::new(9, HW_NODE_ROOT_ID, HwDeviceClass::Other);
-        assert!(mark_boot_console(&mut engine));
-        assert_eq!(engine.property(HwProperty::BootConsole), Some(1));
-        assert!(
-            !engine
-                .resources()
-                .iter()
-                .any(|resource| resource.kind() == Some(HwResourceKind::Framebuffer)),
-            "the firmware's surface is never the engine's to reach"
-        );
-        assert!(
-            engine.match_keys().is_empty(),
-            "the engine keeps its own binding"
-        );
-    }
-
     /// A firmware `simple-framebuffer` node at `base`, as the walk publishes
     /// it: its register window and nothing else.
     fn firmware_surface(id: u32, base: u64) -> HwNode {
@@ -287,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn an_engine_taking_the_screen_over_leaves_no_firmware_surface_to_bind() {
+    fn an_engine_taking_the_screen_over_hosts_the_console_and_leaves_no_firmware_surface() {
         let engine = HwNode::new(1, HW_NODE_ROOT_ID, HwDeviceClass::Other);
         let child = HwNode::new(4, 2, HwDeviceClass::Other);
         let mut sink = collected(&[
@@ -296,8 +323,80 @@ mod tests {
             firmware_surface(3, 0x1000_0000),
             child,
         ]);
-        withhold_firmware_surfaces(&mut sink, FirmwareSurfaces::TakenOver);
+        let scanout = BootScanout {
+            base: 0x3e40_2000,
+            ..ramfb_scanout()
+        };
+        assert_eq!(
+            place_console(&mut sink, Some(1), Some(&scanout)),
+            ConsolePlacement::Hosted
+        );
         assert_eq!(ids(&sink), [1], "every surface, and what hangs beneath one");
+        let engine = sink.nodes()[0];
+        assert_eq!(engine.property(HwProperty::ConsoleHost), Some(1));
+        assert!(
+            !engine
+                .resources()
+                .iter()
+                .any(|resource| resource.kind() == Some(HwResourceKind::Framebuffer)),
+            "the firmware's surface is never the engine's to reach"
+        );
+        assert!(
+            engine.match_keys().is_empty(),
+            "the engine keeps its own binding"
+        );
+    }
+
+    #[test]
+    fn an_engine_no_firmware_lit_still_hosts_the_console() {
+        let mut sink = collected(&[HwNode::new(1, HW_NODE_ROOT_ID, HwDeviceClass::Display)]);
+        assert_eq!(
+            place_console(&mut sink, Some(1), None),
+            ConsolePlacement::Hosted
+        );
+        assert_eq!(sink.nodes()[0].property(HwProperty::ConsoleHost), Some(1));
+    }
+
+    #[test]
+    fn the_first_virtio_gpu_is_the_engine_that_hosts_the_console() {
+        let gpu = |id| {
+            let mut node = HwNode::new(id, HW_NODE_ROOT_ID, HwDeviceClass::Display);
+            node.push_match_key(HwMatchKey::virtio(
+                tairix_abi::driver::virtio::VIRTIO_GPU_DEVICE_ID,
+            ))
+            .expect("room");
+            node
+        };
+        let mut sound = HwNode::new(5, HW_NODE_ROOT_ID, HwDeviceClass::Audio);
+        sound.push_match_key(HwMatchKey::virtio(25)).expect("room");
+        let mut sink = collected(&[sound, firmware_surface(6, 0x3e40_2000), gpu(7), gpu(8)]);
+        let host = virtio_gpu(&sink);
+        assert_eq!(host, Some(7));
+        assert_eq!(
+            place_console(&mut sink, host, None),
+            ConsolePlacement::Hosted
+        );
+        assert_eq!(ids(&sink), [5, 7, 8], "no firmware surface beside it");
+        assert_eq!(sink.nodes()[1].property(HwProperty::ConsoleHost), Some(1));
+        assert_eq!(sink.nodes()[2].property(HwProperty::ConsoleHost), None);
+        assert_eq!(virtio_gpu(&collected(&[sound])), None);
+    }
+
+    #[test]
+    fn an_engine_that_cannot_be_told_still_takes_the_screen_and_shows_nothing() {
+        let mut full = HwNode::new(1, HW_NODE_ROOT_ID, HwDeviceClass::Display);
+        while full.push_resource(HwResource::mmio(0x1000, 0x1000)).is_ok() {}
+        let mut sink = collected(&[full, firmware_surface(2, 0x3e40_2000)]);
+        assert_eq!(
+            place_console(&mut sink, Some(1), Some(&ramfb_scanout())),
+            ConsolePlacement::Displaced
+        );
+        assert_eq!(ids(&sink), [1], "no boot display for a screen taken over");
+        assert_eq!(
+            place_console(&mut collected(&[]), Some(9), None),
+            ConsolePlacement::Displaced,
+            "an engine whose node is not in the tree"
+        );
     }
 
     #[test]
@@ -306,22 +405,28 @@ mod tests {
             firmware_surface(2, 0x3e40_2000),
             firmware_surface(3, 0x1000_0000),
         ]);
-        withhold_firmware_surfaces(
-            &mut sink,
-            FirmwareSurfaces::Published {
-                base: 0x3e40_2000,
-                len: 0x7f_8000,
-            },
+        let scanout = BootScanout {
+            base: 0x3e40_2000,
+            ..ramfb_scanout()
+        };
+        assert_eq!(
+            place_console(&mut sink, None, Some(&scanout)),
+            ConsolePlacement::Firmware
         );
-        observe_boot_display(
-            &BootScanout {
-                base: 0x3e40_2000,
-                ..ramfb_scanout()
-            },
-            &mut sink,
-        )
-        .expect("the heap grows");
         assert_eq!(ids(&sink), [3, BOOT_DISPLAY_NODE_ID]);
+        assert_eq!(
+            place_console(&mut collected(&[]), None, None),
+            ConsolePlacement::Nowhere
+        );
+        // A mode with no length still stands for the surface at its base.
+        let mut sink = collected(&[firmware_surface(2, 0x3e40_2000)]);
+        let degenerate = BootScanout {
+            base: 0x3e40_2000,
+            height_px: 0,
+            ..ramfb_scanout()
+        };
+        let _ = place_console(&mut sink, None, Some(&degenerate));
+        assert!(!ids(&sink).contains(&2), "{:?}", ids(&sink));
     }
 
     #[test]

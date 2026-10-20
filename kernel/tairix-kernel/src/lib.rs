@@ -226,11 +226,11 @@ pub mod pci_probe;
 // into a display-class hardware-tree node carrying the geometry-carrying
 // `Framebuffer` grant request and the canonical `simple-framebuffer`
 // match key, so the user-space display service autoloads against the boot
-// display exactly like any other discovered device. Architecture-neutral
-// (plain discovered values in, `lib/abi` node out) and host-tested on the
-// CI host; gated, like `root_storage` whose buffered tree it feeds, on
-// the two instruction sets where the boot tree assembly compiles.
-#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+// display exactly like any other discovered device, and where the
+// framebuffer console is shown. Architecture-neutral (plain discovered
+// values in, `lib/abi` node out) and host-tested on the CI host; gated on
+// the instruction sets whose boot path assembles a tree.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod boot_display;
 
 // The runtime hardware-inventory store (Design D, D1 —
@@ -469,6 +469,11 @@ pub mod supervisor_host;
 // console is the SBI console), so it is excluded.
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", test))]
 pub mod console_uart;
+
+// The console and seat layout every port installs, over the one framebuffer
+// console each hosts (`plans/FINISH-x86_64.md` F2).
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod console_layout;
 
 // The architecture ports. Each subtree gathers exactly one instruction
 // set's `KernelArch` wrapper, fail-closed dispatch callback, production

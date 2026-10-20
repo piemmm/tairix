@@ -235,16 +235,6 @@ pub fn flush_serial_blocking() {
     CONSOLE.flush();
 }
 
-/// Format one event in the shared diagnostic line shape, stamped with uptime
-/// and a coloured level tag (a serial capture and the framebuffer console both
-/// render ANSI colour).
-///
-/// Used by the direct paths only ([`ConsoleWriter`]); the queued path renders
-/// inside the shared engine, in the same shape.
-fn write_formatted<W: core::fmt::Write>(w: &mut W, event: &Event<'_>) {
-    tairix_log::write_diag_line(w, Some(crate::kernel_arch::uptime_ms()), true, event);
-}
-
 /// Read one byte from the console **without blocking**, or `None` when the
 /// receive FIFO is empty.
 ///
@@ -510,22 +500,13 @@ pub fn beacon(tag: &str) {
     tx_send_bounded(b'\n');
 }
 
-/// [`core::fmt::Write`] adapter for the diagnostic line path that routes by
-/// build profile: a development build sends the whole stream to the serial
-/// line, so a capture carries the full diagnostic stream while the screen
-/// stays clear for the session; a shippable build renders on the framebuffer
-/// when one is configured.
-///
-/// Serial bytes get line-ending translation so a captured log renders line
-/// breaks; the framebuffer renderer interprets a bare newline itself.
+/// [`core::fmt::Write`] adapter for the diagnostic line path, straight to the
+/// serial line, with line-ending translation so a captured log renders line
+/// breaks.
 pub struct ConsoleWriter;
 
 impl core::fmt::Write for ConsoleWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        if !cfg!(debug_assertions) && crate::video::is_active() {
-            crate::video::write_bytes(s.as_bytes());
-            return Ok(());
-        }
         for byte in s.bytes() {
             if byte == b'\n' {
                 tx_send_bounded(b'\r');
@@ -546,6 +527,12 @@ impl SerialSink {
     pub const fn new() -> Self {
         Self
     }
+
+    /// Milliseconds since boot, as this console stamps its records.
+    #[must_use]
+    pub fn uptime_ms(&self) -> Option<u64> {
+        CONSOLE.tx().uptime_ms()
+    }
 }
 
 impl Default for SerialSink {
@@ -556,15 +543,6 @@ impl Default for SerialSink {
 
 impl Sink for SerialSink {
     fn write_event(&self, event: &Event<'_>) {
-        // A shippable build with a live framebuffer renders straight to the
-        // screen: that is the user-facing console, and a framebuffer write is
-        // a memory store, not a slow transmit, so there is nothing to decouple
-        // from — the queue exists for the UART's byte rate.
-        if !cfg!(debug_assertions) && crate::video::is_active() {
-            let mut w = ConsoleWriter;
-            write_formatted(&mut w, event);
-            return;
-        }
         CONSOLE.write_event(event);
     }
 }

@@ -81,11 +81,12 @@ for filesystems, the feature section below.
 | Runtime CPU-feature dispatch (hash group-scan accel) | ✓ SSE2 | ✓ NEON | — baseline | — baseline |
 | Crypto backend availability + boot self-test (SHA-256) | ▢ soft | ▢ soft | — soft | — soft |
 | Wide vector state for user space (AVX / AVX-512, SVE, V) | ✓ XSAVE | ▢ | ▢ | — |
-| Framebuffer / display | ◐ driver | ✓ | ◐ driver | ✓ |
-| Display switched off when idle (desktop screensaver, login screen) | ▢ virtio-gpu | ◐ Pi 4 engine | ▢ virtio-gpu | — |
-| Native display engine (mode setting, several outputs, hotplug, HDMI 2.0 scrambling) | ▢ virtio-gpu | ◐ Pi 4 HVS + HDMI | ▢ virtio-gpu | — |
+| Framebuffer / display | ✓ virtio-gpu | ✓ | ✓ virtio-gpu | ✓ |
+| Hardware-assisted scan-out (driver-allocated frames, cursor plane, hosted console) | ✓ virtio-gpu | ✓ virtio-gpu · ✓ Pi 4 HVS | ✓ virtio-gpu | — |
+| Display switched off when idle (desktop screensaver, login screen) | ✓ virtio-gpu | ✓ virtio-gpu · ◐ Pi 4 engine | ✓ virtio-gpu | — |
+| Native display engine (mode setting, several outputs, hotplug, HDMI 2.0 scrambling) | ◐ virtio-gpu | ◐ Pi 4 HVS + HDMI | ◐ virtio-gpu | — |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
-| Graphical login screen (`greeter.app`) | ▢ | ◐ | ▢ | ▢ |
+| Graphical login screen (`greeter.app`) | ◐ | ◐ | ◐ | ▢ |
 | Fast user switching (concurrent desktop sessions) | ▢ | ◐ | ▢ | ▢ |
 | Block storage | ✓ virtio | ✓ virtio + eMMC + USB | ✓ virtio | — |
 | Networking | ◐ virtio | ◐ virtio + GENET | ◐ virtio | — |

@@ -53,14 +53,29 @@
 //! at. A panic is neither: it reclaims the surface outright.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
+
+#[cfg(test)]
+extern crate alloc;
+
+// The one module that forms a slice over scan-out memory a port hands it, and
+// keeps its state in a cell a pre-MMU boot may write without atomics.
+#[allow(unsafe_code)]
+pub mod hosted;
+pub mod port;
 
 use tairix_font::atlas;
 use tairix_font::glyph::lookup_or_fallback;
 use tairix_vt::{char_width, Attributes, Color, EraseMode, Op, Parser, CONTINUATION};
 
 pub use tairix_vt::Cell;
+
+/// Storage for a console's cell grid: a borrowed slice for a console that
+/// never allocates, an owned buffer for one that is re-cut to new surfaces.
+pub trait Grid: AsRef<[Cell]> + AsMut<[Cell]> + Default {}
+
+impl<T: AsRef<[Cell]> + AsMut<[Cell]> + Default> Grid for T {}
 
 /// Glyph cell width in pixels. The face's uniform advance already carries the
 /// inter-character spacing, so the cell is the atlas cell.
@@ -93,6 +108,14 @@ pub struct Geometry {
 }
 
 impl Geometry {
+    /// The grid a console keeps before any display hosts it: the 80 × 25
+    /// cells a terminal starts at, as Linux's dummy console holds.
+    pub const UNHOSTED: Self = Self {
+        width_px: 80 * CELL_WIDTH,
+        height_px: 25 * CELL_HEIGHT,
+        stride_px: 80 * CELL_WIDTH,
+    };
+
     /// Derive the text geometry for a firmware-confirmed surface.
     ///
     /// The atlas cell is drawn at the size it was rasterised at, one atlas
@@ -220,6 +243,37 @@ fn merge_rects(a: Option<CellRect>, b: Option<CellRect>) -> Option<CellRect> {
             row1: a.row1.max(b.row1),
         }),
         (rect, None) | (None, rect) => rect,
+    }
+}
+
+/// Copy the `(columns, rows)` grid `src` into the `(columns, rows)` grid
+/// `dst`, dropping the first `shift` source rows, and blank whatever is left.
+/// A wide glyph the narrower grid would split is blanked, never halved.
+fn copy_rows(
+    src: &[Cell],
+    (src_cols, src_rows): (u32, u32),
+    dst: &mut [Cell],
+    (dst_cols, dst_rows): (u32, u32),
+    shift: u32,
+) {
+    dst.fill(Cell::BLANK);
+    let cols = src_cols.min(dst_cols) as usize;
+    let rows = src_rows.saturating_sub(shift).min(dst_rows) as usize;
+    for row in 0..rows {
+        let from = (row + shift as usize) * src_cols as usize;
+        let to = row * dst_cols as usize;
+        let (Some(line), Some(into)) = (src.get(from..from + cols), dst.get_mut(to..to + cols))
+        else {
+            return;
+        };
+        into.copy_from_slice(line);
+        if cols < src_cols as usize {
+            if let Some(last) = into.last_mut() {
+                if char_width(last.ch) == 2 {
+                    *last = Cell::BLANK;
+                }
+            }
+        }
     }
 }
 
@@ -354,8 +408,8 @@ struct SavedCursor {
 /// single repaint is what bounds a batch's render cost — a burst that
 /// scrolls many times moves only the cache-resident grid per line and
 /// touches the framebuffer once — and it is also how leaving the alternate
-/// screen restores the primary one (a full-rect flush). The grid buffers are
-/// borrowed (`&mut [Cell]`), so the engine never allocates.
+/// screen restores the primary one (a full-rect flush). The engine never
+/// allocates: the grids are whatever [`Grid`] storage the caller supplies.
 ///
 /// The rendered attributes are colour (16/256/truecolour), bold (brightens the
 /// base colours) and reverse-video (swaps foreground and background);
@@ -369,7 +423,7 @@ struct SavedCursor {
 /// removed before the next batch, so it never contaminates the grid: the cell
 /// under it repaints exactly from its recorded state.
 #[derive(Debug)]
-struct Screen<'a> {
+struct Screen<G> {
     geometry: Geometry,
     column: u32,
     row: u32,
@@ -391,9 +445,9 @@ struct Screen<'a> {
     /// The cell the cursor overlay is currently painted over, if any.
     overlay: Option<(u32, u32)>,
     /// The primary-screen cell grid (`columns × rows`, row-major).
-    main: &'a mut [Cell],
+    main: G,
     /// The alternate-screen cell grid (`columns × rows`, row-major).
-    alt: &'a mut [Cell],
+    alt: G,
     /// Whether the alternate screen is currently shown.
     on_alt: bool,
     /// The primary-screen cursor saved on entering the alternate screen,
@@ -401,14 +455,14 @@ struct Screen<'a> {
     alt_saved: Option<SavedCursor>,
 }
 
-impl<'a> Screen<'a> {
+impl<G: Grid> Screen<G> {
     /// A screen homed at the top-left of a `geometry`-sized surface with the
-    /// plain pen, a full-height scroll region, and the two borrowed cell grids
-    /// (`main` and `alt`, each at least [`Geometry::cell_count`] long — a
-    /// shorter buffer simply bounds what the grid can hold; indexing fails
-    /// closed rather than panicking).
+    /// plain pen, a full-height scroll region, and the two cell grids (`main`
+    /// and `alt`, each at least [`Geometry::cell_count`] long — a shorter
+    /// buffer simply bounds what the grid can hold; indexing fails closed
+    /// rather than panicking).
     #[must_use]
-    fn new(geometry: Geometry, main: &'a mut [Cell], alt: &'a mut [Cell]) -> Self {
+    fn new(geometry: Geometry, main: G, alt: G) -> Self {
         let bottom = geometry.rows() - 1;
         Self {
             geometry,
@@ -459,9 +513,9 @@ impl<'a> Screen<'a> {
     /// alternate screen, else the primary grid).
     fn active_cells(&mut self) -> &mut [Cell] {
         if self.on_alt {
-            &mut *self.alt
+            self.alt.as_mut()
         } else {
-            &mut *self.main
+            self.main.as_mut()
         }
     }
 
@@ -640,7 +694,11 @@ impl<'a> Screen<'a> {
     /// The recorded cell at `(col, row)` of the active grid, or a blank for
     /// an out-of-range coordinate (fail closed, never a panic).
     fn cell_at(&self, col: u32, row: u32) -> Cell {
-        let cells = if self.on_alt { &*self.alt } else { &*self.main };
+        let cells = if self.on_alt {
+            self.alt.as_ref()
+        } else {
+            self.main.as_ref()
+        };
         let index = row as usize * self.cols() as usize + col as usize;
         cells.get(index).copied().unwrap_or(Cell::BLANK)
     }
@@ -801,14 +859,52 @@ impl<'a> Screen<'a> {
     ///
     /// Re-initialising through [`Self::new`] instead of resetting field by
     /// field keeps one definition of the initial state, so state added later
-    /// cannot silently survive a purge. The grids are borrowed, so they are
-    /// moved out and handed straight back.
+    /// cannot silently survive a purge. The grids are moved out and handed
+    /// straight back.
     fn purge(&mut self) {
-        self.main.fill(Cell::BLANK);
-        self.alt.fill(Cell::BLANK);
+        self.main.as_mut().fill(Cell::BLANK);
+        self.alt.as_mut().fill(Cell::BLANK);
         let main = core::mem::take(&mut self.main);
         let alt = core::mem::take(&mut self.alt);
         *self = Self::new(self.geometry, main, alt);
+    }
+
+    /// This screen re-cut for a `geometry`-sized surface over `main` and
+    /// `alt`.
+    ///
+    /// Each grid keeps the rows ending at the row its cursor is on, as many
+    /// as the new height holds, and every column that fits; a wide glyph
+    /// survives only whole. The pen, cursor visibility, the screen shown and
+    /// the saved cursors carry over, following their rows; the scroll region
+    /// is the whole new screen.
+    fn resized<H: Grid>(self, geometry: Geometry, mut main: H, mut alt: H) -> Screen<H> {
+        let fit = |row: u32| (row + 1).saturating_sub(geometry.rows());
+        let active = fit(self.row);
+        let (main_shift, alt_shift) = if self.on_alt {
+            (
+                self.alt_saved.map_or(active, |saved| fit(saved.row)),
+                active,
+            )
+        } else {
+            (active, active)
+        };
+        let from = (self.cols(), self.rows());
+        let to = (geometry.columns(), geometry.rows());
+        copy_rows(self.main.as_ref(), from, main.as_mut(), to, main_shift);
+        copy_rows(self.alt.as_ref(), from, alt.as_mut(), to, alt_shift);
+        let follow = |saved: SavedCursor, shift: u32| SavedCursor {
+            column: saved.column.min(to.0.saturating_sub(1)),
+            row: saved.row.saturating_sub(shift).min(to.1.saturating_sub(1)),
+            pen: saved.pen,
+        };
+        let mut screen = Screen::new(geometry, main, alt);
+        screen.pen = self.pen;
+        screen.cursor_visible = self.cursor_visible;
+        screen.on_alt = self.on_alt;
+        screen.saved = self.saved.map(|saved| follow(saved, active));
+        screen.alt_saved = self.alt_saved.map(|saved| follow(saved, main_shift));
+        screen.place(self.column, self.row.saturating_sub(active));
+        screen
     }
 
     /// Enter the alternate screen (`CSI ? 1049 h`): save the primary-screen
@@ -1103,12 +1199,12 @@ impl Surface {
 /// parser and the screen are separate fields so a write can borrow the parser
 /// (to feed it) and the screen (to apply the ops it yields) at once.
 ///
-/// The two cell grids the screen needs are borrowed (`main`/`alt`), so the
-/// console carries the borrow lifetime and never allocates.
+/// The two cell grids the screen needs (`main`/`alt`) are [`Grid`] storage
+/// the caller supplies, so the console itself never allocates.
 #[derive(Debug)]
-pub struct TextConsole<'a> {
+pub struct TextConsole<G> {
     parser: Parser,
-    screen: Screen<'a>,
+    screen: Screen<G>,
     /// Which presenter owns the scan-out surface this console shares with a
     /// graphical session, and so whether this console paints.
     surface: Surface,
@@ -1120,7 +1216,7 @@ pub struct TextConsole<'a> {
 /// the margins outside the grid — the right/bottom remainders and the stride
 /// slack — and the only thing that can erase pixels a previous presenter left
 /// there. The full-grid flush that follows repaints the cells over it.
-fn fill_surface(pixels: &mut [u32]) {
+pub(crate) fn fill_surface(pixels: &mut [u32]) {
     for pixel in pixels.iter_mut() {
         *pixel = DEFAULT_BACKGROUND;
     }
@@ -1142,16 +1238,33 @@ enum WriteKind {
     ProgramOutput,
 }
 
-impl<'a> TextConsole<'a> {
+impl<G: Grid> TextConsole<G> {
     /// A console at the top-left of a `geometry`-sized surface, backed by the
-    /// borrowed `main` and `alt` cell grids (each at least
-    /// [`Geometry::cell_count`] long).
+    /// `main` and `alt` cell grids (each at least [`Geometry::cell_count`]
+    /// long).
     #[must_use]
-    pub fn new(geometry: Geometry, main: &'a mut [Cell], alt: &'a mut [Cell]) -> Self {
+    pub fn new(geometry: Geometry, main: G, alt: G) -> Self {
         Self {
             parser: Parser::new(),
             screen: Screen::new(geometry, main, alt),
             surface: Surface::Shown,
+        }
+    }
+
+    /// This console re-cut for a `geometry`-sized surface over `main` and
+    /// `alt` (each at least [`Geometry::cell_count`] long), keeping the text
+    /// it shows.
+    ///
+    /// The rows ending at the cursor's survive, as many as the new height
+    /// holds, so the line being typed stays in view; the parser carries over
+    /// mid-sequence, and the disposition with it. Nothing is painted: the new
+    /// surface is the caller's to [`show`](Self::show).
+    #[must_use]
+    pub fn resized<H: Grid>(self, geometry: Geometry, main: H, alt: H) -> TextConsole<H> {
+        TextConsole {
+            parser: self.parser,
+            screen: self.screen.resized(geometry, main, alt),
+            surface: self.surface,
         }
     }
 

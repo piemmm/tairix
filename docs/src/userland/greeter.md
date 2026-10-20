@@ -68,9 +68,10 @@ Compromising it therefore yields a screen, not an account.
 2. **Query the display's output** and size the scan-out from it. With no
    output connected the greeter parks on the display's output announcement
    until one arrives.
-3. **Establish a double-buffered frame region** for it
-   (`tairix_display::establish_frames`), so a frame is presented by handing
-   over a region rather than copying pixels through IPC.
+3. **Take the frames the display allocates** for it
+   (`tairix_display::establish_display`), mapping each one the driver
+   grants, so a frame is presented by naming a buffer rather than copying
+   pixels through IPC.
 4. **Page the offerable accounts** off the authority's `session-v1`
    endpoint into chooser tiles. The walk is bounded three ways — by the
    `total` the first page announced, by a ceiling of eight pages' worth of

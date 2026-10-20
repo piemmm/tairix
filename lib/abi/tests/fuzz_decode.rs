@@ -33,9 +33,16 @@ use tairix_abi::appdata_ipc::{
 };
 use tairix_abi::desktop::{ScreensaverKind, CURSOR_SET_NAME_MAX};
 use tairix_abi::display_ipc::{
-    decode_mode_reply, decode_stats_reply, encode_mode_reply, DisplayRequest, DisplayStats,
+    decode_buffer_reply, decode_configure_reply, decode_mode_reply, decode_planes_reply,
+    decode_present_reply, decode_stats_reply, encode_buffer_reply, encode_configure_reply,
+    encode_mode_reply, encode_planes_reply, encode_present_reply, encode_stats_reply, BufferGrant,
+    ConfiguredFrames, DisplayEvent, DisplayRequest, DisplayStats, GrantedBuffer, LayerList, Planes,
+    PresentReply,
 };
-use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat};
+use tairix_abi::driver::display::{
+    AccelCaps, AccelLayer, BufferId, CursorCaps, DamageList, DamageRect, DisplayDeviceReport,
+    DisplayFormat, DisplayMode, DisplayPower, Presented,
+};
 use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, NetChannelNotify, NetChannelRequest,
 };
@@ -703,6 +710,35 @@ fn exercise_display_ipc(bytes: &[u8]) {
         let redecoded = DisplayStats::from_bytes(&stats.to_le_bytes())
             .expect("round-trip of accepted statistics must succeed");
         assert_eq!(stats, redecoded);
+    }
+    // The replies and events a presenter parses are the driver's word, so an
+    // accepted one must mean what it re-encodes to.
+    if let Ok(frames) = decode_configure_reply(bytes) {
+        assert_eq!(
+            decode_configure_reply(&encode_configure_reply(Ok(frames))),
+            Ok(frames)
+        );
+    }
+    if let Ok(granted) = decode_buffer_reply(bytes) {
+        assert_eq!(
+            decode_buffer_reply(&encode_buffer_reply(Ok(granted))),
+            Ok(granted)
+        );
+    }
+    if let Ok(reply) = decode_present_reply(bytes) {
+        assert_eq!(
+            decode_present_reply(&encode_present_reply(Ok(reply))),
+            Ok(reply)
+        );
+    }
+    if let Ok(planes) = decode_planes_reply(bytes) {
+        assert_eq!(
+            decode_planes_reply(&encode_planes_reply(Ok(planes))),
+            Ok(planes)
+        );
+    }
+    if let Ok(event) = DisplayEvent::from_bytes(bytes) {
+        assert_eq!(DisplayEvent::from_bytes(&event.to_le_bytes()), Ok(event));
     }
 }
 
@@ -2103,6 +2139,164 @@ fn structured_session_frames_with_corrupted_fields_never_panic() {
     }
 }
 
+/// Every display-service frame — each request, each reply and the event —
+/// seeded well formed and bit-flipped: the magic and the fixed widths would
+/// otherwise starve the operand decoders of input that reaches them.
+#[test]
+fn structured_display_frames_with_corrupted_fields_never_panic() {
+    let mut seeds: Vec<Vec<u8>> = display_request_seeds()
+        .iter()
+        .map(|request| request.to_le_bytes().to_vec())
+        .collect();
+    seeds.extend(display_reply_seeds());
+    for mut seed in seeds {
+        exercise(&seed);
+        for byte in 0..seed.len() {
+            for bit in 0..8u32 {
+                seed[byte] ^= 1 << bit;
+                exercise(&seed);
+                seed[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
+fn buffer(raw: u32) -> BufferId {
+    BufferId::new(raw).expect("a buffer id")
+}
+
+fn display_caps() -> (AccelCaps, CursorCaps) {
+    (
+        AccelCaps {
+            max_layers: 4,
+            max_width_px: 4096,
+            max_height_px: 4096,
+            per_layer_opacity: true,
+            hw_scaling: true,
+        },
+        CursorCaps {
+            max_width_px: 64,
+            max_height_px: 64,
+        },
+    )
+}
+
+/// One well-formed seed per display-service request.
+fn display_request_seeds() -> [DisplayRequest; 12] {
+    let rect = DamageRect {
+        x: 4,
+        y: 8,
+        width_px: 16,
+        height_px: 32,
+    };
+    let layer = AccelLayer {
+        buffer: buffer(3),
+        src: rect,
+        dst_x: -2,
+        dst_y: 5,
+        dst_width_px: 32,
+        dst_height_px: 64,
+        opacity: 128,
+    };
+    [
+        DisplayRequest::Query { seat_id: 1 },
+        DisplayRequest::Configure {
+            seat_id: 1,
+            width_px: 640,
+            height_px: 480,
+            format: DisplayFormat::Bgra8888,
+            events_port: 0x9047_0001,
+        },
+        DisplayRequest::QueryStats,
+        DisplayRequest::Present {
+            seat_id: 1,
+            buffer: buffer(1),
+            damage: DamageList::new(&[rect]).expect("one rectangle"),
+        },
+        DisplayRequest::SetPower {
+            seat_id: 1,
+            power: DisplayPower::Off,
+        },
+        DisplayRequest::QueryPlanes { seat_id: 1 },
+        DisplayRequest::AllocBuffer {
+            seat_id: 1,
+            width_px: 64,
+            height_px: 64,
+        },
+        DisplayRequest::FreeBuffer {
+            seat_id: 1,
+            buffer: buffer(2),
+        },
+        DisplayRequest::PresentLayers {
+            seat_id: 1,
+            layers: LayerList::new(&[layer, layer]).expect("two layers"),
+        },
+        DisplayRequest::SetCursor {
+            seat_id: 1,
+            buffer: buffer(4),
+            hot_x: 1,
+            hot_y: 2,
+        },
+        DisplayRequest::MoveCursor {
+            seat_id: 1,
+            x: -3,
+            y: 9,
+        },
+        DisplayRequest::HideCursor { seat_id: 1 },
+    ]
+}
+
+/// One well-formed seed per display-service reply, and the event.
+fn display_reply_seeds() -> Vec<Vec<u8>> {
+    let (caps, cursor) = display_caps();
+    let grantor = tairix_abi::ProcId::from_bytes(&[9u8; 16]).expect("an instance");
+    let grant = BufferGrant {
+        buffer: buffer(1),
+        grant: 0x41,
+    };
+    let stats = DisplayStats {
+        seat_id: 1,
+        busy_ns: 5,
+        idle_ns: 9,
+        device: DisplayDeviceReport {
+            mem_resident_bytes: 1 << 20,
+            mem_total_bytes: 1 << 24,
+            accel: Some(caps),
+            cursor: Some(cursor),
+        },
+        mode: Some(DisplayMode {
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 2560,
+            format: DisplayFormat::Bgra8888,
+        }),
+    };
+    std::vec![
+        encode_configure_reply(Ok(
+            ConfiguredFrames::new(2560, grantor, &[grant, grant]).expect("two frames")
+        ))
+        .to_vec(),
+        encode_buffer_reply(Ok(GrantedBuffer {
+            grant,
+            stride_bytes: 256,
+            grantor,
+        }))
+        .to_vec(),
+        encode_present_reply(Ok(PresentReply {
+            presented: Presented::Queued,
+            seq: 7,
+        }))
+        .to_vec(),
+        encode_planes_reply(Ok(Planes {
+            accel: Some(caps),
+            cursor: Some(cursor),
+        }))
+        .to_vec(),
+        encode_stats_reply(Ok(stats)).to_vec(),
+        DisplayEvent::Presented { seq: 7 }.to_le_bytes().to_vec(),
+    ]
+}
+
 /// Every window-channel operation, seeded and bit-flipped at its own frame
 /// length as well as one byte either side of it.
 ///
@@ -3078,6 +3272,7 @@ fn structured_switchboard_commands_with_corrupted_fields_never_panic() {
             present_calls: 2,
             chrome_hits: 1,
             chrome_misses: 0,
+            layers: 0,
         },
     }
     .to_le_bytes();

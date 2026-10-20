@@ -74,20 +74,19 @@ static X86_UNLOCK_CONSOLE: X86UnlockConsole = X86UnlockConsole;
 
 impl UnlockConsole for X86UnlockConsole {
     fn acquire_console0(&self) -> Console0 {
-        // Arm COM1's interrupt-driven receive for the unlock window so a
-        // keystroke wakes the parked passphrase reader (`console_wake`) —
-        // the receive ISR drains the FIFO into `COM1_INPUT`, which
-        // `COM1_CONSOLE_READ` reads. Idempotent with the
-        // `release_console0_to_login` handoff arm.
-        crate::x86_64::com1_rx::enable_uart_console_irq();
-        // The unlock kthread reads the *ungated* interrupt-fed read half
-        // directly; the console list installs the gate-wrapped sibling for
-        // `login`.
-        Console0 {
-            write: &COM1_CONSOLE,
-            read: &crate::x86_64::com1_rx::COM1_CONSOLE_READ,
-            keys: KeySource::Live,
-        }
+        crate::console_layout::framebuffer_console0().unwrap_or_else(|| {
+            // Arm COM1's interrupt-driven receive for the unlock window so a
+            // keystroke wakes the parked passphrase reader; idempotent with
+            // the `login` handoff arm. The unlock kthread reads the ungated
+            // read half; the console list installs the gated sibling for
+            // `login`.
+            crate::x86_64::com1_rx::enable_uart_console_irq();
+            Console0 {
+                write: &COM1_CONSOLE,
+                read: &crate::x86_64::com1_rx::COM1_CONSOLE_READ,
+                keys: KeySource::Live,
+            }
+        })
     }
 
     fn release_console0_to_login(&self) {

@@ -10,6 +10,12 @@ publish.workspace = true
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared linear-framebuffer engine the decoded surface is driven by.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
+
+[dev-dependencies]
+# The heap-backed buffers the tests present through.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0", features = ["test-support"] }
 
 [lints]
 workspace = true

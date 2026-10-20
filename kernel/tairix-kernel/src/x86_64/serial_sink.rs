@@ -64,8 +64,8 @@ static GATED_COM1_READ: crate::unlock_service::GatedConsoleRead =
         &crate::unlock_service::CONSOLE0_GATE,
     );
 
-/// The boot console list: COM1 is the only console (index 0, PID 1's banner +
-/// the login session). Its read half is the interrupt-fed, unlock-gated COM1
+/// The serial console list: COM1 is the only console (index 0, PID 1's
+/// banner + the login session) when no framebuffer console is attached. Its read half is the interrupt-fed, unlock-gated COM1
 /// receive queue: once the gate opens a parked `login` reader is woken by a
 /// keystroke (`crate::x86_64::com1_rx`), never left polling. The receive-drain
 /// half is that same [`COM1_INPUT`] queue, so a pushed byte reaches the parked
@@ -79,8 +79,7 @@ pub static COM1_CONSOLES: [tairix_kernel_core::ConsoleDevice; 1] =
         &crate::x86_64::com1_rx::COM1_INPUT,
     )];
 
-/// The **installed** COM1 console device — the primary (and only) console on
-/// the QEMU PC target.
+/// The **installed** COM1 console device — console 0 on a serial-only boot.
 ///
 /// The receive drain pushes bytes through this device rather than the raw
 /// [`crate::x86_64::com1_rx::COM1_INPUT`] queue, so the console's cooked-mode

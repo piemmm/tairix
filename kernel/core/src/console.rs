@@ -141,12 +141,26 @@ pub trait ConsoleWrite: Sync {
     /// surface is contended: the panicking CPU may itself be inside this
     /// console's renderer, so waiting could hang the machine with no report
     /// at all — including on a build whose report would otherwise have
-    /// reached a serial console untouched. Losing the repaint is the lesser
-    /// failure, and the record still reaches its log sink.
+    /// reached a serial console untouched. A contended reclaim is owed to
+    /// the report's first write that may render, and the record still
+    /// reaches its log sink.
     ///
     /// The default does nothing, for the same reason as
     /// [`Self::set_surface`]'s.
     fn reclaim_surface(&self) {}
+
+    /// Render the rest of a fatal report without waiting on this console's
+    /// render lock, which the reporting CPU's own abandoned frame may hold.
+    ///
+    /// With `every_cpu_stopped`, every later write renders whoever holds it:
+    /// the holder never runs again, and a torn screen beats a report that
+    /// hangs on the lock it is drawn under. Otherwise a holder may still be
+    /// painting, so a write renders only where the lock is free and leaves
+    /// the record to the serial line. The default does nothing: a byte-stream
+    /// console takes no such lock.
+    fn enter_fatal(&self, every_cpu_stopped: bool) {
+        let _ = every_cpu_stopped;
+    }
 
     /// The framebuffer surface this console paints, when it paints one.
     ///
@@ -155,15 +169,58 @@ pub trait ConsoleWrite: Sync {
         None
     }
 
-    /// Move this console onto the zeroed, kernel-owned block of `len` bytes
-    /// at physical `phys` and repaint it there in the disposition it holds,
-    /// so a display engine taking the screen over from the firmware leaves
-    /// nothing of the console in memory the firmware may take back.
+    /// Whether a display driver may host this console (`console_adopt`).
     ///
-    /// The default refuses: a console painting no surface has none to move.
-    fn relocate(&self, phys: u64, len: u64) -> Relocation {
-        let _ = (phys, len);
-        Relocation::Refused
+    /// The default is `false`: a byte-stream console has nothing to paint.
+    fn can_host(&self) -> bool {
+        false
+    }
+
+    /// Paint this console into the zeroed, kernel-owned block at physical
+    /// `phys`, re-cut to `mode`, in the disposition it holds, owing every row
+    /// it paints from then on to its host, a device that reads the block with
+    /// `coherence`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] while no console is attached,
+    /// [`Errno::LengthOutOfRange`] for a mode no glyph fits,
+    /// [`Errno::OutOfRange`] for a block the kernel cannot reach,
+    /// [`Errno::OutOfMemory`] when the console's grids cannot be re-cut, and
+    /// [`Errno::NotSupported`] for a device that does not snoop the caches on
+    /// a port that cannot clean them, or the default's console that cannot be
+    /// hosted. The console keeps what it had.
+    fn adopt(
+        &self,
+        phys: u64,
+        mode: DisplayMode,
+        coherence: tairix_abi::hwtree::DmaCoherence,
+    ) -> Result<(), Errno> {
+        let _ = (phys, mode, coherence);
+        Err(Errno::NotSupported)
+    }
+
+    /// Whether the console owes its host painted rows.
+    fn owes_damage(&self) -> bool {
+        false
+    }
+
+    /// Take the pixel rows `[start, end)` the console painted for its host
+    /// since the last take.
+    fn take_damage(&self) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// Owe the host the rows `[start, end)` a take could not tell it.
+    fn owe_damage(&self, start: u32, end: u32) {
+        let _ = (start, end);
+    }
+
+    /// Stop painting the block at physical `phys`, keeping the text for the
+    /// console's next host; `false` when that is not the block it paints.
+    fn vacate(&self, phys: u64) -> bool {
+        let _ = phys;
+        false
     }
 
     /// Whether the boot still draws its own prompts on this console's screen
@@ -203,37 +260,7 @@ pub trait ConsoleWrite: Sync {
     }
 }
 
-/// A framebuffer console's surface: where it lies, its shape, and whose
-/// memory it is.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct ConsoleSurface {
-    /// CPU-physical base.
-    pub phys: u64,
-    /// Its shape.
-    pub mode: DisplayMode,
-    /// The kernel owns the memory, rather than the firmware that lit the
-    /// screen.
-    pub kernel_owned: bool,
-}
-
-impl ConsoleSurface {
-    /// The bytes the surface spans, or `None` where that overflows.
-    #[must_use]
-    pub fn len_bytes(&self) -> Option<u64> {
-        u64::from(self.mode.stride_bytes).checked_mul(u64::from(self.mode.height_px))
-    }
-}
-
-/// What [`ConsoleWrite::relocate`] did with the block it was offered.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum Relocation {
-    /// The console paints the block now, and keeps it for the kernel's life.
-    Moved(ConsoleSurface),
-    /// The console already paints kernel memory, so the block is unused.
-    Owned(ConsoleSurface),
-    /// No surface to move, or a block that cannot hold it.
-    Refused,
-}
+pub use tairix_fbcon::port::ConsoleSurface;
 
 /// The console sink installed before any real device exists.
 ///
@@ -1016,6 +1043,12 @@ impl ConsoleDevice {
     /// [`ConsoleWrite::reclaim_surface`] for the contract.
     pub fn reclaim_surface(&self) {
         self.write.reclaim_surface();
+    }
+
+    /// Render the rest of a fatal report without waiting on this console's
+    /// lock — see [`ConsoleWrite::enter_fatal`] for the contract.
+    pub fn enter_fatal(&self, every_cpu_stopped: bool) {
+        self.write.enter_fatal(every_cpu_stopped);
     }
 }
 

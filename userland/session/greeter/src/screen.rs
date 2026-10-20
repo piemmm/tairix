@@ -10,7 +10,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{Display, DisplayMode};
+use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::time::Time64;
 use tairix_abi::touch::TouchFrame;
@@ -18,7 +18,7 @@ use tairix_abi::window_ipc::PointerAction;
 use tairix_abi::{DriverError, WAITSET_TIMEOUT_NONE};
 use tairix_controls::damage;
 use tairix_cursor::{CursorImage, PlacedCursor};
-use tairix_display::{DisplaySleep, SwitchedOff};
+use tairix_display::{DisplaySleep, Presenter, SwitchedOff};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_greeter::{AccountTile, Asking, AuthSurface, Backdrop, Courier, EventContext, Outcome};
 use tairix_input::{InputEvent, PointerButton};
@@ -47,6 +47,22 @@ pub struct Step {
     pub verified: bool,
     /// The answer itself, for the embedder to audit.
     pub answer: Answer,
+}
+
+/// The wakes one frame of the session fade can bring: its deadline, its
+/// present's latch, and input.
+const WAKES_PER_FADE_FRAME: u32 = 3;
+
+/// What a sleeping screen owes its display.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum AsleepOwes {
+    Nothing,
+    /// Its black frame: the display was still latching the last one when
+    /// the screen went to sleep.
+    Black,
+    /// A wake: input reached the screen while the display slept, which
+    /// supersedes any black still owed.
+    Wake,
 }
 
 /// The graphical login screen.
@@ -103,9 +119,8 @@ pub struct LoginScreen<C: Courier<Answer = Checked>> {
     /// sleep from.
     idle: Idle,
     sleep: DisplaySleep,
-    /// Whether input has reached the screen while its display slept, so the
-    /// display is owed a wake.
-    wake_owed: bool,
+    /// What the screen owes its display while it sleeps.
+    asleep_owes: AsleepOwes,
     /// What the seat's touch frames mean. No user is signed in to have chosen
     /// otherwise, so a touch means what it means by default.
     touch: Recogniser,
@@ -214,7 +229,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
             ribbon_owed: false,
             idle: Idle::new(0),
             sleep: DisplaySleep::new(),
-            wake_owed: false,
+            asleep_owes: AsleepOwes::Nothing,
             touch,
         }
     }
@@ -276,7 +291,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         self.painted = None;
         self.paint_owed = true;
         self.sleep = DisplaySleep::new();
-        self.wake_owed = false;
+        self.asleep_owes = AsleepOwes::Nothing;
         if ribbon {
             let _ = self.raise_ribbon(now_ns);
         }
@@ -311,6 +326,10 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
     /// A surface that could not be painted leaves the frame on screen as it
     /// is and stays owed, so the next draw composes it.
     pub fn draw(&mut self) -> Present {
+        if self.asleep_owes == AsleepOwes::Black {
+            self.asleep_owes = AsleepOwes::Nothing;
+            return Present::Whole;
+        }
         if self.owed.is_clean() && !self.ribbon_owed {
             return Present::Nothing;
         }
@@ -392,7 +411,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
     pub fn on_input(&mut self, event: &InputEvent, now_ns: u64) {
         self.idle.input(now_ns);
         if !self.sleep.is_awake() {
-            self.wake_owed = true;
+            self.asleep_owes = AsleepOwes::Wake;
             return;
         }
         let repaint = self.apply(event, now_ns);
@@ -499,7 +518,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
             Pointing::Pressed(_) | Pointing::Released(_) | Pointing::Nothing => None,
         };
         if !self.sleep.is_awake() {
-            self.wake_owed = true;
+            self.asleep_owes = AsleepOwes::Wake;
             return;
         }
         let action = match action {
@@ -584,13 +603,23 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
     /// is asked to switch off. One that cannot is left showing that black.
     /// Either way nothing more is presented, and no timer is armed, until
     /// input wakes it.
-    pub fn sleep_if_idle(&mut self, display: &mut dyn Display, now_ns: u64) -> Option<SwitchedOff> {
+    pub fn sleep_if_idle(
+        &mut self,
+        display: &mut dyn Presenter,
+        now_ns: u64,
+    ) -> Option<SwitchedOff> {
         if !self.sleep.is_awake() || !self.idle.is_due(now_ns) {
             return None;
         }
         self.rest();
         let _ = self.scanout.blacken();
-        let _ = display.present(self.scanout.frame());
+        let whole = DamageRect::full(self.scanout.mode());
+        // A display still latching the last frame takes the black once it has.
+        if !display.ready()
+            || display.present(self.scanout.frame(), &[whole]) == Err(DriverError::Busy)
+        {
+            self.asleep_owes = AsleepOwes::Black;
+        }
         // The black stands until a wake opens the whole screen again.
         self.owed = damage::Repaint::clean();
         self.ribbon_owed = false;
@@ -614,11 +643,15 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
     /// input asks again.
     pub fn wake(
         &mut self,
-        display: &mut dyn Display,
+        display: &mut dyn Presenter,
         now_ns: u64,
         wall: Option<Time64>,
     ) -> Result<Present, DriverError> {
-        if !core::mem::take(&mut self.wake_owed) || !self.sleep.wake(Some(display))? {
+        if self.asleep_owes != AsleepOwes::Wake {
+            return Ok(Present::Nothing);
+        }
+        self.asleep_owes = AsleepOwes::Nothing;
+        if !self.sleep.wake(Some(display))? {
             return Ok(Present::Nothing);
         }
         Ok(self.open(now_ns, wall))
@@ -683,14 +716,18 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         self.draw()
     }
 
-    /// The most frames the fade can ever ask for.
+    /// The most wakes the loop presenting the fade may take: each of its
+    /// frames' deadline, the latch of the present that frame made, and as
+    /// many again for input.
     ///
-    /// What bounds the loop that presents it: a stopped clock or a seat that
-    /// reads ready forever must not be able to strand a successful login on
-    /// a screen that never finishes leaving.
+    /// What bounds that loop: a stopped clock or a seat that reads ready
+    /// forever must not be able to strand a successful login on a screen that
+    /// never finishes leaving, and a display that queues its presents must
+    /// not cut the fade short.
     #[must_use]
     pub fn session_fade_budget(&self) -> u32 {
         frame_budget(self.theme.motion().duration(MotionInteraction::SessionFade))
+            .saturating_mul(WAKES_PER_FADE_FRAME)
     }
 
     /// Return the screen to rest as it first came up: the chooser with nothing

@@ -349,8 +349,14 @@ const NUM_HW_NODE_SETTLE: u64 = SyscallNumber::HW_NODE_SETTLE.as_u16() as u64;
 /// `hw_node_key_source` syscall number (as above).
 const NUM_HW_NODE_KEY_SOURCE: u64 = SyscallNumber::HW_NODE_KEY_SOURCE.as_u16() as u64;
 
-/// `console_relocate` syscall number (as above).
-const NUM_CONSOLE_RELOCATE: u64 = SyscallNumber::CONSOLE_RELOCATE.as_u16() as u64;
+/// `console_adopt` syscall number (as above).
+const NUM_CONSOLE_ADOPT: u64 = SyscallNumber::CONSOLE_ADOPT.as_u16() as u64;
+
+/// `console_damage` syscall number (as above).
+const NUM_CONSOLE_DAMAGE: u64 = SyscallNumber::CONSOLE_DAMAGE.as_u16() as u64;
+
+/// `console_relinquish` syscall number (as above).
+const NUM_CONSOLE_RELINQUISH: u64 = SyscallNumber::CONSOLE_RELINQUISH.as_u16() as u64;
 
 /// `shm_create` syscall number (as above).
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
@@ -1192,34 +1198,98 @@ pub fn hw_node_key_source() -> i64 {
     ret as i64
 }
 
-/// Move the kernel's framebuffer console off the firmware's memory onto
-/// memory the kernel owns and the caller's device reaches
-/// (`SyscallNumber::CONSOLE_RELOCATE`), answering that surface as one
-/// framebuffer [`tairix_abi::HwResource`].
+/// Host the kernel's framebuffer console on the caller's display at `width`
+/// × `height` (`SyscallNumber::CONSOLE_ADOPT`), on memory the kernel carves
+/// under the caller's `Dma` grant `handle` for a device driving `reach`
+/// address bits, answering where the device reaches it.
 ///
-/// A display engine calls it before it tells the firmware the display is the
-/// ARM's, so nothing writes or scans out the firmware's memory once the
-/// firmware may take it back. Gated by [`tairix_abi::CapabilityId::MEM_DMA`];
-/// the kernel answers only the driver of a node discovery marked
-/// [`tairix_abi::HwProperty::BootConsole`], and a second call answers the same
-/// surface.
+/// Gated by [`tairix_abi::CapabilityId::MEM_DMA`]; the kernel answers only the
+/// driver of a node discovery marked [`tairix_abi::HwProperty::ConsoleHost`].
+/// A console the firmware lit a screen for moves once the boot has handed it
+/// on, and the call waits until then. Another call at the same mode answers
+/// the same memory.
 ///
 /// # Errors
 ///
-/// `PermissionDenied` for any other caller, `NotFound` with no console to
-/// move, `OutOfMemory` or `OutOfRange` with no memory below the node's reach,
-/// or a refused record.
+/// `PermissionDenied` for any other caller, `Busy` at another mode than the
+/// one hosted, `NotFound` with no console to host, `LengthOutOfRange` for a
+/// mode no glyph fits, `OutOfRange` or `OutOfMemory` with no memory the
+/// device reaches, or a refused record.
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding.
-pub fn console_relocate() -> Result<tairix_abi::HwResource, Errno> {
-    let mut buf = [0u8; tairix_abi::HwResource::WIRE_LEN];
+pub fn console_adopt(
+    handle: u64,
+    width: u32,
+    height: u32,
+    reach: DmaReach,
+) -> Result<tairix_abi::driver::display::HostedConsole, Errno> {
+    let mut buf = [0u8; tairix_abi::driver::display::HostedConsole::WIRE_LEN];
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing it,
+    // and `buf` is a live local array for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CONSOLE_ADOPT,
+            [
+                handle,
+                u64::from(width),
+                u64::from(height),
+                u64::from(reach.bits()),
+                ptr,
+                buf.len() as u64,
+            ],
+        )
+    } as i64;
+    let written = usize::try_from(ret).map_err(|_| Errno::from_syscall(ret))?;
+    tairix_abi::driver::display::HostedConsole::from_bytes(
+        buf.get(..written).ok_or(Errno::BadMagic)?,
+    )
+}
+
+/// The rows the hosted console painted since the last call
+/// (`SyscallNumber::CONSOLE_DAMAGE`), as one rectangle, or `None` when none
+/// are owed.
+///
+/// # Errors
+///
+/// `PermissionDenied` for any caller but the driver instance the console is
+/// hosted for, or a refused record.
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding.
+pub fn console_damage() -> Result<Option<tairix_abi::driver::display::DamageRect>, Errno> {
+    let mut buf = [0u8; tairix_abi::driver::display::DamageRect::WIRE_LEN];
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
     // `(ptr, len)` pair against the caller's address space before writing it,
     // and `buf` is a live local array for the duration of the call.
     let ret =
-        unsafe { raw_syscall(NUM_CONSOLE_RELOCATE, [ptr, buf.len() as u64, 0, 0, 0, 0]) } as i64;
-    let written = usize::try_from(ret).map_err(|_| Errno::from_syscall(ret))?;
-    tairix_abi::HwResource::from_bytes(buf.get(..written).ok_or(Errno::BadMagic)?)
+        unsafe { raw_syscall(NUM_CONSOLE_DAMAGE, [ptr, buf.len() as u64, 0, 0, 0, 0]) } as i64;
+    match usize::try_from(ret).map_err(|_| Errno::from_syscall(ret))? {
+        0 => Ok(None),
+        written => tairix_abi::driver::display::DamageRect::from_bytes(
+            buf.get(..written).ok_or(Errno::BadMagic)?,
+        )
+        .map(Some),
+    }
+}
+
+/// Give back the memory the console is hosted on
+/// (`SyscallNumber::CONSOLE_RELINQUISH`): the caller vouches that its device
+/// no longer reads it. The console keeps its text and paints nothing until it
+/// is adopted again.
+///
+/// # Errors
+///
+/// `PermissionDenied` for any caller but the live driver of the hosting node,
+/// `NotFound` with nothing hosted on its node.
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 0-or-`-errno` encoding.
+pub fn console_relinquish() -> Result<(), Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call takes no
+    // arguments and no memory operand.
+    let ret = unsafe { raw_syscall(NUM_CONSOLE_RELINQUISH, [0; 6]) } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    Ok(())
 }
 
 /// Yield the calling task's CPU back to the scheduler (`SyscallNumber::YIELD`).
@@ -7422,6 +7492,55 @@ mod tests {
         });
         assert_eq!(number, NUM_CONSOLE_COUNT);
         assert_eq!(args, [0; 6]);
+    }
+
+    #[test]
+    fn console_adopt_marshals_the_grant_mode_and_reach_and_decodes_refusals() {
+        let reach = DmaReach::new(32).expect("a reach");
+        let (number, args) = capture(refusal(Errno::Busy), || {
+            assert_eq!(console_adopt(7, 1280, 800, reach), Err(Errno::Busy));
+        });
+        assert_eq!(number, NUM_CONSOLE_ADOPT);
+        assert_eq!(args[..4], [7, 1280, 800, 32]);
+        assert_ne!(args[4], 0);
+        assert_eq!(
+            args[5],
+            tairix_abi::driver::display::HostedConsole::WIRE_LEN as u64
+        );
+        capture(15, || {
+            assert!(
+                console_adopt(7, 1280, 800, reach).is_err(),
+                "a short record is refused"
+            );
+        });
+    }
+
+    #[test]
+    fn console_damage_answers_none_when_nothing_is_owed() {
+        let (number, args) = capture(0, || {
+            assert_eq!(console_damage(), Ok(None));
+        });
+        assert_eq!(number, NUM_CONSOLE_DAMAGE);
+        assert_ne!(args[0], 0);
+        assert_eq!(
+            args[1],
+            tairix_abi::driver::display::DamageRect::WIRE_LEN as u64
+        );
+        capture(refusal(Errno::PermissionDenied), || {
+            assert_eq!(console_damage(), Err(Errno::PermissionDenied));
+        });
+    }
+
+    #[test]
+    fn console_relinquish_marshals_no_arguments() {
+        let (number, args) = capture(0, || {
+            assert_eq!(console_relinquish(), Ok(()));
+        });
+        assert_eq!(number, NUM_CONSOLE_RELINQUISH);
+        assert_eq!(args, [0; 6]);
+        capture(refusal(Errno::NotFound), || {
+            assert_eq!(console_relinquish(), Err(Errno::NotFound));
+        });
     }
 
     #[test]

@@ -200,6 +200,7 @@ fn frame_report() -> FrameReport {
         present_calls: 1,
         chrome_hits: 124,
         chrome_misses: 2,
+        layers: 0,
     }
 }
 
@@ -217,7 +218,9 @@ fn graphics_device() -> DisplayStats {
                 max_width_px: 1_920,
                 max_height_px: 1_080,
                 per_layer_opacity: true,
+                hw_scaling: false,
             }),
+            cursor: None,
         },
         mode: Some(DisplayMode {
             width_px: 1_920,

@@ -1,467 +1,388 @@
-# FIX-DISPLAY-ACCELERATION — Wire hardware-accelerated desktop composition end-to-end
+# FIX-DISPLAY-ACCELERATION — Hardware-assisted scan-out, end to end
 
 | # | Item | Status |
 |---|---|---|
-| A | Zero-copy layer ABI: `AccelLayer` sourced from a shared-memory reference rather than an in-process slice, with both engines and the compositor on it | blocked: a directly sourced plane needs window frames in scanout-capable memory, a decision this plan does not make (Stage A) |
-| B | `AcceleratedDisplay` across the display service: `QueryAccel` and `PresentLayers` on `DISPLAY_ENDPOINT`, `RemoteDisplay` implementing it, the session choosing its path once | planned |
-| C | The `virtio-gpu` driver: discovery, the 2D control path with host-side damage, the display's power switch, blob-resource layers, IRQ completion, and its QEMU vertical | planned |
-| D | Damage on the accelerated path: per-layer source damage, and the software-stale region that lets a layered present consume damage | planned |
-| E | Double-buffered, vsync-synchronised flips and hardware scaling | planned |
+| F2 | `plans/FINISH-x86_64.md` F2, delivered here as this plan's prerequisite: one shared framebuffer console and one console/seat layout for every port, D152 fixed | done |
+| K | The kernel text console on a surface a display driver hosts: the console layout chosen by discovery, `console_adopt`/`console_relinquish`, damage signalled on a `ConsoleDamage` wait source | done |
+| A | Driver-allocated scan-out memory: the display driver allocates every buffer its hardware reads and grants it to the presenter; the `Display` class trait presents buffers by id; the compositor presents through `tairix_display::Presenter` | done |
+| B | The `DISPLAY_ENDPOINT` protocol for it: `Configure` answering with frames, `AllocBuffer`/`FreeBuffer`, `QueryPlanes`, `PresentLayers`, the cursor requests, and the `Presented` event; `RemoteDisplay` presenting layers; the session reading the device's planes once | done |
+| C | `gpu_virtio`: kernel discovery of virtio-gpu, the 2D driver (zero-copy primary plane, host-side damage, power, EDID and hotplug, the hosted console, interrupt completion), and its QEMU verticals on aarch64, riscv64 and x86_64 | done |
+| P | The hardware cursor plane: cursor caps and requests, `gpu_virtio`'s cursor queue, the HVS cursor plane, the WM moving a plain pointer without a composite | done |
+| H | `bcm2711_hvs` as an `AcceleratedDisplay`: frames and layers scanned out of the buffers it allocated, one display-list plane per layer, the end-of-frame interrupt | done |
+| D | The WM's retained hardware layers: per-window layer buffers re-baked by damage, flattened layers for frosted and translucent surfaces, a layered present consuming the damage it carried | done |
+| E | Flips signalled by completion and paced off it, `Busy` coalesced rather than fatal, and hardware scaling of the scaled desktop | done |
 
-No stage is optional and none defers work as "future".
+No item is optional and none defers work as "future". Items land together;
+the whole-project gate runs once on the final tree.
 
-Binding under `AGENTS.md`. This plan turns the *already-designed but
-dead* acceleration path into a working, first-class pipeline that
-meaningfully speeds up desktop composition on QEMU (all bare-metal
-Tier-1 targets) and on Raspberry Pi 4 hardware, while keeping the
-software `Display` path as the mandatory, always-available fallback
-(§17.3).
-
-Read first (§15.18): `plans/DISPLAY.md` (seat model + `DISPLAY_ENDPOINT`
-semantics), `plans/GUI-CONTROLS-DESIGN.md` and `plans/COMPOSITOR-WORK.md`
-(what the WM composites), `plans/FIX-DESKTOP.md` (non-blocking launch /
-responsiveness the vsync work feeds), `plans/PI.md` (Pi 4 bring-up),
-`plans/SOUND.md` §Native HDMI on the Pi 4 (the native display engine,
-`bcm2711_hvs`), `plans/USB.md`/`plans/NETWORK.md` only insofar as they show
-the `lib/virtio` + `lib/drvrt` + `lib/dma-barrier` user-space-driver
-precedent, `docs/src/drivers/display.md`.
+Binding under `AGENTS.md`. Read first (§15.18): `plans/DISPLAY.md` (seats,
+`DISPLAY_ENDPOINT`, D8's surface handover, D12's moving output),
+`plans/FINISH-x86_64.md` (F2, delivered here), `plans/FIX-DESKTOP-SPEEDUP.md`
+(the software path, which stays mandatory), `plans/COMPOSITOR-WORK.md` and
+`plans/GUI-CONTROLS-DESIGN.md` (what the WM composites), `plans/IOMMU.md`
+(IOM4/IOM19: device-reachable shared memory), `plans/PI.md` and
+`plans/SOUND.md` §Native HDMI on the Pi 4 (`bcm2711_hvs`), `plans/GPU.md`
+(layered on this plan), `docs/src/drivers/display.md`.
 
 ---
 
-## The defect this closes
+## 0. Binding decisions
 
-Acceleration was *designed in* but is **not reachable at runtime** and,
-where reachable, **does not actually save work**:
+Settled by the User on 2026-10-19. A change that contradicts one stops and
+asks (§15.7).
 
-1. **The accelerated path never crosses the process boundary.** The
-   runtime path is `userland/gui/session/run.rs` →
-   `Compositor::composite()` (software blend into one back buffer) →
-   `RemoteDisplay::present`/`present_rects` → `DisplayClient` `ipc_call`
-   to `DISPLAY_ENDPOINT` → `DisplayServer` in the driver's `Run` binary →
-   software `Display::present`. `lib/display` speaks a **software-frame-
-   only** wire protocol (`DisplayRequest::{Query,Configure,Present}`,
-   `lib/abi/src/display_ipc.rs`): one shm frame region indexed by frame
-   number plus a `DamageList` of up to `MAX_DAMAGE_RECTS` rectangles.
-   `RemoteDisplay` implements only `Display`, **not**
-   `AcceleratedDisplay`. So `Compositor::present_accelerated`
-   (which already exists) is exercised only by an in-process mock in
-   `userland/gui/wm/src/tests.rs` — it is dead in production.
+1. **The display driver allocates every buffer its hardware reads.** It is the
+   one component that knows its device's reach, contiguity, coherence and
+   translation domain. A DMA-capable engine carves with `shm_create_dma` under
+   its own node's `Dma` grant (`CAP_MEM_DMA`, the device's `DmaReach`, the
+   IOMMU domain where a unit exists — which is how the `VideoCore` 1 GiB alias
+   is honoured); a CPU-blit framebuffer driver creates plain shared memory.
+   The server grants each buffer to the presenting client with
+   `shm_grant_peer`, and the client maps it as a `RegionGrant`. No new
+   capability, no new shared-memory class. Apps keep their ordinary,
+   app-owned window frames: the session's existing straight-to-premultiplied
+   decode is the one copy, and the session's per-window copy stays the stable
+   snapshot the compositor reads.
+2. **`gpu_virtio` is an honest 2D driver and reports no layer compositor.**
+   virtio-gpu's scanouts are separate monitors, not overlay planes: a device
+   has one primary plane per scanout and one cursor. Its zero-copy path is the
+   primary plane — each frame the driver allocated is one resource's backing,
+   so presenting copies no pixel in the guest. Blob resources
+   (`RESOURCE_CREATE_BLOB`, `SET_SCANOUT_BLOB`) are **not** part of this plan:
+   they buy only a host-side copy once attach-backing already removes the guest
+   one, and QEMU cannot realise `blob=on` without a host `/dev/udmabuf` the
+   runner cannot open, so no vertical could exercise them.
+3. **The display seam carries a hardware cursor plane.** Moving a plain
+   pointer is a plane move, not a composite.
+4. **The kernel text console appears on a display a driver hosts it on.** A
+   machine whose only display is virtio-gpu keeps a visible text login, and a
+   dead desktop returns to text on screen. This needs one shared framebuffer
+   console and one console/seat layout on every port, so `plans/FINISH-x86_64.md`
+   F2 is delivered here (F2 item).
 
-2. **`drivers/display/gpu_virtio` is an empty placeholder** (`#![no_std]`
-   and nothing else — no `register`, no `BIND_KEYS`). This is *the* QEMU
-   acceleration path on aarch64 `virt`, riscv64 `virt`, and x86_64 q35
-   (all expose `virtio-gpu`, virtio device id 16), and it does not exist,
-   so `devmgr` can never autoload it.
+## 1. What it guarantees
 
-3. **The "accelerated" path, as specified, composites in software and
-   double-copies, and no engine implements it yet.**
-   `Compositor::encode_layers` bakes each window into a CPU `LayerBuf` (per
-   pixel through `Window::row`, including rounded corners, shadow and
-   opacity), and an engine sourcing a layer from it must copy that buffer
-   *again* into memory it scans out, every frame; the Pi 4's native engine
-   (`bcm2711_hvs`) composites one surface per output and has no layers. Apps
-   already deliver their pixels
-   in shared memory via the window channel (`lib/window`), so both copies
-   are avoidable. `AccelLayer.pixels: &'a [u8]` is an in-address-space
-   slice that *cannot* cross a process boundary — it structurally forces
-   the copy.
+- A display driver's device reads only buffers that driver allocated, and a
+  present names one by id: no frame byte crosses the IPC, and no engine copies
+  a frame it can scan where it lies.
+- The layered path crosses the process boundary: the session presents through
+  `Presenter`/`LayerPresenter`/`CursorPlane`, which `RemoteDisplay` implements
+  over `DISPLAY_ENDPOINT`, and the WM keeps retained layers that re-bake only
+  their damage, so an undamaged scene presents nothing.
+- Every QEMU target has a native display engine (`gpu_virtio`), every port a
+  framebuffer console a display hosts, and a present is paced by its latch,
+  never refused fatally.
 
-4. **No damage on the accelerated path.** `present_layers` reprograms and
-   re-uploads *all* planes every frame; an idle desktop with one blinking
-   cursor re-uploads every window.
+## 2. Invariants (bind every item)
 
-5. **No flip/vblank synchronisation.** There is no present-complete/vsync
-   event; a real accelerated flip must be double-buffered and completion-
-   signalled via `irq_bind`/`irq_wait` (never a busy-poll, §2.23), which
-   also feeds `plans/FIX-DESKTOP.md` responsiveness.
-
-6. **One backdrop-blurred window disables acceleration for the whole
-   frame**, and the desktop now always has one. `Compositor::encode_layers`
-   refuses the layer path outright when any visible window asks for a
-   backdrop blur, because a hardware plane cannot read what is beneath it;
-   the frame falls back to the software composite. The taskbar and every
-   popup it opens are floating chrome over a blurred backdrop
-   (`plans/GUI-CONTROLS-DESIGN.md`, "Surface ground"), so on a desktop
-   session that refusal is permanent, not occasional: the accelerated path
-   as it stands can only serve a headless or bar-less configuration. This
-   is a real cost of the desktop's look, not a bug in either half — the
-   software path is the mandatory always-available fallback (§17.3) and
-   `plans/FIX-DESKTOP-SPEEDUP.md` is what keeps it fast. Closing it means
-   compositing *only* the frosted surfaces in software and handing the
-   hardware the rest: the blurred region is bounded (the bar and one popup),
-   its backdrop is what the layers below already contain, and a baked layer
-   is exactly the shape Stage A gives such a surface. Until that lands, the
-   accelerated path's win is measured on scenes without chrome, and a
-   measurement quoted from one must say so.
-
----
-
-## Goal / invariants (bind every stage)
-
-- **Compositing policy stays in userland** (§4 microkernel-leaning,
-  §17.3): the kernel only issues framebuffer / MMIO / DMA / IRQ
-  capabilities. `gpu_virtio` is a user-space driver built on `lib/virtio`
-  + `lib/drvrt` + `lib/dma-barrier`, exactly like the existing virtio/USB
-  user-space drivers.
-- **Generic code stays board-neutral** (§2.20): `gpu_virtio`,
-  `lib/display`, `lib/virtio`, `lib/abi`, and the WM carry no SoC/board
-  name, constant, or `cfg`. `bcm2711_hvs` may know its hardware because it is
-  the device's own leaf driver, reached only via discovery-match (§18.3).
-- **One raster/blend path** (§2.2): the software fallback remains
-  `lib/raster`; no second blend is forked. The WM composites in software
-  *only* the layers hardware cannot source directly; those baked results
-  become their own layer.
+- **Compositing policy stays in user space.** The kernel issues framebuffer,
+  MMIO, DMA and interrupt grants, and hosts its own text console; every engine
+  is a user-space driver on `lib/drvrt`.
+- **Generic code is board-neutral** (§2.20). `gpu_virtio`, `lib/display`,
+  `lib/virtio`, `lib/fbcon`, `lib/abi` and the WM name no board.
+  `bcm2711_hvs` knows its silicon because it is that device's leaf driver.
+- **One raster/blend path** (§2.2). The software composite stays `lib/raster`;
+  a baked or flattened layer is that same composite written into a layer
+  buffer.
 - **The engine is never handed a blend that would band**
-  (`plans/FIX-DESKTOP-SPEEDUP.md` B.5). A hardware layer is blended in the
-  scan-out's own 8 bits with one fixed rounding, so a *translucent field*
-  over a picture arrives in the `256 - a` levels that leaves and steps a
-  smooth wallpaper into plateaus; the software composite spends that
-  missing resolution across the area with a per-pixel ordered dither, which
-  no layer stack can express. `Compositor::has_translucent_window`
-  therefore refuses the layer path for a window-wide translucency exactly
-  as a backdrop blur does. A layer's own antialiased *edge* is not this
-  case — a few pixels of partial coverage have no gradient to band — so
-  ordinary rounded windows keep the hardware path. A stage that wants the
-  hardware to blend translucency must first give the engine an honest,
-  *proven* way to say it blends without banding (a high-precision or
-  dithered blend); until such a capability has a live producer and
-  consumer it is not added (§2.4), and translucency is baked or refused.
-- **Roll our own** (§2.12): the virtio-gpu protocol is implemented in-
-  tree on `lib/virtio`, not an external crate.
-- **Fail closed, seat-gated, no ambient authority** (§5.4): every
-  accelerated present checks the live `SeatLease` **first** (as every display
-  driver's present already does); a layer stack that exceeds `AccelCaps`
-  falls back to the software full frame — never a partial hardware frame.
-- **No busy-poll** (§2.23): queue and flip completion are IRQ-driven via
-  `irq_bind`/`irq_wait`, with a bounded, fail-closed hardware-handshake
-  wait only where the silicon dictates.
-- **Evolve the ABI in place** (§2.13/§9): `AccelLayer`/`AccelCaps` and the
-  `lib/display` wire protocol change directly; every caller (WM,
-  `bcm2711_hvs`, `lib/display`, session, tests, the generated C header via
-  `cargo xtask c-header`, `cargo xtask abi-check`) is updated in the same
-  change. No `v2` beside `v1`, no shim, no dead placeholder (§2.14).
-- **Tests + docs in the same change** (§7, §13): host unit tests with a
-  mock host for every new engine, a QEMU integration vertical for
-  `gpu_virtio` (it is emulable), and updated `docs/src/drivers/display.md`
-  + the `gpu_virtio`/`bcm2711_hvs` READMEs + the README support matrix.
-- **Scalability / very-large-surface discipline** (§24, §26): every
-  buffer count, resource-id table, and layer cap is a discovered/grown
-  capacity, not a hand-picked `const` ceiling; per-frame work scales with
-  damage, not surface size.
-
-**Non-goal (explicitly out of scope, not deferred work):** a virgl/3D
-(GPU-rendered) path. 2D transfer/flush + blob/`dmabuf` zero-copy layer
-scanout is the complete, meaningful desktop-composition win; a
-programmable-3D pipeline is a separate, larger effort owned by
-`plans/GPU.md`, which is layered on this one, and is deliberately **not** part
-of this deliverable. Everything
-*this* plan lists is done in full, with no no-ops.
+  (`plans/FIX-DESKTOP-SPEEDUP.md` B.5). A window-wide translucency or a
+  backdrop blur is flattened: composited in software, with the backdrop
+  beneath it and the ordered dither, into an opaque layer. Only a layer's own
+  antialiased edge is blended by the engine.
+- **Fail closed, lease first, no ambient authority** (§5.4). Every request
+  that acts for a seat checks the caller's live lease before any state;
+  buffers belong to the configuration that allocated them and die with it; a
+  layer stack the engine cannot take falls back to the software frame, never a
+  partial hardware frame.
+- **No busy-poll** (§2.23). Completion, latching, hotplug and console damage
+  arrive as interrupts or wait-set wakes.
+- **Evolve in place** (§2.13). `Display`, `AccelLayer`, `AccelCaps` and the
+  wire protocol change directly with every caller, the generated C header and
+  `abi-check`.
+- **Capacities scale, bounds stay fixed** (§24). Buffer counts and bytes per
+  configuration are budgets derived from the device; `MAX_ACCEL_LAYERS` and
+  `MAX_DAMAGE_RECTS` are wire-format bounds.
+- **The software path stays the always-available fallback** on every target
+  (§17.3), and headless stays first-class.
 
 ---
 
-## Stage A — Zero-copy layer ABI (`AccelLayer`/`AccelCaps` in place)
+## F2 — one framebuffer console, one console/seat layout
 
-This is the foundational change: it makes an app's window shm frame usable
-as a hardware source plane, which every later stage depends on. Landing it
-first means the ABI is settled before the IPC and driver work builds on it.
+Delivered exactly as `plans/FINISH-x86_64.md` F2 specifies; that section is
+binding. The arch-neutral half of `kernel/arch/aarch64/src/video.rs` — the
+surface slot and its placement, the render lock, attach, both write paths,
+the grid and extent queries, `set_surface`/`reclaim_surface`/`purge`,
+adoption and `paint` — moves into `lib/fbcon`. A port supplies only its
+surface source, the extent reachability check, the direct-map lookup, the
+post-write cache maintenance and its interrupt-mask type. The console/seat
+layout moves into one `kernel/tairix-kernel` module every port calls.
 
-**The decision it waits on.** The HVS reads a plane from a physically
-contiguous buffer by its `VideoCore` bus address; today the native engine's
-only plane is a scan-out frame of its own that each present copies into. A window's frame is an
-app-created shm region drawn as buddy chunks, contiguous only by accident and
-never promised to be device-addressable, so a plane cannot source it until
-window frames can live in scanout-capable memory. Three things are undecided:
-who allocates that memory (the app through a device-contiguous shm class, or
-the session handing out surfaces it allocated), which capability gates a
-device-contiguous allocation, and how the `VideoCore` addressing limit is
-honoured. `virtio-gpu` has no such constraint, since
-`RESOURCE_ATTACH_BACKING` takes a scatter list.
+- **D152** closes here: a fatal report never waits on the render lock. Once
+  every other CPU has stopped it is broken (`bust_spinlocks`), so a report
+  raised with the lock held still renders; while a peer that would not stop
+  may be painting, a write renders only where the lock is free. Regression
+  tests: a panic with the lock held reaches the sink; the lock is broken only
+  when every peer stopped.
+- `TextConsole` owns its grids generically (`G: AsMut<[Cell]>`), and gains
+  `resized`, which keeps the bottom-most rows, the cursor and the parser state:
+  a console attached to a surface of another size, or following its output to
+  a new mode, keeps what it showed.
+- aarch64 is rewired with no behaviour change; its framebuffer, greeter and
+  desktop verticals are the evidence. x86_64 and riscv64 gain the layout: a
+  serial console with a seat when no display can host the console, the
+  framebuffer console otherwise (K).
 
-### A.1 Replace `AccelLayer`'s in-process slice with a shared-memory reference
-In `lib/abi/src/driver/display.rs`, change `AccelLayer` in place (§2.13):
-drop `pixels: &'a [u8]` and the lifetime; add a **source reference** that
-can cross a process boundary and be mapped once by the driver:
-- `source: AccelSource` — an enum/struct naming a granted shm region by
-  handle + byte offset (the same grant kind the window channel and
-  `DisplayServer::Configure` already use), so the driver maps the client
-  region **once** and the hardware sources it directly.
-- keep `width_px`, `height_px`, `stride_bytes`, `dst_x`, `dst_y`,
-  `opacity`.
-- add `src_crop: Option<DamageRect>` — the sub-rectangle of the source
-  that is valid/changed this frame (Stage D uses it for damage; a `None`
-  means the whole layer). Only add it in this change because Stage D is
-  the live consumer in the same plan — no speculative field lands without
-  a consumer (§2.4); if Stage D slips out of a single change, the field
-  lands with Stage D, not here.
-- `required_len`/validation stays, re-expressed against the mapped region
-  length rather than a slice, still summing extents in `u64` so a hostile
-  stride/height cannot wrap (fail closed, §5.4).
+## K — the console on a hosted surface
 
-### A.2 `AccelCaps` — only fields with a live producer and consumer
-`AccelCaps` now has a **published reader**: the display service answers it
-(with the memory the driver reports and the mode it scans out) on the seatless
-`DisplayRequest::QueryStats`, which `sysinfod` serves as `GPU_DEVICE_STATS`
-for the Switchboard's Graphics pane (`plans/NEW-SWITCHBOARD.md` Q3). A cap
-this plan adds therefore reaches a user-visible reading the moment its
-producer lands, and the wire flag for it goes in the same change.
+- **The layout is chosen by discovery at boot.** A boot framebuffer, or a
+  discovered display-class node that hosts the console when no boot
+  framebuffer exists, makes the framebuffer console console 0; otherwise the
+  serial console is. The hosting node carries `HwProperty::ConsoleHost`, set
+  by the kernel at discovery. With both a boot framebuffer and a hosting
+  engine the engine takes the screen over, as on the Pi: no boot-display node
+  is published and the console moves to the engine.
+- **Before a surface exists the console interprets output into its grid and
+  paints nothing**, so what the boot wrote is on screen once a driver hosts it.
+- **`console_adopt`** (`CAP_MEM_DMA`, the caller loaded for the
+  `ConsoleHost` node): the kernel allocates a zeroed, physically contiguous
+  kernel-owned block for the requested mode below the node's reach, maps it
+  into the node's translation domain where one exists, attaches the console to
+  it at that geometry (`resized`), and answers the block's device address and
+  stride. An adoption at another mode is refused `Busy` until the block is
+  relinquished, so the console's memory is never moved under a device still
+  reading it. The console keeps the block for the kernel's life; a driver's death detaches the
+  console's device mapping, never the console.
+- **Damage**: an adopted console accumulates the rows it painted. The
+  `WaitSourceKind::ConsoleDamage` member is admitted for the console-host
+  node's driver, before it hosts as well as after, so a display that finds
+  its sink later is still woken; it is ready while rows are owed to the
+  instance the console is hosted for, and `console_damage` takes them. A
+  driver that scans memory directly (the HVS) never asks.
+- **Relinquish**: `console_relinquish` gives the block back on the hosting
+  driver's word that its device stopped reading it; the console keeps its
+  text and paints nothing until adopted again, which is how a console follows
+  its output to a new mode.
+- The console's disposition still follows the seat (D8). A driver shows its
+  console when the server reports `ReleaseSurface::Text`, and its client's
+  frames otherwise. A panic report reaches an adopted console's memory; a
+  virtio-gpu screen shows it only if its driver still runs (documented).
 
-Add capability bits **only** as the stages that consume them land, never
-ahead (§2.4). This plan's consumers are:
-- `hw_scaling: bool` (Stage E) — source rect ≠ dest rect, so DPI/window
-  scaling is a hardware op instead of a CPU resample. Landed in Stage E
-  with the WM producer and both driver consumers, not here.
-Stage A adds no speculative caps; `max_layers`, `max_width_px`,
-`max_height_px`, `per_layer_opacity` stay.
+## A — driver-allocated scan-out memory
 
-### A.3 Update every caller in the same change
-- `bcm2711_hvs`: implements `AcceleratedDisplay` — a display-list plane per
-  layer, a directly-sourceable layer's plane pointed at its client region,
-  mapped once, and a copy only for a WM-baked layer (rounded corners /
-  translucency) that has no client region.
-- WM `Compositor::encode_layers`/`encode_layer`: an opaque, unclipped,
-  unscaled window is encoded as a **direct** `AccelSource` referencing its
-  window shm frame (no `LayerBuf`, no bake); only layers the hardware
-  cannot source (rounded corners, a cast shadow, per-region alpha,
-  translucency beyond `per_layer_opacity`) are baked in software into their
-  own layer, over the window's footprint.
-  A baked layer keeps the software path's own rounding: the bake
-  reads the ordered dither at the pixel's **screen** position, so the baked
-  pixels are the ones the software composite would have written there. A
-  translucency the *engine* would blend is refused outright, per the
-  no-banding invariant above — baking cannot help there, because the
-  banding would happen in the engine's blend, not in the bake.
-- `lib/abi` C header (`cargo xtask c-header --write`) regenerated;
-  `cargo xtask abi-check` green.
+- **The `Display` class trait presents buffers the driver allocated.**
+  `alloc_buffer(width, height)` answers an `AllocatedBuffer` (driver id,
+  shared-region id, length, stride); `free_buffer(id)`; `frame_count()` is how
+  many output frames a presenter rotates through (1 where a present copies or
+  transfers synchronously, 2 where the engine reads the frame while it shows);
+  `present(id, damage)` answers `Presented::Shown` or `Presented::Queued`, and
+  `service_events` reports a queued present latching. The hosting loop calls
+  `service_events` on every event wake, and after every request of a driver
+  whose requests wait on its device (`requests_take_wakes`), since such a
+  request may have taken a source's wake. `memory()` states the device's own memory; `as_accelerated()` and
+  `hardware_cursor()` reach the layer compositor and the cursor plane, so the
+  server holds one `&mut dyn Display`, and `DisplayDeviceReport` gathers the
+  three for the monitor.
+- **`AccelLayer` names a buffer.** `buffer: BufferId`, `src: DamageRect` (the
+  part of the buffer shown), `dst_x`, `dst_y`, `dst_width`, `dst_height`,
+  `opacity`. `AccelCaps` keeps `max_layers` (≤ `MAX_ACCEL_LAYERS`),
+  `max_width_px`, `max_height_px`, `per_layer_opacity`, and gains `hw_scaling`
+  (E). No per-layer damage field: both engines scan driver-allocated buffers
+  directly, so no driver has an upload to scope.
+- **Budgets.** A driver bounds what one configuration may allocate by a budget
+  derived from its device; a request past it fails closed (`NoSpace`) and the
+  WM keeps that window in the software composite. A display with no layers —
+  the linear framebuffer, `gpu_virtio`, whose DMA grant names no window —
+  admits the frames a presenter could rotate through (`frames_budget`); the
+  HVS admits a share of its DMA window.
+- **One memory seam.** `tairix_display::BufferMemory`/`SharedBuffer` for every
+  engine, `DeviceBuffer` for one whose device reads a buffer where it lies,
+  and `RtDeviceMemory`, the one `shm_create_dma`-backed allocator the HVS and
+  `gpu_virtio` share.
+- **The compositor presents through `tairix_display::Presenter`**: the mode,
+  `present(frame, damage)`, `set_power`, `layers()` → `LayerPresenter`
+  (caps, buffer allocation and the mapped pixels, `present_layers`), and
+  `cursor()` → `CursorPlane` (P). `RemoteDisplay` implements all three;
+  `Compositor` names no driver trait.
+- **Every driver is rewired.** `drivers/display/framebuffer` allocates one
+  plain shared frame and blits it; `bcm2711_hvs` scans its frames out of the
+  carves it allocated (H); `gpu_virtio` attaches them as backing (C). The
+  framebuffer and vesa QEMU verticals drive the engines through buffers.
 
-### A.4 Tests + docs
-- `lib/abi` unit tests: `AccelSource` validation, `required_len` against
-  a mapped-region length, overflow/short-region fail-closed, `src_crop`
-  bounds.
-- `bcm2711_hvs` unit tests (its register-level model): direct-source layer
-  maps once and does not copy; baked layer still copies; over-caps stack
-  rejected; lease check precedes engine access.
-- WM unit tests: opaque window ⇒ direct layer; rounded/translucent window
-  ⇒ baked layer; scene exceeding caps ⇒ `None` (software fallback).
-- Docs: `docs/src/drivers/display.md` (the new source model),
-  `lib/abi/src/driver/display.rs` rustdoc.
+## B — the protocol
 
----
+Every request but `QueryStats` names a seat and is refused before any state is
+read unless the caller holds that seat's live lease.
 
-## Stage B — Carry `AcceleratedDisplay` across the display service (`lib/display`)
+| Request | Answer |
+|---|---|
+| `Query` | the output's mode, or none |
+| `Configure { mode, events port }` | the frame count, the stride, one `RegionGrant` per frame, the grantor; the port must be the caller's (`call_peer_port`) and admit this endpoint |
+| `QueryPlanes` | `AccelCaps` or none, `CursorCaps` or none |
+| `AllocBuffer { width, height }` / `FreeBuffer { id }` | the buffer's id, stride and grant / status |
+| `Present { buffer, damage }` | status, and whether it is shown or queued |
+| `PresentLayers { count, layers }` | as `Present`; `count ≤ max_layers ≤ MAX_ACCEL_LAYERS` |
+| `SetCursor { buffer, hot spot }` / `HideCursor` / `MoveCursor { x, y }` | status; the image is the buffer's size |
+| `SetPower`, `QueryStats` | as before; stats carry the device report: its memory, layer caps and cursor plane |
 
-Unlocks the code Stage A prepared: the WM's `present_accelerated` becomes
-reachable in production, not just via the in-process mock.
+- **One present in flight.** A queued present's latch is posted to the
+  configuration's port as `DisplayEvent::Presented { seq }`; a present before
+  it is refused `Busy` by the client without a call, and by the server if one
+  arrives. A driver whose pipe stops completes a queued present at once, and
+  completes one the hardware never latched after a bounded deadline, recorded.
+- **Buffers belong to the configuration**, are checked on every reference, and
+  are freed with it; a stale id is `NotFound`.
+- **The session reads the planes once.** At bring-up it reads `QueryPlanes`;
+  `Compositor::present` then takes the layered path frame by frame wherever
+  the presenter reports a layer engine, and the pointer goes to the cursor
+  plane wherever the presenter has one and the pointer is one sprite that
+  fits it.
+- The decoders get structured fuzz seeds in `lib/abi/tests/fuzz_decode.rs`
+  (the `DSP1` magic otherwise starves the random input).
 
-### B.1 Extend the `DISPLAY_ENDPOINT` wire protocol
-In `lib/abi/src/display_ipc.rs`, add two requests alongside
-`Query`/`Configure`/`Present` (in place, §2.13):
-- `QueryAccel { seat_id }` → replies `AccelCaps` (or a typed "no accel"),
-  so the client learns the back-end's hardware caps once at bring-up.
-- `PresentLayers { seat_id, layers: [wire AccelLayer; N], count }` — a
-  fixed-width, bounded, self-validating layer list referencing shm grants
-  the caller has already `Configure`-registered. `count` is bounded by a
-  discovered `AccelCaps::max_layers`, not a magic const (§24.1). Each
-  wire layer names its source region by the same grant mechanism
-  `Configure` uses.
-- new op discriminants `OP_QUERY_ACCEL`/`OP_PRESENT_LAYERS`; `WIRE_LEN`
-  and reply lengths updated; `to_le_bytes`/`from_bytes` round-trip tested.
+## C — `gpu_virtio`
 
-### B.2 Server side (`lib/display/src/server.rs`)
-- `DisplayServer` handles `QueryAccel`/`PresentLayers`, gated on the
-  caller's live seat lease **exactly** like `Present` (record the granting
-  lease generation on `Configure`; refuse a `PresentLayers` whose lease is
-  not the live one — §5.4).
-- Map each layer's shm source **once** at `Configure`/first use, never per
-  present (the hot path stays copy-free); forward the mapped regions to
-  the driver's `AcceleratedDisplay::present_layers`.
-- A back-end that is not an `AcceleratedDisplay` answers `QueryAccel` with
-  the typed "unsupported" so the client falls back — never a panic (§2.9).
+- **Discovery.** The kernel's virtio MMIO and PCI walks publish device type 16
+  (`tairix_abi::driver::virtio::VIRTIO_GPU_DEVICE_ID`) as a `Display` node
+  with its windows, DMA grant and interrupt; the first is the console's host
+  (`boot_display::virtio_gpu`) on every port, beside the aarch64 port's HVS,
+  and x86_64 and riscv64 attach the framebuffer console when one is hosted.
+  `BIND_KEYS` match `HwMatchKey::virtio(16)` on both transports.
+- **The driver** follows `drivers/audio/virtio_snd`: one crate, its engine,
+  `register`, `BIND_KEYS`, `REQUIRED_CAPABILITIES` and a `Run` binary. It
+  negotiates `VERSION_1`, `ACCESS_PLATFORM` and `EDID`. The output is the first
+  enabled scanout at the size its display information states, else the
+  preferred timing of its EDID; a `VIRTIO_GPU_EVENT_DISPLAY` config change
+  re-reads it in `service_events`.
+- **Zero-copy primary plane.** One frame (`frame_count() == 1`): each buffer is
+  the backing of a 2D resource made at its first present, which transfers it
+  whole. A present is one batch on the control queue — a transfer per damage
+  rectangle, the scan-out switch, a flush per rectangle — published with one
+  notify and answered on the used-ring interrupt (`RequestQueue` carries one
+  batch at a time), so the frame is free when the call returns
+  (`Presented::Shown`). The batch relies on the device processing its control
+  queue in order, as every virtio-gpu device does and Linux's driver relies
+  on. A frame given back while shown keeps its resource until replaced; a
+  backing whose detach the device never answered is never unmapped, and a
+  resource an unanswered batch may have made (a frame's, the console's, the
+  pointer's) is unreferenced before its memory is reused or given back.
+- **Power**: `SET_SCANOUT` naming resource 0 switches the output off; switching
+  on scans out what is shown again, a present taken while off included.
+- **The hosted console**: shown on `ReleaseSurface::Text`, its rows
+  transferred on its damage wake, re-hosted at a new output mode
+  (`console_relinquish`, then `console_adopt`); one the device refused goes
+  back to the kernel and is hosted again when the output moves.
+- **Verticals**: on aarch64 `virt`, riscv64 `virt` and x86_64 `q35`, each with a
+  virtio GPU and no other display, `devmgr` autoloads the driver, the console
+  is dumped from the device's screen once the driver records it shown (the
+  passphrase is held until then), and the guest passes once the process the
+  kernel names as serving the display endpoint reports the first frame its
+  display took, which a refused present never produces. aarch64 also runs the desktop over it, whose dumps
+  hold the composited frame and then the damaged region a window opened. The
+  runner's display knob (`tairix_qemu::Display`) attaches the GPU at the
+  ramfb console's mode, removes the x86_64 VGA on `q35`, and names the device
+  in a screendump.
 
-### B.3 Client side (`lib/display/src/client.rs`)
-- `DisplayClient` gains `query_accel()` and `present_layers(...)`.
-- **`RemoteDisplay` implements `AcceleratedDisplay`** in addition to
-  `Display`: `accel_caps()` returns the value cached from the bring-up
-  `query_accel()`; `present_layers()` marshals to `PresentLayers`. The
-  software `Display` path stays as the mandatory fallback.
+## P — the cursor plane
 
-### B.4 Session wiring (`userland/gui/session/run.rs`)
-- At bring-up, `query_accel()` once. If the back-end reports usable accel
-  caps, the present loop calls `Compositor::present_accelerated(&mut
-  remote_display)`; otherwise it uses the existing software
-  `Compositor::present`. Both remain live; the choice is made once from
-  discovered caps (no per-frame probing).
-- The seat-lease gating is unchanged and now covers the layer present too.
+- `CursorCaps { max_width_px, max_height_px }` (`gpu_virtio`: 64 × 64, the
+  device's cursor size; HVS: its cursor plane's bound). The image is
+  premultiplied in the output's format, drawn by the client into a buffer it
+  allocated.
+- `gpu_virtio`: the cursor buffer is a 2D resource's backing; `SetCursor`
+  transfers it and issues `UPDATE_CURSOR` on the cursor queue, `MoveCursor`
+  issues `MOVE_CURSOR`.
+- HVS: a top display-list plane; `MoveCursor` rewrites its position words in
+  the live list, as Linux's `vc4` async cursor update does.
+- The WM gives the plane the pointer whenever the pointer is one sprite that
+  fits it; a trail or the halo composites in software. A pointer that moves
+  while on the plane damages nothing. The session moves the cursor once per
+  drained input batch.
 
-### B.5 Tests + docs
-- `lib/display` host unit tests (mock `DisplayTransport` + mock
-  `AcceleratedDisplay` host): `QueryAccel` round-trip; `PresentLayers`
-  maps once and forwards; a revoked lease refuses `PresentLayers` with the
-  distinct `SeatRevoked`; an over-caps list falls back; a non-accel
-  back-end answers unsupported.
-- Session `tests.rs`: accel-capable back-end drives `present_accelerated`;
-  non-accel back-end drives software `present`.
-- Docs: `docs/src/drivers/display.md` protocol table; `plans/DISPLAY.md`
-  cross-reference updated (§13).
+## H — `bcm2711_hvs` as an `AcceleratedDisplay`
 
----
+- Frames and layer buffers are `shm_create_dma` carves below the HVS's reach,
+  scanned out where they lie: a present writes no pixel.
+- `present_layers` writes a display list of one plane per layer — position,
+  source crop, scaled size where `src ≠ dst`, per-plane alpha (premultiplied,
+  with the constant `opacity` where `per_layer_opacity`) — into a free list
+  slot and latches it. The background fill is the screen beneath the first
+  layer. `accel_caps` states what one stack slot holds; a stack whose scaled
+  layers outrun an output's share of the line buffer is refused `OutOfRange`
+  with every output's list built before any is written, so a refusal moves
+  nothing on screen.
+- **Latching is interrupt-driven.** The driver binds the HVS node's interrupt
+  (`CAP_IRQ_BIND`) and enables the end-of-frame source; a wake that finds the
+  queued list active completes the present.
+- The device report states the engine's caps; its memory is none (it scans
+  system RAM).
 
-## Stage C — The virtio-gpu driver (`drivers/display/gpu_virtio`)
+## D — retained hardware layers in the WM
 
-The QEMU acceleration story on aarch64 / riscv64 / x86_64 — one generic,
-platform-neutral user-space driver, no per-arch code (§2.20).
+- **A window on a hardware layer owns a buffer ring** (two buffers, allocated
+  through `LayerPresenter`) holding its whole footprint — content, furniture,
+  corner coverage, shadow — baked once and re-baked only where damaged; each
+  buffer catches up on what changed while the other was shown. Moving a window
+  is a new destination, not a composite.
+- **The stack**: a base layer (the output frame, holding the desktop and every
+  window below the first hardware-layer window, composited in software), then
+  one layer per window above it, then the pointer if it is not on the cursor
+  plane. The split moves up when the stack exceeds `max_layers`.
+- **Flattened layers**: a frosted or translucent window's layer is the
+  software composite of its footprint over everything beneath it, opaque, so
+  the engine blends nothing that could band. It is re-baked where anything
+  beneath it changes.
+- **A layered present consumes the damage it carried** into a software-stale
+  region outside `has_damage`, which the software path drains when it next
+  composites; an undamaged scene presents nothing.
+- A window that cannot be given buffers, or the lowest window of a stack the
+  engine cannot composite at once, joins the base with everything beneath it
+  and the frame is planned again in the same present, the layers above kept;
+  the refusal stands until that window's size changes. A stack refused
+  outright falls back to the software frame through the damage-scoped
+  `present`.
 
-### C.1 Discovery + registration
-- Replace the placeholder with a real crate: `pub fn register(host: &dyn
-  DriverHost) -> Result<DriverHandle, DriverError>` (nothing else public,
-  §8), gated on `CAP_DRV_LOAD`.
-- Manifest `BIND_KEYS` matching **virtio device id 16 (GPU)** over
-  virtio-pci and virtio-mmio, so `devmgr` autoloads it (§18.3); it
-  receives only the MMIO/DMA/IRQ capabilities its matched hardware-tree
-  node requested (§4, no ambient authority).
-- README: supported hardware, transports, required capabilities,
-  runtime load/unload (§8).
+## E — flips and hardware scaling
 
-### C.2 virtio-gpu 2D control path (rolled on `lib/virtio`)
-Implement the 2D control queue over `lib/virtio` split-virtqueues +
-transport, with `lib/dma-barrier` ordering device-shared writes before the
-doorbell and reads of device-written ring entries:
-- `GET_DISPLAY_INFO` → active mode ⇒ `Display::output`, a config-change
-  event ⇒ `Display::service_events` (`plans/DISPLAY.md` D12).
-- `RESOURCE_CREATE_2D`, `RESOURCE_ATTACH_BACKING` (DMA-allocated backing
-  via `lib/drvrt`/`dma_alloc`), `SET_SCANOUT`.
-- `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`.
-- `Display::present` = transfer whole frame + flush;
-  `Display::present_rects` maps each `DamageRect` of the list **straight**
-  onto `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` of that rect (host-side
-  damage — a real win over the whole-frame blit even before layers), so a
-  scattered frame is one call's worth of small transfers.
-- `Display::set_power` = `SET_SCANOUT` naming no resource to take the output
-  down, and the scanout's resource again to bring it back — the switch the
-  desktop's energy saving drives (`plans/DISPLAY.md` D9), so QEMU's display
-  sleeps behind the screensaver instead of being kept black.
-
-### C.3 `AcceleratedDisplay` via blob resources / multi-scanout
-- Where the QEMU build supports it, wrap each `AccelLayer` shm region as a
-  **blob resource** (`RESOURCE_CREATE_BLOB`) / `dmabuf` and program
-  multi-scanout for zero-copy layer scanout.
-- `accel_caps()` reports real device limits (scanout count ⇒
-  `max_layers`, mode extents ⇒ `max_width/height`, `per_layer_opacity`
-  from what the device supports). A device without blob/multi-scanout
-  reports `max_layers = 1` (and the WM falls back to software compositing
-  into the single scanout) — never a fake capability (§5.4).
-- Resource-id and buffer tables are grown-on-demand, not fixed `const`
-  ceilings (§24.1).
-
-### C.4 Completion via IRQ (no busy-poll)
-- Bind the used-ring / config-change interrupt through the capability-
-  gated `irq_bind`/`irq_wait` (§3 `kernel/irq`); the driver parks on the
-  interrupt for command completion and config-change (hotplug/mode change)
-  rather than spinning (§2.23). Only a bounded, fail-closed hardware-
-  handshake wait (controller readiness) may briefly spin, documented.
-
-### C.5 Tests + docs
-- Host unit tests: control-queue command encode/decode against a mock
-  `lib/virtio` transport; damage → transfer/flush mapping; blob-resource
-  wrap; caps derivation; fail-closed on device-reported errors.
-- **QEMU integration vertical** (`tests/integration/`): boot the aarch64
-  (and each bare-metal target's) `virt`/q35 machine with `virtio-gpu`,
-  autoload via `devmgr`, present a frame, present a damaged region, and —
-  where the emulated device supports it — present a layer stack; assert
-  the scanned-out result. IRQ-driven completion exercised.
-- README + `docs/src/drivers/display.md` + README support-matrix row.
-
----
-
-## Stage D — Damage on the accelerated path
-
-Stop re-uploading/retransferring unchanged planes every frame.
-
-### D.1 Per-layer source damage
-- `present_layers` honours `AccelLayer::src_crop` (Stage A): a layer whose
-  source is unchanged since the last present is **not** re-uploaded
-  (`bcm2711_hvs`) / not re-transferred (`gpu_virtio` — only its damaged rect
-  is `TRANSFER_TO_HOST_2D`'d). An unchanged layer whose *position* changed
-  is re-programmed (plane origin / scanout rect) without re-uploading
-  pixels.
-- The WM computes per-window damage from its existing `damage` module and
-  threads it into each layer's `src_crop`; a fully-unchanged frame
-  (blinking cursor only) re-uploads only the cursor layer.
-- A layered present consumes the damage it carried. Today it cannot:
-  `Compositor::present_accelerated` leaves `damage` in place, because the
-  software frame must stay recomposable should a later frame fall back. As
-  a result `has_damage()` stays true after every layered present, and a wake
-  loop driving the layer path would never settle. The damage the layers
-  carried moves into a software-stale region, outside `has_damage`, which
-  the software path drains when it next composites. A layered success
-  already settles what a refused software frame left owed.
-
-### D.2 Tests
-- `bcm2711_hvs`/`gpu_virtio` unit tests: an unchanged layer is not re-
-  uploaded/re-transferred; a moved-only layer is re-programmed without
-  pixel upload; a damaged sub-rect transfers only that rect.
-- WM test: idle scene with a moving cursor produces one cursor-layer
-  damage and no window re-upload.
-
----
-
-## Stage E — Double-buffered, vsync-synchronised flips + hardware scaling
-
-### E.1 Double-buffer + flip-complete
-- Both accelerated back-ends present into an off-screen buffer/resource
-  and flip; flip-complete is signalled through the driver's IRQ
-  (`gpu_virtio` used-ring; `bcm2711_hvs` HVS end-of-frame line via its
-  bound interrupt). The session parks until the flip lands
-  (`irq_wait`) — never a busy-poll (§2.23) — feeding the non-blocking
-  desktop responsiveness in `plans/FIX-DESKTOP.md`.
-- No tearing: a present that arrives while a flip is in flight returns
-  `Busy` (already an ABI error) and the compositor coalesces, rather than
-  scribbling a half-composited frame.
-- **The seam already exists.** The session paces frames through
-  `FramePacer` (`plans/FIX-DESKTOP-SPEEDUP.md` E.3), which today holds a
-  frame to a fixed period because no driver reports a refresh. Real vsync
-  replaces that period with the flip signal in the same place; it does not
-  add a second pacing policy (§2.2).
-
-### E.2 Hardware scaling (`AccelCaps::hw_scaling` + source rect)
-- Add `hw_scaling` to `AccelCaps` and a destination-extent field to
-  `AccelLayer` **in this change**, with live producer (WM DPI/window
-  scaling) and both consumers (`bcm2711_hvs` HVS scaler, `gpu_virtio` where
-  supported) — so DPI scaling (`tairix_geometry::Scale`) and window
-  scaling become hardware operations instead of CPU resamples. A back-end
-  reporting `hw_scaling = false` requires source extent == dest extent and
-  the WM resamples in software into a baked layer (the fallback).
-
-### E.3 Tests
-- Unit: flip-in-flight ⇒ `Busy`; scaled layer (`src != dst`) accepted only
-  when `hw_scaling`; rejected/fell-back otherwise.
-- QEMU vertical extended: double-buffered flip completes via IRQ; a scaled
-  present matches the software-resampled reference within tolerance.
+- `FramePacer` holds a frame while a present is queued and admits it on the
+  `Presented` event, replacing the fixed period with the flip where the
+  presenter reports one (`plans/FIX-DESKTOP-SPEEDUP.md` E.3 keeps its other
+  invariants). `Busy` is coalesced: damage stays, the next admitted frame
+  carries it; it never ends the session.
+- **Hardware scaling**: with `AccelCaps::hw_scaling`, the scaled desktop
+  (`set_desktop_size`, `plans/DISPLAY.md` D11) is composited into a
+  desktop-sized layer buffer and presented as one scaled layer — the HVS
+  scaler replaces the software resample. Without it, the software resample
+  stays.
 
 ---
 
-## Per-target acceleration delivered
+## Per-target delivery
 
 | Target | Accelerated path |
 |---|---|
-| aarch64 / riscv64 / x86_64 (QEMU) | `virtio-gpu` 2D transfer/flush with host-side damage; blob/`dmabuf` zero-copy layer scanout; IRQ completion. One generic driver, no per-arch code (Stage C). |
-| Raspberry Pi 4 (hardware) | VideoCore **HVS** hardware layer compositor in the native engine (`bcm2711_hvs`), reachable end-to-end and copy-free for directly-sourceable layers (Stages A/B/D/E). |
-| wasm32 / plain framebuffer / VESA | No hardware layers; software `Display` — the mandatory, unchanged fallback (§17.3). Headless stays first-class. |
+| aarch64 / riscv64 / x86_64 (QEMU) | `gpu_virtio`: zero-copy primary plane, host-side damage, power, EDID and hotplug, the cursor plane, the hosted console, interrupt completion. One driver, no per-arch code. |
+| Raspberry Pi 4 | `bcm2711_hvs`: zero-copy frames and layers, one plane per layer, the cursor plane, end-of-frame completion, the scaler. |
+| wasm32, framebuffer, VESA | The software path; one synchronously blitted frame. |
 
----
+## Refused by name
 
-## Definition of done (whole plan)
+- Blob resources and multi-scanout "layers" on virtio-gpu (decision 2).
+- A virgl/3D path: `plans/GPU.md` owns rendering, layered on this plan.
+- A per-layer damage field with no engine to consume it.
+- A second blend path, a GPU-only path with no software equivalent, or a
+  partial hardware frame.
 
-- Every stage's code, tests, and docs land together (§7, §13); no stage
-  ships a no-op, a stub, or a "later".
-- `AccelLayer`/`AccelCaps` and the `lib/display` wire protocol are the
-  single living definition — no `v1`/`v2` duplication, no dead placeholder
-  (`gpu_virtio` is a real driver, §2.14).
-- The software `Display` path remains the always-available fallback on
-  every target; the accelerated path is never a bypass around the seat
-  lease (§5.4).
-- §23 self-review applied (security: lease-first + validated shm sources +
-  fail-closed caps; correctness/multi-arch: `gpu_virtio` board-neutral,
-  one blend path; no-compat/no-dead-code; tests/docs).
-- Whole-project gate green: `cargo fmt --all`, `cargo xtask ci` (once),
-  `cargo xtask fuzz --secs 5` (the new `PresentLayers`/virtio-gpu decoders
-  get fuzz harnesses, §19.6), and `tools/ci/soak.sh both --secs 20`.
+## Definition of done
+
+Every item's code, tests and docs land together; `gpu_virtio` is a real
+driver; the software path is the fallback everywhere and the lease gates every
+path. §23 self-review applied. Whole-project gate green once on the final
+tree: `cargo fmt --all`, `cargo xtask ci`, `cargo xtask fuzz --secs 5`,
+`tools/ci/soak.sh both --secs 20`. New `unsafe` (the shared console slot, the
+driver DMA paths) is enrolled in miri. The queued-present handoff and the
+console damage readiness add no ordering pairing of their own: the damage is
+written and read under the console's render lock (`lib/sync`'s locks, loom
+modelled), its wake is the wait queue's deferred request drained into the
+park/unpark handshake (`kernel/sched/api`, loom modelled), and a queued present
+is held and released by single-threaded loops on either side of the IPC.

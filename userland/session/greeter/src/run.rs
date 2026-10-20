@@ -50,7 +50,7 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
-    use tairix_abi::driver::display::{Display, DisplayMode};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::input::{KeyInput, PointerInput};
     use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -62,7 +62,7 @@ mod program {
     use tairix_abi::NoticeTopic;
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
     use tairix_display::{
-        establish_frames, DisplayClient, DisplayTransport, FramesRefused, RemoteDisplay,
+        establish_display, DisplayClient, DisplayTransport, FramesRefused, Presenter, RtDisplay,
         SwitchedOff,
     };
     use tairix_geometry::Scale;
@@ -82,16 +82,12 @@ mod program {
     use tairix_greeter_service::zones::zone_store_grant;
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
     use tairix_procinfo::{call, IpcTransport};
-    use tairix_rt::shm::SharedRegion;
     use tairix_rt::sync::WorkerWake;
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_rt::LogSink;
     use tairix_theme::{Appearance, ThemeRegistry};
     use tairix_tz::{CivilClock, ZoneInfo};
     use tairix_window::app;
-
-    /// Frames in the presented ring: one being scanned out, one being written.
-    const FRAME_COUNT: u32 = 2;
 
     /// Wait-set token for "the seat has input waiting".
     const SEAT_TOKEN: u64 = 0;
@@ -103,9 +99,13 @@ mod program {
     /// Wait-set token for "the authority answered a check".
     const AUTHORITY_TOKEN: u64 = 2;
 
-    /// The frame ring the screen presents through: its own frames, owned by
-    /// the ring and unmapped with it.
-    type Ring = RemoteDisplay<SharedRegion, RtDisplayTransport>;
+    /// Wait-set token for "the display latched the last frame".
+    const DISPLAY_EVENT_TOKEN: u64 = 3;
+
+    /// The display the screen presents through: the frames its driver
+    /// allocated, mapped by the ring and unmapped with it, and the port the
+    /// driver posts each latch to.
+    type Ring = RtDisplay<RtDisplayTransport>;
 
     /// The thread every check goes to the authority on, so the key derivation
     /// it waits on never holds a frame.
@@ -332,20 +332,62 @@ mod program {
         );
     }
 
-    /// Hand `present` to the display, when there is an output to show it on.
-    fn show(display: &mut Option<Ring>, frame: &[u8], present: Present) {
+    /// Hand `present` to the display, when there is an output to show it on,
+    /// answering what it could not take yet: a display still reading the
+    /// last frame keeps the frame owed until its latch.
+    fn show(display: &mut Option<Ring>, frame: &[u8], present: Present) -> Present {
         let Some(display) = display.as_mut() else {
-            return;
+            return Present::Nothing;
         };
-        match present {
-            Present::Nothing => {}
-            Present::Region(list) => {
-                let _ = display.present_rects(frame, list.rects());
-            }
-            Present::Whole => {
-                let _ = display.present(frame);
-            }
+        if !display.ready() {
+            return present;
         }
+        let whole = [DamageRect::full(&display.mode())];
+        let damage = match &present {
+            Present::Nothing => return Present::Nothing,
+            Present::Region(list) => list.rects(),
+            Present::Whole => &whole,
+        };
+        match display.present(frame, damage) {
+            Err(DriverError::Busy) => present,
+            // Any other refusal is the output's to announce, or a lost seat
+            // the next drain observes.
+            Ok(()) | Err(_) => Present::Nothing,
+        }
+    }
+
+    /// Hold `ring` as the screen's display in place of whatever it held, its
+    /// latch port waited on in `set` in place of the last one's.
+    ///
+    /// # Errors
+    ///
+    /// The wait-set's refusal of the port, which leaves no display held: a
+    /// frame the device queued would never be heard to latch.
+    fn hold_display(set: u64, display: &mut Option<Ring>, ring: Option<Ring>) -> Result<(), Errno> {
+        if let Some(old) = display.take() {
+            let _ = tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Del,
+                WaitSourceKind::Port,
+                old.events_port(),
+                DISPLAY_EVENT_TOKEN,
+            );
+        }
+        let Some(ring) = ring else {
+            return Ok(());
+        };
+        let added = tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Port,
+            ring.events_port(),
+            DISPLAY_EVENT_TOKEN,
+        );
+        if added < 0 {
+            return Err(Errno::from_syscall(added));
+        }
+        *display = Some(ring);
+        Ok(())
     }
 
     /// How draining one of the seat's channels ended.
@@ -438,13 +480,10 @@ mod program {
         }
     }
 
-    /// Frames for `mode`, established the one way every presenter does.
+    /// The frames the display allocated for `mode`, taken the one way every
+    /// presenter does.
     fn frames_for(mode: &DisplayMode) -> Result<Ring, FramesRefused> {
-        establish_frames(
-            DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY),
-            mode,
-            FRAME_COUNT,
-        )
+        establish_display(DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY), *mode)
     }
 
     /// The output the screen comes up on, and frames for it: the one
@@ -488,9 +527,9 @@ mod program {
     /// output may be a new sink, or a restarted service holding none of the
     /// old ones — and the screen rebuilt in place when the mode is another,
     /// answering the whole of it to show.
-    fn follow_output(screen: &mut Screen, display: &mut Option<Ring>) -> Present {
+    fn follow_output(screen: &mut Screen, (display, set): (&mut Option<Ring>, u64)) -> Present {
         let output = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query();
-        *display = None;
+        let _ = hold_display(set, display, None);
         // A refused query is a lost seat, which the next drain observes.
         let Ok(Some(mode)) = output else {
             return Present::Nothing;
@@ -509,7 +548,16 @@ mod program {
             Some(scanout)
         };
         match frames_for(&mode) {
-            Ok(ring) => *display = Some(ring),
+            Ok(ring) => {
+                if hold_display(set, display, Some(ring)).is_err() {
+                    record(
+                        SCREEN_UNAVAILABLE,
+                        Level::Warn,
+                        "greeter: the display's latches cannot be waited on",
+                    );
+                    return Present::Nothing;
+                }
+            }
             // It moved again, and that announcement brings the screen onto
             // where it went.
             Err(FramesRefused::Configure(Errno::Stale)) => return Present::Nothing,
@@ -558,7 +606,13 @@ mod program {
                 "the queried mode describes no drawable screen, or no memory holds its frame",
             );
         };
-        let mut display = Some(ring);
+        let mut display = None;
+        if hold_display(set, &mut display, Some(ring)).is_err() {
+            return fail(
+                EXIT_NO_WAITSET,
+                "the display's latches could not be waited on",
+            );
+        }
 
         let worker = Arc::new(Worker::new(
             exchange::<RtSessionTransport>,
@@ -620,7 +674,7 @@ mod program {
         // handed over cleared to rather than snapping onto it; the park loop
         // below runs the fade off the same deadline as every other animation.
         let opening = screen.open(tairix_rt::clock_get(), wall_now());
-        show(&mut display, screen.frame(), opening);
+        let owed = show(&mut display, screen.frame(), opening);
         record(SCREEN_READY, Level::Info, SCREEN_READY_MESSAGE);
 
         if tairix_rt::waitset_ctl(
@@ -633,7 +687,7 @@ mod program {
         {
             return fail(EXIT_NO_WAITSET, "the seat's input could not be waited on");
         }
-        park_loop(&mut screen, &mut display, (set, worker.wake()))
+        park_loop(&mut screen, &mut display, (set, worker.wake()), owed)
     }
 
     /// Serve the screen until it is finished, parking between wakes.
@@ -649,15 +703,21 @@ mod program {
         screen: &mut Screen,
         display: &mut Option<Ring>,
         (set, answered): (u64, &WorkerWake),
+        mut owed: Present,
     ) -> i32 {
         let mut told_unswitchable = false;
         let mut told_unwakeable = false;
         let mut token = SEAT_TOKEN;
         loop {
+            if token == DISPLAY_EVENT_TOKEN {
+                if let Some(ring) = display.as_mut() {
+                    ring.take_events();
+                }
+            }
             let mut round = if token == DISPLAY_OUTPUT_TOKEN {
-                follow_output(screen, display)
+                follow_output(screen, (display, set))
             } else {
-                Present::Nothing
+                core::mem::replace(&mut owed, Present::Nothing)
             };
             if token == AUTHORITY_TOKEN {
                 answered.drain();
@@ -673,8 +733,8 @@ mod program {
             }
             if adopt_answers(screen) {
                 let verified = round.merged(screen.draw(), screen.mode());
-                show(display, screen.frame(), verified);
-                fade_out(screen, display, set);
+                let owed = show(display, screen.frame(), verified);
+                fade_out(screen, display, set, owed);
                 return 0;
             }
             let now = tairix_rt::clock_get();
@@ -704,7 +764,7 @@ mod program {
             // nothing, so they add to the round's frame and to no verdict.
             screen.refresh(now, wall);
             round = round.merged(screen.draw(), screen.mode());
-            show(display, screen.frame(), round);
+            owed = show(display, screen.frame(), round);
             let slept = display
                 .as_mut()
                 .and_then(|ring| screen.sleep_if_idle(ring, tairix_rt::clock_get()));
@@ -753,9 +813,12 @@ mod program {
     /// The seat's channels are still drained, though nothing acts on them:
     /// input left unread reads ready forever, and the park would return at
     /// once instead of pacing the fade.
-    fn fade_out(screen: &mut Screen, display: &mut Option<Ring>, set: u64) {
-        let opening = screen.begin_session_fade(tairix_rt::clock_get());
-        show(display, screen.frame(), opening);
+    fn fade_out(screen: &mut Screen, display: &mut Option<Ring>, set: u64, owed: Present) {
+        let opening = owed.merged(
+            screen.begin_session_fade(tairix_rt::clock_get()),
+            screen.mode(),
+        );
+        let mut owed = show(display, screen.frame(), opening);
         for _ in 0..screen.session_fade_budget() {
             let Some(due) = screen.session_fade_due(tairix_rt::clock_get()) else {
                 return;
@@ -771,8 +834,17 @@ mod program {
             if woken < 0 && Errno::from_syscall(woken) != Errno::TimedOut {
                 return;
             }
+            if token == DISPLAY_EVENT_TOKEN {
+                if let Some(ring) = display.as_mut() {
+                    ring.take_events();
+                }
+            }
             let darkened = screen.session_fade_step(tairix_rt::clock_get());
-            show(display, screen.frame(), darkened);
+            owed = show(
+                display,
+                screen.frame(),
+                owed.merged(darkened, screen.mode()),
+            );
         }
     }
 

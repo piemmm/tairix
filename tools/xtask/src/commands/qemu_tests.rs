@@ -30,8 +30,8 @@ use tairix_desktop_session::SizedRecord;
 use tairix_itest_harness::pie::PieArch;
 use tairix_qemu::screendump::Rgb;
 use tairix_qemu::{
-    DmaTranslation, InterruptControllers, NamedKey, Outcome, ReservedSocket, Runner, SoundCard,
-    Spec,
+    Display, DmaTranslation, InterruptControllers, NamedKey, Outcome, ReservedSocket, Runner,
+    SoundCard, Spec,
 };
 use tairix_test_audio_wire::ReportedLoss;
 
@@ -109,10 +109,10 @@ struct QemuTest {
     /// capture beside the kernel image so a host can inspect the on-wire
     /// exchange. [`NetPeerMode::None`] attaches no interface.
     netstack_peer: NetPeerMode,
-    /// When `true`, attach a QEMU `ramfb` display device (a
-    /// firmware-programmed linear framebuffer in guest RAM). Used by the
-    /// framebuffer-display vertical on the riscv64 `virt` board.
-    ramfb: bool,
+    /// The display the guest draws on: none, a QEMU `ramfb` (a
+    /// firmware-programmed linear framebuffer in guest RAM), or a virtio GPU
+    /// ([`VIRTIO_GPU`]).
+    display: Display,
     /// When `true`, attach a QEMU `virtio-crypto` device backed by the
     /// builtin cryptodev backend. Used by the accelerator vertical, which
     /// drives a real offload engine and checks its arithmetic against a
@@ -462,6 +462,10 @@ enum FsDisk {
     /// login must reach the graphical login screen on its own
     /// (`plans/NEW-DESKTOP-LOGIN.md` G7.1).
     GreeterRootDisk,
+    /// The [`Self::GreeterRootDisk`] layout whose display driver is the
+    /// virtio-gpu driver ([`super::image_drivers::virtio_gpu_driver_store_files`]):
+    /// the disk of a board whose only display is a virtio GPU.
+    VirtioGpuRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
     /// volume** additionally carries the test-only `memsoak` fixture bundle
     /// ([`super::image_apps::memsoak_store_files`]) — the memory-stability
@@ -1521,26 +1525,11 @@ const _: () = {
 
 /// An enrolment [`TESTS`] runs twice, the second time with its input
 /// devices on the PCI host.
-const AUTOLOAD_INPUT_AARCH64: QemuTest = QemuTest {
-    package: "tairix-test-autoload-input-qemu-aarch64",
-    binary: "tairix-test-autoload-input-qemu-aarch64",
-    target: "aarch64-unknown-none",
-    cpus: 1,
-    timeout: Duration::from_secs(300),
-    ram_mib: None,
-    disk_sectors: None,
-    netstack_peer: NetPeerMode::None,
-    ramfb: true,
-    crypto: false,
-    fs_disk: FsDisk::AutoloadRootDisk,
-    rtc_base: None,
-    keyboard: None,
-    typed_keys: &[
-        TypedStep::text(
-            AUTOLOAD_INPUT_KEY_MARKER,
-            AUTOLOAD_INPUT_ARMED_OCCURRENCES,
-            UNLOCK_PASSPHRASE_LINE,
-        ),
+/// The autoload desktop's seat-keyboard dialogue, its passphrase typed once
+/// `armed` drivers have armed.
+const fn autoload_dialogue(armed: u32) -> [TypedStep; 4] {
+    [
+        TypedStep::text(AUTOLOAD_INPUT_KEY_MARKER, armed, UNLOCK_PASSPHRASE_LINE),
         TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         // AW4 terminal stage: type the shell command once the terminal
         // gains focus (its spawn is the PASS gate's round-trip witness).
@@ -1561,7 +1550,89 @@ const AUTOLOAD_INPUT_AARCH64: QemuTest = QemuTest {
             1,
             AUTOLOAD_TERMINAL_CTRL_C_RECOVERY,
         ),
-    ],
+    ]
+}
+
+/// [`autoload_dialogue`] on the ramfb board: the keyboard and the mouse arm.
+const AUTOLOAD_DIALOGUE: [TypedStep; 4] = autoload_dialogue(AUTOLOAD_INPUT_ARMED_OCCURRENCES);
+
+/// [`autoload_dialogue`] on a virtio-GPU board, whose GPU driver arms too.
+const VIRTIO_GPU_AUTOLOAD_DIALOGUE: [TypedStep; 4] =
+    autoload_dialogue(AUTOLOAD_INPUT_ARMED_OCCURRENCES + 1);
+
+/// Serial marker keying a virtio-GPU vertical's look at its console: the
+/// driver's record that the console is on the device's screen.
+const VIRTIO_GPU_CONSOLE_SHOWN_MARKER: &str = tairix_drv_display_gpu_virtio::CONSOLE_SHOWN_MESSAGE;
+
+/// How a virtio-GPU board's passphrase is typed: once the keyboard and the
+/// GPU have armed, and then only once the console is on the screen, so the
+/// console's screendump is taken before the passphrase unlocks anything
+/// that draws over it.
+const VIRTIO_GPU_UNLOCK: [TypedStep; 2] = [
+    TypedStep::text(
+        AUTOLOAD_INPUT_KEY_MARKER,
+        armed_irq_drivers(tairix_qemu::PointingDevices::NONE, false, VIRTIO_GPU),
+        "",
+    ),
+    TypedStep::text(VIRTIO_GPU_CONSOLE_SHOWN_MARKER, 1, UNLOCK_PASSPHRASE_LINE),
+];
+
+/// The look a virtio-GPU vertical takes at its console.
+const VIRTIO_GPU_CONSOLE_DUMP: ScreendumpPlan = ScreendumpPlan {
+    marker: VIRTIO_GPU_CONSOLE_SHOWN_MARKER,
+    occurrences: 1,
+    suffix: "console",
+    assert: assert_virtio_gpu_console_screendump,
+};
+
+/// A board whose only display is a virtio GPU boots to the graphical login
+/// screen: `devmgr` autoloads the virtio-gpu driver, which hosts the console
+/// on the device, and the login screen's frame reaches it. The guest is the
+/// greeter vertical's on aarch64 and one of its own elsewhere.
+const fn virtio_gpu_greeter(
+    package: &'static str,
+    binary: &'static str,
+    target: &'static str,
+) -> QemuTest {
+    QemuTest {
+        package,
+        binary,
+        target,
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: VIRTIO_GPU,
+        crypto: false,
+        fs_disk: FsDisk::VirtioGpuRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &VIRTIO_GPU_UNLOCK,
+        screendumps: &[VIRTIO_GPU_CONSOLE_DUMP],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    }
+}
+
+const AUTOLOAD_INPUT_AARCH64: QemuTest = QemuTest {
+    package: "tairix-test-autoload-input-qemu-aarch64",
+    binary: "tairix-test-autoload-input-qemu-aarch64",
+    target: "aarch64-unknown-none",
+    cpus: 1,
+    timeout: Duration::from_secs(300),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    display: Display::Ramfb,
+    crypto: false,
+    fs_disk: FsDisk::AutoloadRootDisk,
+    rtc_base: None,
+    keyboard: None,
+    typed_keys: &AUTOLOAD_DIALOGUE,
     screendumps: &[
         ScreendumpPlan {
             marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
@@ -1593,7 +1664,7 @@ const IPI_SMP_AARCH64: QemuTest = QemuTest {
     ram_mib: None,
     disk_sectors: None,
     netstack_peer: NetPeerMode::None,
-    ramfb: false,
+    display: Display::None,
     crypto: false,
     fs_disk: FsDisk::None,
     rtc_base: None,
@@ -1617,7 +1688,7 @@ const FIQ_SELFSAMPLE_AARCH64: QemuTest = QemuTest {
     ram_mib: None,
     disk_sectors: None,
     netstack_peer: NetPeerMode::None,
-    ramfb: false,
+    display: Display::None,
     crypto: false,
     fs_disk: FsDisk::None,
     rtc_base: None,
@@ -1641,7 +1712,7 @@ const KERNEL_ARCH_BOOT_AARCH64: QemuTest = QemuTest {
     ram_mib: None,
     disk_sectors: None,
     netstack_peer: NetPeerMode::None,
-    ramfb: true,
+    display: Display::Ramfb,
     crypto: false,
     fs_disk: FsDisk::None,
     rtc_base: None,
@@ -1665,7 +1736,7 @@ const DMA_TRANSLATION_AARCH64: QemuTest = QemuTest {
     ram_mib: None,
     disk_sectors: None,
     netstack_peer: NetPeerMode::None,
-    ramfb: true,
+    display: Display::Ramfb,
     crypto: false,
     fs_disk: FsDisk::AutoloadRootDisk,
     rtc_base: None,
@@ -1689,7 +1760,7 @@ const KERNEL_ARCH_BOOT_RISCV64: QemuTest = QemuTest {
     ram_mib: None,
     disk_sectors: None,
     netstack_peer: NetPeerMode::None,
-    ramfb: false,
+    display: Display::None,
     crypto: false,
     fs_disk: FsDisk::None,
     rtc_base: None,
@@ -1722,7 +1793,7 @@ const AUTOLOAD_INPUT_RISCV64: QemuTest = QemuTest {
     ram_mib: None,
     disk_sectors: None,
     netstack_peer: NetPeerMode::None,
-    ramfb: false,
+    display: Display::None,
     crypto: false,
     fs_disk: FsDisk::AutoloadRootDisk,
     rtc_base: None,
@@ -1753,7 +1824,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -1778,7 +1849,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -1803,7 +1874,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -1828,7 +1899,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -1856,7 +1927,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -1898,7 +1969,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -1930,7 +2001,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -1962,7 +2033,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -1999,7 +2070,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2032,7 +2103,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2065,7 +2136,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2097,7 +2168,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2130,7 +2201,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2159,7 +2230,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2191,7 +2262,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2223,7 +2294,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2254,7 +2325,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2285,7 +2356,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2316,7 +2387,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2349,7 +2420,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2382,7 +2453,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2415,7 +2486,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2437,7 +2508,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2476,7 +2547,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2498,7 +2569,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2520,7 +2591,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2542,7 +2613,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2569,7 +2640,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2604,7 +2675,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2666,7 +2737,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: Some(3072),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2688,7 +2759,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: Some(3072),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2710,7 +2781,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: Some(3584),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2746,7 +2817,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2784,7 +2855,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2823,7 +2894,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2863,7 +2934,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2904,7 +2975,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2940,7 +3011,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -2981,7 +3052,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3023,7 +3094,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3068,7 +3139,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3108,7 +3179,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3149,7 +3220,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3193,7 +3264,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3220,7 +3291,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3263,7 +3334,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3299,7 +3370,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3337,7 +3408,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: Some(2048),
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3368,7 +3439,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::Fat32,
         rtc_base: None,
@@ -3400,7 +3471,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::ARXFS,
         rtc_base: None,
@@ -3456,7 +3527,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3501,7 +3572,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3544,7 +3615,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3583,7 +3654,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3617,7 +3688,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3652,7 +3723,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3729,7 +3800,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3773,7 +3844,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3811,7 +3882,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3848,7 +3919,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3885,7 +3956,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3915,7 +3986,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3944,7 +4015,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -3977,7 +4048,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4003,7 +4074,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4038,7 +4109,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4072,7 +4143,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4094,7 +4165,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4119,7 +4190,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4148,7 +4219,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4182,7 +4253,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4223,7 +4294,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4257,7 +4328,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: Some(2048),
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4292,7 +4363,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4328,7 +4399,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4395,7 +4466,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4455,7 +4526,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -4518,7 +4589,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -4556,7 +4627,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4599,7 +4670,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4641,7 +4712,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4670,7 +4741,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4716,7 +4787,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4767,7 +4838,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4812,7 +4883,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4887,7 +4958,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4926,7 +4997,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -4966,7 +5037,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5008,7 +5079,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5035,7 +5106,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5079,7 +5150,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5120,7 +5191,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5142,7 +5213,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5183,7 +5254,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5225,7 +5296,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5252,7 +5323,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5283,7 +5354,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5327,7 +5398,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5353,7 +5424,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5380,7 +5451,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5428,7 +5499,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5473,7 +5544,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5516,7 +5587,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5554,7 +5625,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5598,7 +5669,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5643,7 +5714,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5675,7 +5746,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5700,7 +5771,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5744,7 +5815,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5789,7 +5860,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5829,7 +5900,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5873,7 +5944,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5923,7 +5994,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -5965,7 +6036,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -6024,7 +6095,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -6069,7 +6140,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -6109,7 +6180,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -6161,7 +6232,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -6205,7 +6276,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -6248,7 +6319,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -6286,7 +6357,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -6322,7 +6393,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: Some(2048),
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -6357,7 +6428,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::UsersRoot,
         rtc_base: None,
@@ -6397,7 +6468,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::UsersRoot,
         rtc_base: None,
@@ -6438,7 +6509,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -6482,7 +6553,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -6549,7 +6620,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -6576,7 +6647,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::GrownEncryptedRootDisk,
         rtc_base: None,
@@ -6633,7 +6704,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -6672,7 +6743,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -6708,7 +6779,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -6736,7 +6807,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::PlaintextRootDisk,
         rtc_base: None,
@@ -6787,7 +6858,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -6830,7 +6901,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -6886,7 +6957,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -6978,7 +7049,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -7081,7 +7152,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::MemsoakRootDisk,
         rtc_base: None,
@@ -7136,7 +7207,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::StalltraceRootDisk,
         rtc_base: None,
@@ -7192,7 +7263,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6TcpEcho,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::StreamRootDisk,
         rtc_base: None,
@@ -7240,7 +7311,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7282,7 +7353,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7324,7 +7395,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7352,7 +7423,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7380,7 +7451,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7408,7 +7479,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7436,7 +7507,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7464,7 +7535,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7492,7 +7563,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7519,7 +7590,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::LifecycleAudioRootDisk,
         rtc_base: None,
@@ -7546,7 +7617,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::LifecycleAudioRootDisk,
         rtc_base: None,
@@ -7573,7 +7644,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::LifecycleAudioRootDisk,
         rtc_base: None,
@@ -7602,7 +7673,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7631,7 +7702,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7660,7 +7731,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AudioRootDisk,
         rtc_base: None,
@@ -7689,7 +7760,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::UsbAudioRootDisk,
         rtc_base: None,
@@ -7718,7 +7789,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::UsbAudioRootDisk,
         rtc_base: None,
@@ -7747,7 +7818,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::UsbAudioRootDisk,
         rtc_base: None,
@@ -7775,7 +7846,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::HdaAudioRootDisk,
         rtc_base: None,
@@ -7803,7 +7874,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::HdaAudioRootDisk,
         rtc_base: None,
@@ -7831,7 +7902,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::HdaAudioRootDisk,
         rtc_base: None,
@@ -7876,7 +7947,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6TcpEchoEcn,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EcnRootDisk,
         rtc_base: None,
@@ -7933,7 +8004,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6TcpConnect,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::ListenRootDisk,
         rtc_base: None,
@@ -7991,7 +8062,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6TcpFlood,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::ListenRootDisk,
         rtc_base: None,
@@ -8042,7 +8113,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6EchoPeer,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::NetToolRootDisk,
         rtc_base: None,
@@ -8098,7 +8169,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::MdnsResponder,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::NetToolRootDisk,
         rtc_base: None,
@@ -8188,7 +8259,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6TelnetServer,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::NetToolRootDisk,
         rtc_base: None,
@@ -8260,7 +8331,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6StaticEcho,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::StaticNetRootDisk,
         rtc_base: None,
@@ -8310,7 +8381,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V4DhcpEcho,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::DhcpNetRootDisk,
         rtc_base: None,
@@ -8365,7 +8436,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::NtpServer,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::TimeNetRootDisk,
         rtc_base: None,
@@ -8407,7 +8478,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::NtpServer,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::TimeNetRootDisk,
         rtc_base: None,
@@ -8473,7 +8544,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V4DhcpNtpServer,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::DhcpNetRootDisk,
         rtc_base: None,
@@ -8519,7 +8590,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::RtcRootDisk,
         rtc_base: Some(tairix_test_rtc_fixture::RTC_BASE_SECS),
@@ -8549,7 +8620,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::RtcRootDisk,
         rtc_base: Some(tairix_test_rtc_fixture::RTC_BASE_SECS),
@@ -8579,7 +8650,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::RtcRootDisk,
         rtc_base: Some(tairix_test_rtc_fixture::RTC_BASE_SECS),
@@ -8624,7 +8695,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -8687,7 +8758,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::WatchdogRootDisk,
         rtc_base: None,
@@ -8730,7 +8801,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -8797,7 +8868,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::Bond,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::BondNetRootDisk,
         rtc_base: None,
@@ -8846,7 +8917,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6StaticEcho,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::StaticNetRootDisk,
         rtc_base: None,
@@ -8896,7 +8967,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V4DhcpEcho,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::DhcpNetRootDisk,
         rtc_base: None,
@@ -8940,7 +9011,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::Bond,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::BondNetRootDisk,
         rtc_base: None,
@@ -8990,7 +9061,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6StaticEcho,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::StaticNetRootDisk,
         rtc_base: None,
@@ -9055,7 +9126,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V4DhcpEcho,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::DhcpNetRootDisk,
         rtc_base: None,
@@ -9107,7 +9178,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6Dhcp6Echo,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::Dhcp6NetRootDisk,
         rtc_base: None,
@@ -9132,7 +9203,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6Dhcp6Echo,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::Dhcp6NetRootDisk,
         rtc_base: None,
@@ -9157,7 +9228,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6Dhcp6Echo,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::Dhcp6NetRootDisk,
         rtc_base: None,
@@ -9202,7 +9273,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::Bond,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::BondNetRootDisk,
         rtc_base: None,
@@ -9253,7 +9324,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -9333,7 +9404,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -9389,7 +9460,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::EncryptedRootDisk,
         rtc_base: None,
@@ -9517,6 +9588,16 @@ static TESTS: &[QemuTest] = &[
     // deliberately not driven here (host-tested in `lib/browse`); see the
     // sink doc in `src/main.rs` and `plans/OPEN-DEFECTS.md` D20.
     AUTOLOAD_INPUT_AARCH64,
+    // `plans/FIX-DISPLAY-ACCELERATION.md` C: the same desktop, its every
+    // frame presented through the virtio-gpu driver on a board whose only
+    // display is a virtio GPU — the desktop and files-window dumps hold the
+    // composited frame and then the damaged region a window opened.
+    QemuTest {
+        display: VIRTIO_GPU,
+        fs_disk: FsDisk::VirtioGpuRootDisk,
+        typed_keys: &VIRTIO_GPU_AUTOLOAD_DIALOGUE,
+        ..AUTOLOAD_INPUT_AARCH64
+    },
     // The same run with the keyboard and mouse as PCI functions on the
     // generic ECAM host, sharing one INTx line (`plans/IOMMU.md` IOM13).
     QemuTest {
@@ -9567,7 +9648,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -9651,7 +9732,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -9734,7 +9815,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -9801,7 +9882,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -9861,7 +9942,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -9910,7 +9991,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -9979,7 +10060,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10072,7 +10153,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6RouterAdvert,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10123,7 +10204,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10217,7 +10298,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10291,7 +10372,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::HoverRootDisk,
         rtc_base: None,
@@ -10324,7 +10405,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10399,7 +10480,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::SvgTextRootDisk,
         rtc_base: None,
@@ -10455,7 +10536,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::GreeterRootDisk,
         rtc_base: None,
@@ -10478,6 +10559,27 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // `plans/FIX-DISPLAY-ACCELERATION.md` C: the virtio-gpu verticals, one per
+    // port, each on a board whose only display is a virtio GPU — virtio-mmio
+    // on the `virt` boards, virtio-PCI on `q35`. The console dump is keyed on
+    // the driver's record that the console is on the device, and holds the
+    // passphrase back until it is taken; the guest passes on the login
+    // screen's kernel-attested frame.
+    virtio_gpu_greeter(
+        "tairix-test-greeter-default-qemu-aarch64",
+        "tairix-test-greeter-default-qemu-aarch64",
+        "aarch64-unknown-none",
+    ),
+    virtio_gpu_greeter(
+        "tairix-test-virtio-gpu-qemu-riscv64",
+        "tairix-test-virtio-gpu-qemu-riscv64",
+        RISCV64_TARGET,
+    ),
+    virtio_gpu_greeter(
+        "tairix-test-virtio-gpu-qemu-x86-64",
+        "tairix-test-virtio-gpu-qemu-x86-64",
+        X86_64_TARGET,
+    ),
     // `plans/NETWORK.md` N4e-riscv64 (first stage): the riscv64
     // driver-loading-by-discovery autoload vertical — the `virt`-board
     // virtio-mmio analogue of the aarch64 `autoload_input` vertical, reduced
@@ -10555,7 +10657,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10588,7 +10690,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10624,7 +10726,7 @@ static TESTS: &[QemuTest] = &[
         // attaches it as the one virtio-blk-pci function the gate translates.
         disk_sectors: Some(2048),
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -10650,7 +10752,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10676,7 +10778,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10701,7 +10803,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: Some(2048),
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -10808,7 +10910,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6LinkLocal,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10852,7 +10954,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6LinkLocal,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10903,7 +11005,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6LinkLocal,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10949,7 +11051,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6LinkLocal,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::AutoloadRootDisk,
         rtc_base: None,
@@ -10986,7 +11088,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: true,
+        display: Display::Ramfb,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11016,7 +11118,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11050,7 +11152,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11086,7 +11188,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11128,7 +11230,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11166,7 +11268,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11210,7 +11312,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11249,7 +11351,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11283,7 +11385,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: true,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11324,7 +11426,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11364,7 +11466,7 @@ static TESTS: &[QemuTest] = &[
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
+        display: Display::None,
         crypto: false,
         fs_disk: FsDisk::None,
         rtc_base: None,
@@ -11916,6 +12018,8 @@ pub(crate) struct StoreSet {
     /// The signed autoload driver bundles the `-M virt` autoload verticals
     /// plant in the `/System/Drivers/` store.
     autoload_drivers: &'static [AppStoreFile],
+    /// The autoload set with the virtio-gpu driver as its display.
+    virtio_gpu_drivers: &'static [AppStoreFile],
     /// The application/service bundles the stream vertical plants: the shared
     /// set plus the test-only `tcpecho` fixture bundle.
     apps_with_tcpecho: &'static [AppStoreFile],
@@ -11984,7 +12088,8 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         | FsDisk::NetToolRootDisk
         | FsDisk::AutoloadRootDisk
         | FsDisk::RtcRootDisk
-        | FsDisk::GreeterRootDisk => super::image_apps::app_store_files(ctx, arch, profile)?,
+        | FsDisk::GreeterRootDisk
+        | FsDisk::VirtioGpuRootDisk => super::image_apps::app_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     let FixtureStores {
@@ -12000,6 +12105,12 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         | FsDisk::HoverRootDisk
         | FsDisk::SvgTextRootDisk => {
             super::image_drivers::autoload_driver_store_files(ctx, arch, profile)?
+        }
+        _ => EMPTY,
+    };
+    let virtio_gpu_drivers = match t.fs_disk {
+        FsDisk::VirtioGpuRootDisk => {
+            super::image_drivers::virtio_gpu_driver_store_files(ctx, arch, profile)?
         }
         _ => EMPTY,
     };
@@ -12048,6 +12159,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps_with_framestats,
         apps_with_svgtext,
         autoload_drivers,
+        virtio_gpu_drivers,
         apps_with_tcpecho,
         apps_with_audiotone,
         audio_drivers,
@@ -13359,6 +13471,88 @@ fn assert_booted_desktop_screendump(
     _serial: &str,
 ) -> Result<(), String> {
     assert_desktop_screendump(t, path, &booted_theme())
+}
+
+/// [`ScreendumpPlan`] assertion: the kernel console is on a virtio GPU's
+/// screen — the device's mode, one background holding most of it, and text
+/// drawn over that background from its left edge, where the console's lines
+/// begin and the message QEMU centres on a screen nothing scans out never
+/// reaches.
+fn assert_virtio_gpu_console_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
+    let image = read_screendump(t, path)?;
+    assert_virtio_gpu_console(t, path, &image)
+}
+
+/// [`assert_virtio_gpu_console_screendump`] over the dump at `path`, already
+/// read.
+fn assert_virtio_gpu_console(
+    t: &QemuTest,
+    path: &Path,
+    image: &tairix_qemu::screendump::Image,
+) -> Result<(), String> {
+    /// Fewest pixels of text a console showing anything at all draws: a
+    /// handful of glyphs.
+    const TEXT_PIXELS_MIN: usize = 256;
+    /// Fewest of them along the left edge: a few lines' first glyphs.
+    const MARGIN_TEXT_PIXELS_MIN: usize = 32;
+    let Display::VirtioGpu { width, height } = t.display else {
+        return Err(format!(
+            "test --qemu ({}): no virtio GPU to dump",
+            t.package
+        ));
+    };
+    if (image.width, image.height) != (width, height) {
+        return Err(format!(
+            "test --qemu ({}): the console dump is {}x{}, not the GPU's {width}x{height}",
+            t.package, image.width, image.height
+        ));
+    }
+    let pixels = image.pixels.as_chunks::<3>().0;
+    let mut colours: std::collections::HashMap<[u8; 3], usize> = std::collections::HashMap::new();
+    for pixel in pixels {
+        *colours.entry(*pixel).or_default() += 1;
+    }
+    let (background_colour, background) = colours
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .map_or(([0; 3], 0), |(colour, count)| (*colour, *count));
+    let total = pixels.len();
+    if background * 2 < total {
+        return Err(format!(
+            "test --qemu ({}): no background holds most of {}: not a console",
+            t.package,
+            path.display()
+        ));
+    }
+    if total - background < TEXT_PIXELS_MIN {
+        return Err(format!(
+            "test --qemu ({}): {} shows no text on the console",
+            t.package,
+            path.display()
+        ));
+    }
+    let margin = (width / 16) as usize;
+    let at_margin: usize = pixels
+        .chunks(width as usize)
+        .map(|row| {
+            row[..margin.min(row.len())]
+                .iter()
+                .filter(|pixel| **pixel != background_colour)
+                .count()
+        })
+        .sum();
+    if at_margin < MARGIN_TEXT_PIXELS_MIN {
+        return Err(format!(
+            "test --qemu ({}): {} shows no text where the console's lines begin",
+            t.package,
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// [`ScreendumpPlan`] assertion: the served files window on the booted
@@ -15830,6 +16024,13 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
     Ok(pen.steps())
 }
 
+/// A virtio GPU offering the ramfb console's mode, so one layout serves a
+/// desktop on either display.
+const VIRTIO_GPU: Display = Display::VirtioGpu {
+    width: tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
+    height: tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
+};
+
 /// The board's display extent, the screen every reconstructed layout and
 /// pointer script here is laid out against.
 const fn ramfb_screen() -> (u32, u32) {
@@ -17852,6 +18053,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         // copy.
         FsDisk::AutoloadRootDisk
         | FsDisk::GreeterRootDisk
+        | FsDisk::VirtioGpuRootDisk
         | FsDisk::HoverRootDisk
         | FsDisk::SvgTextRootDisk
         | FsDisk::StreamRootDisk
@@ -17873,8 +18075,8 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
 
 /// Build the whole-disk image for a **net-root** vertical — a signed driver
 /// store plus a per-vertical app/config store — the one place each such
-/// disk's driver set, app set, backing-file extension, and label are
-/// selected. Every net-root disk routes through `net_root_image`, so they
+/// disk's driver set, app set and backing file are selected. Every net-root
+/// disk routes through `net_root_image`, so they
 /// cannot drift in how the whole disk is authored. Called only for the
 /// net-root `FsDisk` variants (the caller's match guarantees it).
 fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, String> {
@@ -17883,6 +18085,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         apps_with_framestats,
         apps_with_svgtext,
         autoload_drivers,
+        virtio_gpu_drivers,
         apps_with_tcpecho,
         apps_with_audiotone,
         audio_drivers,
@@ -17896,88 +18099,33 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         dhcpv6_net_apps,
         ..
     } = stores;
-    let (drivers, app_set, extension, label) = match t.fs_disk {
-        FsDisk::AutoloadRootDisk => (autoload_drivers, apps, "autoload-root.img", "autoload-root"),
-        FsDisk::GreeterRootDisk => (autoload_drivers, apps, "greeter-root.img", "greeter-root"),
-        FsDisk::HoverRootDisk => (
-            autoload_drivers,
-            apps_with_framestats,
-            "hover-root.img",
-            "hover-root",
+    let (drivers, app_set, extension) = match t.fs_disk {
+        FsDisk::AutoloadRootDisk => (autoload_drivers, apps, "autoload-root.img"),
+        FsDisk::GreeterRootDisk => (autoload_drivers, apps, "greeter-root.img"),
+        FsDisk::VirtioGpuRootDisk => (virtio_gpu_drivers, apps, "virtio-gpu-root.img"),
+        FsDisk::HoverRootDisk => (autoload_drivers, apps_with_framestats, "hover-root.img"),
+        FsDisk::SvgTextRootDisk => (autoload_drivers, apps_with_svgtext, "svgtext-root.img"),
+        FsDisk::StreamRootDisk => (net_only_drivers, apps_with_tcpecho, "stream-root.img"),
+        FsDisk::AudioRootDisk => (audio_drivers, apps_with_audiotone, "audio-root.img"),
+        FsDisk::UsbAudioRootDisk => (audio_drivers, apps_with_audiotone, "usb-audio-root.img"),
+        FsDisk::HdaAudioRootDisk => (audio_drivers, apps_with_audiotone, "hda-audio-root.img"),
+        FsDisk::LifecycleAudioRootDisk => (
+            audio_drivers,
+            apps_with_audiotone,
+            "lifecycle-audio-root.img",
         ),
-        FsDisk::SvgTextRootDisk => (
-            autoload_drivers,
-            apps_with_svgtext,
-            "svgtext-root.img",
-            "svgtext-root",
-        ),
-        FsDisk::StreamRootDisk => (
-            net_only_drivers,
-            apps_with_tcpecho,
-            "stream-root.img",
-            "stream-root",
-        ),
-        FsDisk::AudioRootDisk
-        | FsDisk::UsbAudioRootDisk
-        | FsDisk::HdaAudioRootDisk
-        | FsDisk::LifecycleAudioRootDisk => {
-            let (extension, label) = match t.fs_disk {
-                FsDisk::UsbAudioRootDisk => ("usb-audio-root.img", "usb-audio-root"),
-                FsDisk::HdaAudioRootDisk => ("hda-audio-root.img", "hda-audio-root"),
-                FsDisk::LifecycleAudioRootDisk => {
-                    ("lifecycle-audio-root.img", "lifecycle-audio-root")
-                }
-                _ => ("audio-root.img", "audio-root"),
-            };
-            (audio_drivers, apps_with_audiotone, extension, label)
-        }
-        FsDisk::EcnRootDisk => (
-            net_only_drivers,
-            apps_with_tcpecho_ecn,
-            "ecn-root.img",
-            "ecn-root",
-        ),
-        FsDisk::ListenRootDisk => (
-            net_only_drivers,
-            apps_with_tcpserve,
-            "listen-root.img",
-            "listen-root",
-        ),
-        FsDisk::NetToolRootDisk => (net_only_drivers, apps, "net-tool-root.img", "net-tool-root"),
-        FsDisk::StaticNetRootDisk => (
-            net_only_drivers,
-            static_net_apps,
-            "static-net-root.img",
-            "static-net-root",
-        ),
-        FsDisk::TimeNetRootDisk => (
-            net_only_drivers,
-            static_net_apps,
-            "time-net-root.img",
-            "time-net-root",
-        ),
-        FsDisk::BondNetRootDisk => (
-            net_only_drivers,
-            bond_net_apps,
-            "bond-net-root.img",
-            "bond-net-root",
-        ),
-        FsDisk::DhcpNetRootDisk => (
-            net_only_drivers,
-            dhcp_net_apps,
-            "dhcp-net-root.img",
-            "dhcp-net-root",
-        ),
-        FsDisk::Dhcp6NetRootDisk => (
-            net_only_drivers,
-            dhcpv6_net_apps,
-            "dhcp6-net-root.img",
-            "dhcp6-net-root",
-        ),
-        FsDisk::RtcRootDisk => (rtc_drivers, apps, "rtc-root.img", "rtc-root"),
+        FsDisk::EcnRootDisk => (net_only_drivers, apps_with_tcpecho_ecn, "ecn-root.img"),
+        FsDisk::ListenRootDisk => (net_only_drivers, apps_with_tcpserve, "listen-root.img"),
+        FsDisk::NetToolRootDisk => (net_only_drivers, apps, "net-tool-root.img"),
+        FsDisk::StaticNetRootDisk => (net_only_drivers, static_net_apps, "static-net-root.img"),
+        FsDisk::TimeNetRootDisk => (net_only_drivers, static_net_apps, "time-net-root.img"),
+        FsDisk::BondNetRootDisk => (net_only_drivers, bond_net_apps, "bond-net-root.img"),
+        FsDisk::DhcpNetRootDisk => (net_only_drivers, dhcp_net_apps, "dhcp-net-root.img"),
+        FsDisk::Dhcp6NetRootDisk => (net_only_drivers, dhcpv6_net_apps, "dhcp6-net-root.img"),
+        FsDisk::RtcRootDisk => (rtc_drivers, apps, "rtc-root.img"),
         _ => unreachable!("net_root_fs_disk_image is called only for net-root disks"),
     };
-    net_root_image(t, drivers, app_set, extension, label)
+    net_root_image(t, drivers, app_set, extension)
 }
 
 /// Build a whole-disk encrypted-root image planting a driver set in
@@ -17986,13 +18134,12 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
 /// static-addressing vertical) shares, never a per-vertical copy. `drivers` is
 /// the vertical's signed driver set and `apps` its app/service set (which may
 /// additionally carry a planted `network.conf`); `extension` names the backing
-/// file and `label` names the vertical in a build error.
+/// file, and the disk in a build error.
 fn net_root_image(
     t: &QemuTest,
     drivers: &[super::image_apps::AppStoreFile],
     apps: &[super::image_apps::AppStoreFile],
     extension: &'static str,
-    label: &str,
 ) -> Result<FsImage, String> {
     // The seeded program-library catalog rides on every driver-store
     // vertical's encrypted root volume, exactly as on a shipped image
@@ -18014,7 +18161,7 @@ fn net_root_image(
             )
         })
     })
-    .map_err(|e| format!("test --qemu ({}): build {label} image: {e:?}", t.package))?;
+    .map_err(|e| format!("test --qemu ({}): build {extension}: {e:?}", t.package))?;
     let total_sectors = image_total_sectors(&bytes);
     Ok(FsImage {
         extension,
@@ -18268,7 +18415,11 @@ fn shared_line_input_gates(spec: Spec, binary: &str) -> Spec {
         return spec;
     }
     let spec = spec.with_shared_line_input().with_virtio_mouse();
-    let armed = armed_irq_drivers(spec.devices.pointing, !spec.net_devices.is_empty());
+    let armed = armed_irq_drivers(
+        spec.devices.pointing,
+        !spec.net_devices.is_empty(),
+        spec.devices.display,
+    );
     spec.with_keyboard_ready_occurrences(armed)
 }
 
@@ -18340,7 +18491,11 @@ fn attach_pointer_script(t: &QemuTest, mut spec: Spec) -> Result<Spec, String> {
     for step in build_script().map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
         spec = spec.with_pointer_step(step.ready_marker, step.ready_occurrences, step.action);
     }
-    let armed = armed_irq_drivers(spec.devices.pointing, !spec.net_devices.is_empty());
+    let armed = armed_irq_drivers(
+        spec.devices.pointing,
+        !spec.net_devices.is_empty(),
+        spec.devices.display,
+    );
     spec = spec.with_keyboard_ready_occurrences(armed);
     if t.bounded_pointer_script {
         spec = spec.with_bounded_pointer_script();
@@ -18351,9 +18506,17 @@ fn attach_pointer_script(t: &QemuTest, mut spec: Spec) -> Result<Spec, String> {
 /// How many user-space drivers raise the [`AUTOLOAD_INPUT_KEY_MARKER`]
 /// `irq_bind` marker as they arm: one per virtio-input device (the keyboard
 /// and each device in `pointing`), plus one for a virtio-net NIC when
-/// `has_nic`, whose driver is a user-space driver that binds its line too.
-fn armed_irq_drivers(pointing: tairix_qemu::PointingDevices, has_nic: bool) -> u32 {
-    1 + u32::from(pointing.mouse) + u32::from(pointing.touchscreen) + u32::from(has_nic)
+/// `has_nic` and one for a virtio GPU `display`, whose drivers are user-space
+/// drivers that bind their lines too.
+const fn armed_irq_drivers(
+    pointing: tairix_qemu::PointingDevices,
+    has_nic: bool,
+    display: Display,
+) -> u32 {
+    1 + pointing.mouse as u32
+        + pointing.touchscreen as u32
+        + has_nic as u32
+        + matches!(display, Display::VirtioGpu { .. }) as u32
 }
 
 /// Attach `t`'s virtio-net interface(s) to `spec` and start the harness-side
@@ -18621,9 +18784,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     spec = message_source_gates(spec, t.binary);
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
-    if t.ramfb {
-        spec = spec.with_ramfb();
-    }
+    spec = spec.with_display(t.display);
 
     // Attach a `virtio-crypto` device for the accelerator vertical.
     if t.crypto {
@@ -18900,7 +19061,7 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use tairix_qemu::screendump::Rgb;
-    use tairix_qemu::Outcome;
+    use tairix_qemu::{Display, Outcome};
 
     use super::{
         appbar_pointer_script, armed_irq_drivers, autoload_desktop_pointer_script, build_targets,
@@ -20170,13 +20331,13 @@ mod tests {
             let has_nic = t.netstack_peer != NetPeerMode::None;
             assert_eq!(
                 *occurrences,
-                armed_irq_drivers(pointing, has_nic),
+                armed_irq_drivers(pointing, has_nic, t.display),
                 "{}: one arming per irq-binding driver on a board with {pointing:?}, nic={has_nic}",
                 t.binary,
             );
         }
         assert_eq!(
-            armed_irq_drivers(tairix_qemu::PointingDevices::NONE, false),
+            armed_irq_drivers(tairix_qemu::PointingDevices::NONE, false, Display::None),
             KEYBOARD_ONLY_ARMED_OCCURRENCES
         );
     }
@@ -20226,7 +20387,11 @@ mod tests {
             .iter()
             .find(|t| t.binary == "tairix-test-svgtext-qemu-aarch64")
             .expect("the SVG-text vertical is enrolled");
-        assert!(t.ramfb, "the fixture renders into a real framebuffer");
+        assert_eq!(
+            t.display,
+            Display::Ramfb,
+            "the fixture renders into a real framebuffer"
+        );
         assert!(matches!(t.fs_disk, FsDisk::SvgTextRootDisk));
         assert!(t.pointer_script.is_none());
         assert!(t.serial.is_empty(), "this disk types at the seat keyboard");
@@ -20761,6 +20926,43 @@ mod tests {
             }
         }
         tairix_qemu::screendump::parse_ppm(&bytes).expect("a well-formed fixture frame")
+    }
+
+    /// A console's dump — text from its left edge over a background holding
+    /// most of the screen — is the GPU console's, and the message QEMU
+    /// centres on a screen nothing scans out is not, however much text it
+    /// draws.
+    #[test]
+    fn a_gpu_console_dump_is_text_from_its_left_edge_and_never_a_centred_placeholder() {
+        const WHITE: Rgb = (0xFF, 0xFF, 0xFF);
+        const BLACK: Rgb = (0, 0, 0);
+        let t = super::TESTS
+            .iter()
+            .find(|t| matches!(t.display, super::Display::VirtioGpu { .. }))
+            .expect("a virtio-gpu enrolment");
+        let path = std::path::Path::new("fixture.screendump.ppm");
+        let glyph = |x: u32, y: u32| x % 8 < 6 && y % 16 < 12;
+        let console = synthetic_frame(|x, y| {
+            if y / 16 < 20 && x < 400 && glyph(x, y) {
+                WHITE
+            } else {
+                BLACK
+            }
+        });
+        super::assert_virtio_gpu_console(t, path, &console).expect("the console");
+        let (width, height) = (
+            tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
+            tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
+        );
+        let placeholder = synthetic_frame(|x, y| {
+            let centred = y.abs_diff(height / 2) < 8 && x.abs_diff(width / 2) < 120;
+            if centred && glyph(x, y) {
+                WHITE
+            } else {
+                BLACK
+            }
+        });
+        assert!(super::assert_virtio_gpu_console(t, path, &placeholder).is_err());
     }
 
     /// The enrolment and dump path a fixture assertion names in its

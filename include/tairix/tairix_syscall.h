@@ -165,13 +165,15 @@ extern "C" {
 #define TAIRIX_SYS_PORT_ADMIT 138u
 #define TAIRIX_SYS_FOREGROUND_HELD 139u
 #define TAIRIX_SYS_HW_NODE_SETTLE 140u
-#define TAIRIX_SYS_CONSOLE_RELOCATE 141u
+#define TAIRIX_SYS_CONSOLE_ADOPT 141u
 #define TAIRIX_SYS_WAITSET_CLOSE 142u
 #define TAIRIX_SYS_PORT_UNBIND 143u
 #define TAIRIX_SYS_CALL_PEER_PORT 144u
 #define TAIRIX_SYS_HW_NODE_KEY_SOURCE 145u
 #define TAIRIX_SYS_FD_GRANT_LOCATION 146u
 #define TAIRIX_SYS_FD_REDEEM_LOCATION 147u
+#define TAIRIX_SYS_CONSOLE_DAMAGE 148u
+#define TAIRIX_SYS_CONSOLE_RELINQUISH 149u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -474,6 +476,7 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_WAIT_SOURCE_DIR_WATCH 13u
 #define TAIRIX_WAIT_SOURCE_FOREGROUND 14u
 #define TAIRIX_WAIT_SOURCE_HARDWARE_TREE 15u
+#define TAIRIX_WAIT_SOURCE_CONSOLE_DAMAGE 16u
 /* waitset_wait() timeout_ns that parks until a member is ready, and the
 * child-member id that observes any child. */
 #define TAIRIX_WAITSET_TIMEOUT_NONE ((uint64_t)0xffffffffffffffffull)
@@ -683,13 +686,15 @@ uint64_t tairix_sys_fs_watch_read(uint32_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_port_admit(uint64_t a0, uint64_t a1);
 uint64_t tairix_sys_foreground_held(uint32_t a0);
 int32_t tairix_sys_hw_node_settle(void);
-uint64_t tairix_sys_console_relocate(void * a0, uintptr_t a1);
+uint64_t tairix_sys_console_adopt(uint64_t a0, uint32_t a1, uint32_t a2, uint32_t a3, void * a4, uintptr_t a5);
 int32_t tairix_sys_waitset_close(uint64_t a0);
 int32_t tairix_sys_port_unbind(uint64_t a0);
 int32_t tairix_sys_call_peer_port(uint64_t a0, uint64_t a1, uint64_t a2);
 int32_t tairix_sys_hw_node_key_source(void);
 uint64_t tairix_sys_fd_grant_location(uint32_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_fd_redeem_location(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
+uint64_t tairix_sys_console_damage(void * a0, uintptr_t a1);
+int32_t tairix_sys_console_relinquish(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

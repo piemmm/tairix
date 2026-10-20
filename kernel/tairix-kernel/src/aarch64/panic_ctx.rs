@@ -23,14 +23,14 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use tairix_arch_aarch64::backtrace::Backtracer;
-use tairix_arch_aarch64::SERIAL_SINK;
 use tairix_arch_api::backtrace::CpuStateCapture;
 use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::fault::{set_fault_handler, SetFaultHandlerError};
 use tairix_kernel_core::ConsoleDevice;
 use tairix_log::Sink;
 
-use crate::aarch64::arch_wrapper::{console_layout, Aarch64BinArch};
+use crate::aarch64::arch_wrapper::Aarch64BinArch;
+use crate::console_layout::console_layout;
 use crate::fatal_bridge::{report_kernel_fault, report_panic, FatalReport};
 
 /// The aarch64 post-mortem CPU-state handle the bridge attaches.
@@ -81,7 +81,7 @@ impl FatalReport for Aarch64Fatal {
     }
 
     fn audit_sink() -> &'static (dyn Sink + Sync) {
-        &SERIAL_SINK
+        &crate::console_layout::LOG_SINK
     }
 
     fn backtrace() -> &'static dyn CpuStateCapture {

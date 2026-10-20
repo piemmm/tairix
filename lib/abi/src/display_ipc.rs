@@ -1,80 +1,117 @@
-//! The display-service IPC protocol (`plans/DISPLAY.md` D7b): the reserved
-//! rendezvous a display-driver service binds and the fixed-width,
-//! fail-closed requests a seat owner presents frames through.
+//! The display-service IPC protocol (`plans/DISPLAY.md` D7b,
+//! `plans/FIX-DISPLAY-ACCELERATION.md` B): the reserved rendezvous a
+//! display-driver service binds and the fixed-width, fail-closed requests a
+//! seat owner presents through.
 //!
-//! The transport is deliberately zero-copy: a client shares one
-//! `shm_create` region holding its frames, hands the service the
-//! endpoint-directed `shm_grant` handle once (`Configure`), and thereafter
-//! presents by **frame index** (`Present`) — no pixel bytes ever cross the
-//! IPC. Every request that acts *for a seat* carries that seat's id, and the
-//! service gates each one (including `Query`) on the caller's live seat lease
-//! through the kernel's `call_peer_seat` oracle-free check, so only the seat
-//! owner can learn the mode, configure frames, or scan out.
+//! The driver allocates every buffer its device reads and grants each to the
+//! presenter that asked (`shm_grant_peer`), so a present names a buffer by id
+//! and no pixel crosses the IPC. `Configure` answers the output frames the
+//! presenter rotates through; `AllocBuffer` answers a further buffer, for a
+//! layer or the pointer. Every request that acts *for a seat* carries that
+//! seat's id, and the service gates each one, `Query` included, on the
+//! caller's live seat lease (`call_peer_seat`), so only the seat owner learns
+//! the mode, holds buffers, or scans out.
 //!
 //! [`DisplayRequest::QueryStats`] is the one operation that acts for no seat:
-//! it describes the *device* this service drives, for the monitor that draws
-//! graphics utilisation. It is gated on the caller's kernel-attested
-//! `CAP_SYSINFO_HW` instead — a reader that holds no lease, and never will,
-//! must still be able to read hardware utilisation, and that is the authority
-//! the hardware inventory it details is already read under.
+//! it describes the *device*, for the monitor that draws graphics
+//! utilisation, and is gated on the caller's `CAP_SYSINFO_HW` instead.
 //!
-//! A `Present` names a whole frame's damage in one call: it carries a
-//! [`DamageList`] of up to [`MAX_DAMAGE_RECTS`] rectangles inline, so a
-//! frame that changed two far-apart places costs one round trip and two
-//! rectangle-sized blits rather than a round trip each and a blit of the
-//! box spanning them.
+//! One present is in flight at a time. A present the device takes at its next
+//! frame start answers [`Presented::Queued`], and its latch is posted to the
+//! configuration's port as [`DisplayEvent::Presented`].
 //!
-//! [`DisplayRequest::SetPower`] switches the seat's display off and on again
-//! for the configuration that asked, and never outlives it.
-//!
-//! Requests are the fixed-width [`DisplayRequest`]. `Configure`, `Present`
-//! and `SetPower` answer with the shared status frame
-//! ([`crate::reply::encode_status_reply`] /
-//! [`crate::reply::decode_status_reply`]); `Query` answers with the
-//! [`DISPLAY_MODE_REPLY_LEN`]-byte output reply ([`encode_mode_reply`] /
-//! [`decode_mode_reply`]); `QueryStats` with the
-//! [`DISPLAY_STATS_REPLY_LEN`]-byte statistics reply ([`encode_stats_reply`] /
-//! [`decode_stats_reply`]). Every decode fails closed: an unknown magic,
-//! version, operation, format, an out-of-bounds frame count, an empty
-//! damage rectangle, or a dirty reserved field refuses rather than
-//! guessing.
+//! Every decode fails closed: an unknown magic, version, operation, format,
+//! an out-of-bounds count, an empty rectangle, a zero buffer id or a dirty
+//! reserved field refuses rather than guessing.
 
 use crate::driver::display::{
-    AccelCaps, DamageList, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode,
-    DisplayPower, MAX_DAMAGE_RECTS, NO_RECT,
+    AccelCaps, AccelLayer, BufferId, CursorCaps, DamageList, DamageRect, DisplayDeviceReport,
+    DisplayFormat, DisplayMode, DisplayPower, Presented, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
+    NO_RECT,
 };
-use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
+use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::Errno;
 
 /// Reserved well-known call-endpoint id of the display service (`"DIS"`
 /// hex-spelled prefix, mirroring [`crate::seat::SEATMGR_ENDPOINT`]'s
 /// convention). Binding it requires `CAP_IPC_BIND_PRIVILEGED`
 /// ([`crate::ipc::is_reserved_endpoint`]): a squatter claiming the
-/// rendezvous first would receive the desktop session's frames and learn
-/// the seat owner's shared-memory grant. One endpoint serves every seat —
-/// requests carry the seat id in-protocol, so a later multi-GPU broker is
-/// additive, never a second protocol.
+/// rendezvous first would be handed the desktop session's frames. One
+/// endpoint serves every seat — requests carry the seat id in-protocol.
 pub const DISPLAY_ENDPOINT: u64 = 0x0D15_1001;
 
 /// Magic number identifying a display-service request (`"DSP1"`
 /// little-endian).
 pub const DISPLAY_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"DSP1");
 
+/// Magic number identifying a display-service event (`"DSPE"`
+/// little-endian).
+pub const DISPLAY_EVENT_MAGIC: u32 = u32::from_le_bytes(*b"DSPE");
+
 /// The `display-v1` protocol version.
 pub const DISPLAY_VERSION_V1: u16 = 1;
 
-/// Most frames one `Configure` may lay out in its shared region. A
-/// validation bound, not a capacity: two frames are the double-buffer
-/// steady state, three serve a mailbox-style presenter, and anything
-/// beyond four buys no latency while letting a hostile client reserve
-/// unbounded pinned memory.
+/// Most output frames one configuration rotates through. A validation bound,
+/// not a capacity: three serve a device that reads a frame while it shows and
+/// a presenter drawing the next, and more buy no latency while letting a
+/// hostile client pin memory.
 pub const DISPLAY_MAX_FRAMES: u32 = 4;
+
+/// Most buffers one configuration holds: its frames, two for each layer the
+/// engine shows, and the pointer image. A containment bound on the table the
+/// service keeps for a presenter, not what memory the device reaches, which
+/// bounds them first.
+pub const DISPLAY_MAX_BUFFERS: usize = DISPLAY_MAX_FRAMES as usize + 2 * MAX_ACCEL_LAYERS + 1;
 
 /// Maximum request, in bytes, the [`DISPLAY_ENDPOINT`] accepts: exactly
 /// one fixed-width [`DisplayRequest`].
 pub const DISPLAY_MAX_REQUEST: usize = DisplayRequest::WIRE_LEN;
 
-/// One display-service operation (`plans/DISPLAY.md` D7b).
+/// The layers of one [`DisplayRequest::PresentLayers`]: one to
+/// [`MAX_ACCEL_LAYERS`], held inline so the request stays a plain value.
+#[derive(Copy, Clone, Debug)]
+pub struct LayerList {
+    layers: [AccelLayer; MAX_ACCEL_LAYERS],
+    len: usize,
+}
+
+impl LayerList {
+    /// The list of `layers`, bottom-most first.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for no layer or more than
+    /// [`MAX_ACCEL_LAYERS`].
+    pub fn new(layers: &[AccelLayer]) -> Result<Self, Errno> {
+        let (&first, _) = layers.split_first().ok_or(Errno::LengthOutOfRange)?;
+        if layers.len() > MAX_ACCEL_LAYERS {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut slots = [first; MAX_ACCEL_LAYERS];
+        slots[..layers.len()].copy_from_slice(layers);
+        Ok(Self {
+            layers: slots,
+            len: layers.len(),
+        })
+    }
+
+    /// The layers, bottom-most first.
+    #[must_use]
+    pub fn layers(&self) -> &[AccelLayer] {
+        &self.layers[..self.len]
+    }
+}
+
+impl PartialEq for LayerList {
+    fn eq(&self, other: &Self) -> bool {
+        self.layers() == other.layers()
+    }
+}
+
+impl Eq for LayerList {}
+
+/// One display-service operation.
 ///
 /// Every variant that acts for a seat names it, and the service derives the
 /// right to perform it from the caller's **live lease** on that seat
@@ -88,60 +125,98 @@ pub enum DisplayRequest {
         /// The seat whose display output is requested.
         seat_id: u64,
     },
-    /// Adopt the caller's shared frame region for `seat_id`: map the
-    /// granted region once and validate the frame layout against the mode
-    /// the output runs. Replaces any earlier configuration by the same lease;
-    /// a geometry that is not the output's mode is refused [`Errno::Stale`].
+    /// Take the output frames of `seat_id`'s display at the mode the caller
+    /// expects, replacing any earlier configuration by the same lease, with
+    /// events posted to `events_port`, a port the caller owns. A mode that is
+    /// not the output's is refused [`Errno::Stale`].
     Configure {
         /// The seat the frames will be presented on.
         seat_id: u64,
-        /// The `shm_grant` handle minted to this endpoint's serving task.
-        shm_handle: u64,
-        /// Frames laid out back-to-back in the region
-        /// (`1..=DISPLAY_MAX_FRAMES`).
-        frame_count: u32,
-        /// Frame width in pixels; must equal the active mode's.
+        /// The output width the caller expects.
         width_px: u32,
-        /// Frame height in pixels; must equal the active mode's.
+        /// The output height the caller expects.
         height_px: u32,
-        /// Bytes between consecutive scanlines; must equal the active
-        /// mode's stride, so a configured frame is bit-compatible with
-        /// the scan-out surface.
-        stride_bytes: u32,
-        /// Pixel encoding; must equal the active mode's.
+        /// The pixel encoding the caller expects.
         format: DisplayFormat,
+        /// The caller's port the service posts [`DisplayEvent`]s to.
+        events_port: u64,
     },
-    /// Report the device's own graphics statistics: how long it has been
-    /// driven, the memory it owns, what its compositor can do, and the mode
-    /// it scans out.
-    ///
-    /// The one operation that names **no seat**: it describes the device this
-    /// service drives, not an act on anybody's screen, so a monitor that
-    /// holds no lease can read it. Its authority is `CAP_SYSINFO_HW` — the
-    /// same the hardware inventory it details is read under — checked against
-    /// the caller's kernel-attested capabilities.
+    /// Report the device's own graphics statistics. Names no seat; its
+    /// authority is `CAP_SYSINFO_HW`.
     QueryStats,
-    /// Scan out configured frame `frame_index`, of which only `damage`
-    /// changed since the previously presented frame.
+    /// Show output frame `buffer`, of which only `damage` changed since the
+    /// previous present.
     Present {
         /// The seat the frame is presented on.
         seat_id: u64,
-        /// Index of the frame inside the configured region.
-        frame_index: u32,
+        /// The frame shown.
+        buffer: BufferId,
         /// The changed rectangles; a single [`DamageRect::full`] presents
         /// the whole frame. Never empty.
         damage: DamageList,
     },
-    /// Switch `seat_id`'s display on or off.
-    ///
-    /// Held by the configuration that asked for it: a display switched off
-    /// is switched back on the moment that configuration is replaced or
-    /// dropped, so the next owner of the seat never inherits a dark screen.
+    /// Switch `seat_id`'s display on or off, for as long as the configuration
+    /// that asked stands.
     SetPower {
         /// The seat whose display is switched.
         seat_id: u64,
         /// The state asked for.
         power: DisplayPower,
+    },
+    /// Report what the device composites and draws in hardware.
+    QueryPlanes {
+        /// The seat whose display is asked about.
+        seat_id: u64,
+    },
+    /// Allocate a further buffer of `width_px` × `height_px` for the
+    /// configuration: a layer's or the pointer's.
+    AllocBuffer {
+        /// The seat the buffer is for.
+        seat_id: u64,
+        /// Width in pixels.
+        width_px: u32,
+        /// Height in pixels.
+        height_px: u32,
+    },
+    /// Free a buffer the configuration allocated.
+    FreeBuffer {
+        /// The seat the buffer is for.
+        seat_id: u64,
+        /// The buffer freed.
+        buffer: BufferId,
+    },
+    /// Composite `layers` in hardware and show them.
+    PresentLayers {
+        /// The seat the layers are presented on.
+        seat_id: u64,
+        /// The layers, bottom-most first.
+        layers: LayerList,
+    },
+    /// Show `buffer` as the pointer, its hot spot `(hot_x, hot_y)` pixels in
+    /// from its top-left.
+    SetCursor {
+        /// The seat the pointer is shown on.
+        seat_id: u64,
+        /// The pointer image.
+        buffer: BufferId,
+        /// The hot spot's column.
+        hot_x: u32,
+        /// The hot spot's row.
+        hot_y: u32,
+    },
+    /// Put the pointer's hot spot at `(x, y)` on the output.
+    MoveCursor {
+        /// The seat the pointer is shown on.
+        seat_id: u64,
+        /// Column, possibly off the left edge.
+        x: i32,
+        /// Row, possibly off the top edge.
+        y: i32,
+    },
+    /// Take the pointer off the screen.
+    HideCursor {
+        /// The seat the pointer is shown on.
+        seat_id: u64,
     },
 }
 
@@ -155,19 +230,44 @@ const OP_PRESENT: u16 = 3;
 const OP_QUERY_STATS: u16 = 4;
 /// Wire operation discriminant of [`DisplayRequest::SetPower`].
 const OP_SET_POWER: u16 = 5;
+/// Wire operation discriminant of [`DisplayRequest::QueryPlanes`].
+const OP_QUERY_PLANES: u16 = 6;
+/// Wire operation discriminant of [`DisplayRequest::AllocBuffer`].
+const OP_ALLOC_BUFFER: u16 = 7;
+/// Wire operation discriminant of [`DisplayRequest::FreeBuffer`].
+const OP_FREE_BUFFER: u16 = 8;
+/// Wire operation discriminant of [`DisplayRequest::PresentLayers`].
+const OP_PRESENT_LAYERS: u16 = 9;
+/// Wire operation discriminant of [`DisplayRequest::SetCursor`].
+const OP_SET_CURSOR: u16 = 10;
+/// Wire operation discriminant of [`DisplayRequest::MoveCursor`].
+const OP_MOVE_CURSOR: u16 = 11;
+/// Wire operation discriminant of [`DisplayRequest::HideCursor`].
+const OP_HIDE_CURSOR: u16 = 12;
+
+/// Offset of the operation block, after the magic, version, op and seat.
+const BODY_AT: usize = 16;
 
 /// Offset of a `Present`'s first damage rectangle.
 const PRESENT_RECTS_AT: usize = 24;
 
-/// Encoded size of one [`DamageRect`]: x, y, width, height.
-const DAMAGE_RECT_LEN: usize = 16;
+/// Offset of a `PresentLayers`' first layer.
+const LAYERS_AT: usize = 24;
+
+/// Encoded size of one [`DamageRect`].
+const DAMAGE_RECT_LEN: usize = DamageRect::WIRE_LEN;
+
+/// Encoded size of one layer: the buffer (4), its source rectangle (16), the
+/// destination origin (8) and size (8), the opacity (1) and a reserved tail
+/// (3).
+const LAYER_LEN: usize = 40;
 
 impl DisplayRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), seat id
     /// (8), and an operation block whose unused tail must be zero. The
-    /// widest block is `Present`'s frame index, rectangle count and its
-    /// [`MAX_DAMAGE_RECTS`] inline rectangles.
-    pub const WIRE_LEN: usize = PRESENT_RECTS_AT + MAX_DAMAGE_RECTS * DAMAGE_RECT_LEN;
+    /// widest block is `PresentLayers`' count and its [`MAX_ACCEL_LAYERS`]
+    /// inline layers.
+    pub const WIRE_LEN: usize = LAYERS_AT + MAX_ACCEL_LAYERS * LAYER_LEN;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -175,72 +275,100 @@ impl DisplayRequest {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u32(&mut out, 0, DISPLAY_REQUEST_MAGIC);
         put_u16(&mut out, 4, DISPLAY_VERSION_V1);
-        match *self {
-            Self::Query { seat_id } => {
-                put_u16(&mut out, 6, OP_QUERY);
-                put_u64(&mut out, 8, seat_id);
-            }
+        let (op, seat_id) = match *self {
+            Self::Query { seat_id } => (OP_QUERY, seat_id),
             Self::Configure {
                 seat_id,
-                shm_handle,
-                frame_count,
                 width_px,
                 height_px,
-                stride_bytes,
                 format,
+                events_port,
             } => {
-                put_u16(&mut out, 6, OP_CONFIGURE);
-                put_u64(&mut out, 8, seat_id);
-                put_u64(&mut out, 16, shm_handle);
-                put_u32(&mut out, 24, frame_count);
-                put_u32(&mut out, 28, width_px);
-                put_u32(&mut out, 32, height_px);
-                put_u32(&mut out, 36, stride_bytes);
-                out[40] = format.as_u8();
+                put_u32(&mut out, BODY_AT, width_px);
+                put_u32(&mut out, BODY_AT + 4, height_px);
+                out[BODY_AT + 8] = format.as_u8();
+                put_u64(&mut out, BODY_AT + 16, events_port);
+                (OP_CONFIGURE, seat_id)
             }
-            Self::QueryStats => put_u16(&mut out, 6, OP_QUERY_STATS),
+            Self::QueryStats => (OP_QUERY_STATS, 0),
             Self::Present {
                 seat_id,
-                frame_index,
+                buffer,
                 damage,
             } => {
-                put_u16(&mut out, 6, OP_PRESENT);
-                put_u64(&mut out, 8, seat_id);
-                put_u32(&mut out, 16, frame_index);
-                put_u32(&mut out, 20, u32::try_from(damage.len()).unwrap_or(0));
+                put_u32(&mut out, BODY_AT, buffer.get());
+                put_u32(&mut out, BODY_AT + 4, wire_count(damage.len()));
                 for (index, rect) in damage.rects().iter().enumerate() {
-                    put_rect(&mut out, PRESENT_RECTS_AT + index * DAMAGE_RECT_LEN, rect);
+                    let at = PRESENT_RECTS_AT + index * DAMAGE_RECT_LEN;
+                    out[at..at + DAMAGE_RECT_LEN].copy_from_slice(&rect.to_le_bytes());
                 }
+                (OP_PRESENT, seat_id)
             }
             Self::SetPower { seat_id, power } => {
-                put_u16(&mut out, 6, OP_SET_POWER);
-                put_u64(&mut out, 8, seat_id);
-                out[16] = power.as_u8();
+                out[BODY_AT] = power.as_u8();
+                (OP_SET_POWER, seat_id)
             }
-        }
+            Self::QueryPlanes { seat_id } => (OP_QUERY_PLANES, seat_id),
+            Self::AllocBuffer {
+                seat_id,
+                width_px,
+                height_px,
+            } => {
+                put_u32(&mut out, BODY_AT, width_px);
+                put_u32(&mut out, BODY_AT + 4, height_px);
+                (OP_ALLOC_BUFFER, seat_id)
+            }
+            Self::FreeBuffer { seat_id, buffer } => {
+                put_u32(&mut out, BODY_AT, buffer.get());
+                (OP_FREE_BUFFER, seat_id)
+            }
+            Self::PresentLayers { seat_id, layers } => {
+                put_u32(&mut out, BODY_AT, wire_count(layers.layers().len()));
+                for (index, layer) in layers.layers().iter().enumerate() {
+                    put_layer(&mut out, LAYERS_AT + index * LAYER_LEN, layer);
+                }
+                (OP_PRESENT_LAYERS, seat_id)
+            }
+            Self::SetCursor {
+                seat_id,
+                buffer,
+                hot_x,
+                hot_y,
+            } => {
+                put_u32(&mut out, BODY_AT, buffer.get());
+                put_u32(&mut out, BODY_AT + 4, hot_x);
+                put_u32(&mut out, BODY_AT + 8, hot_y);
+                (OP_SET_CURSOR, seat_id)
+            }
+            Self::MoveCursor { seat_id, x, y } => {
+                put_i32(&mut out, BODY_AT, x);
+                put_i32(&mut out, BODY_AT + 4, y);
+                (OP_MOVE_CURSOR, seat_id)
+            }
+            Self::HideCursor { seat_id } => (OP_HIDE_CURSOR, seat_id),
+        };
+        put_u16(&mut out, 6, op);
+        put_u64(&mut out, 8, seat_id);
         out
     }
 
     /// Decode from `bytes`, failing closed on any malformed input.
     ///
-    /// Semantic bounds a decoder can already see are enforced here — the
-    /// frame count within `1..=DISPLAY_MAX_FRAMES`, a non-empty damage
-    /// rectangle, a plausible `Configure` geometry (no zero extent, a
-    /// stride that holds one scanline) — so no accepted request ever
-    /// carries a value the server would have to re-reject structurally.
-    /// Bounds only the server knows (the active mode, the configured
-    /// frame count) stay server-side.
+    /// Bounds a decoder can see are enforced here — a non-empty damage and
+    /// layer list within its bound, non-empty rectangles, non-zero buffer ids
+    /// and extents — so no accepted request carries a value the server would
+    /// have to re-reject structurally. Bounds only the server knows (the
+    /// output, the buffers it allocated, what the device admits) stay there.
     ///
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole request.
     /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved tail.
     /// * [`Errno::AbiVersionUnsupported`] — not `display-v1`.
-    /// * [`Errno::OutOfRange`] — an operation or pixel format outside the
-    ///   closed set.
-    /// * [`Errno::LengthOutOfRange`] — a frame count outside
-    ///   `1..=DISPLAY_MAX_FRAMES`, a zero-extent geometry, a stride too
-    ///   small for one scanline, or an empty damage rectangle.
+    /// * [`Errno::OutOfRange`] — an operation, pixel format or power state
+    ///   outside the closed set, or a zero buffer id.
+    /// * [`Errno::LengthOutOfRange`] — a zero extent, an empty or overlong
+    ///   damage or layer list, or an empty rectangle.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -251,87 +379,184 @@ impl DisplayRequest {
         if read_u16(bytes, 4) != DISPLAY_VERSION_V1 {
             return Err(Errno::AbiVersionUnsupported);
         }
-        let op = read_u16(bytes, 6);
         let seat_id = read_u64(bytes, 8);
-        match op {
+        let at = |offset: usize| read_u32(bytes, BODY_AT + offset);
+        match read_u16(bytes, 6) {
             OP_QUERY => {
-                reserved_zero(bytes, 16)?;
+                reserved_zero(bytes, BODY_AT)?;
                 Ok(Self::Query { seat_id })
             }
-            OP_CONFIGURE => {
-                reserved_zero(bytes, 41)?;
-                let shm_handle = read_u64(bytes, 16);
-                let frame_count = read_u32(bytes, 24);
-                if frame_count == 0 || frame_count > DISPLAY_MAX_FRAMES {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                let mode = read_mode(bytes, 28, DisplayFormat::from_u8(bytes[40])?)?;
-                Ok(Self::Configure {
-                    seat_id,
-                    shm_handle,
-                    frame_count,
-                    width_px: mode.width_px,
-                    height_px: mode.height_px,
-                    stride_bytes: mode.stride_bytes,
-                    format: mode.format,
-                })
-            }
+            OP_CONFIGURE => decode_configure(bytes, seat_id),
             OP_QUERY_STATS => {
-                // The common seat slot is part of this operation's reserved
-                // tail: a stats read names no seat, so a seat smuggled into
-                // one is refused rather than ignored.
+                // A stats read names no seat, so a seat smuggled into one is
+                // refused rather than ignored.
                 reserved_zero(bytes, 8)?;
                 Ok(Self::QueryStats)
             }
-            OP_PRESENT => {
-                let frame_index = read_u32(bytes, 16);
-                let count = usize::try_from(read_u32(bytes, 20))
-                    .ok()
-                    .filter(|count| *count <= MAX_DAMAGE_RECTS)
-                    .ok_or(Errno::LengthOutOfRange)?;
-                // The slots past the live count are part of the reserved
-                // tail: a rectangle smuggled behind the count is refused,
-                // never ignored.
-                reserved_zero(bytes, PRESENT_RECTS_AT + count * DAMAGE_RECT_LEN)?;
-                let mut rects = [NO_RECT; MAX_DAMAGE_RECTS];
-                for (index, slot) in rects.iter_mut().take(count).enumerate() {
-                    *slot = read_rect(bytes, PRESENT_RECTS_AT + index * DAMAGE_RECT_LEN);
-                }
-                Ok(Self::Present {
-                    seat_id,
-                    frame_index,
-                    damage: DamageList::new(&rects[..count])?,
-                })
-            }
+            OP_PRESENT => decode_present(bytes, seat_id),
             OP_SET_POWER => {
-                reserved_zero(bytes, 17)?;
+                reserved_zero(bytes, BODY_AT + 1)?;
                 Ok(Self::SetPower {
                     seat_id,
-                    power: DisplayPower::from_u8(bytes[16])?,
+                    power: DisplayPower::from_u8(bytes[BODY_AT])?,
                 })
+            }
+            OP_QUERY_PLANES => {
+                reserved_zero(bytes, BODY_AT)?;
+                Ok(Self::QueryPlanes { seat_id })
+            }
+            OP_ALLOC_BUFFER => {
+                reserved_zero(bytes, BODY_AT + 8)?;
+                let (width_px, height_px) = extent(at(0), at(4))?;
+                Ok(Self::AllocBuffer {
+                    seat_id,
+                    width_px,
+                    height_px,
+                })
+            }
+            OP_FREE_BUFFER => {
+                reserved_zero(bytes, BODY_AT + 4)?;
+                Ok(Self::FreeBuffer {
+                    seat_id,
+                    buffer: buffer_id(at(0))?,
+                })
+            }
+            OP_PRESENT_LAYERS => decode_layers(bytes, seat_id),
+            OP_SET_CURSOR => {
+                reserved_zero(bytes, BODY_AT + 12)?;
+                Ok(Self::SetCursor {
+                    seat_id,
+                    buffer: buffer_id(at(0))?,
+                    hot_x: at(4),
+                    hot_y: at(8),
+                })
+            }
+            OP_MOVE_CURSOR => {
+                reserved_zero(bytes, BODY_AT + 8)?;
+                Ok(Self::MoveCursor {
+                    seat_id,
+                    x: read_i32(bytes, BODY_AT),
+                    y: read_i32(bytes, BODY_AT + 4),
+                })
+            }
+            OP_HIDE_CURSOR => {
+                reserved_zero(bytes, BODY_AT)?;
+                Ok(Self::HideCursor { seat_id })
             }
             _ => Err(Errno::OutOfRange),
         }
     }
 }
 
-/// Write one damage rectangle at `at`.
-fn put_rect(out: &mut [u8; DisplayRequest::WIRE_LEN], at: usize, rect: &DamageRect) {
-    put_u32(out, at, rect.x);
-    put_u32(out, at + 4, rect.y);
-    put_u32(out, at + 8, rect.width_px);
-    put_u32(out, at + 12, rect.height_px);
+/// The body of a `Configure`.
+fn decode_configure(bytes: &[u8], seat_id: u64) -> Result<DisplayRequest, Errno> {
+    reserved_zero(bytes, BODY_AT + 24)?;
+    if bytes[BODY_AT + 9..BODY_AT + 16].iter().any(|&b| b != 0) {
+        return Err(Errno::BadMagic);
+    }
+    let (width_px, height_px) = extent(read_u32(bytes, BODY_AT), read_u32(bytes, BODY_AT + 4))?;
+    Ok(DisplayRequest::Configure {
+        seat_id,
+        width_px,
+        height_px,
+        format: DisplayFormat::from_u8(bytes[BODY_AT + 8])?,
+        events_port: read_u64(bytes, BODY_AT + 16),
+    })
 }
 
-/// Read one damage rectangle from `at`. The result is bounds-checked by
-/// [`DamageList::new`] (non-empty) and by the server (inside the mode).
-fn read_rect(bytes: &[u8], at: usize) -> DamageRect {
-    DamageRect {
-        x: read_u32(bytes, at),
-        y: read_u32(bytes, at + 4),
-        width_px: read_u32(bytes, at + 8),
-        height_px: read_u32(bytes, at + 12),
+/// The body of a `Present`.
+fn decode_present(bytes: &[u8], seat_id: u64) -> Result<DisplayRequest, Errno> {
+    let count = bounded(read_u32(bytes, BODY_AT + 4), MAX_DAMAGE_RECTS)?;
+    // Slots past the live count are reserved: a rectangle smuggled behind the
+    // count is refused, never ignored.
+    reserved_zero(bytes, PRESENT_RECTS_AT + count * DAMAGE_RECT_LEN)?;
+    let mut rects = [NO_RECT; MAX_DAMAGE_RECTS];
+    for (index, slot) in rects.iter_mut().take(count).enumerate() {
+        let from = PRESENT_RECTS_AT + index * DAMAGE_RECT_LEN;
+        *slot = DamageRect::from_bytes(&bytes[from..])?;
     }
+    Ok(DisplayRequest::Present {
+        seat_id,
+        buffer: buffer_id(read_u32(bytes, BODY_AT))?,
+        damage: DamageList::new(&rects[..count])?,
+    })
+}
+
+/// The body of a `PresentLayers`.
+fn decode_layers(bytes: &[u8], seat_id: u64) -> Result<DisplayRequest, Errno> {
+    let count = bounded(read_u32(bytes, BODY_AT), MAX_ACCEL_LAYERS)?;
+    if read_u32(bytes, BODY_AT + 4) != 0 {
+        return Err(Errno::BadMagic);
+    }
+    reserved_zero(bytes, LAYERS_AT + count * LAYER_LEN)?;
+    let mut layers = [read_layer(bytes, LAYERS_AT)?; MAX_ACCEL_LAYERS];
+    for (index, slot) in layers.iter_mut().enumerate().take(count).skip(1) {
+        *slot = read_layer(bytes, LAYERS_AT + index * LAYER_LEN)?;
+    }
+    Ok(DisplayRequest::PresentLayers {
+        seat_id,
+        layers: LayerList::new(&layers[..count])?,
+    })
+}
+
+/// A list's length as its wire count; lists are bounded far below `u32`.
+fn wire_count(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
+}
+
+/// `count` as a list length: one to `max`.
+fn bounded(count: u32, max: usize) -> Result<usize, Errno> {
+    usize::try_from(count)
+        .ok()
+        .filter(|count| (1..=max).contains(count))
+        .ok_or(Errno::LengthOutOfRange)
+}
+
+/// A buffer id read off the wire; `0` names none.
+fn buffer_id(raw: u32) -> Result<BufferId, Errno> {
+    BufferId::new(raw).ok_or(Errno::OutOfRange)
+}
+
+/// A width and height read off the wire, neither zero.
+fn extent(width_px: u32, height_px: u32) -> Result<(u32, u32), Errno> {
+    if width_px == 0 || height_px == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok((width_px, height_px))
+}
+
+/// Write one layer at `at`.
+fn put_layer(out: &mut [u8], at: usize, layer: &AccelLayer) {
+    put_u32(out, at, layer.buffer.get());
+    out[at + 4..at + 4 + DAMAGE_RECT_LEN].copy_from_slice(&layer.src.to_le_bytes());
+    put_i32(out, at + 20, layer.dst_x);
+    put_i32(out, at + 24, layer.dst_y);
+    put_u32(out, at + 28, layer.dst_width_px);
+    put_u32(out, at + 32, layer.dst_height_px);
+    out[at + 36] = layer.opacity;
+}
+
+/// Read one layer from `at`: a real buffer, a non-empty source and a
+/// non-empty destination. Whether the device admits it is the server's to
+/// decide.
+fn read_layer(bytes: &[u8], at: usize) -> Result<AccelLayer, Errno> {
+    if bytes[at + 37..at + LAYER_LEN].iter().any(|&b| b != 0) {
+        return Err(Errno::BadMagic);
+    }
+    let src = DamageRect::from_bytes(&bytes[at + 4..])?;
+    if src.width_px == 0 || src.height_px == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let (dst_width_px, dst_height_px) = extent(read_u32(bytes, at + 28), read_u32(bytes, at + 32))?;
+    Ok(AccelLayer {
+        buffer: buffer_id(read_u32(bytes, at))?,
+        src,
+        dst_x: read_i32(bytes, at + 20),
+        dst_y: read_i32(bytes, at + 24),
+        dst_width_px,
+        dst_height_px,
+        opacity: bytes[at + 36],
+    })
 }
 
 /// The width, height and stride at `at`, in `format`, refused
@@ -364,6 +589,25 @@ fn reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
     Ok(())
 }
 
+/// The status word of a reply frame: a negative [`Errno`] discriminant on
+/// refusal, `0` otherwise.
+fn put_status(out: &mut [u8], result: Result<(), Errno>) {
+    out[..4].copy_from_slice(&crate::reply::encode_status_reply(result));
+}
+
+/// Check a reply frame's length and status word, and that its bytes from
+/// `tail` to `len` are zero.
+fn read_status(bytes: &[u8], len: usize, tail: usize) -> Result<(), Errno> {
+    if bytes.len() < len {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    if bytes[tail..len].iter().any(|&b| b != 0) {
+        return Err(Errno::BadMagic);
+    }
+    Ok(())
+}
+
 /// Reply length, in bytes, of a `Query`: the status word followed by the
 /// output record — width (4), height (4), stride (4), format (1), whether an
 /// output runs that mode (1), and a reserved tail (2) that must be zero. With
@@ -374,11 +618,8 @@ pub const DISPLAY_MODE_REPLY_LEN: usize = 20;
 /// reply carries and `0` when there is none.
 const QUERY_OUTPUT_AT: usize = 17;
 
-/// Encode a `Query` outcome: the [`DISPLAY_MODE_REPLY_LEN`]-byte output
-/// reply on success, the shared status frame (a negative [`Errno`]
-/// discriminant, zero-padded to the same length) on refusal. Padding the
-/// refusal keeps the reply length constant, so a client can always issue
-/// one fixed-size receive.
+/// Encode a `Query` outcome. A refusal is the status word zero-padded to the
+/// same length, so a client always issues one fixed-size receive.
 #[must_use]
 pub fn encode_mode_reply(
     result: Result<Option<DisplayMode>, Errno>,
@@ -393,9 +634,7 @@ pub fn encode_mode_reply(
             out[QUERY_OUTPUT_AT] = 1;
         }
         Ok(None) => {}
-        Err(err) => {
-            out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
-        }
+        Err(err) => put_status(&mut out, Err(err)),
     }
     out
 }
@@ -407,24 +646,14 @@ pub fn encode_mode_reply(
 ///
 /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
 /// * [`Errno::OutOfRange`] — a corrupt status word or an unknown pixel
-///   format (fail closed on a malformed frame).
+///   format.
 /// * [`Errno::BadMagic`] — a dirty reserved tail, an output byte other than
 ///   `0` or `1`, or a mode carried beside a cleared one.
 /// * [`Errno::LengthOutOfRange`] — a mode with a zero extent or a stride
-///   too small for one scanline (a nonsensical mode is refused, never
-///   handed to a renderer).
+///   too small for one scanline.
 /// * The decoded [`Errno`] itself, when the service refused the query.
 pub fn decode_mode_reply(bytes: &[u8]) -> Result<Option<DisplayMode>, Errno> {
-    if bytes.len() < DISPLAY_MODE_REPLY_LEN {
-        return Err(Errno::BufferTooSmall);
-    }
-    crate::reply::decode_status_reply(&bytes[..4])?;
-    if bytes[QUERY_OUTPUT_AT + 1..DISPLAY_MODE_REPLY_LEN]
-        .iter()
-        .any(|&b| b != 0)
-    {
-        return Err(Errno::BadMagic);
-    }
+    read_status(bytes, DISPLAY_MODE_REPLY_LEN, QUERY_OUTPUT_AT + 1)?;
     match bytes[QUERY_OUTPUT_AT] {
         0 if bytes[4..QUERY_OUTPUT_AT].iter().all(|&b| b == 0) => Ok(None),
         1 => read_mode(bytes, 4, DisplayFormat::from_u8(bytes[16])?).map(Some),
@@ -432,21 +661,482 @@ pub fn decode_mode_reply(bytes: &[u8]) -> Result<Option<DisplayMode>, Errno> {
     }
 }
 
+/// One buffer the service granted a presenter: the driver's id for it and the
+/// kernel's handle for the presenter's mapping.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BufferGrant {
+    /// The buffer.
+    pub buffer: BufferId,
+    /// The `shm_grant_peer` handle the presenter maps it through.
+    pub grant: u64,
+}
+
+impl BufferGrant {
+    /// Encoded size: the buffer (4), a reserved word (4), the grant (8).
+    const WIRE_LEN: usize = 16;
+
+    fn put(&self, out: &mut [u8], at: usize) {
+        put_u32(out, at, self.buffer.get());
+        put_u64(out, at + 8, self.grant);
+    }
+
+    fn read(bytes: &[u8], at: usize) -> Result<Self, Errno> {
+        if read_u32(bytes, at + 4) != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let grant = read_u64(bytes, at + 8);
+        if grant == 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            buffer: buffer_id(read_u32(bytes, at))?,
+            grant,
+        })
+    }
+}
+
+/// The output frames a `Configure` answered: the stride every frame has, the
+/// driver instance that granted them, and the frames in rotation order.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ConfiguredFrames {
+    /// Bytes from one row to the next of every frame.
+    pub stride_bytes: u32,
+    /// The driver instance that granted the frames, which the presenter names
+    /// when it maps them.
+    pub grantor: ProcId,
+    frames: [Option<BufferGrant>; DISPLAY_MAX_FRAMES as usize],
+}
+
+impl ConfiguredFrames {
+    /// The frames `frames`, granted by `grantor`, `stride_bytes` per row.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for no frame or more than
+    /// [`DISPLAY_MAX_FRAMES`].
+    pub fn new(stride_bytes: u32, grantor: ProcId, frames: &[BufferGrant]) -> Result<Self, Errno> {
+        if frames.is_empty() || frames.len() > DISPLAY_MAX_FRAMES as usize {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut slots = [None; DISPLAY_MAX_FRAMES as usize];
+        for (slot, frame) in slots.iter_mut().zip(frames) {
+            *slot = Some(*frame);
+        }
+        Ok(Self {
+            stride_bytes,
+            grantor,
+            frames: slots,
+        })
+    }
+
+    /// The frames, in the order a presenter rotates through them.
+    pub fn frames(&self) -> impl Iterator<Item = BufferGrant> + '_ {
+        self.frames.iter().flatten().copied()
+    }
+
+    /// How many frames there are.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.frames().count()
+    }
+}
+
+/// Offset of a `Configure` reply's grantor.
+const CONFIGURE_GRANTOR_AT: usize = 16;
+/// Offset of a `Configure` reply's first frame.
+const CONFIGURE_FRAMES_AT: usize = CONFIGURE_GRANTOR_AT + PROC_ID_LEN;
+
+/// Reply length, in bytes, of a `Configure`: the status word, the frame count
+/// (4), the stride (4), a reserved word (4), the grantor (16), and
+/// [`DISPLAY_MAX_FRAMES`] frame slots, the unused ones zero.
+pub const DISPLAY_CONFIGURE_REPLY_LEN: usize =
+    CONFIGURE_FRAMES_AT + DISPLAY_MAX_FRAMES as usize * BufferGrant::WIRE_LEN;
+
+/// Encode a `Configure` outcome; a refusal is the zero-padded status word.
+#[must_use]
+pub fn encode_configure_reply(
+    result: Result<ConfiguredFrames, Errno>,
+) -> [u8; DISPLAY_CONFIGURE_REPLY_LEN] {
+    let mut out = [0u8; DISPLAY_CONFIGURE_REPLY_LEN];
+    match result {
+        Ok(frames) => {
+            put_u32(&mut out, 4, wire_count(frames.count()));
+            put_u32(&mut out, 8, frames.stride_bytes);
+            out[CONFIGURE_GRANTOR_AT..CONFIGURE_FRAMES_AT]
+                .copy_from_slice(&frames.grantor.to_le_bytes());
+            for (index, frame) in frames.frames().enumerate() {
+                frame.put(
+                    &mut out,
+                    CONFIGURE_FRAMES_AT + index * BufferGrant::WIRE_LEN,
+                );
+            }
+        }
+        Err(err) => put_status(&mut out, Err(err)),
+    }
+    out
+}
+
+/// Decode a `Configure` reply frame.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
+/// * [`Errno::BadMagic`] — a dirty reserved word or a frame smuggled past the
+///   count.
+/// * [`Errno::LengthOutOfRange`] — no frame or more than
+///   [`DISPLAY_MAX_FRAMES`], or a zero stride.
+/// * [`Errno::OutOfRange`] — a zero buffer id or grant, a corrupt status
+///   word, or the kernel named as grantor.
+/// * The decoded [`Errno`] itself, when the service refused the configure.
+pub fn decode_configure_reply(bytes: &[u8]) -> Result<ConfiguredFrames, Errno> {
+    if bytes.len() < DISPLAY_CONFIGURE_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    let count = bounded(read_u32(bytes, 4), DISPLAY_MAX_FRAMES as usize)?;
+    let stride_bytes = read_u32(bytes, 8);
+    if stride_bytes == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let used = CONFIGURE_FRAMES_AT + count * BufferGrant::WIRE_LEN;
+    if read_u32(bytes, 12) != 0
+        || bytes[used..DISPLAY_CONFIGURE_REPLY_LEN]
+            .iter()
+            .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let grantor = ProcId::from_bytes(&bytes[CONFIGURE_GRANTOR_AT..CONFIGURE_FRAMES_AT])?;
+    if grantor.is_kernel() {
+        return Err(Errno::OutOfRange);
+    }
+    let mut frames = [None; DISPLAY_MAX_FRAMES as usize];
+    for (index, slot) in frames.iter_mut().take(count).enumerate() {
+        *slot = Some(BufferGrant::read(
+            bytes,
+            CONFIGURE_FRAMES_AT + index * BufferGrant::WIRE_LEN,
+        )?);
+    }
+    Ok(ConfiguredFrames {
+        stride_bytes,
+        grantor,
+        frames,
+    })
+}
+
+/// A buffer an `AllocBuffer` answered: the grant, its stride and the driver
+/// instance that granted it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GrantedBuffer {
+    /// The buffer and the presenter's handle for it.
+    pub grant: BufferGrant,
+    /// Bytes from one row to the next.
+    pub stride_bytes: u32,
+    /// The driver instance that granted it.
+    pub grantor: ProcId,
+}
+
+/// Offset of an `AllocBuffer` reply's grantor.
+const BUFFER_GRANTOR_AT: usize = 8 + BufferGrant::WIRE_LEN;
+
+/// Reply length, in bytes, of an `AllocBuffer`: the status word, the stride
+/// (4), the buffer's grant (16) and the grantor (16).
+pub const DISPLAY_BUFFER_REPLY_LEN: usize = BUFFER_GRANTOR_AT + PROC_ID_LEN;
+
+/// Encode an `AllocBuffer` outcome; a refusal is the zero-padded status word.
+#[must_use]
+pub fn encode_buffer_reply(result: Result<GrantedBuffer, Errno>) -> [u8; DISPLAY_BUFFER_REPLY_LEN] {
+    let mut out = [0u8; DISPLAY_BUFFER_REPLY_LEN];
+    match result {
+        Ok(granted) => {
+            put_u32(&mut out, 4, granted.stride_bytes);
+            granted.grant.put(&mut out, 8);
+            out[BUFFER_GRANTOR_AT..].copy_from_slice(&granted.grantor.to_le_bytes());
+        }
+        Err(err) => put_status(&mut out, Err(err)),
+    }
+    out
+}
+
+/// Decode an `AllocBuffer` reply frame.
+///
+/// # Errors
+///
+/// As [`decode_configure_reply`], for one buffer.
+pub fn decode_buffer_reply(bytes: &[u8]) -> Result<GrantedBuffer, Errno> {
+    if bytes.len() < DISPLAY_BUFFER_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    let stride_bytes = read_u32(bytes, 4);
+    if stride_bytes == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let grantor = ProcId::from_bytes(&bytes[BUFFER_GRANTOR_AT..DISPLAY_BUFFER_REPLY_LEN])?;
+    if grantor.is_kernel() {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(GrantedBuffer {
+        grant: BufferGrant::read(bytes, 8)?,
+        stride_bytes,
+        grantor,
+    })
+}
+
+/// What a `Present` or `PresentLayers` answered: whether the frame is shown or
+/// queued, and the present's sequence number within its configuration, which
+/// a queued present's [`DisplayEvent::Presented`] carries.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PresentReply {
+    /// Whether the frame is on screen or waits for the device's next frame.
+    pub presented: Presented,
+    /// The present's number within its configuration.
+    pub seq: u64,
+}
+
+/// A present's wire byte for [`Presented::Shown`].
+const PRESENTED_SHOWN: u8 = 1;
+/// A present's wire byte for [`Presented::Queued`].
+const PRESENTED_QUEUED: u8 = 2;
+
+/// Reply length, in bytes, of a `Present` or `PresentLayers`: the status
+/// word, how the present ended (1), a reserved tail (3) and the sequence
+/// number (8).
+pub const DISPLAY_PRESENT_REPLY_LEN: usize = 16;
+
+/// Encode a present's outcome; a refusal is the zero-padded status word.
+#[must_use]
+pub fn encode_present_reply(
+    result: Result<PresentReply, Errno>,
+) -> [u8; DISPLAY_PRESENT_REPLY_LEN] {
+    let mut out = [0u8; DISPLAY_PRESENT_REPLY_LEN];
+    match result {
+        Ok(reply) => {
+            out[4] = match reply.presented {
+                Presented::Shown => PRESENTED_SHOWN,
+                Presented::Queued => PRESENTED_QUEUED,
+            };
+            put_u64(&mut out, 8, reply.seq);
+        }
+        Err(err) => put_status(&mut out, Err(err)),
+    }
+    out
+}
+
+/// Decode a present's reply frame.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
+/// * [`Errno::BadMagic`] — a dirty reserved tail or an unknown outcome.
+/// * The decoded [`Errno`] itself, when the service refused the present.
+pub fn decode_present_reply(bytes: &[u8]) -> Result<PresentReply, Errno> {
+    if bytes.len() < DISPLAY_PRESENT_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    if bytes[5..8].iter().any(|&b| b != 0) {
+        return Err(Errno::BadMagic);
+    }
+    let presented = match bytes[4] {
+        PRESENTED_SHOWN => Presented::Shown,
+        PRESENTED_QUEUED => Presented::Queued,
+        _ => return Err(Errno::BadMagic),
+    };
+    Ok(PresentReply {
+        presented,
+        seq: read_u64(bytes, 8),
+    })
+}
+
+/// What a device composites and draws in hardware, as `QueryPlanes` answers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Planes {
+    /// The layer compositor, if any.
+    pub accel: Option<AccelCaps>,
+    /// The cursor plane, if any.
+    pub cursor: Option<CursorCaps>,
+}
+
+/// Set when a planes reply carries a layer compositor.
+const PLANES_ACCEL: u32 = 1 << 0;
+/// Set when that compositor applies a constant per-layer opacity.
+const PLANES_PER_LAYER_OPACITY: u32 = 1 << 1;
+/// Set when that compositor scales a layer.
+const PLANES_HW_SCALING: u32 = 1 << 2;
+/// Set when a planes reply carries a cursor plane.
+const PLANES_CURSOR: u32 = 1 << 3;
+/// Every flag this ABI defines.
+const PLANES_KNOWN: u32 =
+    PLANES_ACCEL | PLANES_PER_LAYER_OPACITY | PLANES_HW_SCALING | PLANES_CURSOR;
+
+/// Reply length, in bytes, of a `QueryPlanes`: the status word, the flags
+/// (4), the compositor's limits (12) and the cursor plane's (8), each block
+/// zero where its flag is clear.
+pub const DISPLAY_PLANES_REPLY_LEN: usize = 28;
+
+/// Encode a `QueryPlanes` outcome; a refusal is the zero-padded status word.
+#[must_use]
+pub fn encode_planes_reply(result: Result<Planes, Errno>) -> [u8; DISPLAY_PLANES_REPLY_LEN] {
+    let mut out = [0u8; DISPLAY_PLANES_REPLY_LEN];
+    match result {
+        Ok(planes) => {
+            let mut flags = 0;
+            if let Some(caps) = planes.accel {
+                flags |= PLANES_ACCEL;
+                if caps.per_layer_opacity {
+                    flags |= PLANES_PER_LAYER_OPACITY;
+                }
+                if caps.hw_scaling {
+                    flags |= PLANES_HW_SCALING;
+                }
+                put_u32(&mut out, 8, caps.max_layers);
+                put_u32(&mut out, 12, caps.max_width_px);
+                put_u32(&mut out, 16, caps.max_height_px);
+            }
+            if let Some(cursor) = planes.cursor {
+                flags |= PLANES_CURSOR;
+                put_u32(&mut out, 20, cursor.max_width_px);
+                put_u32(&mut out, 24, cursor.max_height_px);
+            }
+            put_u32(&mut out, 4, flags);
+        }
+        Err(err) => put_status(&mut out, Err(err)),
+    }
+    out
+}
+
+/// Decode a `QueryPlanes` reply frame.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
+/// * [`Errno::BadMagic`] — an unknown flag.
+/// * [`Errno::LengthOutOfRange`] — a block that contradicts its flag, a
+///   compositor of no layer, more than [`MAX_ACCEL_LAYERS`] or no pixel, or
+///   a cursor of no pixel.
+/// * The decoded [`Errno`] itself, when the service refused the query.
+pub fn decode_planes_reply(bytes: &[u8]) -> Result<Planes, Errno> {
+    if bytes.len() < DISPLAY_PLANES_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    let flags = read_u32(bytes, 4);
+    if flags & !PLANES_KNOWN != 0 {
+        return Err(Errno::BadMagic);
+    }
+    let block =
+        |at: usize, words: usize| (0..words).map(move |word| read_u32(bytes, at + 4 * word));
+    let accel = if flags & PLANES_ACCEL != 0 {
+        let caps = AccelCaps {
+            max_layers: read_u32(bytes, 8),
+            max_width_px: read_u32(bytes, 12),
+            max_height_px: read_u32(bytes, 16),
+            per_layer_opacity: flags & PLANES_PER_LAYER_OPACITY != 0,
+            hw_scaling: flags & PLANES_HW_SCALING != 0,
+        };
+        let layers_fit = usize::try_from(caps.max_layers)
+            .is_ok_and(|layers| (1..=MAX_ACCEL_LAYERS).contains(&layers));
+        if !layers_fit || caps.max_width_px == 0 || caps.max_height_px == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Some(caps)
+    } else {
+        if flags & (PLANES_PER_LAYER_OPACITY | PLANES_HW_SCALING) != 0
+            || block(8, 3).any(|w| w != 0)
+        {
+            return Err(Errno::LengthOutOfRange);
+        }
+        None
+    };
+    let cursor = if flags & PLANES_CURSOR != 0 {
+        let cursor = CursorCaps {
+            max_width_px: read_u32(bytes, 20),
+            max_height_px: read_u32(bytes, 24),
+        };
+        if cursor.max_width_px == 0 || cursor.max_height_px == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Some(cursor)
+    } else {
+        if block(20, 2).any(|w| w != 0) {
+            return Err(Errno::LengthOutOfRange);
+        }
+        None
+    };
+    Ok(Planes { accel, cursor })
+}
+
+/// What the service posts to a configuration's port.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DisplayEvent {
+    /// Queued present `seq` latched: the frame it replaced is free.
+    Presented {
+        /// The present's sequence number, as its reply named it.
+        seq: u64,
+    },
+}
+
+/// Wire kind of [`DisplayEvent::Presented`].
+const EVENT_PRESENTED: u16 = 1;
+
+impl DisplayEvent {
+    /// Encoded size: magic (4), version (2), kind (2), sequence number (8).
+    pub const WIRE_LEN: usize = 16;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, DISPLAY_EVENT_MAGIC);
+        put_u16(&mut out, 4, DISPLAY_VERSION_V1);
+        match *self {
+            Self::Presented { seq } => {
+                put_u16(&mut out, 6, EVENT_PRESENTED);
+                put_u64(&mut out, 8, seq);
+            }
+        }
+        out
+    }
+
+    /// Decode from `bytes`, exactly one event.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a wrong length, [`Errno::BadMagic`]
+    /// for a wrong magic, [`Errno::AbiVersionUnsupported`] for another
+    /// version, and [`Errno::OutOfRange`] for an unknown kind.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() != Self::WIRE_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if read_u32(bytes, 0) != DISPLAY_EVENT_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != DISPLAY_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        match read_u16(bytes, 6) {
+            EVENT_PRESENTED => Ok(Self::Presented {
+                seq: read_u64(bytes, 8),
+            }),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// A display device's own graphics statistics, as
 /// [`DisplayRequest::QueryStats`] answers them.
 ///
-/// Composed of the two types that already define its parts — the driver's own
+/// Composed of the types that already define its parts — the
 /// [`DisplayDeviceReport`] and the [`DisplayMode`] it scans out — plus the
 /// service-measured occupancy, so no field here is a second spelling of one
 /// defined elsewhere.
 ///
 /// `busy_ns` and `idle_ns` partition the window since the device was first
-/// driven: the same busy/idle vocabulary the CPU reading uses, so utilisation
-/// derives the same way and no new averaging convention appears. Both are
+/// driven: the same busy/idle vocabulary the CPU reading uses. Both are
 /// cumulative and never reset, so a reader takes a two-sample delta over its
-/// own interval; a first sample therefore yields no utilisation, and a device
-/// nothing has presented to reports both as `0` rather than an idle share of a
-/// window that never opened.
+/// own interval; a device nothing has presented to reports both as `0`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DisplayStats {
     /// The seat whose frames the device is currently configured for, or `0`
@@ -456,25 +1146,29 @@ pub struct DisplayStats {
     pub busy_ns: u64,
     /// Cumulative nanoseconds it did not, over the same window.
     pub idle_ns: u64,
-    /// What the driver reports about the device itself.
+    /// What the device is.
     pub device: DisplayDeviceReport,
     /// The mode being scanned out, or [`None`] while there is no output.
     pub mode: Option<DisplayMode>,
 }
 
-/// Set in a statistics reply when the device has a hardware compositor, so
-/// the accelerated-capability fields carry a reading rather than a nought.
+/// Set in a statistics record when the device has a layer compositor.
 const STATS_FLAG_ACCELERATED: u16 = 1 << 0;
-/// Set when that compositor can scale a whole layer by a constant opacity
-/// ([`AccelCaps::per_layer_opacity`]).
+/// Set when that compositor applies a constant per-layer opacity.
 const STATS_FLAG_PER_LAYER_OPACITY: u16 = 1 << 1;
-/// Set when an output is connected, so the mode block carries the mode it
-/// runs; clear, the block is zero.
+/// Set when an output is connected, so the mode block carries its mode.
 const STATS_FLAG_OUTPUT: u16 = 1 << 2;
+/// Set when the compositor scales a layer.
+const STATS_FLAG_HW_SCALING: u16 = 1 << 3;
+/// Set when the device has a cursor plane.
+const STATS_FLAG_CURSOR: u16 = 1 << 4;
 /// Every flag bit this ABI defines; any other set bit fails the decode
 /// closed rather than being ignored.
-const STATS_FLAGS_KNOWN: u16 =
-    STATS_FLAG_ACCELERATED | STATS_FLAG_PER_LAYER_OPACITY | STATS_FLAG_OUTPUT;
+const STATS_FLAGS_KNOWN: u16 = STATS_FLAG_ACCELERATED
+    | STATS_FLAG_PER_LAYER_OPACITY
+    | STATS_FLAG_OUTPUT
+    | STATS_FLAG_HW_SCALING
+    | STATS_FLAG_CURSOR;
 
 impl DisplayStats {
     /// Encoded size on the wire, and the size of one packed
@@ -483,10 +1177,9 @@ impl DisplayStats {
     /// Layout: `busy_ns` (8), `idle_ns` (8), `mem_resident_bytes` (8),
     /// `mem_total_bytes` (8), `seat_id` (8), `max_layers` (4),
     /// `max_width_px` (4), `max_height_px` (4), mode width (4), height (4),
-    /// stride (4), format (1), reserved (1), flags (2), reserved (4). Every
-    /// field is naturally aligned within the record and every reserved byte
-    /// must be zero on the wire.
-    pub const WIRE_LEN: usize = 72;
+    /// stride (4), format (1), reserved (1), flags (2), reserved (4), cursor
+    /// width (4) and height (4). Every reserved byte must be zero.
+    pub const WIRE_LEN: usize = 80;
 
     /// Byte offset of the accelerated-capability block.
     const ACCEL_AT: usize = 40;
@@ -494,6 +1187,8 @@ impl DisplayStats {
     const MODE_AT: usize = 52;
     /// Byte offset of the flags word.
     const FLAGS_AT: usize = 66;
+    /// Byte offset of the cursor block.
+    const CURSOR_AT: usize = 72;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -505,6 +1200,9 @@ impl DisplayStats {
             if caps.per_layer_opacity {
                 flags |= STATS_FLAG_PER_LAYER_OPACITY;
             }
+            if caps.hw_scaling {
+                flags |= STATS_FLAG_HW_SCALING;
+            }
             put_u32(&mut out, Self::ACCEL_AT, caps.max_layers);
             put_u32(&mut out, Self::ACCEL_AT + 4, caps.max_width_px);
             put_u32(&mut out, Self::ACCEL_AT + 8, caps.max_height_px);
@@ -515,6 +1213,11 @@ impl DisplayStats {
             put_u32(&mut out, Self::MODE_AT + 4, mode.height_px);
             put_u32(&mut out, Self::MODE_AT + 8, mode.stride_bytes);
             out[Self::MODE_AT + 12] = mode.format.as_u8();
+        }
+        if let Some(cursor) = self.device.cursor {
+            flags |= STATS_FLAG_CURSOR;
+            put_u32(&mut out, Self::CURSOR_AT, cursor.max_width_px);
+            put_u32(&mut out, Self::CURSOR_AT + 4, cursor.max_height_px);
         }
         put_u16(&mut out, Self::FLAGS_AT, flags);
         put_u64(&mut out, 0, self.busy_ns);
@@ -539,10 +1242,9 @@ impl DisplayStats {
     ///   [`Self::WIRE_LEN`].
     /// * [`Errno::OutOfRange`] — an unknown pixel format.
     /// * [`Errno::BadMagic`] — an unknown flag bit or a dirty reserved field.
-    /// * [`Errno::LengthOutOfRange`] — a nonsensical mode (zero extent, or a
-    ///   stride too small for one scanline), resident bytes above the memory
-    ///   the device owns, or an accelerated-capability or mode block that
-    ///   contradicts its flag.
+    /// * [`Errno::LengthOutOfRange`] — a nonsensical mode, resident bytes
+    ///   above the memory the device owns, or a block that contradicts its
+    ///   flag.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -550,7 +1252,7 @@ impl DisplayStats {
         let flags = read_u16(bytes, Self::FLAGS_AT);
         if flags & !STATS_FLAGS_KNOWN != 0
             || bytes[Self::MODE_AT + 13] != 0
-            || bytes[Self::FLAGS_AT + 2..Self::WIRE_LEN]
+            || bytes[Self::FLAGS_AT + 2..Self::CURSOR_AT]
                 .iter()
                 .any(|&b| b != 0)
         {
@@ -573,12 +1275,13 @@ impl DisplayStats {
                 max_width_px,
                 max_height_px,
                 per_layer_opacity: flags & STATS_FLAG_PER_LAYER_OPACITY != 0,
+                hw_scaling: flags & STATS_FLAG_HW_SCALING != 0,
             })
         } else {
             if max_layers != 0
                 || max_width_px != 0
                 || max_height_px != 0
-                || flags & STATS_FLAG_PER_LAYER_OPACITY != 0
+                || flags & (STATS_FLAG_PER_LAYER_OPACITY | STATS_FLAG_HW_SCALING) != 0
             {
                 return Err(Errno::LengthOutOfRange);
             }
@@ -596,6 +1299,22 @@ impl DisplayStats {
             }
             None
         };
+        let cursor_width = read_u32(bytes, Self::CURSOR_AT);
+        let cursor_height = read_u32(bytes, Self::CURSOR_AT + 4);
+        let cursor = if flags & STATS_FLAG_CURSOR != 0 {
+            if cursor_width == 0 || cursor_height == 0 {
+                return Err(Errno::LengthOutOfRange);
+            }
+            Some(CursorCaps {
+                max_width_px: cursor_width,
+                max_height_px: cursor_height,
+            })
+        } else {
+            if cursor_width != 0 || cursor_height != 0 {
+                return Err(Errno::LengthOutOfRange);
+            }
+            None
+        };
         Ok(Self {
             seat_id: read_u64(bytes, 32),
             busy_ns: read_u64(bytes, 0),
@@ -604,6 +1323,7 @@ impl DisplayStats {
                 mem_resident_bytes,
                 mem_total_bytes,
                 accel,
+                cursor,
             },
             mode,
         })
@@ -614,13 +1334,11 @@ impl DisplayStats {
 /// [`DisplayStats`] record.
 pub const DISPLAY_STATS_REPLY_LEN: usize = 4 + DisplayStats::WIRE_LEN;
 
-/// Encode a `QueryStats` outcome: the status word plus the statistics record
-/// on success, the status frame zero-padded to the same length on refusal, so
-/// a client always issues one fixed-size receive.
+/// Encode a `QueryStats` outcome; a refusal is the zero-padded status word.
 #[must_use]
 pub fn encode_stats_reply(result: Result<DisplayStats, Errno>) -> [u8; DISPLAY_STATS_REPLY_LEN] {
     let mut out = [0u8; DISPLAY_STATS_REPLY_LEN];
-    out[..4].copy_from_slice(&crate::reply::encode_status_reply(result.map(|_| ())));
+    put_status(&mut out, result.map(|_| ()));
     if let Ok(stats) = result {
         out[4..].copy_from_slice(&stats.to_le_bytes());
     }
@@ -644,521 +1362,5 @@ pub fn decode_stats_reply(bytes: &[u8]) -> Result<DisplayStats, Errno> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        decode_mode_reply, decode_stats_reply, encode_mode_reply, encode_stats_reply, DamageList,
-        DisplayRequest, DisplayStats, DAMAGE_RECT_LEN, DISPLAY_MAX_FRAMES, DISPLAY_MODE_REPLY_LEN,
-        DISPLAY_REQUEST_MAGIC, DISPLAY_STATS_REPLY_LEN, NO_RECT, PRESENT_RECTS_AT,
-    };
-    use crate::driver::display::{
-        AccelCaps, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode, DisplayPower,
-        MAX_DAMAGE_RECTS,
-    };
-    use crate::Errno;
-
-    /// Byte offset of the statistics record inside its reply frame: the
-    /// status word precedes it, so a test that dirties a record field aims
-    /// past that word.
-    const STATS_BODY_AT: usize = 4;
-
-    /// The bound as a `u32`, for the tests that count rectangles.
-    fn max_rects() -> u32 {
-        u32::try_from(MAX_DAMAGE_RECTS).expect("the bound fits a u32")
-    }
-
-    /// The rectangle `index` pixels down the surface, so a list's entries
-    /// are distinguishable at a glance.
-    /// The `index`th of a column of rectangles that touch and never overlap.
-    fn rect(index: u32) -> DamageRect {
-        DamageRect {
-            x: 10,
-            y: 20 + index * 40,
-            width_px: 30,
-            height_px: 40,
-        }
-    }
-
-    /// One rectangle more than the bound allows, so a test can slice out any
-    /// length it needs (this crate allocates nowhere, tests included).
-    fn rects() -> [DamageRect; MAX_DAMAGE_RECTS + 1] {
-        let mut all = [NO_RECT; MAX_DAMAGE_RECTS + 1];
-        for (index, slot) in all.iter_mut().enumerate() {
-            *slot = rect(u32::try_from(index).expect("a small index"));
-        }
-        all
-    }
-
-    fn damage(count: u32) -> DamageList {
-        let count = usize::try_from(count).expect("a small count");
-        DamageList::new(&rects()[..count]).expect("a list within the bound")
-    }
-
-    fn sample_configure() -> DisplayRequest {
-        DisplayRequest::Configure {
-            seat_id: 0,
-            shm_handle: 7,
-            frame_count: 2,
-            width_px: 640,
-            height_px: 480,
-            stride_bytes: 2560,
-            format: DisplayFormat::Bgra8888,
-        }
-    }
-
-    fn sample_present() -> DisplayRequest {
-        DisplayRequest::Present {
-            seat_id: 0,
-            frame_index: 1,
-            damage: damage(1),
-        }
-    }
-
-    #[test]
-    fn requests_round_trip() {
-        for request in [
-            DisplayRequest::Query { seat_id: 3 },
-            sample_configure(),
-            sample_present(),
-            DisplayRequest::SetPower {
-                seat_id: 3,
-                power: DisplayPower::Off,
-            },
-            DisplayRequest::SetPower {
-                seat_id: 3,
-                power: DisplayPower::On,
-            },
-        ] {
-            let bytes = request.to_le_bytes();
-            assert_eq!(DisplayRequest::from_bytes(&bytes), Ok(request));
-        }
-    }
-
-    #[test]
-    fn a_power_request_names_a_known_state_and_nothing_more() {
-        let good = DisplayRequest::SetPower {
-            seat_id: 3,
-            power: DisplayPower::Off,
-        }
-        .to_le_bytes();
-        for bad in [0, 3, u8::MAX] {
-            let mut unknown = good;
-            unknown[16] = bad;
-            assert_eq!(DisplayRequest::from_bytes(&unknown), Err(Errno::OutOfRange));
-        }
-        let mut smuggled = good;
-        smuggled[17] = 1;
-        assert_eq!(DisplayRequest::from_bytes(&smuggled), Err(Errno::BadMagic));
-    }
-
-    /// A whole frame's damage travels in one request: every list length the
-    /// bound allows survives the wire, rectangles and order intact.
-    #[test]
-    fn a_present_carries_a_whole_damage_list() {
-        for count in 1..=max_rects() {
-            let request = DisplayRequest::Present {
-                seat_id: 7,
-                frame_index: 1,
-                damage: damage(count),
-            };
-            let decoded = DisplayRequest::from_bytes(&request.to_le_bytes());
-            assert_eq!(decoded, Ok(request), "{count} rectangles");
-            let Ok(DisplayRequest::Present { damage, .. }) = decoded else {
-                panic!("a present decodes as one");
-            };
-            assert_eq!(u32::try_from(damage.rects().len()), Ok(count));
-            assert_eq!(damage.rects().last(), Some(&rect(count - 1)));
-        }
-    }
-
-    /// The list's bound and its "no empty rectangle" rule hold at
-    /// construction, so a caller cannot build one the wire would refuse.
-    #[test]
-    fn a_damage_list_is_bounded_and_never_empty() {
-        assert_eq!(DamageList::new(&[]).err(), Some(Errno::LengthOutOfRange));
-        assert_eq!(
-            DamageList::new(&rects()).err(),
-            Some(Errno::LengthOutOfRange),
-            "one rectangle past the bound"
-        );
-        let with_empty = [
-            rect(0),
-            DamageRect {
-                x: 0,
-                y: 0,
-                width_px: 0,
-                height_px: 1,
-            },
-        ];
-        assert_eq!(
-            DamageList::new(&with_empty).err(),
-            Some(Errno::LengthOutOfRange)
-        );
-        // Equality is the rectangles named, not the slots behind them.
-        assert_eq!(damage(2), damage(2));
-        assert_ne!(damage(2), damage(3));
-    }
-
-    /// A count past the bound, and a rectangle hidden in a slot the count
-    /// does not reach, are both refused rather than partly honoured.
-    #[test]
-    fn a_present_refuses_a_smuggled_rectangle() {
-        let encoded = DisplayRequest::Present {
-            seat_id: 0,
-            frame_index: 0,
-            damage: damage(2),
-        }
-        .to_le_bytes();
-
-        let mut over = encoded;
-        over[20..24].copy_from_slice(&(max_rects() + 1).to_le_bytes());
-        assert_eq!(
-            DisplayRequest::from_bytes(&over),
-            Err(Errno::LengthOutOfRange)
-        );
-        let mut none = encoded;
-        none[20..24].copy_from_slice(&0u32.to_le_bytes());
-        none[PRESENT_RECTS_AT..].fill(0);
-        assert_eq!(
-            DisplayRequest::from_bytes(&none),
-            Err(Errno::LengthOutOfRange),
-            "a present that names nothing changed"
-        );
-        // A rectangle the count does not reach is a dirty reserved slot,
-        // whether it sits behind a live one or behind a zeroed count.
-        for at in [PRESENT_RECTS_AT + 2 * DAMAGE_RECT_LEN, PRESENT_RECTS_AT] {
-            let mut behind = encoded;
-            if at == PRESENT_RECTS_AT {
-                behind[20..24].copy_from_slice(&0u32.to_le_bytes());
-            }
-            behind[at] = 1;
-            assert_eq!(DisplayRequest::from_bytes(&behind), Err(Errno::BadMagic));
-        }
-    }
-
-    #[test]
-    fn magic_is_the_ascii_tag() {
-        assert_eq!(DISPLAY_REQUEST_MAGIC, u32::from_le_bytes(*b"DSP1"));
-    }
-
-    #[test]
-    fn decode_fails_closed_on_malformed_framing() {
-        let good = sample_configure().to_le_bytes();
-
-        assert_eq!(
-            DisplayRequest::from_bytes(&good[..DisplayRequest::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-        let mut bad_magic = good;
-        bad_magic[0] ^= 0xFF;
-        assert_eq!(DisplayRequest::from_bytes(&bad_magic), Err(Errno::BadMagic));
-        let mut bad_version = good;
-        bad_version[4] = 9;
-        assert_eq!(
-            DisplayRequest::from_bytes(&bad_version),
-            Err(Errno::AbiVersionUnsupported)
-        );
-        let mut bad_op = good;
-        bad_op[6] = 9;
-        assert_eq!(DisplayRequest::from_bytes(&bad_op), Err(Errno::OutOfRange));
-    }
-
-    #[test]
-    fn decode_refuses_dirty_reserved_tails() {
-        // A query must carry nothing beyond its seat id.
-        let mut query = DisplayRequest::Query { seat_id: 0 }.to_le_bytes();
-        query[16] = 1;
-        assert_eq!(DisplayRequest::from_bytes(&query), Err(Errno::BadMagic));
-        // A configure's tail past the format byte must be zero.
-        let mut configure = sample_configure().to_le_bytes();
-        configure[47] = 1;
-        assert_eq!(DisplayRequest::from_bytes(&configure), Err(Errno::BadMagic));
-        // A present's tail past its last damage rectangle must be zero.
-        let mut present = sample_present().to_le_bytes();
-        present[PRESENT_RECTS_AT + DAMAGE_RECT_LEN] = 1;
-        assert_eq!(DisplayRequest::from_bytes(&present), Err(Errno::BadMagic));
-    }
-
-    #[test]
-    fn configure_bounds_are_enforced() {
-        let encode = |frame_count: u32, width: u32, height: u32, stride: u32, format: u8| {
-            let mut bytes = sample_configure().to_le_bytes();
-            bytes[24..28].copy_from_slice(&frame_count.to_le_bytes());
-            bytes[28..32].copy_from_slice(&width.to_le_bytes());
-            bytes[32..36].copy_from_slice(&height.to_le_bytes());
-            bytes[36..40].copy_from_slice(&stride.to_le_bytes());
-            bytes[40] = format;
-            DisplayRequest::from_bytes(&bytes)
-        };
-        // Frame count outside 1..=DISPLAY_MAX_FRAMES.
-        assert_eq!(encode(0, 640, 480, 2560, 2), Err(Errno::LengthOutOfRange));
-        assert_eq!(
-            encode(DISPLAY_MAX_FRAMES + 1, 640, 480, 2560, 2),
-            Err(Errno::LengthOutOfRange)
-        );
-        // Zero extents and a stride too small for one scanline.
-        assert_eq!(encode(2, 0, 480, 2560, 2), Err(Errno::LengthOutOfRange));
-        assert_eq!(encode(2, 640, 0, 2560, 2), Err(Errno::LengthOutOfRange));
-        assert_eq!(encode(2, 640, 480, 2559, 2), Err(Errno::LengthOutOfRange));
-        // An unknown pixel format.
-        assert_eq!(encode(2, 640, 480, 2560, 9), Err(Errno::OutOfRange));
-        // The widest accepted count still round-trips.
-        assert!(encode(DISPLAY_MAX_FRAMES, 640, 480, 2560, 2).is_ok());
-    }
-
-    #[test]
-    fn present_refuses_an_empty_damage_rectangle() {
-        // The width and height of the first rectangle, at its own offset.
-        let width_at = PRESENT_RECTS_AT + 8;
-        let height_at = PRESENT_RECTS_AT + 12;
-        let mut zero_width = sample_present().to_le_bytes();
-        zero_width[width_at..width_at + 4].copy_from_slice(&0u32.to_le_bytes());
-        assert_eq!(
-            DisplayRequest::from_bytes(&zero_width),
-            Err(Errno::LengthOutOfRange)
-        );
-        let mut zero_height = sample_present().to_le_bytes();
-        zero_height[height_at..height_at + 4].copy_from_slice(&0u32.to_le_bytes());
-        assert_eq!(
-            DisplayRequest::from_bytes(&zero_height),
-            Err(Errno::LengthOutOfRange)
-        );
-        // An empty rectangle behind a live one is refused too: the whole
-        // list is checked, never just its first entry.
-        let mut second = DisplayRequest::Present {
-            seat_id: 0,
-            frame_index: 0,
-            damage: damage(2),
-        }
-        .to_le_bytes();
-        let second_width = PRESENT_RECTS_AT + DAMAGE_RECT_LEN + 8;
-        second[second_width..second_width + 4].copy_from_slice(&0u32.to_le_bytes());
-        assert_eq!(
-            DisplayRequest::from_bytes(&second),
-            Err(Errno::LengthOutOfRange)
-        );
-    }
-
-    #[test]
-    fn mode_replies_round_trip_ok_and_error() {
-        let mode = DisplayMode {
-            width_px: 1920,
-            height_px: 1080,
-            stride_bytes: 7680,
-            format: DisplayFormat::Rgba8888,
-        };
-        assert_eq!(
-            decode_mode_reply(&encode_mode_reply(Ok(Some(mode)))),
-            Ok(Some(mode))
-        );
-        assert_eq!(decode_mode_reply(&encode_mode_reply(Ok(None))), Ok(None));
-        assert_eq!(
-            decode_mode_reply(&encode_mode_reply(Err(Errno::SeatNotOwner))),
-            Err(Errno::SeatNotOwner)
-        );
-        assert_eq!(
-            decode_mode_reply(&encode_mode_reply(Err(Errno::SeatRevoked))),
-            Err(Errno::SeatRevoked)
-        );
-    }
-
-    #[test]
-    fn mode_reply_decode_fails_closed() {
-        let mode = DisplayMode {
-            width_px: 640,
-            height_px: 480,
-            stride_bytes: 2560,
-            format: DisplayFormat::Bgra8888,
-        };
-        let good = encode_mode_reply(Ok(Some(mode)));
-
-        assert_eq!(
-            decode_mode_reply(&good[..DISPLAY_MODE_REPLY_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-        // A corrupt (positive) status word.
-        let mut bad_status = good;
-        bad_status[0] = 1;
-        assert_eq!(decode_mode_reply(&bad_status), Err(Errno::OutOfRange));
-        // An unknown format byte.
-        let mut bad_format = good;
-        bad_format[16] = 9;
-        assert_eq!(decode_mode_reply(&bad_format), Err(Errno::OutOfRange));
-        // A dirty reserved tail.
-        let mut dirty = good;
-        dirty[19] = 1;
-        assert_eq!(decode_mode_reply(&dirty), Err(Errno::BadMagic));
-        // An output byte that is neither answer, and a mode carried beside
-        // the answer that there is no output.
-        let mut neither = good;
-        neither[17] = 2;
-        assert_eq!(decode_mode_reply(&neither), Err(Errno::BadMagic));
-        let mut absent_with_mode = good;
-        absent_with_mode[17] = 0;
-        assert_eq!(decode_mode_reply(&absent_with_mode), Err(Errno::BadMagic));
-        // A nonsensical mode: zero extents or an undersized stride.
-        let mut zero_width = good;
-        zero_width[4..8].copy_from_slice(&0u32.to_le_bytes());
-        assert_eq!(decode_mode_reply(&zero_width), Err(Errno::LengthOutOfRange));
-        let mut thin_stride = good;
-        thin_stride[12..16].copy_from_slice(&2559u32.to_le_bytes());
-        assert_eq!(
-            decode_mode_reply(&thin_stride),
-            Err(Errno::LengthOutOfRange)
-        );
-    }
-    /// The mode every statistics test reports, so a decode failure is always
-    /// about the field the test dirtied.
-    fn stats_mode() -> DisplayMode {
-        DisplayMode {
-            width_px: 640,
-            height_px: 480,
-            stride_bytes: 2560,
-            format: DisplayFormat::Bgra8888,
-        }
-    }
-
-    /// An accelerated device with memory of its own: every optional part of
-    /// the reply populated, so a round trip exercises all of them.
-    fn accelerated_stats() -> DisplayStats {
-        DisplayStats {
-            seat_id: 3,
-            busy_ns: 4_000_000,
-            idle_ns: 96_000_000,
-            device: DisplayDeviceReport {
-                mem_resident_bytes: 8 << 20,
-                mem_total_bytes: 256 << 20,
-                accel: Some(AccelCaps {
-                    max_layers: 6,
-                    max_width_px: 1920,
-                    max_height_px: 1080,
-                    per_layer_opacity: true,
-                }),
-            },
-            mode: Some(stats_mode()),
-        }
-    }
-
-    #[test]
-    fn query_stats_round_trips_and_names_no_seat() {
-        let encoded = DisplayRequest::QueryStats.to_le_bytes();
-        assert_eq!(
-            DisplayRequest::from_bytes(&encoded),
-            Ok(DisplayRequest::QueryStats)
-        );
-        // The common seat slot is this operation's reserved tail: a seat
-        // smuggled into a stats read is refused, never ignored.
-        let mut with_seat = encoded;
-        with_seat[8] = 1;
-        assert_eq!(DisplayRequest::from_bytes(&with_seat), Err(Errno::BadMagic));
-    }
-
-    #[test]
-    fn stats_reply_round_trips_both_device_shapes() {
-        let accelerated = accelerated_stats();
-        assert_eq!(
-            decode_stats_reply(&encode_stats_reply(Ok(accelerated))),
-            Ok(accelerated)
-        );
-        // A firmware framebuffer: no memory of its own, no hardware
-        // compositor. `mem_total_bytes == 0` is the statement "none of its
-        // own", and it round trips as `accel: None` rather than as zeroed
-        // capabilities.
-        let software = DisplayStats {
-            seat_id: 0,
-            busy_ns: 0,
-            idle_ns: 0,
-            device: DisplayDeviceReport::SOFTWARE,
-            mode: Some(stats_mode()),
-        };
-        let decoded = decode_stats_reply(&encode_stats_reply(Ok(software)));
-        assert_eq!(decoded, Ok(software));
-        assert!(decoded.expect("decoded").device.accel.is_none());
-    }
-
-    #[test]
-    fn stats_reply_round_trips_a_device_with_no_output() {
-        let unplugged = DisplayStats {
-            mode: None,
-            ..accelerated_stats()
-        };
-        assert_eq!(
-            decode_stats_reply(&encode_stats_reply(Ok(unplugged))),
-            Ok(unplugged)
-        );
-    }
-
-    #[test]
-    fn stats_reply_carries_a_refusal_at_full_length() {
-        let refused = encode_stats_reply(Err(Errno::PermissionDenied));
-        assert_eq!(refused.len(), DISPLAY_STATS_REPLY_LEN);
-        assert_eq!(decode_stats_reply(&refused), Err(Errno::PermissionDenied));
-    }
-
-    #[test]
-    fn stats_reply_decode_fails_closed() {
-        let good = encode_stats_reply(Ok(accelerated_stats()));
-
-        assert_eq!(
-            decode_stats_reply(&good[..DISPLAY_STATS_REPLY_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-        // A corrupt (positive) status word.
-        let mut bad_status = good;
-        bad_status[0] = 1;
-        assert_eq!(decode_stats_reply(&bad_status), Err(Errno::OutOfRange));
-        // An undefined flag bit.
-        let mut unknown_flag = good;
-        unknown_flag[STATS_BODY_AT + 66] |= 1 << 4;
-        assert_eq!(decode_stats_reply(&unknown_flag), Err(Errno::BadMagic));
-        // A dirty reserved word, and a dirty reserved tail.
-        let mut dirty_word = good;
-        dirty_word[STATS_BODY_AT + 65] = 1;
-        assert_eq!(decode_stats_reply(&dirty_word), Err(Errno::BadMagic));
-        let mut dirty_tail = good;
-        dirty_tail[DISPLAY_STATS_REPLY_LEN - 1] = 1;
-        assert_eq!(decode_stats_reply(&dirty_tail), Err(Errno::BadMagic));
-        // More resident than the device owns.
-        let mut over_resident = good;
-        over_resident[STATS_BODY_AT + 16..STATS_BODY_AT + 24]
-            .copy_from_slice(&u64::MAX.to_le_bytes());
-        assert_eq!(
-            decode_stats_reply(&over_resident),
-            Err(Errno::LengthOutOfRange)
-        );
-        // Compositor limits on a device whose flag says it has none.
-        let mut unflagged_caps = good;
-        unflagged_caps[STATS_BODY_AT + 66] = 0;
-        assert_eq!(
-            decode_stats_reply(&unflagged_caps),
-            Err(Errno::LengthOutOfRange)
-        );
-        // An accelerated device that can composite no layer.
-        let mut no_layers = good;
-        no_layers[STATS_BODY_AT + 40..STATS_BODY_AT + 44].copy_from_slice(&0u32.to_le_bytes());
-        assert_eq!(decode_stats_reply(&no_layers), Err(Errno::LengthOutOfRange));
-        // An unknown format byte, and a nonsensical mode.
-        let mut bad_format = good;
-        bad_format[STATS_BODY_AT + 64] = 9;
-        assert_eq!(decode_stats_reply(&bad_format), Err(Errno::OutOfRange));
-        let mut thin_stride = good;
-        thin_stride[STATS_BODY_AT + 60..STATS_BODY_AT + 64].copy_from_slice(&2559u32.to_le_bytes());
-        assert_eq!(
-            decode_stats_reply(&thin_stride),
-            Err(Errno::LengthOutOfRange)
-        );
-        // A mode block beside a flag saying no output is connected, and the
-        // flag with no mode beside it, whose zero format byte names none.
-        let mut stray_mode = good;
-        stray_mode[STATS_BODY_AT + 66] &= !(1 << 2);
-        assert_eq!(
-            decode_stats_reply(&stray_mode),
-            Err(Errno::LengthOutOfRange)
-        );
-        let mut unplugged = encode_stats_reply(Ok(DisplayStats {
-            mode: None,
-            ..accelerated_stats()
-        }));
-        unplugged[STATS_BODY_AT + 66] |= 1 << 2;
-        assert_eq!(decode_stats_reply(&unplugged), Err(Errno::OutOfRange));
-    }
-}
+#[path = "display_ipc_tests.rs"]
+mod tests;

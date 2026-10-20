@@ -35,7 +35,9 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{net_device_arg, netdev_arg, rtc_base_args, SessionKind, Spec};
+use crate::{
+    net_device_arg, netdev_arg, rtc_base_args, virtio_pci_options, Display, SessionKind, Spec,
+};
 
 /// Default guest RAM size in mebibytes for an x86_64 QEMU integration
 /// test.
@@ -131,7 +133,8 @@ fn push_board(argv: &mut Vec<OsString>, spec: &Spec) {
     // `pc` board holds no translation unit, and no more than 255 CPUs.
     let unit = spec.dma_translation.unit_device();
     let past_xapic = spec.x86_64_topology == Topology::ApPastXapic;
-    if unit.is_some() || past_xapic {
+    let virtio_gpu = matches!(spec.devices.display, Display::VirtioGpu { .. });
+    if unit.is_some() || past_xapic || virtio_gpu {
         argv.push("-machine".into());
         argv.push("q35".into());
     }
@@ -196,15 +199,15 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         )
         .into(),
     );
-    // Attach QEMU's `ramfb` display device when requested. `ramfb` is a
-    // firmware-programmed linear framebuffer whose scan-out surface lives
-    // in guest RAM; the guest programs its geometry over the `fw_cfg`
-    // device the `pc`/`q35` machine already carries (here over the x86
-    // IOport DMA interface). This is what the vesa-display vertical
-    // drives.
-    if spec.devices.ramfb {
+    // A virtio GPU is the board's only display: the default VGA would
+    // otherwise be its console.
+    if matches!(spec.devices.display, Display::VirtioGpu { .. }) {
+        argv.push("-vga".into());
+        argv.push("none".into());
+    }
+    if let Some(display) = spec.devices.display.device(Some(virtio_pci_options(spec))) {
         argv.push("-device".into());
-        argv.push("ramfb".into());
+        argv.push(display.into());
     }
     // PVH direct boot: QEMU's ELF loader reads the kernel's
     // XEN_ELFNOTE_PHYS32_ENTRY note and enters `pvh_start` with the
@@ -708,7 +711,7 @@ mod tests {
         let spec = fixture_spec(1);
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(
-            !argv.iter().any(|a| a == "ramfb"),
+            !argv.iter().any(|a| a.starts_with("ramfb")),
             "a display-free spec must not attach a ramfb device"
         );
     }
@@ -716,13 +719,36 @@ mod tests {
     #[test]
     fn argv_attaches_ramfb_when_requested() {
         let mut spec = fixture_spec(1);
-        spec.devices.ramfb = true;
+        spec.devices.display = Display::Ramfb;
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let pos = argv
             .iter()
-            .position(|a| a == "ramfb")
+            .position(|a| a == "ramfb,id=display0")
             .expect("argv contains the ramfb device");
         assert_eq!(argv[pos - 1], "-device");
+    }
+
+    #[test]
+    fn a_virtio_gpu_is_a_q35_board_s_only_display() {
+        let mut spec = fixture_spec(1);
+        spec.devices.display = Display::VirtioGpu {
+            width: 1024,
+            height: 768,
+        };
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let machine = argv
+            .iter()
+            .position(|a| a == "-machine")
+            .expect("a machine");
+        assert_eq!(argv[machine + 1], "q35");
+        let vga = argv
+            .iter()
+            .position(|a| a == "-vga")
+            .expect("the VGA removed");
+        assert_eq!(argv[vga + 1], "none");
+        assert!(argv
+            .iter()
+            .any(|a| a == "virtio-gpu-pci,id=display0,xres=1024,yres=768,disable-legacy=on"));
     }
 
     #[test]

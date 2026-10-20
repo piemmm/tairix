@@ -23,7 +23,7 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
-    use tairix_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator, SERIAL_SINK};
+    use tairix_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator};
 
     /// What boot allocates before the heap can grow from the frame allocator.
     static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
@@ -69,7 +69,7 @@ mod kernel {
         boot(
             boot_info,
             &ALLOCATOR,
-            &SERIAL_SINK,
+            &tairix_kernel::console_layout::LOG_SINK,
             &tairix_kernel::x86_64::boot::AUDIT_SINK,
             tairix_log::Level::Info,
         )
@@ -89,7 +89,6 @@ mod kernel {
 mod kernel {
     use core::panic::PanicInfo;
 
-    use tairix_arch_aarch64::SERIAL_SINK;
     use tairix_kernel::aarch64::boot;
     use tairix_kernel::aarch64::panic_ctx::handle_panic_via_kernel_core;
     use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
@@ -134,7 +133,7 @@ mod kernel {
         boot::boot(
             dtb,
             &ALLOCATOR,
-            &SERIAL_SINK,
+            &tairix_kernel::console_layout::LOG_SINK,
             &boot::AUDIT_SINK,
             tairix_log::Level::Info,
             &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
@@ -155,7 +154,6 @@ mod kernel {
 mod kernel {
     use core::panic::PanicInfo;
 
-    use tairix_arch_riscv64::SERIAL_SINK;
     use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
     use tairix_kernel::riscv64::boot;
     use tairix_kernel::riscv64::panic_ctx::handle_panic_via_kernel_core;
@@ -201,7 +199,7 @@ mod kernel {
             hartid,
             dtb,
             &ALLOCATOR,
-            &SERIAL_SINK,
+            &tairix_kernel::console_layout::LOG_SINK,
             &boot::AUDIT_SINK,
             tairix_log::Level::Info,
         )
