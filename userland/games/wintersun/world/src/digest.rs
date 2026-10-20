@@ -57,6 +57,10 @@ const FAR_PROBES: [(i32, i32); 2] = [(9, 3), (-11, 8)];
 /// The stages after the realm: each probe chunk, then each far patch.
 const STAGES: usize = PROBE_CHUNKS.len() + FAR_PROBES.len();
 
+/// How many times a [`Folding`] is stepped to its digest: once for the realm,
+/// then once per stage.
+pub const STEPS: usize = STAGES + 1;
+
 /// The most bytes of ground the probes keep for one another.
 const PROBE_KEPT_BYTES: usize = 24 * 1024 * 1024;
 

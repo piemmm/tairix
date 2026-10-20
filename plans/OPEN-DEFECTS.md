@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 421 open, 827 closed, 1248 total.
+**closed**, and a partial fix stays **open**. 422 open, 829 closed, 1251 total.
 
-### Open (421)
+### Open (422)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -449,8 +449,9 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1251 | patience pays for work it does not need: every `animate` damages the status band; each move builds every legal action to test for one; a deal lays out twice and asks the solver twice; each frame re-resolves the palette and replays the statistics for `bank`; hiding saves and leaves the autosave armed; a minimised victory presents at 60 fps; a move along the known line searches afresh; `order.retain` runs per card; column layout and hit-testing re-sum offsets per depth; `fan` is computed for piles that never fan; a drag frame scans every card per held card; the empty stock's mark allocates per repaint; faces are drawn lazily in the paint, fetching glyphs there; suit shapes are rasterised per face; and the solver evaluates children already visited, replays the chosen one and scans the foundations per card | **low**; noticed reviewing the merge of `0fb46feb7`, not absorbed. `userland/apps/patience/src/{game,motion,layout,paint,art,solver}.rs` |
 | D1252 | patience's loop has three smaller lapses: reopening from the icon bar presents from inside the event handler, so a burst with it presents twice (sapper does the same); `see_out` waits on an untimed store call, so a store that never answers keeps the program from ending after Quit; and with no worker thread every move runs a 60 000-position search on the loop and a deal up to 24 × 120 000, where skipping the optional analysis would keep it responsive | **low**; noticed reviewing the merge of `0fb46feb7`, not absorbed. `userland/apps/patience/src/run.rs`, `userland/apps/sapper/src/run.rs` |
 | D1253 | the merged commit's comments and docs break the comment rule or misstate the code: decorative section banners (`lib/appdata/src/publish_tests.rs`; patience `game.rs` ×7, `table.rs` ×5, `input.rs` ×2, `run.rs` ×4); comments narrating what the code does (patience `game.rs`, `paint.rs`, `art.rs`); `rt.rs`'s claim that opening the store costs a single read, though `Opening::Defaults` reads the shipped layer too; the solver's collision odds, about one in six billion at 80 000 positions rather than below one in ten billion; an unmeasured "fraction of a second"; and the help's Rewind promise, which returns the latest position the solver proved rather than the last one still winnable | **low**; noticed reviewing the merge of `0fb46feb7`, not absorbed. |
+| D1256 | `docs/src/userland/wintersun-world.md` says the reference digest folds the realm's coarse field and then six chunks, but the fold also takes two far patches (`digest::FAR_PROBES`), so the page understates what the determinism verticals check | **low**; noticed fixing the world-determinism verticals' budgets, not absorbed: WinterSun's pages are its owner's to keep. `docs/src/userland/wintersun-world.md` |
 
-### Closed (827)
+### Closed (829)
 
 | ID | Subject |
 |---|---|
@@ -1281,6 +1282,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1217 | confd rewrote a user's settings document for a commit whose edits changed nothing — an unset of a key only the policy layer holds — costing its timestamp every save | a commit whose edits change nothing writes nothing; `a_commit_whose_edits_change_nothing_writes_nothing` |
 | D1218 | `lib/land` added a grain's knobs in full at every level fine enough to hold them, on top of a parent that already carried its own, so two such levels doubled them | each level adds what it resolves beyond its parent; `knobs_are_added_once_however_many_levels_resolve_them` |
 | D1221 | the session announced a served window on screen — `WINDOW_SHOWN`, `WINDOW_RETITLED`, `WINDOW_SIZED` — for a frame its own drawing had not settled in: a first frame often drew the title without the glyphs the font worker was still fetching, and with the window's shadow and its displaced neighbour's still easing between levels, so a vertical photographing at the witness caught a transition (`wintersun-client-qemu-aarch64`'s open dump against its restored one); the witnesses are held until a frame drawn with nothing waiting to be fetched, no fetch out, what it brought laid out again, and every shadow still; `a_job_is_outstanding_until_its_answer_lands_on_the_worker`, `shadows_stand_still_only_before_a_change_of_focus_and_once_it_has_settled`, `a_window_is_reported_shown_once_its_first_frame_has_been_taken` |
+| D1254 | the world-determinism verticals ran under a ceiling derived as two silence budgets, though the guest steps the fold nine times back to back and each step may take a whole budget, and that budget left the longest step 5 % headroom at five-fold host contention: a contended CI runner killed riscv64 and x86_64 at 180 s with six of the nine steps folded | the ceiling is one silence budget per fold step, counted from the world crate's own `digest::STEPS` (`world_fold_gates`), and the budget is twice the longest step measured at five-fold contention (86 s); `a_world_determinism_run_is_bounded_by_one_silence_budget_per_fold_step`, `a_digest_folded_a_stage_at_a_time_is_the_realms` |
+| D1255 | the desktop-hover vertical demanded eight frames in its bracketed window on the premise that the sweep's frames exist whatever the load, but the desktop drains every waiting move before it paints and the runner sends the sweep one move a tick, so a contended guest composes it in fewer frames, and a CI runner failed `too-few-frames` | the floor is the one frame an empty difference lacks, every other bound being a total or ratio of work that merging frames can only shrink; `a_sweep_the_desktop_coalesced_into_one_frame_is_judged_on_its_work`, `an_empty_window_never_passes` |
 
 ## Scope
 

@@ -8647,6 +8647,7 @@ dependencies = [
  "tairix-window",
  "tairix-wintersun-app",
  "tairix-wintersun-figure",
+ "tairix-wintersun-world",
  "tairix-wm",
 ]
 

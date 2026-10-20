@@ -1299,10 +1299,12 @@ the program library to take a sample, sweeps the pointer the length of the
 icon bar, and launches it again. The fixture is what makes the reading
 reachable at all — the query is userland IPC, which a freestanding test kernel
 cannot issue, so the fixture asks and re-emits the counters through the system
-log, where the guest decodes them. The window is then held to per-frame damage
-as a share of the screen, overdraw per damaged pixel, bounded one-off frost
-work, no re-rendered furniture, and no more driver calls than rectangles and
-frames.
+log, where the guest decodes them. The window is then held to its total damage
+as a count of screens, overdraw per damaged pixel, no more recomputed frost than
+the damage it serves, no re-rendered furniture, and no more driver calls than
+rectangles and frames. It must also have composed a frame, and one is all it is
+asked for: the desktop drains the sweep's waiting moves into as few frames as
+its speed allows, so a frame count measures the host rather than the gesture.
 
 ## Server-side window decorations
 

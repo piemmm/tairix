@@ -500,6 +500,9 @@ tairix-wintersun-figure = { path = "../../userland/games/wintersun/figure", vers
 # copy of it. Taken without its `run` feature: the host needs the library,
 # not the freestanding program.
 tairix-wintersun-app = { path = "../../userland/games/wintersun/app", version = "=0.0.0", default-features = false }
+# The world-determinism verticals are bounded by the steps of the fold their
+# guest performs, a count the world generator owns.
+tairix-wintersun-world = { path = "../../userland/games/wintersun/world", version = "=0.0.0" }
 # The desktop an application sizes its window against: the client vertical
 # opens the game's window at the size its own `Desktop` caps it to.
 tairix-window = { path = "../../lib/window", version = "=0.0.0" }

@@ -1959,13 +1959,15 @@ static TESTS: &[QemuTest] = &[
     // another, which no single-target run can see. Pure computation over
     // the boot heap — no device, no disk, one CPU — reported a stage of the
     // fold at a time, so its longest silence is one probe chunk solved
-    // alone, some 20 seconds on a debug-profile guest.
+    // alone: some 20 seconds on an idle debug-profile guest and 86 under
+    // five-fold host contention, so the budget is twice the latter. The
+    // whole run is bounded by one budget per fold step (`world_fold_gates`).
     QemuTest {
         package: "tairix-test-world-determinism-qemu-aarch64",
         binary: "tairix-test-world-determinism-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
-        timeout: Duration::from_secs(90),
+        timeout: Duration::from_secs(180),
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
@@ -1991,13 +1993,15 @@ static TESTS: &[QemuTest] = &[
     // another, which no single-target run can see. Pure computation over
     // the boot heap — no device, no disk, one CPU — reported a stage of the
     // fold at a time, so its longest silence is one probe chunk solved
-    // alone, some 20 seconds on a debug-profile guest.
+    // alone: some 20 seconds on an idle debug-profile guest and 86 under
+    // five-fold host contention, so the budget is twice the latter. The
+    // whole run is bounded by one budget per fold step (`world_fold_gates`).
     QemuTest {
         package: "tairix-test-world-determinism-qemu-riscv64",
         binary: "tairix-test-world-determinism-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
-        timeout: Duration::from_secs(90),
+        timeout: Duration::from_secs(180),
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
@@ -2023,13 +2027,15 @@ static TESTS: &[QemuTest] = &[
     // another, which no single-target run can see. Pure computation over
     // the boot heap — no device, no disk, one CPU — reported a stage of the
     // fold at a time, so its longest silence is one probe chunk solved
-    // alone, some 20 seconds on a debug-profile guest.
+    // alone: some 20 seconds on an idle debug-profile guest and 86 under
+    // five-fold host contention, so the budget is twice the latter. The
+    // whole run is bounded by one budget per fold step (`world_fold_gates`).
     QemuTest {
         package: "tairix-test-world-determinism-qemu-x86-64",
         binary: "tairix-test-world-determinism-qemu-x86-64",
         target: X86_64_TARGET,
         cpus: 1,
-        timeout: Duration::from_secs(90),
+        timeout: Duration::from_secs(180),
         ram_mib: None,
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
@@ -18657,6 +18663,30 @@ fn memtest_takeover_gates(spec: Spec, binary: &str) -> Spec {
         .with_runtime_ceiling(MEMTEST_TAKEOVER_RUNTIME_CEILING)
 }
 
+/// The `WinterSun` world-determinism verticals, whose guest steps the
+/// reference fold to its digest.
+const WORLD_DETERMINISM_BINARIES: [&str; 3] = [
+    "tairix-test-world-determinism-qemu-aarch64",
+    "tairix-test-world-determinism-qemu-riscv64",
+    "tairix-test-world-determinism-qemu-x86-64",
+];
+
+/// Bound a world-determinism run by the fold it performs, or return `spec`
+/// untouched for any other `binary`.
+///
+/// The fold's steps run back to back and each may take the whole silence
+/// budget, so the derived ceiling of two budgets would cut off a guest that is
+/// still folding on a contended host. One budget per step bounds the run by
+/// its work while leaving the silence budget as sharp as it was.
+fn world_fold_gates(spec: Spec, binary: &str) -> Spec {
+    if !WORLD_DETERMINISM_BINARIES.contains(&binary) {
+        return spec;
+    }
+    let steps = u32::try_from(tairix_wintersun_world::digest::STEPS).unwrap_or(u32::MAX);
+    let ceiling = spec.timeout.saturating_mul(steps);
+    spec.with_runtime_ceiling(ceiling)
+}
+
 /// End a lifecycle vertical at its logout sound's own record, or return `spec`
 /// untouched for any other run.
 ///
@@ -18777,6 +18807,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     let (mut spec, peer, _wire_socks) = attach_net_peer(t, kernel, spec)?;
 
     spec = memtest_takeover_gates(spec, t.binary);
+    spec = world_fold_gates(spec, t.binary);
     spec = lifecycle_sound_gates(spec, t);
     spec = dma_translation_gates(spec, t.binary);
     spec = interrupt_controller_gates(spec, t.binary);
@@ -20240,6 +20271,42 @@ mod tests {
             // The silence budget stays exactly as tight as it was.
             assert_eq!(gated.timeout, t.timeout);
         }
+    }
+
+    /// A world-determinism run is bounded by one silence budget per step of
+    /// the fold its guest performs: the steps run back to back, so the derived
+    /// two-budget ceiling killed a guest still folding on a contended runner.
+    #[test]
+    fn a_world_determinism_run_is_bounded_by_one_silence_budget_per_fold_step() {
+        use super::{world_fold_gates, WORLD_DETERMINISM_BINARIES};
+        use tairix_qemu::Spec;
+
+        let steps = u32::try_from(tairix_wintersun_world::digest::STEPS).expect("a few steps");
+        for binary in WORLD_DETERMINISM_BINARIES {
+            let t = TESTS
+                .iter()
+                .find(|t| t.binary == binary)
+                .expect("every world-determinism binary is enrolled");
+            let plain = Spec::for_aarch64_kernel("/tmp/k").with_timeout(t.timeout);
+            let derived = plain.runtime_ceiling();
+            let gated = world_fold_gates(plain, binary);
+            assert_eq!(gated.runtime_ceiling(), t.timeout * steps, "{binary}");
+            assert!(gated.runtime_ceiling() > derived, "{binary}");
+            assert_eq!(
+                gated.timeout, t.timeout,
+                "{binary}: the silence budget is untouched"
+            );
+        }
+        let other = TESTS
+            .iter()
+            .find(|t| !WORLD_DETERMINISM_BINARIES.contains(&t.binary))
+            .expect("the matrix enrols more than the world folds");
+        let plain = Spec::for_aarch64_kernel("/tmp/k").with_timeout(other.timeout);
+        let derived = plain.runtime_ceiling();
+        assert_eq!(
+            world_fold_gates(plain, other.binary).runtime_ceiling(),
+            derived
+        );
     }
 
     /// Only the takeover verticals get those gates: every other enrolment

@@ -216,8 +216,10 @@ the two samples. This is the regression gate every later stage tightens.
   covered by a window, so the gesture needs nothing else on screen reasoned
   about first; the per-control damage under test is the same sink either way.
 - **Bounds, all derived from the screen extent** so they hold on any board:
-  frames ≥ `MIN_SWEEP_FRAMES` (an empty difference must not pass by measuring
-  nothing), total damage ≤ `MAX_SWEEP_SCREENS` screens, blends ≤ 4 per damaged
+  frames ≥ `MIN_SWEEP_FRAMES`, which is one (an empty difference must not pass
+  by measuring nothing, and a contended guest drains the sweep's waiting moves
+  into as few frames as its speed allows, so a higher floor measured the host),
+  total damage ≤ `MAX_SWEEP_SCREENS` screens, blends ≤ 4 per damaged
   pixel, frost work ≤ one recomputed pixel per damaged pixel, no re-rendered
   furniture, and presents ≤ rectangles + frames. None divides by the frame
   count, so none is met or missed by how many frames the host let through.

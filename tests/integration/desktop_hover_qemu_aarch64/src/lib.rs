@@ -46,21 +46,21 @@ pub const SAMPLE_APP_NAME: &str = "framestats";
 
 /// Pointer moves the sweep injects between the two samples.
 ///
-/// Long enough that the frames the sweep composes dominate the bracketed
-/// window over the two library popups that open and close inside it, and long
-/// enough to span several of the publisher's rate-limited submissions.
+/// The runner sends one each poll tick, so the sweep lasts some 0.8 s however
+/// fast the guest runs: several of the publisher's rate-limited submissions.
 pub const SWEEP_MOVES: u32 = 32;
 
 /// Frames the bracketed window must have composed for the run to have
 /// measured anything.
 ///
-/// The sweep marks damage whenever the pointer arrives somewhere new, so the
-/// frames exist regardless of machine load — only the *publisher's*
-/// submissions are rate-limited, and a submission carries the cumulative
-/// count rather than one frame. A window that composed fewer frames than this
-/// did not carry the gesture, and the run fails rather than passing on an
-/// empty difference.
-pub const MIN_SWEEP_FRAMES: u64 = 8;
+/// One, because a frame is all the gesture guarantees: the desktop drains
+/// every move waiting before it paints, and the runner sends the sweep at its
+/// own cadence, so a guest slower than that cadence composes the sweep in
+/// fewer frames — under eight on a contended runner, 36 on an idle host. Every
+/// other bound is a total or a ratio of work, which merging frames can only
+/// shrink, so the window is judged on the work it did; a window that composed
+/// nothing still fails.
+pub const MIN_SWEEP_FRAMES: u64 = 1;
 
 /// The most screens' worth of pixels the **whole** bracketed window may
 /// recompose.
@@ -148,7 +148,8 @@ pub enum Verdict {
     EpochBroken,
     /// The epoch was composed against some other screen.
     ScreenExtent,
-    /// The window composed too few frames to have carried the gesture.
+    /// The window composed fewer than [`MIN_SWEEP_FRAMES`], so it measured
+    /// nothing.
     TooFewFrames,
     /// The window recomposed more screens' worth of pixels than the bound.
     DamageTotal,
@@ -234,7 +235,7 @@ pub fn judge(delta: &Delta) -> Verdict {
 mod tests {
     use super::{
         assess, judge, Verdict, EXPECTED_SCREEN_PX, MAX_BLENDS_PER_DAMAGED_PX,
-        MAX_BLUR_PX_PER_DAMAGED_PX, MAX_SWEEP_SCREENS, MIN_SWEEP_FRAMES, SWEEP_MOVES,
+        MAX_BLUR_PX_PER_DAMAGED_PX, MAX_SWEEP_SCREENS, MIN_SWEEP_FRAMES,
     };
     use tairix_test_framestats::{Delta, Sample};
 
@@ -354,12 +355,18 @@ mod tests {
         assert_eq!(judge(&empty), Verdict::TooFewFrames);
     }
 
+    /// A contended guest drains the whole sweep into a frame or two; that
+    /// window carried the same work and is judged on it, regressions included.
     #[test]
-    fn a_window_short_of_the_gesture_never_passes() {
-        let mut short = hovering();
-        short.frames = MIN_SWEEP_FRAMES - 1;
-        short.damaged_px = short.frames * 4_000;
-        assert_eq!(judge(&short), Verdict::TooFewFrames);
+    fn a_sweep_the_desktop_coalesced_into_one_frame_is_judged_on_its_work() {
+        let mut coalesced = hovering();
+        coalesced.frames = MIN_SWEEP_FRAMES;
+        coalesced.present_calls = coalesced.frames;
+        assert_eq!(judge(&coalesced), Verdict::Held);
+
+        let mut regressed = coalesced;
+        regressed.damaged_px = 3_711_067;
+        assert_eq!(judge(&regressed), Verdict::DamageTotal);
     }
 
     #[test]
@@ -492,14 +499,6 @@ mod tests {
             assess(&before, &after),
             Verdict::Held,
             "bring-up's own full-screen frames are outside the window"
-        );
-    }
-
-    #[test]
-    fn the_sweep_is_long_enough_to_clear_the_frame_floor() {
-        assert!(
-            u64::from(SWEEP_MOVES) > MIN_SWEEP_FRAMES,
-            "the injected gesture must be able to compose the frames the gate demands"
         );
     }
 

@@ -1,4 +1,6 @@
-use super::{chunk, fold_generated, realm, reference_params, world, Folding, REFERENCE_DIGEST};
+use super::{
+    chunk, fold_generated, realm, reference_params, world, Folding, REFERENCE_DIGEST, STEPS,
+};
 use crate::chunk::ChunkBuild;
 use crate::land::{RealmLand, Unkept};
 use crate::params::{RealmParams, RealmSpec};
@@ -33,15 +35,15 @@ fn the_reference_digest_is_what_every_target_must_produce() {
 #[test]
 fn a_digest_folded_a_stage_at_a_time_is_the_realms() {
     let mut folding = Folding::new(reference_params());
-    let mut stages = 1;
+    let mut steps = 1;
     let digest = loop {
         match folding.step().expect("folds") {
             Some(digest) => break digest,
-            None => stages += 1,
+            None => steps += 1,
         }
     };
     assert_eq!(digest, REFERENCE_DIGEST);
-    assert!(stages > 2, "the realm and its probes are folded apart");
+    assert_eq!(steps, STEPS, "the realm and each stage are folded apart");
     assert_eq!(folding.step().expect("folded"), Some(REFERENCE_DIGEST));
 }
 

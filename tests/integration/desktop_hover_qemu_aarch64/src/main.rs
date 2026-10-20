@@ -39,8 +39,8 @@
 //! gesture that followed. Every bound is over counted work rather than elapsed
 //! time, so the verdict is the same under any machine load.
 //!
-//! A run whose sweep composed too few frames **fails**: an empty difference
-//! would otherwise satisfy every bound by measuring nothing.
+//! A window that composed no frame **fails**: an empty difference would
+//! otherwise satisfy every bound by measuring nothing.
 //!
 //! # Failing loudly
 //!
