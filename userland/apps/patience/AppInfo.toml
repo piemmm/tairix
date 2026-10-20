@@ -1,0 +1,17 @@
+# Signed-AppInfo manifest source for `patience`, the desktop card games.
+#
+# CAP_CONSOLE_WRITE states its refusals on stderr and CAP_SHM grants the window
+# frame region; nothing else is asked for. Its preferences, statistics and kept
+# game live in its app-data store, reached by an unprivileged call gated on this
+# bundle's kernel-attested identity. It ships no DefaultSettings/, so it opens
+# that store without the bundle layer and needs no filesystem authority.
+id = "os.tairix.patience"
+name = "patience"
+title = "Patience"
+version = "0.1.0"
+kind = "application"
+purpose = "Klondike, FreeCell and Spider, with a solver behind every hint"
+author = "The TAIRiX Project"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
+library = "Games"
+library-icon = "patience.png"

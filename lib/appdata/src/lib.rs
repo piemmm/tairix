@@ -84,9 +84,12 @@ mod publish;
 #[cfg(feature = "rt")]
 mod rt;
 
-pub use publish::{clear, loaded, publish, save, Publication, PublishJob, Published, Refusal};
+pub use publish::{
+    clear, collect_published, loaded, publish, save, see_out_published, stage, submit_published,
+    Publication, PublishAnswer, PublishDesk, PublishJob, Published, Refusal,
+};
 #[cfg(feature = "rt")]
-pub use rt::RtHost;
+pub use rt::{publish_worker, Opening, PublishWorker, RtHost};
 
 /// Document bytes a first read asks the service for.
 ///

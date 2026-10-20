@@ -2860,14 +2860,15 @@ mod program {
     }
 
     impl Workers {
-        /// Start every desk. A machine that grants no thread runs the work
-        /// on the event loop instead, which each start states for itself.
+        /// Start every desk, its answer wake watched on `set`. A machine
+        /// that grants no thread or no wake runs the work on the event loop
+        /// instead, which each start states for itself.
         ///
         /// # Errors
         ///
         /// The exit code of the stated failure when the asker's queue could
         /// not be held.
-        fn started() -> Result<Self, i32> {
+        fn started(set: u64) -> Result<Self, i32> {
             // One render in flight at a time: the desktop takes one per window.
             let Ok(asker) = Asker::queued(
                 ask_preview,
@@ -2908,92 +2909,67 @@ mod program {
             Ok(Self {
                 applier: started(
                     Applier::new(send_apply, (), tairix_rt::sync::WorkerWake::create()),
+                    (set, APPLY_TOKEN),
                     "apply",
                 ),
                 mounts: started(
                     Mounts::new(read_mounts, (), tairix_rt::sync::WorkerWake::create()),
+                    (set, MOUNTS_TOKEN),
                     "mount-table",
                 ),
                 machine: started(
                     Machine::new(read_machine, (), tairix_rt::sync::WorkerWake::create()),
+                    (set, MACHINE_TOKEN),
                     "machine-readings",
                 ),
                 network: started(
                     Network::new(read_network, (), tairix_rt::sync::WorkerWake::create()),
+                    (set, NETWORK_TOKEN),
                     "network-readings",
                 ),
                 accounts: started(
                     Accounts::new(read_accounts, (), tairix_rt::sync::WorkerWake::create()),
+                    (set, ACCOUNTS_TOKEN),
                     "account-readings",
                 ),
-                asker: started(asker, "preview-request"),
-                desktop: started(desktop, "desktop-request"),
+                asker: started(asker, (set, ASK_TOKEN), "preview-request"),
+                desktop: started(desktop, (set, DESKTOP_TOKEN), "desktop-request"),
                 sound: started(
                     SoundDesk::new(
                         serve_sound,
                         RtAudio::new(),
                         tairix_rt::sync::WorkerWake::create(),
                     ),
+                    (set, SOUND_TOKEN),
                     "sound",
                 ),
                 sound_moved: Cell::new(false),
-                effects: started(effects, "sound-choices"),
+                effects: started(effects, (set, EFFECTS_TOKEN), "sound-choices"),
             })
         }
 
-        /// Each desk's wake, the token it is watched under, and how a refused
-        /// watch is stated.
-        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 9] {
+        /// Each desk's wake and the token it is watched under.
+        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64); 9] {
             [
-                (self.applier.wake(), APPLY_TOKEN, "apply wake refused"),
-                (self.mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
-                (
-                    self.machine.wake(),
-                    MACHINE_TOKEN,
-                    "machine-readings wake refused",
-                ),
-                (
-                    self.network.wake(),
-                    NETWORK_TOKEN,
-                    "network-readings wake refused",
-                ),
-                (
-                    self.accounts.wake(),
-                    ACCOUNTS_TOKEN,
-                    "account-readings wake refused",
-                ),
-                (self.asker.wake(), ASK_TOKEN, "preview-request wake refused"),
-                (
-                    self.desktop.wake(),
-                    DESKTOP_TOKEN,
-                    "desktop-request wake refused",
-                ),
-                (self.sound.wake(), SOUND_TOKEN, "sound wake refused"),
-                (
-                    self.effects.wake(),
-                    EFFECTS_TOKEN,
-                    "sound-choices wake refused",
-                ),
+                (self.applier.wake(), APPLY_TOKEN),
+                (self.mounts.wake(), MOUNTS_TOKEN),
+                (self.machine.wake(), MACHINE_TOKEN),
+                (self.network.wake(), NETWORK_TOKEN),
+                (self.accounts.wake(), ACCOUNTS_TOKEN),
+                (self.asker.wake(), ASK_TOKEN),
+                (self.desktop.wake(), DESKTOP_TOKEN),
+                (self.sound.wake(), SOUND_TOKEN),
+                (self.effects.wake(), EFFECTS_TOKEN),
             ]
         }
 
-        /// Put every desk's wake on `set`, so a landed answer ends the park
-        /// the loop is already in.
+        /// Put the audio service's notices on `set`, so the sound desk hears
+        /// of a device change while the loop is parked.
         ///
-        /// A refused add is fatal rather than tolerated: an answer nobody
-        /// collects would leave every row showing a value the desktop may
-        /// never have adopted, or a storage pane waiting for ever on a table
-        /// that has already landed.
-        fn watched(&self, set: u64) -> Result<(), i32> {
-            for (wake, token, refusal) in self.wakes() {
-                if let Err(err) = app::watch_wake(set, wake, token) {
-                    return Err(app::fail(
-                        APP_NAME,
-                        app::EXIT_NO_EVENTS,
-                        format_args!("{refusal} ({err})"),
-                    ));
-                }
-            }
+        /// # Errors
+        ///
+        /// The exit code of the stated failure when the wait-set refuses one.
+        fn watched(set: u64) -> Result<(), i32> {
             for topic in [NoticeTopic::AudioDevices, NoticeTopic::AudioCapture] {
                 if tairix_rt::waitset_ctl(
                     set,
@@ -3019,10 +2995,10 @@ mod program {
         /// A wake's readiness is a level peek, so one left undrained would
         /// report ready for ever and turn the park into a spin.
         fn drain(&self, token: u64) -> bool {
-            let Some((wake, ..)) = self
+            let Some((wake, _)) = self
                 .wakes()
                 .into_iter()
-                .find(|&(_, watched, _)| watched == token)
+                .find(|&(_, watched)| watched == token)
             else {
                 return false;
             };
@@ -3047,9 +3023,11 @@ mod program {
         }
     }
 
-    /// Put `worker` on a desk of its own and start it.
+    /// Put `worker` on a desk of its own and start it, its answer wake
+    /// watched on `set` under `token`.
     fn started<S, Req, Ans, D>(
         worker: tairix_rt::work::Worker<S, Req, Ans, D>,
+        (set, token): (u64, u64),
         what: &str,
     ) -> Arc<tairix_rt::work::Worker<S, Req, Ans, D>>
     where
@@ -3059,30 +3037,8 @@ mod program {
         D: tairix_rt::work::Desk<Req, Ans> + Send + 'static,
     {
         let worker = Arc::new(worker);
-        start_worker(&worker, what);
+        app::start_worker(APP_NAME, &worker, set, token, what);
         worker
-    }
-
-    /// Start a worker, stating in this program's own words why a machine
-    /// that grants none will do its work on the event loop instead.
-    ///
-    /// Not a failure: a program with no thread is exactly as correct and
-    /// only as responsive as it was before there was a worker at all.
-    fn start_worker<S, Req, Ans, D>(
-        worker: &Arc<tairix_rt::work::Worker<S, Req, Ans, D>>,
-        what: &str,
-    ) where
-        S: Send + 'static,
-        Req: Send + 'static,
-        Ans: Send + 'static,
-        D: tairix_rt::work::Desk<Req, Ans> + Send + 'static,
-    {
-        if let Err(reason) = tairix_rt::work::Worker::start(worker) {
-            app::report(
-                APP_NAME,
-                format_args!("no {what} worker ({reason:?}); it is done on the event loop"),
-            );
-        }
     }
 
     /// The window's icon cache, budgeted from the `frame_bytes` of the
@@ -3150,11 +3106,11 @@ mod program {
                 "the settings registry holds no categories",
             );
         };
-        let workers = match Workers::started() {
+        let workers = match Workers::started(binding.set()) {
             Ok(workers) => workers,
             Err(code) => return code,
         };
-        if let Err(code) = workers.watched(binding.set()) {
+        if let Err(code) = Workers::watched(binding.set()) {
             return code;
         }
 

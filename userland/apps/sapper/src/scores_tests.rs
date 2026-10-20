@@ -31,7 +31,6 @@ fn a_fresh_account_has_no_best_times() {
     let mut host = service();
     let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
-    assert!(times.is_empty());
     assert!(refused.is_empty());
     for preset in Difficulty::PRESETS {
         assert_eq!(times.best(preset), None);
@@ -46,7 +45,7 @@ fn a_recorded_time_survives_a_round_trip() {
         let mut times = BestTimes::default();
         assert!(times.record(Difficulty::Beginner, 42));
         assert!(times.record(Difficulty::Expert, 300));
-        tairix_appdata::save(&times, &mut settings).expect("the fake commits");
+        keep(&times, &mut settings).expect("the fake commits");
     }
     let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
@@ -71,7 +70,7 @@ fn a_custom_board_keeps_no_time() {
     let mut times = BestTimes::default();
     assert!(!times.record(custom(), 10));
     assert_eq!(times.best(custom()), None);
-    assert!(times.is_empty());
+    assert_eq!(times, BestTimes::default());
 }
 
 #[test]
@@ -80,7 +79,7 @@ fn a_time_outside_the_bounds_is_not_a_record() {
     assert!(!times.record(Difficulty::Beginner, 0), "a zero-second game");
     assert!(!times.record(Difficulty::Beginner, MAX_TIME_SECS + 1));
     assert!(!times.record(Difficulty::Beginner, u32::MAX));
-    assert!(times.is_empty());
+    assert_eq!(times, BestTimes::default());
     assert!(times.record(Difficulty::Beginner, MAX_TIME_SECS));
 }
 
@@ -123,7 +122,7 @@ fn a_save_writes_only_what_changed() {
         let mut settings = Settings::open_without_defaults(&mut host);
         let mut times = BestTimes::default();
         times.record(Difficulty::Beginner, 30);
-        tairix_appdata::save(&times, &mut settings).expect("commits");
+        keep(&times, &mut settings).expect("commits");
     }
     assert_eq!(host.committed().settings().count(), 1);
     assert_eq!(host.committed().get("best.beginner"), Some("30"));
@@ -136,29 +135,11 @@ fn a_save_with_nothing_to_write_leaves_the_document_alone() {
     {
         let mut settings = Settings::open_without_defaults(&mut host);
         let (times, _) = BestTimes::load(&settings);
-        tairix_appdata::save(&times, &mut settings).expect("nothing to do");
+        keep(&times, &mut settings).expect("nothing to do");
         assert!(!settings.is_dirty(), "nothing was staged");
     }
     assert_eq!(host.committed().get("best.beginner"), Some("30"));
     assert_eq!(host.committed().settings().count(), 1);
-}
-
-#[test]
-fn clearing_removes_the_stored_times() {
-    let mut host = holding("best.beginner = 30\nbest.expert = 200\n");
-    {
-        let mut settings = Settings::open_without_defaults(&mut host);
-        let (mut times, _) = BestTimes::load(&settings);
-        assert!(!times.is_empty());
-        times.clear();
-        assert!(times.is_empty());
-        tairix_appdata::save(&times, &mut settings).expect("commits");
-    }
-    let settings = Settings::open_without_defaults(&mut host);
-    let (times, refused) = BestTimes::load(&settings);
-    assert!(times.is_empty());
-    assert!(refused.is_empty());
-    assert_eq!(host.committed().get("best.beginner"), None);
 }
 
 #[test]
@@ -167,7 +148,7 @@ fn a_store_the_service_will_not_serve_leaves_the_game_playable() {
     host.read_refusal().set(Some(Errno::NotFound));
     let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
-    assert!(times.is_empty(), "no times, and no panic");
+    assert_eq!(times, BestTimes::default(), "no times, and no panic");
     assert!(
         refused.is_empty(),
         "an absent store refused no single entry"
@@ -181,11 +162,55 @@ fn a_save_removes_a_stored_time_the_registry_refused() {
         let mut settings = Settings::open_without_defaults(&mut host);
         let (times, refused) = BestTimes::load(&settings);
         assert_eq!(refused, [Preset::Beginner, Preset::Expert]);
-        tairix_appdata::save(&times, &mut settings).expect("commits");
+        keep(&times, &mut settings).expect("commits");
     }
     assert_eq!(
         host.committed().settings().count(),
         0,
         "neither is read again"
+    );
+}
+
+/// The store could not be read at start, so the session's record began empty:
+/// a time it then sets must not replace a faster one it never saw, nor remove
+/// the presets it knows nothing about.
+#[test]
+fn a_slower_time_never_replaces_a_faster_one_the_session_did_not_read() {
+    let mut host = holding("best.beginner = 30\nbest.expert = 200\n");
+    let mut times = BestTimes::default();
+    assert!(times.record(Difficulty::Beginner, 42));
+    assert!(times.record(Difficulty::Intermediate, 100));
+    keep(&times, &mut Settings::open_without_defaults(&mut host)).expect("commits");
+    let document = host.committed();
+    assert_eq!(document.get("best.beginner"), Some("30"));
+    assert_eq!(document.get("best.intermediate"), Some("100"));
+    assert_eq!(document.get("best.expert"), Some("200"));
+}
+
+#[test]
+fn a_later_write_carrying_every_improvement_replaces_one_never_run() {
+    let mut host = service();
+    let mut times = BestTimes::default();
+    assert!(times.record(Difficulty::Beginner, 42));
+    let displaced = times;
+    assert!(times.record(Difficulty::Expert, 300));
+    keep(&times, &mut Settings::open_without_defaults(&mut host)).expect("commits");
+    let (kept, _) = BestTimes::load(&Settings::open_without_defaults(&mut host));
+    assert_eq!(
+        kept.best(Difficulty::Beginner),
+        displaced.best(Difficulty::Beginner)
+    );
+    assert_eq!(kept.best(Difficulty::Expert), Some(300));
+}
+
+#[test]
+fn a_store_unreadable_when_written_is_not_written_over() {
+    let mut host = holding("best.beginner = 30\n");
+    host.read_refusal().set(Some(Errno::NotFound));
+    let mut times = BestTimes::default();
+    assert!(times.record(Difficulty::Beginner, 20));
+    assert_eq!(
+        keep(&times, &mut Settings::open_without_defaults(&mut host)),
+        Err(Errno::NotFound)
     );
 }

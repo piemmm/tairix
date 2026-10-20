@@ -1713,6 +1713,14 @@ mod tests {
         assert_reads_on_the_dark_icon_bar("userland/apps/sapper", "sapper.png");
     }
 
+    /// `patience.png` reads on the dark icon bar: its card backs are a deep
+    /// blue, the tone the sapper icon sank in, so the white faces have to
+    /// carry it.
+    #[test]
+    fn the_patience_icon_is_authored_to_read_on_the_dark_icon_bar() {
+        assert_reads_on_the_dark_icon_bar("userland/apps/patience", "patience.png");
+    }
+
     /// Every wallpaper master the image ships is a photograph the desktop's
     /// own decoder can actually turn into a picture. Discovered from disk
     /// exactly as the icon masters above are (only the wallpaper-family rows

@@ -2587,6 +2587,13 @@ impl Compositor {
         }
     }
 
+    /// Whether every window's shadow stands still: no shadow on screen is
+    /// part-way between its levels, nor about to start for a focus change.
+    #[must_use]
+    pub fn shadows_still(&self) -> bool {
+        self.windows.iter().all(Window::shadow_still)
+    }
+
     /// Nanoseconds until a shadow easing between its levels owes its next
     /// step, or `None` while every one stands still.
     #[must_use]

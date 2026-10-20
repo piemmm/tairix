@@ -3636,6 +3636,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-patience"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
+ "tairix-buildcfg",
+ "tairix-collections",
+ "tairix-colour",
+ "tairix-controls",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-hash",
+ "tairix-input",
+ "tairix-mix",
+ "tairix-raster",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-theme",
+ "tairix-util",
+ "tairix-window",
+]
+
+[[package]]
 name = "tairix-pci"
 version = "0.0.0"
 dependencies = [

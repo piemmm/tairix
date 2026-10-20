@@ -588,7 +588,7 @@ fn a_win_on_a_custom_board_records_nothing() {
     let reaction = play_to_win(&mut game, 7, 3 * SECOND_NS);
     assert_eq!(game.board().phase(), Phase::Won);
     assert!(!reaction.record);
-    assert!(game.best_times().is_empty());
+    assert_eq!(game.best_times(), BestTimes::default());
 }
 
 #[test]

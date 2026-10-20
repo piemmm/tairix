@@ -195,6 +195,13 @@ impl<S, Req, Ans, D: Desk<Req, Ans>> Worker<S, Req, Ans, D> {
         self.held.lock().desk.collect()
     }
 
+    /// Whether a job is waiting or being carried out, its answer not yet
+    /// landed: what a loop asks before it vouches for work it handed off.
+    #[must_use]
+    pub fn outstanding(&self) -> bool {
+        self.held.lock().desk.outstanding()
+    }
+
     /// Block until an answer lands and take it, or answer `None` once
     /// nothing is left outstanding — for an asker with nothing else to do,
     /// such as a program seeing its writes out before it ends.
@@ -579,6 +586,23 @@ mod tests {
             "run here, and its answer waited for"
         );
         assert_eq!(stopped.wait(), None);
+    }
+
+    /// A job is outstanding from its submission until its answer lands,
+    /// through the time a worker holds it, and not once the answer waits.
+    #[test]
+    fn a_job_is_outstanding_until_its_answer_lands_on_the_worker() {
+        let (job, done) = job();
+        let worker: Worker<u32, Job, Done> = Worker::new(double, 0, WorkerWake::create());
+        assert!(!worker.outstanding());
+        assert!(!worker.submit(job));
+        assert!(worker.outstanding(), "waiting");
+        let mut taken = worker.held.lock().desk.take().expect("the job is waiting");
+        assert!(worker.outstanding(), "held by the worker");
+        worker.carry_out(&mut taken, || {});
+        assert!(!worker.outstanding(), "landed");
+        assert_eq!(worker.collect(), Some(done));
+        assert!(!worker.outstanding());
     }
 
     type Queued = Worker<u32, Job, Done, JobQueue<Job, Done>>;

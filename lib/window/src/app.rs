@@ -28,6 +28,8 @@
 
 use core::fmt;
 
+use alloc::sync::Arc;
+
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::window_ipc::{
@@ -36,6 +38,7 @@ use tairix_abi::window_ipc::{
 use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, CALL_DEADLINE_NONE};
 use tairix_display::{winframe, SERIAL};
 use tairix_raster::Surface;
+use tairix_rt::work::{Desk, Worker};
 use tairix_theme::{Accessibility, ThemeRegistry};
 
 use crate::client::{refusal_alert, retained_damage, WindowClient, WindowTransport};
@@ -356,6 +359,41 @@ pub fn watch_wake(set: u64, wake: &tairix_rt::sync::WorkerWake, token: u64) -> R
         Ok(())
     } else {
         Err(Errno::from_syscall(ret))
+    }
+}
+
+/// Start `worker`, the application `name`'s `what` worker, with its answer
+/// wake watched on `set` under `token`.
+///
+/// Never fatal. A wake the set refuses stops the desk before any thread runs,
+/// and a thread the machine will not grant leaves it stopped: either way each
+/// submission is carried out where it is made and its answer is waiting at
+/// once, so the work is slower under load and never lost. Both are said.
+pub fn start_worker<S, Req, Ans, D>(
+    name: &str,
+    worker: &Arc<Worker<S, Req, Ans, D>>,
+    set: u64,
+    token: u64,
+    what: &str,
+) where
+    S: Send + 'static,
+    Req: Send + 'static,
+    Ans: Send + 'static,
+    D: Desk<Req, Ans> + Send + 'static,
+{
+    if let Err(err) = watch_wake(set, worker.wake(), token) {
+        worker.stop();
+        report(
+            name,
+            format_args!("{what} wake refused ({err}); its work is done on the event loop"),
+        );
+        return;
+    }
+    if let Err(reason) = Worker::start(worker) {
+        report(
+            name,
+            format_args!("no {what} worker ({reason:?}); its work is done on the event loop"),
+        );
     }
 }
 

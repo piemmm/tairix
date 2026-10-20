@@ -12424,6 +12424,18 @@ fn a_change_of_level_eases_and_repaints_only_the_shadow() {
 }
 
 #[test]
+fn shadows_stand_still_only_before_a_change_of_focus_and_once_it_has_settled() {
+    let (mut c, left, _) = two_framed();
+    assert!(c.shadows_still(), "unsorted, every window stands lifted");
+    c.follow_focus(Some(left));
+    assert!(!c.shadows_still(), "aimed, not yet stepped");
+    stepped(&mut c, 0);
+    assert!(!c.shadows_still(), "easing");
+    stepped(&mut c, SETTLED_NS);
+    assert!(c.shadows_still(), "settled");
+}
+
+#[test]
 fn reduced_motion_rests_a_window_on_the_first_step() {
     let (mut c, left, right) = two_framed();
     assert!(c.set_theme(with_reduced_motion(&Theme::dark())));

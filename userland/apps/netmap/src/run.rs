@@ -35,12 +35,12 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::net::{SocketAddr, SocketEcho, SocketId, SocketStreamEvent, StreamCloseReason};
     use tairix_abi::net_ipc::{address_parts, ip_from_parts, NetAddrFamily};
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::waitset::WaitSourceKind;
     use tairix_abi::window_ipc::{
         AppBarClick, ClipboardKind, MenuOutcome, WindowEvent, WindowRegion, WindowSizing,
     };
     use tairix_abi::{Errno, FieldValue, ProcId, ORIGIN_WIRE_LEN};
-    use tairix_appdata::{Publication, PublishJob, Published, RtHost, Settings};
+    use tairix_appdata::{Opening, Publication, PublishWorker, RtHost, Settings};
     use tairix_controls::damage::{self, Repaint};
     use tairix_controls::Keystroke;
     use tairix_devids::{DbKind, DevIds};
@@ -1138,14 +1138,8 @@ mod program {
     /// wake path and the inline write a settle does when there is no worker.
     fn adopt_settings(app_state: &mut NetMap, publisher: &Publisher) {
         let mut refusals = Vec::new();
-        let mut adopted = false;
-        while let Some(answer) = publisher.collect() {
-            adopted = true;
-            let owed = app_state.choice.adopt(answer, &mut refusals);
-            if !owed.is_some_and(|job| publisher.submit(job)) {
-                break;
-            }
-        }
+        let adopted =
+            tairix_appdata::collect_published(publisher, &mut app_state.choice, &mut refusals);
         for refusal in refusals {
             app::report(APP_NAME, format_args!("settings not saved ({refusal:?})"));
         }
@@ -1595,45 +1589,7 @@ mod program {
     }
 
     /// The worker the probe posture is written through, off the loop.
-    type Publisher = Worker<(), PublishJob<ProbeSettings>, Result<Published<ProbeSettings>, Errno>>;
-
-    /// Write one settings job to the app's own store and read the result back.
-    fn write_settings(
-        _: &mut (),
-        job: &mut PublishJob<ProbeSettings>,
-    ) -> Result<Published<ProbeSettings>, Errno> {
-        tairix_appdata::publish(&mut Settings::open_without_defaults(&mut RtHost), job)
-    }
-
-    /// Start the settings-store worker and put its answer wake on `set`. Where
-    /// neither the wake nor the thread can be had, the write falls back to the
-    /// loop (its desk stopped), so a choice is never lost — slower, never wrong.
-    fn start_publisher(publisher: &Arc<Publisher>, set: u64) {
-        let added = publisher.wake().read_end().is_some_and(|read| {
-            tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Stream,
-                u64::from(read),
-                PUBLISH_TOKEN,
-            ) == 0
-        });
-        if !added {
-            publisher.stop();
-            app::report(
-                APP_NAME,
-                "settings writes stay on the loop: no store-worker wake",
-            );
-            return;
-        }
-        if Publisher::start(publisher).is_err() {
-            publisher.stop();
-            app::report(
-                APP_NAME,
-                "settings writes stay on the loop: no store-worker thread",
-            );
-        }
-    }
+    type Publisher = PublishWorker<ProbeSettings>;
 
     /// The settings window on screen: its pane on the map's own channel, the
     /// picture retained between paints, and what of it is owed.
@@ -1777,12 +1733,8 @@ mod program {
         for refusal in settings_refusals {
             app::report(APP_NAME, format_args!("settings not read ({refusal:?})"));
         }
-        let publisher = Arc::new(Publisher::new(
-            write_settings,
-            (),
-            tairix_rt::sync::WorkerWake::create(),
-        ));
-        start_publisher(&publisher, set);
+        let publisher = Arc::new(tairix_appdata::publish_worker(Opening::Bare));
+        app::start_worker(APP_NAME, &publisher, set, PUBLISH_TOKEN, "settings");
         let _reader_guard = WorkerGuard::new(&reader);
         let _namer_guard = WorkerGuard::new(&namer);
         let _prober_guard = prober.as_ref().map(WorkerGuard::new);
@@ -1833,7 +1785,7 @@ mod program {
             desktop_moved: &desktop_moved,
             rung: &rung,
         });
-        run(
+        let code = run(
             &mut state,
             &Workers {
                 reader: &reader,
@@ -1848,7 +1800,14 @@ mod program {
             &desktop_moved,
             &rung,
             events,
-        )
+        );
+        // The last posture chosen is seen out, not dropped with the worker.
+        let mut refusals = Vec::new();
+        tairix_appdata::see_out_published(&*publisher, &mut state.choice, &mut refusals);
+        for refusal in refusals {
+            app::report(APP_NAME, format_args!("settings not saved ({refusal:?})"));
+        }
+        code
     }
 
     tairix_rt::entry!(main);

@@ -1589,6 +1589,18 @@ show, so it does not map the window — and `SessionWindows` tracks each window
 as unpresented, then painted, then shown, with only the painted → shown step
 announcing. A refused present maps nothing and announces nothing.
 
+And only for a frame the desktop's own drawing has settled in. A window's first
+frame is often the first to draw its title, whose glyphs may still be fetched
+from the font service (the desktop draws them provisionally rather than wait),
+and the first with it in front, which starts its shadow and the shadow of the
+window it displaced easing between their levels. A frame drawn mid-way through
+either is a transition, not the window as it stays, so `WINDOW_SHOWN`,
+`WINDOW_RETITLED` and `WINDOW_SIZED` are all held while any text the desktop
+drew is waiting to be fetched, a fetch is out, or what one brought has yet to
+be laid out again, and while any shadow is part-way between its levels. The
+glyphs landing and the shadow's last step each repaint, so the first settled
+frame always follows and carries what was held.
+
 Once, and once again after a release. Releasing a hidden window's content makes
 the record's claim false — the window composites as an empty plate, so nothing
 of the application's is on screen — so `SessionWindows::content_released` puts it back

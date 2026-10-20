@@ -1344,6 +1344,7 @@ mod program {
         picker: &mut SessionPicker<S, F>,
         apps: &mut AppBarService,
         suspended: &mut Option<bool>,
+        text: TextDrawn<'_>,
     ) -> Result<(), i32> {
         let Some(display) = display.as_mut() else {
             return Ok(());
@@ -1354,7 +1355,7 @@ mod program {
         let refused = match compositor.present(display) {
             Ok(()) => {
                 fade.presented(&LOG_SINK);
-                report_surfaces_shown(shell, compositor, fade, windows, menu, picker, apps);
+                report_surfaces_shown(shell, compositor, fade, windows, menu, picker, apps, text);
                 return Ok(());
             }
             Err(refused) => refused,
@@ -1407,6 +1408,7 @@ mod program {
     /// lands nobody has seen any of them. Each witness is one-shot in its own
     /// owner, so an ordinary frame costs one walk of the served windows and a
     /// bool test for everything else.
+    #[allow(clippy::too_many_arguments)] // Every surface a frame may be the first showing of.
     fn report_surfaces_shown<S: tairix_browse::DirectorySource, F: FnMut() -> S>(
         shell: &mut DesktopShell,
         compositor: &Compositor,
@@ -1415,6 +1417,7 @@ mod program {
         menu: &mut MenuChain,
         picker: &mut SessionPicker<S, F>,
         apps: &mut AppBarService,
+        text: TextDrawn<'_>,
     ) {
         let window = |window| {
             [LogField {
@@ -1425,7 +1428,10 @@ mod program {
         // The compositor's own record of how this frame reached the display,
         // so a witness names the path the frame took rather than one assumed.
         let presentation = compositor.presentation();
+        // Asked after the frame drew, so the glyphs its titles missed count.
+        let settled = text.settled() && compositor.shadows_still();
         windows.report_on_screen(
+            settled,
             |wm| compositor.on_display(wm),
             |id| log_info(WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, &window(id)),
             |id| log_info(WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, &window(id)),
@@ -3017,6 +3023,10 @@ mod program {
             &mut picker,
             &mut apps.service,
             &mut suspended,
+            TextDrawn {
+                fonts: &font_worker,
+                generation: tairix_font::text_generation(),
+            },
         ) {
             return code;
         }
@@ -3909,6 +3919,10 @@ mod program {
                         &mut picker,
                         &mut apps.service,
                         &mut suspended,
+                        TextDrawn {
+                            fonts: &font_worker,
+                            generation: text_drawn,
+                        },
                     ) {
                         return code;
                     }
@@ -5203,6 +5217,10 @@ mod program {
                     &mut picker,
                     &mut apps.service,
                     &mut suspended,
+                    TextDrawn {
+                        fonts: &font_worker,
+                        generation: text_drawn,
+                    },
                 ) {
                     return code;
                 }
@@ -9711,6 +9729,25 @@ mod program {
     /// The font worker: one thread that may wait on the font service, with
     /// no state of its own, answering whether a fetch landed anything.
     type FontWorker = Worker<(), (), bool>;
+
+    /// What says whether the desktop's text is drawn with its real glyphs.
+    #[derive(Copy, Clone)]
+    struct TextDrawn<'a> {
+        fonts: &'a FontWorker,
+        /// What deferred fetches had brought when the text was last laid out.
+        generation: u64,
+    }
+
+    impl TextDrawn<'_> {
+        /// Whether all of it is: nothing drawn provisionally waits to be
+        /// fetched, no fetch is out, and what the last one brought has been
+        /// laid out again.
+        fn settled(self) -> bool {
+            !tairix_font::has_deferred()
+                && !self.fonts.outstanding()
+                && tairix_font::text_generation() == self.generation
+        }
+    }
 
     /// The font worker's job: fetch what the desktop drew provisionally.
     fn fetch_fonts(_: &mut (), _: &mut ()) -> bool {

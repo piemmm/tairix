@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 use tairix_appconf::Document;
+use tairix_appconf::Keys;
 use tairix_appdata::fake::FakeService;
 use tairix_appdata::{Publication, PublishJob, Published, Refusal, Settings};
 
@@ -34,8 +35,13 @@ fn document(text: &str) -> Document {
 fn publish(host: &mut FakeService, graphics: Graphics) -> Result<Published<Graphics>, Errno> {
     tairix_appdata::publish(
         &mut Settings::open_without_defaults(host),
-        &PublishJob::Save(graphics),
+        &saving(graphics, Keys::ALL),
     )
+}
+
+/// The write a settle owes: `keys` of `record`.
+fn saving(record: Graphics, keys: Keys<Graphics>) -> PublishJob<Graphics> {
+    PublishJob::Save { record, keys }
 }
 
 fn load(host: &mut FakeService) -> (Graphics, Vec<Refusal>) {
@@ -166,7 +172,7 @@ fn an_answer_is_adopted_only_where_the_player_has_not_moved_on() {
     choose(&mut publication, Graphics::Basic);
     assert_eq!(
         publication.settle(),
-        Some(PublishJob::Save(Graphics::Basic))
+        Some(saving(Graphics::Basic, Keys::ALL))
     );
 
     // The player moved on before the write of Basic answered.
@@ -185,7 +191,7 @@ fn an_answer_is_adopted_only_where_the_player_has_not_moved_on() {
 
     // Their own write answers, and the store holds something else — a machine
     // policy wins where the player is not editing.
-    assert_eq!(publication.settle(), Some(PublishJob::Save(CUSTOM)));
+    assert_eq!(publication.settle(), Some(saving(CUSTOM, Keys::ALL)));
     assert_eq!(answered(&mut publication, Graphics::Auto), None);
     assert_eq!(*publication.live(), Graphics::Auto);
 }
@@ -207,7 +213,10 @@ fn a_knob_moved_while_its_write_is_out_stays_where_the_player_put_it() {
     choose(&mut publication, lit);
     let _ = answered(&mut publication, soft);
     assert_eq!(*publication.live(), lit);
-    assert_eq!(publication.settle(), Some(PublishJob::Save(lit)));
+    assert_eq!(
+        publication.settle(),
+        Some(saving(lit, Keys::of(GraphicsKey::Resolution)))
+    );
 }
 
 #[test]
@@ -219,7 +228,7 @@ fn a_custom_choice_made_anew_while_an_older_one_is_written_is_kept() {
     });
     let mut publication = Publication::new(Graphics::Ultra);
     choose(&mut publication, CUSTOM);
-    assert_eq!(publication.settle(), Some(PublishJob::Save(CUSTOM)));
+    assert_eq!(publication.settle(), Some(saving(CUSTOM, Keys::ALL)));
     // Out of custom and back while that write is out, onto other knobs.
     choose(&mut publication, Graphics::Ultra);
     choose(&mut publication, newer);
@@ -229,7 +238,7 @@ fn a_custom_choice_made_anew_while_an_older_one_is_written_is_kept() {
         newer,
         "the older write's knobs came back over the newer choice"
     );
-    assert_eq!(publication.settle(), Some(PublishJob::Save(newer)));
+    assert_eq!(publication.settle(), Some(saving(newer, Keys::ALL)));
 }
 
 #[test]

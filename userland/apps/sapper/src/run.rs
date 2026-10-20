@@ -39,7 +39,7 @@ mod program {
         AppMenuShortcut, AppMenuSymbol, WindowEvent,
     };
     use tairix_abi::{Errno, ProcId};
-    use tairix_appdata::{PublishJob, Refusal, RtHost, Settings};
+    use tairix_appdata::{Refusal, RtHost, Settings};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Rect, Region, Scale};
     use tairix_input::InputEvent;
@@ -49,7 +49,7 @@ mod program {
     use tairix_sapper::board::Difficulty;
     use tairix_sapper::game::{Game, Reaction};
     use tairix_sapper::layout::WindowGeometry;
-    use tairix_sapper::scores::BestTimes;
+    use tairix_sapper::scores::{self, BestTimes};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
@@ -72,16 +72,15 @@ mod program {
     /// The name this program states its refusals under.
     const APP_NAME: &str = "sapper";
 
-    /// The best-times writer: latest-wins with at most one write in flight,
-    /// so a run of quick wins costs one further write rather than a backlog,
-    /// and two writes never race for what the store ends up saying.
+    /// The best-times writer: latest-wins with at most one write in flight.
+    /// Each write carries every improvement so far and keeps only the times
+    /// that beat the store's, so a write that displaces one not yet run loses
+    /// nothing.
     type Writer = tairix_rt::work::Worker<(), BestTimes, Result<(), Errno>>;
 
-    /// Write `times` into the game's own store.
+    /// Keep the improvements `times` carries in the game's own store.
     fn write_times(_: &mut (), times: &mut BestTimes) -> Result<(), Errno> {
-        let mut host = RtHost;
-        let mut settings = Settings::open_without_defaults(&mut host);
-        tairix_appdata::publish(&mut settings, &PublishJob::Save(*times)).map(drop)
+        scores::keep(times, &mut Settings::open_without_defaults(&mut RtHost))
     }
 
     /// Say why a best time could not be kept: it is still a best time played.
@@ -793,7 +792,7 @@ mod program {
         let event_endpoint = binding.endpoint();
 
         let writer = Arc::new(Writer::new(write_times, (), WorkerWake::create()));
-        start_writer(&writer, binding.set());
+        app::start_worker(APP_NAME, &writer, binding.set(), WRITER_TOKEN, "best-times");
         let _guard = WorkerGuard::new(&writer);
 
         let reduced = themes.active().motion().reduced_motion();
@@ -852,29 +851,6 @@ mod program {
             report_write(Some(written));
         }
         code
-    }
-
-    /// Start the best-times writer and join its wake to the loop's wait-set.
-    ///
-    /// A kernel that will not grant the thread or the pipe is not a failure:
-    /// the write moves back onto the event loop, which is slower under load but
-    /// never loses a record.
-    fn start_writer(writer: &Arc<Writer>, set: u64) {
-        if let Err(reason) = Writer::start(writer) {
-            app::report(
-                APP_NAME,
-                format_args!("no writer ({reason:?}); best times are written on the event loop"),
-            );
-            return;
-        }
-        if let Err(err) = app::watch_wake(set, writer.wake(), WRITER_TOKEN) {
-            // An answer nothing wakes the loop for is still collected at the
-            // next event, so the game plays on; only the report waits.
-            app::report(
-                APP_NAME,
-                format_args!("writer wake refused ({err}); a failed write is said late"),
-            );
-        }
     }
 
     tairix_rt::entry!(main);

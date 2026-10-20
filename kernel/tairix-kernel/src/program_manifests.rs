@@ -1671,6 +1671,7 @@ mod tests {
         ("netmap", ProgramKind::Application, NETMAP_REQUEST),
         ("netstack", ProgramKind::Service, NETSTACK_MANIFEST),
         ("passwd", ProgramKind::Command, USERS_TOOL_MANIFEST),
+        ("patience", ProgramKind::Application, WINDOWED_APP_REQUEST),
         ("ping", ProgramKind::Command, ECHO_PROBE_TOOL_REQUEST),
         ("play", ProgramKind::Command, PLAY_TOOL_REQUEST),
         ("printf", ProgramKind::Command, PURE_TOOL_REQUEST),

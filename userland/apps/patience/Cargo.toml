@@ -1,0 +1,68 @@
+[package]
+name = "tairix-patience"
+description = "TAIRiX Patience: Klondike, FreeCell and Spider with a solver behind every hint. The host-tested rules, solver, layout, card art, motion, painter and store are the crate's [lib]; the freestanding `Run` binary is the on-disk patience.app bundle's entry point composing it over lib/window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Everything with behaviour, host-tested: `no_std` + `alloc`, so it links
+# unchanged into the freestanding binary.
+[lib]
+name = "tairix_patience"
+path = "src/lib.rs"
+
+# The `Run` entry point of the on-disk `patience.app` bundle: freestanding on
+# the native Tier-1 targets, an inert host stub elsewhere (`build.rs`).
+[[bin]]
+name = "tairix-patience-run"
+path = "src/run.rs"
+
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
+# The solver's set of positions already searched.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# The finaliser a position's fingerprint is mixed with.
+tairix-mix = { path = "../../../lib/mix", version = "=0.0.0" }
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The float functions the motion's curves and the card art's geometry need.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The shared menu builder and the icon bar's fixed rows, without the
+# runtime half the `Run` binary adds below.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false }
+
+# The `Run` binary drives the window channel and the userland runtime: the
+# entry point, the allocator, the syscalls and the worker threads the store's
+# writes and the solver's searches run on. Bare-metal only.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+
+# The painter's tests draw text through the shared test transport, never a
+# running `fontd`, and the store's tests speak `appdata-v1` to the shared fake
+# service.
+[dev-dependencies]
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -81,6 +81,10 @@ use crate::wallpaper::WallpaperService;
 /// nowhere, and anything else asking the question — a user diagnosing an
 /// application that launched but showed nothing, the icon-bar QEMU vertical
 /// deciding when the screen is worth reading — reads this one record.
+///
+/// The frame it speaks for is one the desktop has finished drawing, as are
+/// those of [`WINDOW_RETITLED`] and [`WINDOW_SIZED`]: every title glyph
+/// fetched and every shadow still ([`SessionWindows::report_on_screen`]).
 pub const WINDOW_SHOWN: EventId = EventId(20_003);
 
 /// The exact message [`WINDOW_SHOWN`] is emitted with. A log consumer
@@ -604,6 +608,13 @@ impl SessionWindows {
     /// carries at that state's extent, where `visible` says the window was
     /// composited into it.
     ///
+    /// Nothing is reported for a frame the desktop's own drawing has not
+    /// `settled` in — text still drawn without its glyphs, a shadow part-way
+    /// between its levels — because a reader of the screen at the witness
+    /// would see a transition rather than the window as it stays. What is
+    /// held is reported with the first settled frame, which always follows:
+    /// the glyphs landing and the shadow's last step each repaint.
+    ///
     /// Called immediately after a frame was handed to the display, which is
     /// what makes the claims true: a window the application has presented into
     /// is carried by that frame, so it is on screen now. A window still
@@ -626,11 +637,15 @@ impl SessionWindows {
     /// an announcement pending.
     pub fn report_on_screen(
         &mut self,
+        settled: bool,
         visible: impl Fn(WindowId) -> bool,
         mut shown: impl FnMut(u64),
         mut retitled: impl FnMut(u64),
         mut sized: impl FnMut(u64, WindowSizeState, (u32, u32)),
     ) {
+        if !settled {
+            return;
+        }
         for (&ipc, record) in &mut self.records {
             match record.first_frame {
                 FirstFrame::Painted => {
@@ -3601,6 +3616,10 @@ mod tests {
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents");
         }
+        // A frame the desktop drew provisionally holds the announcement for
+        // the first one it drew settled.
+        assert_eq!(shown_unsettled(&mut windows), Vec::<u64>::new());
+        assert_eq!(shown_unsettled(&mut windows), Vec::<u64>::new());
         assert_eq!(shown(&mut windows), alloc::vec![1]);
         // The announcement is one-shot: a later frame, and a later present,
         // say nothing more about a window already seen.
@@ -3995,6 +4014,19 @@ mod tests {
         on_screen(windows, |_| true).0
     }
 
+    /// The same for a frame the desktop's drawing had not settled in.
+    fn shown_unsettled(windows: &mut SessionWindows) -> Vec<u64> {
+        let mut shown = Vec::new();
+        windows.report_on_screen(
+            false,
+            |_| true,
+            |window| shown.push(window),
+            |_| {},
+            |_, _, _| {},
+        );
+        shown
+    }
+
     /// A window at a size state, as [`WINDOW_SIZED`] reports it.
     type Sized = (u64, WindowSizeState, (u32, u32));
 
@@ -4007,6 +4039,7 @@ mod tests {
     ) -> (Vec<u64>, Vec<u64>, Vec<Sized>) {
         let (mut shown, mut retitled, mut sized) = (Vec::new(), Vec::new(), Vec::new());
         windows.report_on_screen(
+            true,
             visible,
             |window| shown.push(window),
             |window| retitled.push(window),

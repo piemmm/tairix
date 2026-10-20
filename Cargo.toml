@@ -304,6 +304,7 @@ members = [
     "userland/apps/reset",
     "userland/apps/rm",
     "userland/apps/rmdir",
+    "userland/apps/patience",
     "userland/apps/sapper",
     "userland/apps/seq",
     "userland/apps/setcap",
@@ -748,6 +749,12 @@ opt-level = 3
 # The screensaver's countryside routes every lane, track and path across the
 # land and cuts every holding into its fields before a pixel is traced.
 [profile.dev.package.tairix-countryside]
+opt-level = 3
+
+# The patience solver searches tens of thousands of positions after every
+# move and more for each hint and deal, so at `opt-level = 1` a debug image's
+# hints and winnable deals would measure the profile, not the search.
+[profile.dev.package.tairix-patience]
 opt-level = 3
 
 # Every byte a debug kernel reads from an encrypted volume is authenticated

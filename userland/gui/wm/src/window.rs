@@ -608,6 +608,11 @@ impl Window {
             && self.casts_shadow()
     }
 
+    /// Whether this window's shadow stands still at the level it is aimed at.
+    pub(crate) const fn shadow_still(&self) -> bool {
+        self.lift.still()
+    }
+
     /// Nanoseconds until this window's shadow owes its next step, or `None`
     /// while it stands still.
     pub(crate) fn shadow_frame_in(&self, now_ns: u64) -> Option<u64> {

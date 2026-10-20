@@ -16,13 +16,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::FileKind;
+use tairix_appconf::Keys;
 use tairix_glob::Pattern;
 use tairix_path::join;
 use tairix_procinfo::VolumeBytes;
 
 use crate::fs::{Fs, FsEntry, VolumeInfo};
 use crate::ops::FileOp;
-use crate::settings::Settings;
+use crate::settings::{SettingKey, Settings};
 use crate::tag::{Batch, TagSet};
 use crate::view_disasm::DisasmView;
 use crate::view_hex::HexView;
@@ -460,8 +461,20 @@ pub enum SettingsState {
     /// cannot.
     #[default]
     Published,
-    /// A key changed the preferences and the change is not published yet.
-    Pending,
+    /// Keys changed these preferences and the change is not published yet.
+    Pending(Keys<Settings>),
+}
+
+impl SettingsState {
+    /// This state with `key` changed too.
+    #[must_use]
+    pub fn with(self, key: SettingKey) -> Self {
+        let changed = Keys::of(key);
+        match self {
+            Self::Published => Self::Pending(changed),
+            Self::Pending(keys) => Self::Pending(keys.union(changed)),
+        }
+    }
 }
 
 /// The whole session state the renderer draws and the key handler mutates.

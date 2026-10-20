@@ -14,9 +14,12 @@ use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::APPDATA_ENDPOINT;
 use tairix_abi::Errno;
+use tairix_appconf::Registry;
 use tairix_cmdres::{bundle_candidates, CommandEnv};
+use tairix_rt::sync::WorkerWake;
+use tairix_rt::work::Worker;
 
-use crate::AppDataHost;
+use crate::{publish, AppDataHost, PublishAnswer, PublishDesk, PublishJob, Settings};
 
 /// The app-data client's syscall host: `ipc_call`, `fs_*`, and the session's
 /// own `HOME`/`PATH`.
@@ -43,5 +46,60 @@ impl AppDataHost for RtHost {
         let path_var =
             tairix_rt::env_var(b"PATH").and_then(|value| core::str::from_utf8(value).ok());
         bundle_candidates(word, CommandEnv { home, path_var })
+    }
+}
+
+/// How a store job opens the application's own store.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Opening {
+    /// With the bundle's shipped `DefaultSettings/` layer, found for the
+    /// program the command word names.
+    Defaults(&'static str),
+    /// Without that layer: a bundle that ships none asks for no filesystem
+    /// authority to look for it.
+    Bare,
+}
+
+impl Opening {
+    /// The store, opened this way through `host`.
+    pub fn open(self, host: &mut RtHost) -> Settings<'_> {
+        match self {
+            Self::Defaults(word) => Settings::open(host, word),
+            Self::Bare => Settings::open_without_defaults(host),
+        }
+    }
+}
+
+/// The worker a registry's writes are carried out on, off the loop that owes
+/// a window its frames.
+pub type PublishWorker<R> = Worker<Opening, PublishJob<R>, PublishAnswer<R>>;
+
+/// A [`PublishWorker`] writing through `opening`, not yet started.
+#[must_use]
+pub fn publish_worker<R: Registry>(opening: Opening) -> PublishWorker<R> {
+    Worker::new(publish_own::<R>, opening, WorkerWake::create())
+}
+
+/// Carry out `job` against the store `opening` opens: what a
+/// [`PublishWorker`] runs.
+///
+/// A fresh handle per job, so the work keeps no state two threads could
+/// disagree about, and opening one costs a single read.
+fn publish_own<R: Registry>(opening: &mut Opening, job: &mut PublishJob<R>) -> PublishAnswer<R> {
+    let mut host = RtHost;
+    publish(&mut opening.open(&mut host), job)
+}
+
+impl<R: Registry> PublishDesk<R> for PublishWorker<R> {
+    fn submit(&self, job: PublishJob<R>) -> bool {
+        PublishWorker::<R>::submit(self, job)
+    }
+
+    fn collect(&self) -> Option<PublishAnswer<R>> {
+        PublishWorker::<R>::collect(self)
+    }
+
+    fn wait(&self) -> Option<PublishAnswer<R>> {
+        PublishWorker::<R>::wait(self)
     }
 }

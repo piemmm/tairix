@@ -1230,6 +1230,7 @@ mod tests {
         "netmap",
         "netstack",
         "passwd",
+        "patience",
         "ping",
         "play",
         "printf",

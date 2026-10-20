@@ -242,7 +242,7 @@ pub trait DocumentApp: Sized {
     const BAR_ROWS: &'static [(AppMenuSymbol, &'static str)] = &[];
 
     /// Bring the application's own state up for `desktop`: its own workers
-    /// started ([`start_worker`]) and their answer wakes watched on `set`
+    /// started ([`app::start_worker`]) and their answer wakes watched on `set`
     /// from [`APP_TOKEN`] on.
     ///
     /// # Errors
@@ -2983,42 +2983,6 @@ fn app_bar<A: DocumentApp>(endpoint: u64) -> Result<AppBar, Errno> {
     declaration(endpoint, AppBarClick::RaiseOrOpen, &rows)
 }
 
-/// Start `worker`, the application `name`'s `what` worker, and watch its
-/// answer wake on `set` under `token`. A worker the machine does not grant
-/// leaves its work on the loop, which is said.
-///
-/// # Errors
-///
-/// The exit code to end with when the wake cannot be watched, which is
-/// stated: an answer nothing wakes the loop for is never taken in.
-pub fn start_worker<S, Req, Ans, D>(
-    name: &str,
-    worker: &Arc<Worker<S, Req, Ans, D>>,
-    set: u64,
-    token: u64,
-    what: &str,
-) -> Result<(), i32>
-where
-    S: Send + 'static,
-    Req: Send + 'static,
-    Ans: Send + 'static,
-    D: Desk<Req, Ans> + Send + 'static,
-{
-    if let Err(reason) = Worker::start(worker) {
-        report(
-            name,
-            format!("no {what} worker ({reason:?}); its work runs on the event loop"),
-        );
-    }
-    app::watch_wake(set, worker.wake(), token).map_err(|err| {
-        fail(
-            name,
-            app::EXIT_NO_EVENTS,
-            format!("{what} answer wake refused ({err})"),
-        )
-    })
-}
-
 /// What the park saw that the loop is to take in.
 #[derive(Default)]
 struct Signals {
@@ -3227,9 +3191,7 @@ pub fn run<A: DocumentApp>() -> i32 {
         return fail(A::NAME, app::EXIT_NO_EVENTS, "no room for the work queue");
     };
     let queue = Arc::new(queue);
-    if let Err(code) = start_worker(A::NAME, &queue, set, QUEUE_TOKEN, "work") {
-        return code;
-    }
+    app::start_worker(A::NAME, &queue, set, QUEUE_TOKEN, "work");
     let _queue_guard = WorkerGuard::new(&queue);
     let own = match A::start(&desktop, set) {
         Ok(own) => own,

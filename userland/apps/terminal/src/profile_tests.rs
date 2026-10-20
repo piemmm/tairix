@@ -114,7 +114,7 @@ fn a_saved_profile_loads_back_identically() {
     let edited = edited_profile();
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        tairix_appdata::save(&edited, &mut settings).expect("publishes");
+        tairix_appdata::save(&edited, Keys::ALL, &mut settings).expect("publishes");
     }
     let settings = Settings::open(&mut host, OWN_WORD);
     let (loaded, refused) = Profile::load(&settings);
@@ -133,7 +133,7 @@ fn a_save_writes_only_what_the_layers_do_not_already_imply() {
     };
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        tairix_appdata::save(&profile, &mut settings).expect("publishes");
+        tairix_appdata::save(&profile, Keys::ALL, &mut settings).expect("publishes");
     }
     assert_eq!(stored_len(&host), 1, "one key changed, one key written");
     assert_eq!(stored(&host, ProfileKey::FontSize.name()), Some("17"));
@@ -148,7 +148,7 @@ fn saving_an_unchanged_profile_writes_nothing_at_all() {
     drop(settings);
 
     let mut settings = Settings::open(&mut host, OWN_WORD);
-    tairix_appdata::save(&loaded, &mut settings).expect("a no-op save");
+    tairix_appdata::save(&loaded, Keys::ALL, &mut settings).expect("a no-op save");
     assert!(!settings.is_dirty());
     drop(settings);
     assert_eq!(
@@ -217,7 +217,7 @@ fn clear_removes_the_users_opinions_so_the_layers_beneath_apply() {
     let mut host = service();
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        tairix_appdata::save(&edited_profile(), &mut settings).expect("publishes");
+        tairix_appdata::save(&edited_profile(), Keys::ALL, &mut settings).expect("publishes");
     }
     assert!(stored_len(&host) > 1);
 
@@ -277,7 +277,7 @@ fn a_save_never_writes_a_value_the_shipped_defaults_already_give() {
     };
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        tairix_appdata::save(&profile, &mut settings).expect("nothing to publish");
+        tairix_appdata::save(&profile, Keys::ALL, &mut settings).expect("nothing to publish");
     }
     assert_eq!(
         stored_len(&host),
@@ -293,7 +293,7 @@ fn a_key_outside_the_registry_is_left_alone_by_a_save() {
     let mut host = holding("scheme = contrast\nsomething.else = kept\n");
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        tairix_appdata::save(&edited_profile(), &mut settings).expect("publishes");
+        tairix_appdata::save(&edited_profile(), Keys::ALL, &mut settings).expect("publishes");
     }
     assert_eq!(
         stored(&host, "something.else"),
@@ -320,7 +320,7 @@ fn an_unreachable_store_loads_the_defaults_and_refuses_the_save() {
     assert_eq!(profile, Profile::default(), "the app still runs");
     assert!(refused.is_empty());
     assert_eq!(
-        tairix_appdata::save(&edited_profile(), &mut settings),
+        tairix_appdata::save(&edited_profile(), Keys::ALL, &mut settings),
         Err(Errno::DeviceOffline),
         "and is never told a save landed that did not"
     );
@@ -335,7 +335,7 @@ fn every_registry_key_round_trips_through_the_store() {
     let edited = edited_profile();
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        tairix_appdata::save(&edited, &mut settings).expect("publishes");
+        tairix_appdata::save(&edited, Keys::ALL, &mut settings).expect("publishes");
     }
     assert_eq!(
         stored_len(&host),

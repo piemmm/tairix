@@ -246,6 +246,13 @@ impl MenuBuilder {
         let _ = self.push(&AppMenuRow::Separator, plate);
     }
 
+    /// The icon bar's information row, which the desktop draws from the
+    /// bundle's signed identity: the first row of an application's own
+    /// icon-bar menu, as [`crate::declaration`] lays a flat one out.
+    pub fn info(&mut self) {
+        let _ = self.push(&AppMenuRow::Info, Plate::Root);
+    }
+
     /// Open a submenu labelled `label` on `plate`, for rows doing `symbol`'s
     /// function, answering the plate its rows go on, or `None` when it could
     /// not be added.

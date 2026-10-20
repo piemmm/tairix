@@ -234,6 +234,7 @@
 - [Network Map](./desktop/netmap.md)
 - [Widget gallery](./desktop/widgets.md)
 - [Sapper](./desktop/sapper.md)
+- [Patience](./desktop/patience.md)
 - [Cinder](./desktop/cinder.md)
 - [Design artwork and storyboards](./desktop/artwork.md)
 

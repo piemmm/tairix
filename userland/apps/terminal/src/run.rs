@@ -93,7 +93,7 @@ mod program {
     };
     use tairix_terminal::menu::{self, Command};
     // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
-    use tairix_appdata::{Publication, PublishJob, Published, RtHost, Settings as SettingsStore};
+    use tairix_appdata::{Opening, Publication, PublishWorker, RtHost, Settings as SettingsStore};
     use tairix_soundtheme::cue::RtCuePost;
     use tairix_soundtheme::{Answer, PostedCues, SoundEvent, CUE_ANSWER_DEADLINE_NS};
     use tairix_terminal::profile::{Invalidation, Profile};
@@ -1024,22 +1024,9 @@ mod program {
         };
 
         // Every later write goes to this worker instead, so a settled edit
-        // costs the window no frame. A kernel that will not grant the thread,
-        // or a pipe it refuses, leaves the writes on this task — exactly where
-        // they used to be, and stated once.
-        let publisher = alloc::sync::Arc::new(Publisher::new(
-            write_profile,
-            (),
-            tairix_rt::sync::WorkerWake::create(),
-        ));
-        if let Err(reason) = Publisher::start(&publisher) {
-            app::report(
-                OWN_WORD,
-                format_args!(
-                    "no settings worker ({reason:?}); the profile is saved on the event loop"
-                ),
-            );
-        }
+        // costs the window no frame. It starts once the wait-set exists.
+        let publisher =
+            alloc::sync::Arc::new(tairix_appdata::publish_worker(Opening::Defaults(OWN_WORD)));
         let _publisher_guard = tairix_rt::work::WorkerGuard::new(&publisher);
 
         // --- The desktop these windows will be shown on: the screen, the
@@ -1068,21 +1055,7 @@ mod program {
         };
         let event_endpoint = binding.endpoint();
         let set = binding.set();
-        // The settings worker's wake. A refused add is fatal rather than
-        // tolerated: a publish whose answer nobody collects would leave the
-        // window showing settings the store may have refused.
-        if let Some(read) = publisher.wake().read_end() {
-            if tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Stream,
-                u64::from(read),
-                PUBLISH_TOKEN,
-            ) != 0
-            {
-                return app::fail(OWN_WORD, app::EXIT_NO_EVENTS, "settings wake refused");
-            }
-        }
+        app::start_worker(OWN_WORD, &publisher, set, PUBLISH_TOKEN, "settings");
 
         // Forward this terminal's own inherited environment (USER, HOME,
         // LOGNAME, PATH, LANG, ...) to every shell it hosts, exactly as the
@@ -1400,14 +1373,7 @@ mod program {
     /// settled, and every write owed behind the one outstanding is made.
     fn see_out(publisher: &Publisher, publication: &mut Publication<Profile>) {
         let mut refusals = Vec::new();
-        if let Some(job) = publication.settle() {
-            let _ = publisher.submit(job);
-        }
-        while let Some(answer) = publisher.wait() {
-            if let Some(job) = publication.adopt(answer, &mut refusals) {
-                let _ = publisher.submit(job);
-            }
-        }
+        tairix_appdata::see_out_published(publisher, publication, &mut refusals);
         for refusal in refusals {
             app::report(OWN_WORD, refusal);
         }
@@ -1472,27 +1438,7 @@ mod program {
     /// every one. The loop therefore *asks* and adopts nothing; the worker
     /// writes and answers with what the store then holds; the loop adopts that
     /// on the wake it nudges.
-    /// A fresh store handle per job, so the work keeps no state.
-    type Publisher = tairix_rt::work::Worker<(), PublishJob<Profile>, PublishAnswer>;
-
-    /// What the store said, or why it said nothing.
-    type PublishAnswer = Result<Published<Profile>, Errno>;
-
-    /// Carry out one publish job against the user's own store, and answer with
-    /// the profile the store then implies.
-    ///
-    /// A fresh handle per job: opening one costs a single read, jobs are one
-    /// per settled interaction, and it all happens on the worker — so holding a
-    /// handle across the process's life would buy nothing and would put the
-    /// store's cached view somewhere two threads could disagree about it.
-    ///
-    /// The answer is deliberately what the store *now says* rather than what
-    /// was asked for, so a value a machine policy or a shipped default supplies
-    /// wins over the widget's, and *Restore defaults* needs no second path.
-    fn write_profile(_: &mut (), job: &mut PublishJob<Profile>) -> PublishAnswer {
-        let mut host = RtHost;
-        tairix_appdata::publish(&mut SettingsStore::open(&mut host, OWN_WORD), job)
-    }
+    type Publisher = PublishWorker<Profile>;
 
     /// Adopt whatever the publisher has answered with, state anything it could
     /// not use, submit the write owed behind it, and bring every window and
@@ -1503,14 +1449,7 @@ mod program {
         ctx: &mut AppContext<'_>,
     ) -> Applied {
         let mut refusals = Vec::new();
-        // With no worker a submission runs here and its answer is already
-        // waiting, so the owed chain is followed until one is really in flight.
-        while let Some(answer) = ctx.publisher.collect() {
-            let owed = ctx.publication.adopt(answer, &mut refusals);
-            if !owed.is_some_and(|job| ctx.publisher.submit(job)) {
-                break;
-            }
-        }
+        tairix_appdata::collect_published(ctx.publisher, ctx.publication, &mut refusals);
         for refusal in refusals {
             app::report(OWN_WORD, refusal);
         }

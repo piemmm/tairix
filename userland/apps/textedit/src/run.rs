@@ -432,7 +432,7 @@ mod program {
                 ),
                 WorkerWake::create(),
             ));
-            docapp::start_worker(APP_NAME, &syntax, set, APP_TOKEN, "syntax")?;
+            tairix_window::app::start_worker(APP_NAME, &syntax, set, APP_TOKEN, "syntax");
             let guard = WorkerGuard::new(&syntax);
             let code = Arc::new(CodeWorker::new(
                 serve_code,
@@ -442,7 +442,7 @@ mod program {
                 ),
                 WorkerWake::create(),
             ));
-            docapp::start_worker(APP_NAME, &code, set, CODE_TOKEN, "code")?;
+            tairix_window::app::start_worker(APP_NAME, &code, set, CODE_TOKEN, "code");
             let code_guard = WorkerGuard::new(&code);
             let data = Arc::new(DataWorker::new(
                 serve_data,
@@ -452,7 +452,7 @@ mod program {
                 ),
                 WorkerWake::create(),
             ));
-            docapp::start_worker(APP_NAME, &data, set, DATA_TOKEN, "data")?;
+            tairix_window::app::start_worker(APP_NAME, &data, set, DATA_TOKEN, "data");
             let data_guard = WorkerGuard::new(&data);
             Ok(Self {
                 syntax,

@@ -149,9 +149,13 @@ nobody played.
 
 Writing a best time is an IPC round trip to the settings service, so it is
 handed to a worker rather than run on the loop that owes the window a frame.
-The desk is latest-wins with at most one write in flight. Where the kernel
-grants no worker thread or no wake pipe, the write happens on the loop instead
-— slower under load, never wrong, and never a dropped record.
+The desk is latest-wins with at most one write in flight. A write keeps only
+the times that beat what the store holds at that moment, so a session that
+could not read its store at start never puts a slower time over a faster one,
+and a write carrying every improvement so far can safely replace one that had
+not yet run. Where the kernel grants no worker thread or no wake pipe, the
+write happens on the loop instead — slower under load, never wrong, and never a
+dropped record.
 
 ## Where the code is
 

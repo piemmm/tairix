@@ -216,17 +216,23 @@ its record as a `tairix_appconf::Registry` — its keys, their spellings, and th
 bridges between a stored text and a field — and the engine does the rest once
 for every application: `Registry::load` reads it through `Lookup`, which
 `Settings` implements, so one loader serves the layered handle and the
-`Document` a foreign read answers with; `save` writes only what the layers do
-not already imply and replaces a stored value the registry refused; `clear`
-removes the user's opinions; `loaded` reads it and names everything worth
-saying about the read.
+`Document` a foreign read answers with; `save` writes the keys it is given —
+only what the layers do not already imply, replacing a stored value the
+registry refused — and leaves every other key as the store holds it, so a
+record that began from the defaults because its store could not be read at
+start never writes them over the user's values; `stage` is `save` without the
+commit, for several records written in one; `clear` removes the user's
+opinions; `loaded` reads it and names everything worth saying about the read.
 
 A settings *surface* keeps the record in a `Publication`: an edit changes the
-live record and writes nothing, the settle asks for one write, carried out off
-the loop by `publish`, and the store's answer is adopted wherever the user has
+live record and writes nothing, the settle asks for one write carrying the keys
+edited since the last, and the store's answer is adopted wherever the user has
 not edited since — a refusal reverts what the write carried and is stated, and
-one write is outstanding at a time, the rest owed behind it. A program sees its
-last write out before it ends (`Worker::wait`).
+one write is outstanding at a time, the rest owed behind it. The write is
+carried out by `publish` off the loop, on a `publish_worker` or any other
+`PublishDesk`, and the loop's side of it is the one `submit_published`,
+`collect_published` and `see_out_published`: a program sees its last write out
+before it ends.
 
 Some app data is an **open** namespace, though: a catalog, a recent-file list, a
 set of per-host preferences. `Settings::settings` answers those, listing every

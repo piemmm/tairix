@@ -23,22 +23,45 @@ use tairix_appconf::{Keys, Live, Registry};
 
 use crate::Settings;
 
-/// Write `record` into `store` and commit, touching only what the store's
-/// layers do not already imply: a value a machine policy or the bundle's
-/// defaults supply is never copied up into the user's own document, a stored
-/// value the registry refuses is replaced, and a key the record says by its
-/// absence is removed wherever the store still holds it — even one the
-/// registry read and ignored, as a setting another setting makes meaningless
-/// is.
+/// Write the `keys` of `record` into `store` and commit, touching only what
+/// the store's layers do not already imply: a value a machine policy or the
+/// bundle's defaults supply is never copied up into the user's own document,
+/// and a key the record says by its absence is removed wherever the store
+/// still holds it — even one the registry read and ignored, as a setting
+/// another setting makes meaningless is.
+///
+/// A key outside `keys` keeps whatever the store holds, so a record that
+/// began from defaults because the store could not be read at start never
+/// writes those defaults over values the user saved. The one exception is a
+/// stored value the registry refuses, which is replaced by the record's.
 ///
 /// # Errors
 ///
 /// The service's refusal of the commit, or [`Errno::OutOfRange`] for a
 /// spelling the format refuses, which is a defect of the registry.
-pub fn save<R: Registry>(record: &R, store: &mut Settings<'_>) -> Result<(), Errno> {
+pub fn save<R: Registry>(record: &R, keys: Keys<R>, store: &mut Settings<'_>) -> Result<(), Errno> {
+    stage(record, keys, store)?;
+    store.commit()
+}
+
+/// [`save`] without its commit, so registries sharing one document reach it
+/// in a single commit.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for a spelling the format refuses, which is a defect
+/// of the registry.
+pub fn stage<R: Registry>(
+    record: &R,
+    keys: Keys<R>,
+    store: &mut Settings<'_>,
+) -> Result<(), Errno> {
     let (stored, refused) = R::load(store);
     let (mut held, mut wanted) = (String::new(), String::new());
     for &key in R::KEYS {
+        if !keys.contains(key) && !refused.contains(&key) {
+            continue;
+        }
         held.clear();
         wanted.clear();
         let had = stored.spell(key, &mut held);
@@ -52,7 +75,7 @@ pub fn save<R: Registry>(record: &R, store: &mut Settings<'_>) -> Result<(), Err
                 .map_err(|_| Errno::OutOfRange)?;
         }
     }
-    store.commit()
+    Ok(())
 }
 
 /// Remove every key of the registry from the user's own document, so the
@@ -94,8 +117,13 @@ pub fn loaded<R: Registry>(store: &Settings<'_>) -> (R, Vec<Refusal>) {
 /// What a store write is asked to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublishJob<R> {
-    /// Write this record.
-    Save(R),
+    /// Write the `keys` of `record` ([`save`]).
+    Save {
+        /// The record the settings are taken from.
+        record: R,
+        /// The settings written; every other key keeps what the store holds.
+        keys: Keys<R>,
+    },
     /// Remove the user's opinions, so the layers beneath them apply again.
     Restore,
 }
@@ -125,11 +153,79 @@ pub fn publish<R: Registry>(
         return Err(err);
     }
     match job {
-        PublishJob::Save(record) => save(record, store)?,
+        PublishJob::Save { record, keys } => save(record, *keys, store)?,
         PublishJob::Restore => clear::<R>(store)?,
     }
     let (record, refused) = R::load(store);
     Ok(Published { record, refused })
+}
+
+/// What a store said about one publish job, or why it said nothing.
+pub type PublishAnswer<R> = Result<Published<R>, Errno>;
+
+/// The worker a registry's writes are carried out on, as the loop drives it.
+///
+/// The runtime's worker is one; with no worker thread a submission runs where
+/// it is made and its answer is waiting at once.
+pub trait PublishDesk<R: Registry> {
+    /// Ask for `job`, answering whether its answer is already waiting.
+    fn submit(&self, job: PublishJob<R>) -> bool;
+    /// Take a landed answer.
+    fn collect(&self) -> Option<PublishAnswer<R>>;
+    /// Block until an answer lands and take it, or `None` once nothing is
+    /// outstanding.
+    fn wait(&self) -> Option<PublishAnswer<R>>;
+}
+
+/// Hand `job` to `desk`, adopting its answer into `publication` at once where
+/// no worker thread ran it. Answers whether an answer was adopted.
+pub fn submit_published<R: Live, D: PublishDesk<R> + ?Sized>(
+    desk: &D,
+    publication: &mut Publication<R>,
+    job: Option<PublishJob<R>>,
+    refusals: &mut Vec<Refusal>,
+) -> bool {
+    job.is_some_and(|job| desk.submit(job)) && collect_published(desk, publication, refusals)
+}
+
+/// Adopt every answer `desk` has landed into `publication`, submitting the
+/// write each owes. Answers whether any landed.
+///
+/// With no worker thread a submission runs where it is made and its answer is
+/// already waiting, so the owed chain is followed until one is really in
+/// flight.
+pub fn collect_published<R: Live, D: PublishDesk<R> + ?Sized>(
+    desk: &D,
+    publication: &mut Publication<R>,
+    refusals: &mut Vec<Refusal>,
+) -> bool {
+    let mut adopted = false;
+    while let Some(answer) = desk.collect() {
+        adopted = true;
+        let owed = publication.adopt(answer, refusals);
+        if !owed.is_some_and(|job| desk.submit(job)) {
+            break;
+        }
+    }
+    adopted
+}
+
+/// See `publication`'s writes out before the program ends: an edit still to
+/// settle is settled, and every write owed behind the one outstanding is
+/// made, so the last change is never dropped with the worker.
+pub fn see_out_published<R: Live, D: PublishDesk<R> + ?Sized>(
+    desk: &D,
+    publication: &mut Publication<R>,
+    refusals: &mut Vec<Refusal>,
+) {
+    if let Some(job) = publication.settle() {
+        let _ = desk.submit(job);
+    }
+    while let Some(answer) = desk.wait() {
+        if let Some(job) = publication.adopt(answer, refusals) {
+            let _ = desk.submit(job);
+        }
+    }
 }
 
 /// Something about a registry's store worth saying, never fatal: the
@@ -334,14 +430,17 @@ impl<R: Live> Publication<R> {
         if !core::mem::take(&mut self.owed.save) || self.edited.is_empty() {
             return None;
         }
-        self.edited = Keys::EMPTY;
+        let keys = core::mem::replace(&mut self.edited, Keys::EMPTY);
         // Edits that came back to rest on what the store holds leave nothing
         // to write.
         if self.live == self.adopted {
             return None;
         }
         self.outstanding = Some(Asked::Save);
-        Some(PublishJob::Save(self.live.clone()))
+        Some(PublishJob::Save {
+            record: self.live.clone(),
+            keys,
+        })
     }
 }
 

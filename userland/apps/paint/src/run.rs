@@ -34,7 +34,8 @@ mod program {
     use tairix_abi::window_ipc::{AppMenuSymbol, ClipboardKind};
     use tairix_abi::Errno;
     use tairix_appdata::{
-        Publication, PublishJob, Published, Refusal as StoreRefusal, RtHost, Settings,
+        Opening, Publication, PublishAnswer, PublishJob, PublishWorker, Refusal as StoreRefusal,
+        RtHost, Settings,
     };
     use tairix_controls::damage;
     use tairix_geometry::{Region, Scale};
@@ -362,17 +363,6 @@ mod program {
     /// The wait-set token the settings writer's answer wake arrives under.
     const SETTINGS_TOKEN: u64 = APP_TOKEN + 1;
 
-    /// What the store said after a settings write, or why it said nothing.
-    type SettingsAnswer = Result<Published<Preferences>, Errno>;
-
-    /// The worker Paint's settings are written through, off the loop.
-    type SettingsWriter = Worker<(), PublishJob<Preferences>, SettingsAnswer>;
-
-    /// Carry out one settings write against Paint's own store.
-    fn write_settings(_: &mut (), job: &mut PublishJob<Preferences>) -> SettingsAnswer {
-        tairix_appdata::publish(&mut Settings::open_without_defaults(&mut RtHost), job)
-    }
-
     /// What the painter keeps beside the host's own.
     struct Paint {
         decoder: Arc<DecodeWorker>,
@@ -381,8 +371,8 @@ mod program {
         artwork: ArtworkCache,
         /// The settings in force, and the ones the store last said.
         preferences: Publication<Preferences>,
-        writer: Arc<SettingsWriter>,
-        _writer_guard: WorkerGuard<(), PublishJob<Preferences>, SettingsAnswer>,
+        writer: Arc<PublishWorker<Preferences>>,
+        _writer_guard: WorkerGuard<Opening, PublishJob<Preferences>, PublishAnswer<Preferences>>,
     }
 
     impl DocumentApp for Paint {
@@ -423,7 +413,7 @@ mod program {
                 ));
             };
             let decoder = Arc::new(decoder);
-            docapp::start_worker(APP_NAME, &decoder, set, APP_TOKEN, "decode")?;
+            app::start_worker(APP_NAME, &decoder, set, APP_TOKEN, "decode");
             let guard = WorkerGuard::new(&decoder);
             // Read here, before any window: nothing is on screen yet, so
             // there is no frame to owe anyone.
@@ -432,12 +422,8 @@ mod program {
             for refusal in refusals {
                 app::report(APP_NAME, refusal);
             }
-            let writer = Arc::new(SettingsWriter::new(
-                write_settings,
-                (),
-                WorkerWake::create(),
-            ));
-            docapp::start_worker(APP_NAME, &writer, set, SETTINGS_TOKEN, "settings")?;
+            let writer = Arc::new(tairix_appdata::publish_worker(Opening::Bare));
+            app::start_worker(APP_NAME, &writer, set, SETTINGS_TOKEN, "settings");
             let writer_guard = WorkerGuard::new(&writer);
             Ok(Self {
                 decoder,
@@ -569,14 +555,11 @@ mod program {
         fn leaving(host: &mut Host<Self>) {
             let paint = &mut host.app;
             let mut refusals = Vec::new();
-            if let Some(job) = paint.preferences.settle() {
-                let _ = paint.writer.submit(job);
-            }
-            while let Some(answer) = paint.writer.wait() {
-                if let Some(job) = paint.preferences.adopt(answer, &mut refusals) {
-                    let _ = paint.writer.submit(job);
-                }
-            }
+            tairix_appdata::see_out_published(
+                &*paint.writer,
+                &mut paint.preferences,
+                &mut refusals,
+            );
             for refusal in refusals {
                 app::report(APP_NAME, refusal);
             }
@@ -746,34 +729,39 @@ mod program {
     /// Hand `job`, the settings write owed now, to the writer, and take in
     /// its answer where it ran here for want of a worker.
     fn submit_settings(host: &mut Host<Paint>, job: Option<PublishJob<Preferences>>) {
-        if job.is_some_and(|job| host.app.writer.submit(job)) {
-            collect_settings(host);
+        let mut refusals = Vec::new();
+        let paint = &mut host.app;
+        if tairix_appdata::submit_published(
+            &*paint.writer,
+            &mut paint.preferences,
+            job,
+            &mut refusals,
+        ) {
+            settings_adopted(host, &refusals);
         }
     }
 
-    /// Adopt what the settings writer answered, say what it refused in the
-    /// settings window and on `stderr`, make the write owed behind it, and
-    /// bring every window up to the settings now in force.
+    /// Adopt what the settings writer answered and make the write owed behind
+    /// it.
     fn collect_settings(host: &mut Host<Paint>) {
         let mut refusals = Vec::new();
-        let mut adopted = false;
-        while let Some(answer) = host.app.writer.collect() {
-            adopted = true;
-            let owed = host.app.preferences.adopt(answer, &mut refusals);
-            if !owed.is_some_and(|job| host.app.writer.submit(job)) {
-                break;
-            }
+        let paint = &mut host.app;
+        if tairix_appdata::collect_published(&*paint.writer, &mut paint.preferences, &mut refusals)
+        {
+            settings_adopted(host, &refusals);
         }
-        if !adopted {
-            return;
-        }
+    }
+
+    /// Say what the store refused, in the settings window and on `stderr`,
+    /// and bring every window up to the settings now in force.
+    fn settings_adopted(host: &mut Host<Paint>, refusals: &[StoreRefusal]) {
         let said = refusals.iter().find_map(|refusal| match refusal {
             StoreRefusal::NotSaved(_) | StoreRefusal::NotRestored(_) => {
                 Some(alloc::format!("{refusal}"))
             }
             _ => None,
         });
-        for refusal in &refusals {
+        for refusal in refusals {
             app::report(APP_NAME, refusal);
         }
         apply_settings(host);

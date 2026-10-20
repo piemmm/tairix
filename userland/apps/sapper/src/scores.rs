@@ -7,6 +7,11 @@
 //! the handle, and the write itself is handed to a worker rather than run on
 //! the event loop.
 //!
+//! A write [`keep`]s only the times that beat what the store holds at that
+//! moment, so a session that could not read the store at start never puts a
+//! slower time over a faster one, and a later write carrying every improvement
+//! so far can safely replace one that had not yet run.
+//!
 //! Only the three preset boards have a best time. A custom board is a size the
 //! player invented, so two custom games are not the same game and a time on one
 //! says nothing about a time on the other.
@@ -19,7 +24,9 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use tairix_appconf::{as_u32, Registry};
+use tairix_abi::Errno;
+use tairix_appconf::{as_u32, Keys, Registry};
+use tairix_appdata::Settings;
 
 use crate::board::Difficulty;
 
@@ -116,16 +123,42 @@ impl BestTimes {
         true
     }
 
-    /// Forget every best time.
-    pub fn clear(&mut self) {
-        *self = Self::default();
-    }
-
-    /// Whether any preset has a time recorded.
+    /// `stored` with every time of this record that beats it taken over it,
+    /// and the presets that improved.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.beginner.is_none() && self.intermediate.is_none() && self.expert.is_none()
+    pub fn improving(&self, stored: &Self) -> (Self, Keys<Self>) {
+        let mut best = *stored;
+        let mut improved = Keys::EMPTY;
+        for preset in Preset::ALL {
+            let Some(secs) = self.of(preset) else {
+                continue;
+            };
+            if stored.of(preset).is_none_or(|kept| secs < kept) {
+                *best.slot(preset) = Some(secs);
+                improved = improved.union(Keys::of(preset));
+            }
+        }
+        (best, improved)
     }
+}
+
+/// Keep every time of `times` that beats what `store` holds, leaving each
+/// other stored time as it is; a stored value the registry refuses is removed.
+///
+/// # Errors
+///
+/// A store the service could not serve, which is not written over, and the
+/// service's refusal of the commit.
+pub fn keep(times: &BestTimes, store: &mut Settings<'_>) -> Result<(), Errno> {
+    if let Some(err) = store.store_refusal() {
+        return Err(err);
+    }
+    let (stored, refused) = BestTimes::load(store);
+    let (best, improved) = times.improving(&stored);
+    if improved.is_empty() && refused.is_empty() {
+        return Ok(());
+    }
+    tairix_appdata::save(&best, improved, store)
 }
 
 impl Registry for BestTimes {

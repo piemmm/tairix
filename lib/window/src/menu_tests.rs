@@ -129,3 +129,21 @@ fn every_row_states_its_function_and_a_destructive_one_its_emphasis() {
         ]
     );
 }
+
+#[test]
+fn the_information_row_sits_on_the_root_plate() {
+    let mut menu = MenuBuilder::new();
+    menu.info();
+    let games = menu
+        .submenu("Game", AppMenuSymbol::NewGame, Plate::Root)
+        .expect("room");
+    menu.item(2u16, AppMenuSymbol::NewGame, "Deal", "", true, games);
+    assert_eq!(
+        shape(menu),
+        [
+            (alloc::string::String::from("info"), None),
+            (alloc::string::String::from("Game"), None),
+            (alloc::string::String::from("Deal"), Some(1)),
+        ]
+    );
+}

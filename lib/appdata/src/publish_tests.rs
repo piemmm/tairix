@@ -2,15 +2,20 @@
 //! surface live while it is written: the store half over the fake service,
 //! the publication half over records alone.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::fmt::Write as _;
 
 use tairix_abi::appdata_ipc::APPDATA_DOCUMENT_MAX;
 use tairix_abi::Errno;
 use tairix_appconf::{as_u32, overwrite, Keys, Live, Registry};
 
-use super::{clear, loaded, publish, save, Publication, PublishJob, Published, Refusal};
+use super::{
+    clear, collect_published, loaded, publish, save, see_out_published, submit_published,
+    Publication, PublishAnswer, PublishDesk, PublishJob, Published, Refusal,
+};
 use crate::fake::FakeService;
 use crate::Settings;
 
@@ -144,7 +149,7 @@ fn a_save_writes_only_what_the_layers_do_not_already_say() {
         size: 20,
         ..shipped
     };
-    save(&mine, &mut store).expect("written");
+    save(&mine, Keys::ALL, &mut store).expect("written");
     drop(store);
     let document = host.committed();
     assert_eq!(document.get("font.size"), Some("20"));
@@ -162,7 +167,7 @@ fn a_save_mends_a_stored_value_the_registry_refused_and_spares_another_apps_keys
     let mut store = Settings::open(&mut host, OWN_WORD);
     let (record, refusals) = loaded::<Look>(&store);
     assert_eq!(refusals, [Refusal::Unusable("font.size")]);
-    save(&record, &mut store).expect("written");
+    save(&record, Keys::EMPTY, &mut store).expect("written");
     drop(store);
     assert_eq!(host.committed().get("font.size"), Some("14"));
     assert_eq!(host.committed().get("layout.other"), Some("kept"));
@@ -226,7 +231,7 @@ fn a_setting_another_makes_meaningless_is_removed_by_the_next_save() {
     let mut store = Settings::open(&mut host, OWN_WORD);
     let (record, refusals) = loaded::<Gated>(&store);
     assert_eq!((record, refusals), (Gated::default(), alloc::vec![]));
-    save(&record, &mut store).expect("written");
+    save(&record, Keys::ALL, &mut store).expect("written");
     drop(store);
     assert_eq!(
         host.committed().get("gate.level"),
@@ -243,7 +248,7 @@ fn a_setting_said_by_its_absence_is_removed_and_a_restore_removes_every_key() {
     let (mut record, _) = loaded::<Look>(&store);
     assert_eq!(record.badge, Some(3));
     record.badge = None;
-    save(&record, &mut store).expect("written");
+    save(&record, Keys::of(Key::Badge), &mut store).expect("written");
     assert_eq!(store.get("badge"), None);
     assert_eq!(store.get("scheme"), Some("amber"));
     clear::<Look>(&mut store).expect("cleared");
@@ -265,7 +270,14 @@ fn a_publish_answers_what_the_store_then_says() {
         size: 30,
         ..shipped
     };
-    let saved = publish(&mut store, &PublishJob::Save(mine)).expect("written");
+    let saved = publish(
+        &mut store,
+        &PublishJob::Save {
+            record: mine,
+            keys: Keys::of(Key::Size),
+        },
+    )
+    .expect("written");
     assert_eq!(saved.record, mine);
     assert_eq!(
         store.get("scheme"),
@@ -278,7 +290,14 @@ fn a_publish_answers_what_the_store_then_says() {
         scheme: Scheme::Amber,
         ..shipped
     };
-    let saved = publish(&mut store, &PublishJob::Save(chosen)).expect("written");
+    let saved = publish(
+        &mut store,
+        &PublishJob::Save {
+            record: chosen,
+            keys: Keys::of(Key::Scheme),
+        },
+    )
+    .expect("written");
     assert_eq!(
         saved.record.scheme,
         Scheme::Amber,
@@ -297,8 +316,59 @@ fn a_store_that_could_not_be_read_is_not_written_over_and_is_said() {
     assert_eq!(record, Look::default());
     assert_eq!(refusals, [Refusal::StoreUnreadable(Errno::NotFound)]);
     assert_eq!(
-        publish(&mut store, &PublishJob::Save(record)),
+        publish(
+            &mut store,
+            &PublishJob::Save {
+                record,
+                keys: Keys::ALL
+            }
+        ),
         Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn a_save_leaves_every_key_it_does_not_name() {
+    let mut host = service().with_store("font.size = 20\nscheme = amber\n");
+    let mut store = Settings::open(&mut host, OWN_WORD);
+    let dimmed = Look {
+        opacity: 500,
+        ..Look::default()
+    };
+    save(&dimmed, Keys::of(Key::Opacity), &mut store).expect("written");
+    drop(store);
+    let document = host.committed();
+    assert_eq!(document.get("opacity"), Some("500"));
+    assert_eq!(document.get("font.size"), Some("20"));
+    assert_eq!(document.get("scheme"), Some("amber"));
+}
+
+/// The store could not be read at start, so the record began on defaults;
+/// once the store answers, writing one change must not write those defaults
+/// over everything else the user saved.
+#[test]
+fn a_store_unreadable_at_start_keeps_every_setting_the_user_did_not_change() {
+    let mut host = service().with_store("font.size = 20\nscheme = amber\nbadge = 3\n");
+    let unreadable = host.read_refusal();
+    unreadable.set(Some(Errno::NotFound));
+    let (record, refusals) = loaded::<Look>(&Settings::open(&mut host, OWN_WORD));
+    assert_eq!(record, Look::default());
+    assert_eq!(refusals, [Refusal::StoreUnreadable(Errno::NotFound)]);
+    unreadable.set(None);
+
+    let mut publication = Publication::new(record);
+    edit(&mut publication, set_opacity(500));
+    let job = publication.settle().expect("one edit to write");
+    let answer = publish(&mut Settings::open(&mut host, OWN_WORD), &job).expect("written");
+    let document = host.committed();
+    assert_eq!(document.get("opacity"), Some("500"));
+    assert_eq!(document.get("font.size"), Some("20"));
+    assert_eq!(document.get("scheme"), Some("amber"));
+    assert_eq!(document.get("badge"), Some("3"));
+    assert_eq!(
+        (answer.record.size, answer.record.badge),
+        (20, Some(3)),
+        "the answer is the user's store, not the defaults"
     );
 }
 
@@ -363,6 +433,11 @@ fn set_opacity(opacity: u32) -> impl FnOnce(&mut Look) {
     move |now| now.opacity = opacity
 }
 
+/// The write a settle owes: `keys` of `record`.
+fn saving(record: Look, keys: Keys<Look>) -> PublishJob<Look> {
+    PublishJob::Save { record, keys }
+}
+
 fn confirm(publication: &mut Publication<Look>, record: Look) -> Option<PublishJob<Look>> {
     let answer = Published {
         record,
@@ -396,10 +471,31 @@ fn a_settle_asks_for_exactly_one_write() {
     let mut publication = Publication::new(Look::default());
     edit(&mut publication, resize_to(larger()));
     edit(&mut publication, resize_to(largest()));
-    assert_eq!(publication.settle(), Some(PublishJob::Save(largest())));
+    assert_eq!(
+        publication.settle(),
+        Some(saving(largest(), Keys::of(Key::Size)))
+    );
     assert_eq!(publication.settle(), None, "nothing is left unwritten");
     assert_eq!(*publication.adopted(), Look::default());
     assert_eq!(confirm(&mut publication, largest()), None, "nothing owed");
+}
+
+#[test]
+fn a_settle_carries_every_setting_edited_since_the_last_write() {
+    let mut publication = Publication::new(Look::default());
+    edit(&mut publication, resize_to(larger()));
+    edit(&mut publication, set_opacity(500));
+    let expected = Look {
+        opacity: 500,
+        ..larger()
+    };
+    assert_eq!(
+        publication.settle(),
+        Some(saving(
+            expected,
+            Keys::of(Key::Size).union(Keys::of(Key::Opacity))
+        ))
+    );
 }
 
 #[test]
@@ -491,12 +587,18 @@ fn the_values_an_answer_refused_are_said() {
 fn an_answer_landing_mid_drag_leaves_the_dragged_setting_alone() {
     let mut publication = Publication::new(Look::default());
     edit(&mut publication, resize_to(larger()));
-    assert_eq!(publication.settle(), Some(PublishJob::Save(larger())));
+    assert_eq!(
+        publication.settle(),
+        Some(saving(larger(), Keys::of(Key::Size)))
+    );
     edit(&mut publication, resize_to(sized(5)));
     assert_eq!(confirm(&mut publication, larger()), None);
     assert_eq!(*publication.live(), sized(5), "not snapped back");
     edit(&mut publication, resize_to(largest()));
-    assert_eq!(publication.settle(), Some(PublishJob::Save(largest())));
+    assert_eq!(
+        publication.settle(),
+        Some(saving(largest(), Keys::of(Key::Size)))
+    );
 }
 
 #[test]
@@ -548,7 +650,10 @@ fn a_restore_answered_mid_drag_is_not_undone_by_the_drags_settle() {
         ..restored
     };
     assert_eq!(*publication.live(), expected);
-    assert_eq!(publication.settle(), Some(PublishJob::Save(expected)));
+    assert_eq!(
+        publication.settle(),
+        Some(saving(expected, Keys::of(Key::Opacity)))
+    );
 }
 
 #[test]
@@ -565,7 +670,10 @@ fn a_refusal_landing_mid_drag_leaves_the_dragged_setting_alone() {
         ..Look::default()
     };
     assert_eq!(*publication.live(), expected);
-    assert_eq!(publication.settle(), Some(PublishJob::Save(expected)));
+    assert_eq!(
+        publication.settle(),
+        Some(saving(expected, Keys::of(Key::Opacity)))
+    );
 
     let mut same = Publication::new(Look::default());
     edit(&mut same, resize_to(larger()));
@@ -577,19 +685,22 @@ fn a_refusal_landing_mid_drag_leaves_the_dragged_setting_alone() {
         largest(),
         "the setting under the pointer stays"
     );
-    assert_eq!(same.settle(), Some(PublishJob::Save(largest())));
+    assert_eq!(same.settle(), Some(saving(largest(), Keys::of(Key::Size))));
 }
 
 #[test]
 fn a_save_asked_for_while_a_write_is_outstanding_waits_for_its_answer() {
     let mut publication = Publication::new(Look::default());
     edit(&mut publication, resize_to(larger()));
-    assert_eq!(publication.settle(), Some(PublishJob::Save(larger())));
+    assert_eq!(
+        publication.settle(),
+        Some(saving(larger(), Keys::of(Key::Size)))
+    );
     edit(&mut publication, resize_to(largest()));
     assert_eq!(publication.settle(), None, "one write at a time");
     assert_eq!(
         confirm(&mut publication, larger()),
-        Some(PublishJob::Save(largest()))
+        Some(saving(largest(), Keys::of(Key::Size)))
     );
     assert_eq!(confirm(&mut publication, largest()), None);
     assert_eq!(*publication.adopted(), largest());
@@ -617,7 +728,7 @@ fn a_restore_behind_a_write_is_not_displaced_by_a_later_save() {
     };
     assert_eq!(
         confirm(&mut publication, restored),
-        Some(PublishJob::Save(expected))
+        Some(saving(expected, Keys::of(Key::Opacity)))
     );
 }
 
@@ -691,4 +802,161 @@ fn an_adopted_answer_or_a_revert_owes_the_difference_from_the_screen() {
         Keys::of(Key::Size),
         "owes the revert"
     );
+}
+
+// --- The loop helpers --------------------------------------------------------
+
+/// A desk over the fake service. Unthreaded, each job is carried out where it
+/// is submitted, as with no worker thread; threaded, a job waits until the
+/// worker is let take it.
+struct FakeDesk<'a> {
+    host: RefCell<&'a mut FakeService>,
+    threaded: bool,
+    waiting: RefCell<VecDeque<PublishJob<Look>>>,
+    landed: RefCell<VecDeque<PublishAnswer<Look>>>,
+}
+
+impl<'a> FakeDesk<'a> {
+    fn new(host: &'a mut FakeService, threaded: bool) -> Self {
+        Self {
+            host: RefCell::new(host),
+            threaded,
+            waiting: RefCell::new(VecDeque::new()),
+            landed: RefCell::new(VecDeque::new()),
+        }
+    }
+
+    fn carry_out(&self, job: &PublishJob<Look>) {
+        let answer = publish(
+            &mut Settings::open(&mut **self.host.borrow_mut(), OWN_WORD),
+            job,
+        );
+        self.landed.borrow_mut().push_back(answer);
+    }
+
+    /// The worker takes the job waiting longest, answering whether there was
+    /// one.
+    fn work(&self) -> bool {
+        let Some(job) = self.waiting.borrow_mut().pop_front() else {
+            return false;
+        };
+        self.carry_out(&job);
+        true
+    }
+}
+
+impl PublishDesk<Look> for FakeDesk<'_> {
+    fn submit(&self, job: PublishJob<Look>) -> bool {
+        if self.threaded {
+            self.waiting.borrow_mut().push_back(job);
+            return false;
+        }
+        self.carry_out(&job);
+        true
+    }
+
+    fn collect(&self) -> Option<PublishAnswer<Look>> {
+        self.landed.borrow_mut().pop_front()
+    }
+
+    fn wait(&self) -> Option<PublishAnswer<Look>> {
+        self.collect()
+            .or_else(|| self.work().then(|| self.collect()).flatten())
+    }
+}
+
+#[test]
+fn with_no_worker_thread_a_settled_edit_is_written_and_adopted_at_once() {
+    let mut host = service();
+    let mut publication = Publication::new(Look::default());
+    edit(&mut publication, resize_to(larger()));
+    let mut refusals = Vec::new();
+    {
+        let desk = FakeDesk::new(&mut host, false);
+        let job = publication.settle();
+        assert!(submit_published(
+            &desk,
+            &mut publication,
+            job,
+            &mut refusals
+        ));
+    }
+    assert!(refusals.is_empty());
+    assert_eq!(*publication.adopted(), larger());
+    assert_eq!(host.committed().get("font.size"), Some("18"));
+}
+
+#[test]
+fn the_write_owed_behind_an_answer_is_made_when_that_answer_lands() {
+    let mut host = service();
+    let mut publication = Publication::new(Look::default());
+    let mut refusals = Vec::new();
+    {
+        let desk = FakeDesk::new(&mut host, true);
+        edit(&mut publication, resize_to(larger()));
+        let job = publication.settle();
+        assert!(!submit_published(
+            &desk,
+            &mut publication,
+            job,
+            &mut refusals
+        ));
+        edit(&mut publication, set_opacity(500));
+        assert_eq!(publication.settle(), None, "owed behind the first");
+        assert!(!collect_published(&desk, &mut publication, &mut refusals));
+
+        assert!(desk.work());
+        assert!(collect_published(&desk, &mut publication, &mut refusals));
+        assert_eq!(desk.waiting.borrow().len(), 1, "the owed write was made");
+        assert!(desk.work());
+        assert!(collect_published(&desk, &mut publication, &mut refusals));
+    }
+    assert!(refusals.is_empty());
+    let both = Look {
+        opacity: 500,
+        ..larger()
+    };
+    assert_eq!(*publication.adopted(), both);
+    assert_eq!(host.committed().get("opacity"), Some("500"));
+    assert_eq!(host.committed().get("font.size"), Some("18"));
+}
+
+#[test]
+fn seeing_out_writes_an_edit_never_settled_and_everything_owed() {
+    let mut host = service();
+    let mut publication = Publication::new(Look::default());
+    let mut refusals = Vec::new();
+    {
+        let desk = FakeDesk::new(&mut host, true);
+        edit(&mut publication, resize_to(larger()));
+        let job = publication.settle();
+        let _ = submit_published(&desk, &mut publication, job, &mut refusals);
+        edit(&mut publication, set_opacity(500));
+        see_out_published(&desk, &mut publication, &mut refusals);
+        assert!(desk.waiting.borrow().is_empty(), "nothing left behind");
+    }
+    assert!(refusals.is_empty());
+    assert_eq!(host.committed().get("opacity"), Some("500"));
+    assert_eq!(host.committed().get("font.size"), Some("18"));
+}
+
+#[test]
+fn a_refused_write_is_said_by_the_helpers() {
+    let mut host = service();
+    host.refusal().set(Some(Errno::NoSpace));
+    let mut publication = Publication::new(Look::default());
+    edit(&mut publication, resize_to(larger()));
+    let mut refusals = Vec::new();
+    {
+        let desk = FakeDesk::new(&mut host, false);
+        let job = publication.settle();
+        assert!(submit_published(
+            &desk,
+            &mut publication,
+            job,
+            &mut refusals
+        ));
+    }
+    assert_eq!(refusals, [Refusal::NotSaved(Errno::NoSpace)]);
+    assert_eq!(*publication.live(), Look::default(), "the edit is put back");
 }

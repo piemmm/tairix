@@ -43,7 +43,8 @@ mod program {
         DESKTOP_LAYER_MAX_PLATES,
     };
     use tairix_abi::{Errno, ProcId};
-    use tairix_appdata::{PublishJob, RtHost, Settings};
+    use tairix_appconf::Keys;
+    use tairix_appdata::{Opening, PublishAnswer, PublishJob, PublishWorker, RtHost, Settings};
     use tairix_cinder::cinder::{Eyes, Pose};
     use tairix_cinder::gait;
     use tairix_cinder::layout::{self, PenLayout, COMPANION_SIDE};
@@ -58,7 +59,6 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_raster::Surface;
     use tairix_rng::FastRng;
-    use tairix_rt::sync::WorkerWake;
     use tairix_rt::work::WorkerGuard;
     use tairix_theme::{Theme, ThemeRegistry, Timeline};
     use tairix_util::mathf;
@@ -93,38 +93,20 @@ mod program {
     /// The saved-mood writer: latest-wins with at most one write in flight, so
     /// a companion whose mood keeps moving costs one further write rather than
     /// a backlog, and two writes never race for what the store ends up saying.
-    type Writer = tairix_rt::work::Worker<(), Saved, Result<(), Errno>>;
+    type Writer = PublishWorker<Saved>;
 
-    /// Write `saved` into the companion's own store.
-    fn write_saved(_: &mut (), saved: &mut Saved) -> Result<(), Errno> {
-        let mut host = RtHost;
-        let mut settings = Settings::open_without_defaults(&mut host);
-        tairix_appdata::publish(&mut settings, &PublishJob::Save(*saved)).map(drop)
+    /// The write of Cinder's whole state as `saved` holds it.
+    fn saving(saved: Saved) -> PublishJob<Saved> {
+        PublishJob::Save {
+            record: saved,
+            keys: Keys::ALL,
+        }
     }
 
     /// Say why a mood could not be kept.
-    fn report_write(written: Option<Result<(), Errno>>) {
+    fn report_write(written: Option<&PublishAnswer<Saved>>) {
         if let Some(Err(err)) = written {
-            app::report(APP_NAME, tairix_appdata::Refusal::NotSaved(err));
-        }
-    }
-
-    /// Start the writer and join its wake to the loop's wait-set. A kernel
-    /// that grants neither leaves the write on the frame loop, which is slower
-    /// under load but never loses a mood.
-    fn start_writer(writer: &Arc<Writer>, set: u64) {
-        if let Err(reason) = Writer::start(writer) {
-            app::report(
-                APP_NAME,
-                format_args!("no writer ({reason:?}); Cinder's mood is saved on the frame loop"),
-            );
-            return;
-        }
-        if let Err(err) = app::watch_wake(set, writer.wake(), WRITER_TOKEN) {
-            app::report(
-                APP_NAME,
-                format_args!("writer wake refused ({err}); a failed save is said late"),
-            );
+            app::report(APP_NAME, tairix_appdata::Refusal::NotSaved(*err));
         }
     }
 
@@ -407,8 +389,8 @@ mod program {
         };
         let event_endpoint = binding.endpoint();
 
-        let writer = Arc::new(Writer::new(write_saved, (), WorkerWake::create()));
-        start_writer(&writer, binding.set());
+        let writer = Arc::new(tairix_appdata::publish_worker(Opening::Bare));
+        app::start_worker(APP_NAME, &writer, binding.set(), WRITER_TOKEN, "mood");
         let _guard = WorkerGuard::new(&writer);
 
         let saved = load_saved();
@@ -452,7 +434,7 @@ mod program {
             );
         }
 
-        run_loop(
+        let code = run_loop(
             &mut companion,
             &mut window,
             &mut desktop,
@@ -462,7 +444,14 @@ mod program {
             binding.set(),
             event_endpoint,
             server,
-        )
+        );
+        // However the loop ended, the mood he leaves in is seen out, not
+        // dropped with the worker.
+        let _ = writer.submit(saving(companion.saved()));
+        while let Some(written) = writer.wait() {
+            report_write(Some(&written));
+        }
+        code
     }
 
     /// Let Cinder out, stating the reason if the desktop will not have him.
@@ -601,7 +590,7 @@ mod program {
                 }
                 Some(Wake::App(WRITER_TOKEN)) => {
                     writer.wake().drain();
-                    report_write(writer.collect());
+                    report_write(writer.collect().as_ref());
                     continue;
                 }
                 Some(Wake::PressureChanged | Wake::PressureUnchanged | Wake::App(_)) => continue,
@@ -665,12 +654,6 @@ mod program {
                             // *Quit* ends him, and takes him off the desktop
                             // on the way out.
                             put_away(companion, window, pen_layout);
-                            let _ = writer.submit(companion.saved());
-                            // The mood he leaves in is seen out, not dropped
-                            // with the worker.
-                            while let Some(written) = writer.wait() {
-                                report_write(Some(written));
-                            }
                             return 0;
                         }
                         if item.get() == ROW_OUT {

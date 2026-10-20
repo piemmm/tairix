@@ -51,7 +51,7 @@ mod program {
     use tairix_abi::window_ipc::{WindowEvent, WindowSizing};
     use tairix_abi::{Errno, ProcId};
     use tairix_appdata::RtHost;
-    use tairix_appdata::{Publication, PublishJob, Published, Settings};
+    use tairix_appdata::{Opening, Publication, PublishWorker, Settings};
     use tairix_controls::damage::{self, Repaint};
     use tairix_controls::Keystroke;
     use tairix_geometry::Region;
@@ -437,16 +437,8 @@ mod program {
         }
     }
 
-    /// What the store held after a write, or why it said nothing.
-    type Answer = Result<Published<Graphics>, Errno>;
-
     /// The worker the graphics choice is written through, off the frame loop.
-    type Publisher = Worker<(), PublishJob<Graphics>, Answer>;
-
-    /// Carry out one write to the application's own store.
-    fn publish(_: &mut (), job: &mut PublishJob<Graphics>) -> Answer {
-        tairix_appdata::publish(&mut Settings::open_without_defaults(&mut RtHost), job)
-    }
+    type Publisher = PublishWorker<Graphics>;
 
     /// The desktop the windows are drawn for: its scale, and the theme its
     /// appearance selects.
@@ -1027,16 +1019,10 @@ mod program {
         let Some(publisher) = session.publisher else {
             return;
         };
+        let was = *session.choice.live();
         let mut refusals = Vec::new();
-        // With no worker a write runs here and its answer is already waiting,
-        // so the owed chain is followed until one is really in flight.
-        while let Some(answer) = publisher.collect() {
-            let was = *session.choice.live();
-            let owed = session.choice.adopt(answer, &mut refusals);
+        if tairix_appdata::collect_published(publisher, &mut session.choice, &mut refusals) {
             entered(session, was);
-            if !owed.is_some_and(|job| publisher.submit(job)) {
-                break;
-            }
         }
         for refusal in refusals {
             app::report(APP_NAME, refusal);
@@ -1047,14 +1033,7 @@ mod program {
     /// is never dropped with the worker.
     fn see_out(publisher: &Publisher, choice: &mut Publication<Graphics>) {
         let mut refusals = Vec::new();
-        if let Some(job) = choice.settle() {
-            let _ = publisher.submit(job);
-        }
-        while let Some(answer) = publisher.wait() {
-            if let Some(job) = choice.adopt(answer, &mut refusals) {
-                let _ = publisher.submit(job);
-            }
-        }
+        tairix_appdata::see_out_published(publisher, choice, &mut refusals);
         for refusal in refusals {
             app::report(APP_NAME, refusal);
         }
@@ -1409,45 +1388,9 @@ mod program {
         for refusal in refusals {
             app::report(APP_NAME, refusal);
         }
-        let publisher = Arc::new(Publisher::new(
-            publish,
-            (),
-            tairix_rt::sync::WorkerWake::create(),
-        ));
-        start_worker(&publisher, set, PUBLISH_TOKEN, "graphics store");
+        let publisher = Arc::new(tairix_appdata::publish_worker(Opening::Bare));
+        app::start_worker(APP_NAME, &publisher, set, PUBLISH_TOKEN, "graphics store");
         (Publication::new(graphics), publisher)
-    }
-
-    /// Start `worker` and put its answer wake on `set` under `token`.
-    ///
-    /// A kernel that grants neither leaves the `what` work on the frame loop:
-    /// the desk is stopped, so a submission is carried out where it is made
-    /// and its answer is waiting when the loop next collects. Slower on a
-    /// single core, never work that is lost.
-    fn start_worker<S, Req, Ans>(
-        worker: &Arc<Worker<S, Req, Ans>>,
-        set: u64,
-        token: u64,
-        what: &str,
-    ) where
-        S: Send + 'static,
-        Req: Send + 'static,
-        Ans: Send + 'static,
-    {
-        if let Err(err) = app::watch_wake(set, worker.wake(), token) {
-            worker.stop();
-            app::report(
-                APP_NAME,
-                format_args!("{what} wake refused ({err}); its work is done on the frame loop"),
-            );
-            return;
-        }
-        if let Err(reason) = Worker::start(worker) {
-            app::report(
-                APP_NAME,
-                format_args!("no {what} worker ({reason:?}); its work is done on the frame loop"),
-            );
-        }
     }
 
     /// The player: its figure, built from the preset it walks as, and its
@@ -1778,7 +1721,7 @@ mod program {
             },
             tairix_rt::sync::WorkerWake::create(),
         ));
-        start_worker(&scene, set, SCENE_TOKEN, "scene");
+        app::start_worker(APP_NAME, &scene, set, SCENE_TOKEN, "scene");
         let _scene_guard = WorkerGuard::new(&scene);
         // The scene keeps no choice and declares no slot, so no settings
         // window is ever asked for; it draws nothing of its own either, its

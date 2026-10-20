@@ -991,6 +991,10 @@ const AUTOLOAD_DESKTOP_REVEALED_MARKER: &str = tairix_desktop_session::DESKTOP_R
 /// create round-trip nor the frame-region map it performs says the window is on
 /// screen yet — a click gated on either races that present and lands on
 /// whatever is behind it.
+///
+/// And for a dump of one: the frame it speaks for is drawn settled, every title
+/// glyph fetched and every shadow still, so the picture is the window as it
+/// stays rather than part-way through its arrival.
 const WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
 
 /// Serial marker a vertical gates on to know a served window's *later* frame

@@ -837,7 +837,7 @@ fn handle_settings_overlay(model: &mut Model, event: &Event) {
                 return;
             };
             model.settings.toggle(key);
-            model.settings_state = SettingsState::Pending;
+            model.settings_state = model.settings_state.with(key);
         }
         _ => {}
     }
@@ -851,11 +851,11 @@ fn handle_settings_overlay(model: &mut Model, event: &Event) {
 /// reverted — and the intent is cleared either way, so one refusal is
 /// reported once rather than retried on every keystroke.
 pub fn publish_settings(model: &mut Model, store: &mut SettingsStore<'_>) {
-    if model.settings_state == SettingsState::Published {
+    let SettingsState::Pending(keys) = model.settings_state else {
         return;
-    }
+    };
     model.settings_state = SettingsState::Published;
-    match tairix_appdata::save(&model.settings, store) {
+    match tairix_appdata::save(&model.settings, keys, store) {
         Ok(()) => model.message = Some(String::from("settings saved")),
         Err(errno) => {
             model.message = Some(format!(
