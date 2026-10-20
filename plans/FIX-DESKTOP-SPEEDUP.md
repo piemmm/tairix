@@ -8,17 +8,20 @@
 | D | Blur costs what it changes: damage funnels, the retained frost, bit-identical blur arithmetic, family restack, desktop cells, rationed retention with every blur still drawn, reserved frost memory | done |
 | D.5 | Half-resolution blur | planned: approved once its visual comparison is produced and judged |
 | E | One present per frame carrying a rectangle list, and one-shot frame pacing | done |
+| E.5 | Frames paced at the output's own refresh: the rate travels beside the mode, and the pacer, the session's animation clocks and every desktop application's are driven by it | done |
+| E.6 | The cursor plane moves with the frame while a gesture carries a window | done |
 | F.0 | Raster families select on the `ByPriority` capability axis | done |
 | F.1 | The loops made vectorisable before any intrinsic | done |
-| F.2 | Packed `lib/cpuops` candidates for the blur window and the resample row filter, on aarch64 and x86_64 | planned |
-| F.3 | The remaining candidate families, in order | planned |
-| F.5 | Each family's self-verify vectors, differential fuzz and docs | in progress: lands with each F.2 candidate |
+| F.2 | Packed `lib/cpuops` candidates — SSE2 on x86_64, NEON on aarch64 — for the span blend, the box blur's sliding window and the row scan | done |
+| F.3 | The remaining candidate families, in order | blocked: `resample` (item 6) waits on decision 2; items 1–5 done |
+| F.5 | Each family's self-verify vectors, differential fuzz and docs | done |
 | G | x86_64 hard-float kernel and user space, with per-task FP/SSE/AVX state | done |
 | G.2 | riscv64 vector state | blocked: whether to take it is a User decision |
 | G.3 | aarch64 SVE state | blocked: whether to take it is a User decision |
 | H | A popup window publishes its region's own pages instead of re-freezing the space | done |
 | I | A dirty rectangle's rows composed in bands across a worker pool | done |
 | J | One window-frame codec, and the desktop's decode spread across it | done |
+| J.2 | Window frames carry premultiplied alpha: an application's present is a byte-order copy, the session's decode a copy and a coverage clamp | done |
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -1178,13 +1181,11 @@ lock and the frame report use — so a desktop with nothing held arms nothing
   period has elapsed is admitted on the wake that produced it, so a click, a
   keystroke, and every interaction slower than the display cost nothing. Only a
   producer outrunning the screen is held.
-- **The period is the one the desktop already animates at.**
-  `tairix_theme::Timeline::FRAME_NS` is the shortest gap between two frames
-  worth drawing, which is the same fact for an animation step and a drag, so
-  there is no second frame-period constant (§2.2) and an animated surface is
-  never woken for a frame the pacer would refuse. A refresh taken from the mode
-  would be an ABI field with no producer; real vsync off the flip signal is
-  `plans/FIX-DISPLAY-ACCELERATION.md` Stage E.
+- **The period is the output's own.** One frame of the rate the display
+  service states for the output (`RefreshRate`, E.5), held by the compositor
+  and handed to the pacer and every animated surface alike, so there is no
+  second frame-period constant and an animated surface is never woken for a
+  frame the pacer would refuse. A display that flips paces by its latch.
 - **`admit` holds only what is not yet due**, so the deadline it arms is never
   zero-length and the loop cannot spin between a refusal and its frame.
 - **An undamaged frame is never held and never starts the period.** Presenting
@@ -1218,6 +1219,85 @@ does damage the screen — composite nothing until that deadline.
 
 **Acceptance:** CPU at idle unchanged from parked — the pacer folds
 `WAITSET_TIMEOUT_NONE` through untouched whenever nothing is held.
+
+### E.5 Frames paced at the output's own refresh
+
+A fixed sixtieth of a second is wrong for every output that is not exactly
+60 Hz: content paced at 60 on a 75 or 144 Hz scan-out repeats a frame every few
+refreshes, which is judder exactly where it shows — a drag. The period is the
+output's, and the invariants later work must keep:
+
+- **The rate is the driver's to state, with the mode, and only it can.**
+  `Display::refresh` answers the rate the output scans at
+  (`tairix_abi::driver::display::RefreshRate`, millihertz), or none when the
+  device states none; it moves across `service_events` exactly as `output` does.
+  The display protocol's `Query` reply carries it beside the mode, and a change
+  of either is a `DisplayOutput` notice. A refresh is **not** part of
+  `DisplayMode`: that type is a frame layout (and a window's), and a rate change
+  must not read as a mode move that rebuilds every buffer.
+- **Where it comes from.** `gpu_virtio` reads the EDID timing that matches the
+  scan-out's size, preferring the preferred timing, on bring-up and on every
+  display-change event (QEMU writes the host display's rate there).
+  `bcm2711_hvs` states the timing of the output its surface is shaped for. The
+  firmware framebuffer and VESA state none: firmware hands over no timing.
+- **One assumed rate, defined once.** Where the output states none the period
+  is `RefreshRate::ASSUMED` (60 Hz), the one definition every consumer falls
+  back to; nothing else spells a frame period to pace by. A frame *budget* —
+  what one may cost, such as WinterSun's 60 Hz baseline — is not a cadence.
+- **A rate is validated, not trusted.** The wire refuses a rate outside
+  `RefreshRate::MIN_MHZ..=RefreshRate::MAX_MHZ` (a fixed format bound, not a
+  capacity), so a hostile or broken driver cannot set the desktop spinning at a
+  nanosecond period or stalling at a minute.
+- **One holder, handed to every clock.** The compositor holds the output's
+  rate (`Compositor::refresh_rate`); the pacer and every animated surface are
+  handed it per call (`Timeline::next_frame_in`, `Fade`, the pointer aids, the
+  lock and credential sheets), so a rate that changes is followed at the next
+  frame and no second copy can drift. A flipping display (E,
+  `FIX-DISPLAY-ACCELERATION` E) is still paced by its latch; the rate then
+  governs only the animation cadence.
+- **A cadence capped below the refresh stands whole frames.** A scene draws at
+  most thirty frames a second and a terminal effect twenty, each on the fewest
+  whole display frames that hold it there (`tairix_theme::motion::whole_frames_ns`,
+  `SceneClock::frame_on`), so it lands on the display's cadence instead of
+  beating against it. A serve loop's slice of inline work is half a frame
+  (`work_slice_ns`), the ray tracer's and the file manager's alike.
+- **Applications are told it.** `DesktopInfo` carries the rate the desktop
+  composes at, `tairix_window::Desktop::refresh` is what an application
+  animates by, and a rate that changes alone republishes the desktop.
+- **WinterSun paces by the output and budgets by its baseline.** Its frames
+  fall due one display frame apart (`pacing::Cadence`), while the budget its
+  governor sheds detail against stays the 60 Hz baseline `plans/WINTERSUN.md`
+  states, so a faster output is given more frames, never less detail.
+- **Rate, not phase.** A device with no vertical-blank event (virtio-gpu, the
+  framebuffers) is paced at the right rate with no knowledge of the phase — the
+  same position Linux takes for a virtual display with no vblank interrupt.
+
+### E.6 The cursor moves with the frame while a gesture carries a window
+
+The cursor plane is moved on every drained input batch, ahead of any frame,
+which is right for a plain pointer move — it presents nothing — and wrong while
+the pointer *carries* something: the plane then runs ahead of the window it is
+dragging by however long the frame takes, which reads as the window lagging the
+hand.
+
+- While a move or resize gesture holds a window, or a drag carries a plate, the
+  plane is moved by the frame's present, **after** the frame is handed to the
+  display, so both show from the same scan-out. `Compositor::present` routes the
+  pointer (shape and plane-versus-frame) before composing, as ever, and moves
+  the plane after the frame is sent.
+- A batch that leaves nothing to draw still moves the plane at once, so a
+  gesture pinned against the screen edge never freezes the pointer.
+- Outside a gesture nothing changes: the plane follows the hand between frames.
+- The session decides per batch: it moves the plane between frames unless the
+  pointer carried something at any point of the batch the seat drain served
+  (`SeatWake::Served`'s `carried`, so a batch whose release ends the gesture
+  still takes its last move with the frame) and a frame is owed. Routing
+  records where the plane is due, a new shape shown where the old one stood,
+  and `move_plane` takes it there; a move the plane refuses hands the pointer
+  back to the frame.
+- A display engine that latches presents (the Pi 4 HVS) rewrites a pointer
+  moved while a present waits in the list that present latches alone, so the
+  move reaches the screen with that frame.
 
 ---
 
@@ -1324,14 +1404,10 @@ a later change does not re-derive them:
   change the output and is therefore a rendering decision (invariant 2), not an
   optimisation. Reverted.
 
-**Also fixed here** (§2.18, noticed by reading): `lib/display`'s three
-per-pixel channel-order codecs (`encode`, `encode_straight`, `decode_straight`)
-had the same missing `#[inline]`, and the disassembly confirms Stage J's
-window-frame codec was making an out-of-line indirect call per pixel across its
-own crate's module boundary — on the path every application present takes.
-Fixed the same way; unmeasured, because no bench family covers the window-frame
-codec, and the fix is the correct expression for a four-byte shuffle rather than
-a restructure a figure would have to justify.
+`lib/display`'s per-pixel channel-order codecs (`ChannelOrder::encode`,
+`ChannelOrder::decode`) are `#[inline]` for the same reason, so the
+window-frame codec every application present takes makes no out-of-line call
+per pixel across its crate's module boundary.
 
 Also, and separately: the `encode` bench family
 re-implemented the encode loop inside the harness instead of calling
@@ -1347,20 +1423,48 @@ Same shape, because it has passed review once: a `build.rs`-emitted per-ISA cfg
 (never `cfg(target_arch)` in source, so `cargo xtask cfg-check` stays green), a
 portable baseline registered **last** that is always feature-legal, the mandatory
 self-verify against that baseline over a fixed size/alignment/alpha vector,
-`ByPriority` selection, host fuzzing, and the pin for determinism.
+`ByPriority` selection and host fuzzing. No pin is taken: a priority choice over
+the delivered set is already the same on every run.
+
+- **The two families measured to matter.** A translucent window's drag frame
+  is the scalar span blend's (~5 ns per blended pixel); a frosted one is ~57%
+  that and ~43% re-blurring the frost's border. So the candidates are the span
+  blend (`blend_span` and `blend_solid_span`, a `factor`/tile-bias
+  composite of one span over another) and the box blur's two passes.
+- **Exactness by construction.** The blend's every term is a product of two
+  bytes plus a bias below one level, so it lives in 16-bit lanes, and
+  `div255` is `(x + 1 + (x >> 8)) >> 8`, exact for every such sum (proved
+  exhaustively in the tests). The blur's mean is `floor((sum + d/2) / d)`
+  through `LaneDivisor`, a reciprocal below 2^32 exact for every sum a window
+  of up to 65 536 samples holds, where the scalar path multiplies by its own
+  64-bit one. A wider window could hold sums past 32 bits, where only the
+  baseline's saturating arithmetic is defined, so it takes the baseline
+  (`accel::blur_for`). Neither candidate rounds differently from the baseline
+  anywhere.
+- **Structure loads and stores only, on NEON.** `aarch64-unknown-none` builds
+  with strict alignment, under which a plain vector load of a pixel or a sum is
+  split into its bytes, so the NEON candidates reach memory only through
+  `LD4`/`ST4`, which need no more than their element's alignment; `Pixel` and
+  `PixelSum` are `#[repr(C)]`, so a span's bytes are its pixels and a run of
+  sums its lanes.
+- **AVX2 is not taken.** SSE2 is measured first; a 256-bit candidate is added
+  only if the 128-bit one leaves the loop compute-bound rather than
+  memory-bound, and then with its own miri coverage.
+- **Every process resolves its families**, lazily, from the feature set the
+  kernel delivered (`plans/FIX-HARDWARE-FEATURES.md` P2d).
 
 ### F.3 Families, in order
-1. `blend_span` — one source over a span (the one span composite B.6 routed
-   every blended pixel through). **F.1 landed its source shape**; a packed
-   candidate is still open.
-2. `Surface::blit` — src-over-dst row zip. Reaches `blend_span`, so F.1
-   covered it.
-3. the WM's opaque/blended run loop (B.1). Its copy-and-encode half is now
-   0.50 ns/px full screen; what is left is the strided alpha scan in
-   `WindowRow::opaque_run`/`blend_len`.
-4. `blur_span` add/sub/mean — after the D.3 reciprocal. F.1
-   established this needs intrinsics: no source shape vectorises the
-   reciprocal multiply.
+1. `raster-blend` — `blend_span` and `blend_solid_span`, one source over a
+   span (the one span composite B.6 routed every blended pixel through).
+2. `Surface::blit` — src-over-dst row zip. Reaches `blend_span`, so the blend
+   family covers it.
+3. `raster-scan` — `leading_opaque` / `leading_translucent`, the alpha scan
+   `WindowRow::opaque_run`/`blend_len` split a row into copied and blended runs
+   by: measured at 0.225 ns/px scalar against the run's 0.50 ns/px copy and
+   encode.
+4. `raster-blur` — the box blur's line pass and its column sums' add, slide
+   and mean, after the D.3 reciprocal (no source shape vectorises the
+   reciprocal multiply, so the lanes take `LaneDivisor`'s exact 32-bit form).
 5. `encode_run` is not a family: F.1 measured its byte-order shuffle at
    0.132 ns/px against 0.031 for the matching order, leaving a candidate
    nothing to win.
@@ -1382,15 +1486,34 @@ All are secret-free and bit-identical, so all are legal on the capability axis
 
 ### F.5 Tests + docs
 - Self-verify vectors per family (sizes, alignments, alpha extremes,
-  overlapping/short spans).
-- Differential fuzz: candidate vs baseline over random buffers
-  (`cargo xtask fuzz`), added to the regression corpus (§19.6).
-- The pin makes CI deterministic; the audit records the selection.
+  overlapping/short spans), run at every resolution.
+- Differential fuzz: `lib/raster/tests/fuzz_kernels.rs` resolves the public
+  calls to the build's candidates and holds them to an oracle in the public
+  per-pixel operators (`cargo xtask fuzz`).
+- miri interprets the SSE2 kernels (`tairix-raster`, `accel::`); the crate
+  denies `unsafe` outside its two kernel modules. The NEON module is never
+  compiled on the host, so the aarch64 guest vertical
+  `raster_kernels_qemu_aarch64` is what holds the NEON candidates — through
+  their self-verify and `CONFORMANCE_DIGEST`, which the host holds portable and
+  SSE2 to.
+- `cargo xtask bench` measures what a process on the host runs; `--portable`
+  measures the baseline beside it.
+- `accel::resolve` answers what it installed — `None` for a family already
+  resolved — which the bench prints and the guest vertical asserts.
 - Docs: `lib/raster/README.md` (families and their gates),
-  `plans/FIX-HARDWARE-FEATURES.md` P3b corrected, README support matrix.
+  `plans/FIX-HARDWARE-FEATURES.md` P3b, README support matrix.
 
 **Acceptance:** bit-identical output on every candidate, baseline chosen when
 features are masked off, measured improvement quoted from the A.2 harness.
+
+**Measured** (`cargo xtask bench --iters 64 --rounds 9`, x86_64 host, SSE2
+against `--portable`, ns/px): a translucent window stack composites at 2.04
+against 6.10, a frosted one at 7.47 against 16.6 (5.65 against 14.1 for a drag
+frame), a translucent blit at 0.72 against 3.05, `frost_region` at 4.9 against
+9.7, `box_blur` at 7.7 against 10.6, and an opaque stack at 0.45 against 0.55.
+The NEON candidates are held by their disassembly rather than a figure: the
+bench runs on the host, and on `aarch64-unknown-none` every load and store of
+theirs is a single `LD4`/`ST4`.
 
 ---
 
@@ -1540,7 +1663,7 @@ the pool.
 
 ## Stage J — The one whole-window pass above the compositor
 
-Converting an application's presented straight-alpha frame into the compositor's
+Converting an application's presented frame into the compositor's
 own window surface, and reporting the pixels that genuinely changed, is not the
 app's to shrink: the **app** declares the damage, so a client that repaints
 everything makes the desktop convert everything. C.3 is the answer for the two
@@ -1548,10 +1671,15 @@ passes inside the app; it cannot be the answer for this one.
 
 - **One definition, not seven.** The conversion is `tairix_display::winframe`,
   beside the `ChannelOrder` the scan-out path owns: `encode` writes a surface out
-  as the straight-alpha bytes a window frame holds, `decode` reads a frame in and
-  answers the changed sub-rectangle. The scan-out encoder is deliberately *not*
-  reused — the screen is opaque, a window frame is not — so the pair sits beside
-  it as `encode_straight` / `decode_straight`.
+  as the bytes a window frame holds, `decode` reads a frame in and answers the
+  changed sub-rectangle.
+- **J.2: a window frame is premultiplied.** It holds exactly the pixels the
+  application composed, in the channel order the mode names, so `encode` is the
+  scan-out's own byte-order copy and nothing divides or loses precision at low
+  alpha. `decode` copies, and **clamps each colour channel to the pixel's
+  alpha**: a frame is a client's, and a channel above its alpha breaks the
+  invariant every blend relies on, so the session restores it rather than
+  trusting the client.
 - **Spread, because it cannot be bounded.** Both directions are row-independent
   and expressed over `lib/parallel`'s `JobRunner`. The session hands the decode
   the compositor's own runner, read back through `Compositor::job_runner`, so the
@@ -1597,12 +1725,12 @@ Stated so a later change cannot quietly take a shortcut:
 | B | opaque runs (occlusion is the same mechanism), dither, segment composite, `encode_run` | A | no | no |
 | C | region hoist, control damage, hover routing, per-app damage, text memo, batch shell work | A | no | no |
 | D | damage funnels, frost cache/reuse, blur reciprocal, family restack, desktop cells | A, B | no | no |
-| E | disjoint region, one present per frame, one-shot pacing | B, C, D | `Present` rect list (with FIX-DISPLAY-ACCELERATION Stage B) | no |
+| E | disjoint region, one present per frame, one-shot pacing; E.5 the output's rate | B, C, D | `Present` rect list (with FIX-DISPLAY-ACCELERATION Stage B); E.5 the `Query` reply's rate, `DesktopInfo`'s rate | no |
 | F | `lib/cpuops` `ByPriority` raster candidates (aarch64 and x86_64) | B, C, (D, E) | no | no |
 | G | x86_64 hard-float and per-task FP/SSE/AVX state; G.2 riscv64 vector state | — | target spec | yes |
 | H | publish a region's own pages instead of re-freezing the space | — | no | yes |
 | I | compose a dirty rectangle's rows in bands across a worker pool | A, B, D | no | no |
-| J | one window-frame codec, and the desktop's decode spread across it | A, I | no | no |
+| J | one window-frame codec, and the desktop's decode spread across it; J.2 premultiplied frames | A, I | J.2 the window frame's alpha | no |
 
 A–E are expected to dominate F entirely.
 

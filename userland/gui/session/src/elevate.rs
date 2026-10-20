@@ -43,6 +43,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::AuthorisedOutcome;
 use tairix_abi::Errno;
@@ -614,11 +615,11 @@ impl AuthorisePrompt {
         })
     }
 
-    /// `park_ns` shortened to the sheet's next frame, the next second of a
-    /// lockout's countdown, or now while a change is owed; left as it is
-    /// with nothing up.
+    /// `park_ns` shortened to the sheet's next frame on a display refreshing
+    /// at `refresh`, the next second of a lockout's countdown, or now while a
+    /// change is owed; left as it is with nothing up.
     #[must_use]
-    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64, refresh: RefreshRate) -> u64 {
         park_within(
             park_ns,
             self.showing.as_ref().and_then(|showing| {
@@ -634,7 +635,7 @@ impl AuthorisePrompt {
                     });
                 showing
                     .sheet
-                    .next_frame_in(now_ns)
+                    .next_frame_in(now_ns, refresh)
                     .into_iter()
                     .chain(tick)
                     .min()

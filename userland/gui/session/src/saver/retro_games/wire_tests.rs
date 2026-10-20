@@ -13,6 +13,7 @@ use super::{
     Part, Stage, NEAR,
 };
 use crate::saver::retro_games::{draw_craft, Moment, Rgb, View, CAMERA};
+use crate::saver::TEST_SCENE_FRAME_NS;
 
 const SCREEN: (u32, u32) = (480, 270);
 
@@ -171,7 +172,7 @@ fn nothing_on_the_ground_stands_as_tall_as_the_camera() {
 #[test]
 fn the_camera_projects_the_floor_where_the_floor_lies() {
     let view = view();
-    let moment = Moment::at(12.0, 0.8);
+    let moment = Moment::at(12.0, 0.8, TEST_SCENE_FRAME_NS);
     let camera = Camera::at(&view, moment);
     for depth in [1.5, 4.0, 30.0] {
         let world = Vec3::new(moment.sway + 2.0, 0.0, moment.flown + depth);

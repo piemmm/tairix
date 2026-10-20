@@ -4,6 +4,7 @@
 //! ribbon moved, so a frame of the ribbon never paints the column again and a
 //! keystroke never paints the ribbon.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::{Rect, Region};
 use tairix_raster::Surface;
 use tairix_ribbon::Light;
@@ -23,16 +24,21 @@ pub struct Scene {
 
 impl Scene {
     /// The ribbon across `screen`, kept clear of `clear`, painted whole as it
-    /// stands at `now_ns` and holding still when `still`; `None` when the heap
-    /// will not give it.
+    /// stands at `now_ns` on a display refreshing at `refresh` and holding
+    /// still when `still`; `None` when the heap will not give it.
     #[must_use]
-    pub fn new(screen: Rect, clear: Rect, now_ns: u64, still: bool) -> Option<Self> {
+    pub fn new(
+        screen: Rect,
+        clear: Rect,
+        (now_ns, refresh): (u64, RefreshRate),
+        still: bool,
+    ) -> Option<Self> {
         let mut light = Light::new((screen.width, screen.height), clear, 0.0)?;
         let mut layer = Surface::new(screen.width, screen.height)?;
         light.paint(&mut layer, Rect::new(0, 0, screen.width, screen.height));
         Some(Self {
             light,
-            motion: SceneClock::new(now_ns, still),
+            motion: SceneClock::new(now_ns, still, refresh),
             layer,
             clear,
             damage: Region::new(),
@@ -46,14 +52,14 @@ impl Scene {
         self.motion.due_ns().map(|due| due.saturating_sub(now_ns))
     }
 
-    /// Move the ribbon on to `now_ns` if a frame is due, repainting what it
-    /// moved, and answer whether anything did; [`damage`](Self::damage) then
-    /// holds those pixels.
-    pub fn advance(&mut self, now_ns: u64) -> bool {
+    /// Move the ribbon on to `now_ns` on a display now refreshing at
+    /// `refresh` if a frame is due, repainting what it moved, and answer
+    /// whether anything did; [`damage`](Self::damage) then holds those pixels.
+    pub fn advance(&mut self, now_ns: u64, refresh: RefreshRate) -> bool {
         if !self.motion.frame_due(now_ns) {
             return false;
         }
-        let t = self.motion.advance(now_ns);
+        let t = self.motion.advance(now_ns, refresh);
         self.damage.clear();
         if !self.light.step(t, self.clear, &mut self.damage) {
             return false;

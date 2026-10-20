@@ -28,6 +28,9 @@ tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 tairix-procinfo = { path = "../procinfo", version = "=0.0.0", optional = true, features = [
     "program",
 ] }
+# The worker pool an app spreads its per-pixel work across, sized from the CPUs
+# the System Information API reports. Optional with the rest of the app half.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", optional = true, features = ["pool"] }
 # The retained window surface the shell draws each frame into. Optional with
 # the rest of the app-side half.
 tairix-raster = { path = "../raster", version = "=0.0.0", optional = true }
@@ -47,6 +50,7 @@ default = ["rt"]
 rt = [
     "dep:tairix-rt",
     "dep:tairix-procinfo",
+    "dep:tairix-parallel",
     "dep:tairix-raster",
 ]
 

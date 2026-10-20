@@ -20,16 +20,10 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_theme::motion::ease_out;
 
 use crate::board::{Coord, Step};
-
-/// How long one animated frame lasts: a sixtieth of a second.
-///
-/// A repaint is scoped to the cells actually moving, so the cost of a frame is
-/// a handful of tiles rather than the window; and a wave is short and finite,
-/// so a game at rest wakes for nothing at all.
-pub const FRAME_NS: u64 = 1_000_000_000 / 60;
 
 /// Live waves kept at once, oldest dropped past it.
 ///
@@ -243,14 +237,15 @@ impl Motion {
         })
     }
 
-    /// When the next frame is due, or `None` when nothing is animating.
+    /// When the next frame is due on a desktop refreshing at `refresh`, or
+    /// `None` when nothing is animating.
     ///
     /// One-shot by construction: the caller passes this as its park deadline,
     /// so a board at rest parks with no deadline and takes no wake at all.
     #[must_use]
-    pub fn deadline_ns(&self, now_ns: u64) -> Option<u64> {
+    pub fn deadline_ns(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
         let last = self.waves.iter().map(|wave| wave.ends_ns).max()?;
-        Some(now_ns.saturating_add(FRAME_NS).min(last))
+        Some(now_ns.saturating_add(refresh.frame_ns()).min(last))
     }
 
     /// Every cell any live wave covers, for the repaint's damage set.

@@ -13,8 +13,8 @@
 use tairix_abi::driver::clock;
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, AllocatedBuffer, BufferId, CursorCaps, DamageRect,
-    Display, DisplayFormat, DisplayMode, DisplayPower, HardwareCursor, Presented, Scan, Serviced,
-    Timing, MAX_ACCEL_LAYERS,
+    Display, DisplayFormat, DisplayMode, DisplayPower, HardwareCursor, Presented, RefreshRate,
+    Scan, Serviced, Timing, MAX_ACCEL_LAYERS,
 };
 use tairix_abi::driver::encoder::{Connector, EncoderOp, Phase, PipeLimits};
 use tairix_abi::driver::mmio::RegisterBlock;
@@ -250,6 +250,8 @@ pub struct Engine<H, V, C: LinkCall, A: BufferMemory, D, L> {
     /// needed.
     floor_refused: Option<u64>,
     surface: Option<DisplayMode>,
+    /// The rate of the timing the surface is shaped for.
+    refresh: Option<RefreshRate>,
     buffers: Buffers<A::Region>,
     alloc: A,
     /// Most bytes the presenter's buffers may hold together.
@@ -303,10 +305,10 @@ fn output_load_hz(load: Load, timing: &Timing) -> u64 {
 
 /// The surface a timing's sink shows.
 fn surface_of(timing: &Timing) -> DisplayMode {
-    let width = u32::from(timing.horizontal.active);
+    let (width, height) = timing.active_size();
     DisplayMode {
         width_px: width,
-        height_px: u32::from(timing.vertical.active),
+        height_px: height,
         stride_bytes: (width * 4).next_multiple_of(STRIDE_ALIGN),
         format: DisplayFormat::Bgra8888,
     }
@@ -387,6 +389,7 @@ where
             floor_hz: 0,
             floor_refused: None,
             surface: None,
+            refresh: None,
             buffers: Buffers::new(),
             alloc: parts.alloc,
             budget: parts.budget,
@@ -551,7 +554,7 @@ where
     /// Write every fixed list of pipe `at`, whose valve runs `timing`.
     fn write_lists(&self, at: usize, timing: &Timing) -> Result<(), DriverError> {
         let channel = self.pipes[at].valve.kind().channel;
-        let (width, height) = active_size(timing);
+        let (width, height) = timing.active_size();
         self.hvs.write_slot(channel, List::Black, &[])?;
         if let Some(console) = self.console {
             let words = Self::fitted_plane(channel, &console, width, height)?;
@@ -596,7 +599,7 @@ where
     fn build_stack(&mut self, at: usize, timing: &Timing) -> Result<Built, DriverError> {
         let surface = self.surface.ok_or(DriverError::Stale)?;
         let channel = self.pipes[at].valve.kind().channel;
-        let output = active_size(timing);
+        let output = timing.active_size();
         let fit = Place::fit(surface.width_px, surface.height_px, output.0, output.1);
         let mut planes: ArrayVec<PlaneWords, STACK_PLANES> = ArrayVec::new();
         let mut named: ArrayVec<BufferId, MAX_ACCEL_LAYERS> = ArrayVec::new();
@@ -731,18 +734,31 @@ where
         )
     }
 
-    /// Bring the pointer's plane in every list a running channel reads to
-    /// the pointer as it now is, in place.
+    /// Bring the pointer's plane to the pointer as it now is, in place: in
+    /// every list a running channel reads, or — while a present is queued on
+    /// it — in the list it latches next alone, so the pointer reaches the
+    /// screen with the frame that moves what it drags rather than ahead of it.
     fn rewrite_pointer(&self) -> Result<(), DriverError> {
         let Some(surface) = self.surface else {
             return Ok(());
         };
         for (at, pipe) in self.pipes.iter().enumerate() {
             let Some(timing) = pipe.runs else { continue };
-            let output = active_size(&timing);
+            let output = timing.active_size();
             let fit = Place::fit(surface.width_px, surface.height_px, output.0, output.1);
             let (source, place) = self.pointer_at(&fit);
-            for &start in self.slots[at].pointer_at.iter().flatten() {
+            let slots = &self.slots[at];
+            let read = slots
+                .pointer_at
+                .iter()
+                .enumerate()
+                .filter_map(|(index, start)| {
+                    slots
+                        .waiting
+                        .is_none_or(|waiting| waiting == index)
+                        .then_some(*start)?
+                });
+            for start in read {
                 self.rewrite_pointer_plane(start, &source, &place)?;
             }
         }
@@ -1052,14 +1068,11 @@ where
     /// Bring pipe `at` up running `timing`.
     fn bring_up(&mut self, at: usize, timing: Timing) -> Result<(), DriverError> {
         let kind = *self.pipes[at].valve.kind();
+        let (width, height) = timing.active_size();
         self.write_lists(at, &timing)?;
         self.hvs.mux(kind.output, Some(kind.channel))?;
-        self.hvs.start(
-            kind.channel,
-            u32::from(timing.horizontal.active),
-            u32::from(timing.vertical.active),
-            timing.scan == Scan::Interlaced,
-        )?;
+        self.hvs
+            .start(kind.channel, width, height, timing.scan == Scan::Interlaced)?;
         let _ = self.show_on(at, &timing)?;
         let pipe = &mut self.pipes[at];
         pipe.encoder.configure(&timing)?;
@@ -1074,8 +1087,8 @@ where
         pipe.runs_link = pipe.connector.link;
         self.log.record(Record::Up {
             encoder: kind.encoder,
-            width: u32::from(timing.horizontal.active),
-            height: u32::from(timing.vertical.active),
+            width,
+            height,
             refresh_mhz: timing.refresh_mhz(),
         });
         Ok(())
@@ -1103,7 +1116,7 @@ where
             let Some(timing) = timing else { continue };
             running += 1;
             most = most.max(output_load_hz(pipe.valve.kind().load, timing));
-            let (out_width, out_height) = active_size(timing);
+            let (out_width, out_height) = timing.active_size();
             let place = Place::fit(width, height, out_width, out_height);
             let placed = u64::from(place.width) * u64::from(place.height);
             pixels += placed * stacked / surface_area * u64::from(timing.refresh_mhz()) / 1_000;
@@ -1158,11 +1171,9 @@ where
     /// One pass of [`Self::reconcile`], answering the first output that
     /// failed in it.
     fn converge(&mut self) -> Result<(), DriverError> {
-        let surface = self
-            .pipes
-            .iter()
-            .find_map(Pipe::wanted)
-            .map(|t| surface_of(&t));
+        let shaping = self.pipes.iter().find_map(Pipe::wanted);
+        self.refresh = shaping.as_ref().and_then(RefreshRate::of);
+        let surface = shaping.map(|t| surface_of(&t));
         if surface != self.surface {
             for at in 0..self.pipes.len() {
                 if self.pipes[at].runs.is_some() {
@@ -1240,14 +1251,6 @@ where
 /// The word offset of the filter kernel, as a plane's field holds it.
 fn kernel_at() -> Result<u32, DriverError> {
     u32::try_from(KERNEL_AT).map_err(|_| DriverError::OutOfRange)
-}
-
-/// A timing's active pixels across and lines down.
-fn active_size(timing: &Timing) -> (u32, u32) {
-    (
-        u32::from(timing.horizontal.active),
-        u32::from(timing.vertical.active),
-    )
 }
 
 /// Where `layer` reads its buffer, at `bus` and `stride` bytes a line, and
@@ -1332,6 +1335,10 @@ where
         self.surface
     }
 
+    fn refresh(&self) -> Option<RefreshRate> {
+        self.refresh
+    }
+
     fn service_events(&mut self) -> Result<Serviced, DriverError> {
         for at in 0..self.pipes.len() {
             let pipe = &mut self.pipes[at];
@@ -1383,9 +1390,11 @@ where
             }
         }
         // The outputs go on compositing the stack they latched last, which is
-        // what an output coming up shows and the clock is held to.
+        // what an output coming up shows and the clock is held to, with the
+        // pointer where it went while the present waited.
         if withdrawn {
             self.stack.clone_from(&self.latched);
+            let _ = self.rewrite_pointer();
         }
         // What only the withdrawn lists named is free to go.
         if let Ok(named) = self.named_buffers() {

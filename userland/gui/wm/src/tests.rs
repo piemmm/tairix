@@ -3,7 +3,7 @@
 extern crate alloc;
 
 use tairix_abi::driver::display::{
-    DamageRect, DisplayFormat, DisplayMode, DisplayPower, MAX_DAMAGE_RECTS,
+    DamageRect, DisplayFormat, DisplayMode, DisplayPower, RefreshRate, MAX_DAMAGE_RECTS,
 };
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::DriverError;
@@ -11854,6 +11854,26 @@ fn the_family_in_front_stands_lifted_and_every_other_window_rests() {
 }
 
 #[test]
+fn an_easing_shadow_wakes_on_the_output_s_own_frames() {
+    let (mut c, left, _) = two_framed();
+    assert_eq!(
+        c.refresh_rate(),
+        RefreshRate::ASSUMED,
+        "until one is stated"
+    );
+    let fast = RefreshRate::from_mhz(144_000);
+    assert!(c.set_refresh_rate(fast));
+    assert!(!c.set_refresh_rate(fast), "the same rate changes nothing");
+    c.follow_focus(Some(left));
+    c.composite();
+    c.step_elevations(0);
+    let wait = c.next_elevation_frame_in(0).expect("easing");
+    assert_eq!(wait, fast.map(RefreshRate::frame_ns).expect("a rate"));
+    assert!(c.set_refresh_rate(None), "none stated is the assumed rate");
+    assert_eq!(c.refresh_rate(), RefreshRate::ASSUMED);
+}
+
+#[test]
 fn a_change_of_level_eases_and_repaints_only_the_shadow() {
     let (mut c, left, right) = two_framed();
     let resting = c.window(right).expect("placed").bounds();
@@ -11877,7 +11897,7 @@ fn a_change_of_level_eases_and_repaints_only_the_shadow() {
     ) * 500_000;
     assert!(half > 0, "the built-in theme eases a change of focus");
     let wait = c.next_elevation_frame_in(0).expect("easing");
-    assert!(wait > 0 && wait <= tairix_theme::Timeline::FRAME_NS);
+    assert!(wait > 0 && wait <= c.refresh_rate().frame_ns());
     c.composite();
 
     c.step_elevations(half);

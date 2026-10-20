@@ -9,6 +9,7 @@
 //! recomputed only when the owner steps it, which is what keeps painting a
 //! pure function of already-computed state that reads no clock.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
@@ -250,8 +251,8 @@ impl Stage {
     }
 
     /// Nanoseconds until the next frame of the travel.
-    pub(crate) fn next_frame_in(self, now_ns: u64) -> Option<u64> {
-        self.timeline.next_frame_in(now_ns)
+    pub(crate) fn next_frame_in(self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        self.timeline.next_frame_in(now_ns, refresh)
     }
 }
 
@@ -316,8 +317,8 @@ impl Shake {
     }
 
     /// Nanoseconds until the next frame of the oscillation.
-    pub(crate) fn next_frame_in(self, now_ns: u64) -> Option<u64> {
-        self.timeline.next_frame_in(now_ns)
+    pub(crate) fn next_frame_in(self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        self.timeline.next_frame_in(now_ns, refresh)
     }
 }
 
@@ -399,8 +400,8 @@ impl Veil {
     }
 
     /// Nanoseconds until the next frame of the fade.
-    pub(crate) fn next_frame_in(self, now_ns: u64) -> Option<u64> {
-        self.fade.next_frame_in(now_ns)
+    pub(crate) fn next_frame_in(self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        self.fade.next_frame_in(now_ns, refresh)
     }
 }
 

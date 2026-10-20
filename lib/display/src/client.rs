@@ -27,7 +27,7 @@ use tairix_abi::display_ipc::{
 };
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, BufferId, CursorCaps, DamageList, DamageRect, DisplayMode, DisplayPower,
-    Presented, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
+    OutputMode, Presented, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
 };
 use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{DriverError, Errno, ProcId};
@@ -81,12 +81,13 @@ impl<T: DisplayTransport> DisplayClient<T> {
         self.seat_id
     }
 
-    /// The mode the seat's output runs, or [`None`] with no output.
+    /// The mode the seat's output runs and its rate, or [`None`] with no
+    /// output.
     ///
     /// # Errors
     ///
     /// The service's refusal, or a malformed reply.
-    pub fn query(&mut self) -> Result<Option<DisplayMode>, Errno> {
+    pub fn query(&mut self) -> Result<Option<OutputMode>, Errno> {
         let mut reply = [0u8; DISPLAY_MODE_REPLY_LEN];
         let len = self.call(
             &DisplayRequest::Query {

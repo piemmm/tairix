@@ -256,7 +256,10 @@ mod program {
         /// the user gave it; only the range it may be dragged within, which is
         /// logical, is restated.
         fn adopt_desktop(&mut self, game: &mut Game, damage: &mut Region) -> bool {
-            match app::adopt_desktop(&mut self.desktop, &mut self.themes) {
+            let adopted = app::adopt_desktop(&mut self.desktop, &mut self.themes);
+            // A new frame rate alone owes no redraw, but still paces the game.
+            game.set_refresh(self.desktop.refresh());
+            match adopted {
                 Ok(true) => {
                     let reduced = self.themes.active().motion().reduced_motion();
                     game.set_reduced_motion(reduced, damage);
@@ -737,6 +740,7 @@ mod program {
             client: opening.client(),
             scale: desktop.scale(),
             reduced: themes.active().motion().reduced_motion(),
+            refresh: desktop.refresh(),
         };
         let mut game = Game::new(setup, now, &mut rng);
         let mut shell = Shell {

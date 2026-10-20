@@ -6,11 +6,12 @@ use super::{
     LayerList, Planes, PresentReply, BODY_AT, DAMAGE_RECT_LEN, DISPLAY_BUFFER_REPLY_LEN,
     DISPLAY_CONFIGURE_REPLY_LEN, DISPLAY_EVENT_MAGIC, DISPLAY_MAX_FRAMES, DISPLAY_MODE_REPLY_LEN,
     DISPLAY_PLANES_REPLY_LEN, DISPLAY_PRESENT_REPLY_LEN, DISPLAY_REQUEST_MAGIC,
-    DISPLAY_STATS_REPLY_LEN, LAYERS_AT, LAYER_LEN, NO_RECT, PRESENT_RECTS_AT,
+    DISPLAY_STATS_REPLY_LEN, LAYERS_AT, LAYER_LEN, NO_RECT, PRESENT_RECTS_AT, QUERY_REFRESH_AT,
 };
 use crate::driver::display::{
     AccelCaps, AccelLayer, BufferId, CursorCaps, DamageRect, DisplayDeviceReport, DisplayFormat,
-    DisplayMode, DisplayPower, Presented, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
+    DisplayMode, DisplayPower, OutputMode, Presented, RefreshRate, MAX_ACCEL_LAYERS,
+    MAX_DAMAGE_RECTS,
 };
 use crate::origin::ProcId;
 use crate::Errno;
@@ -407,10 +408,17 @@ fn mode_replies_round_trip_ok_and_error() {
         stride_bytes: 7680,
         format: DisplayFormat::Rgba8888,
     };
-    assert_eq!(
-        decode_mode_reply(&encode_mode_reply(Ok(Some(mode)))),
-        Ok(Some(mode))
-    );
+    for refresh in [
+        None,
+        RefreshRate::from_mhz(59_940),
+        Some(RefreshRate::ASSUMED),
+    ] {
+        let output = OutputMode { mode, refresh };
+        assert_eq!(
+            decode_mode_reply(&encode_mode_reply(Ok(Some(output)))),
+            Ok(Some(output))
+        );
+    }
     assert_eq!(decode_mode_reply(&encode_mode_reply(Ok(None))), Ok(None));
     for refused in [Errno::SeatNotOwner, Errno::SeatRevoked] {
         assert_eq!(
@@ -428,7 +436,10 @@ fn mode_reply_decode_fails_closed() {
         stride_bytes: 2560,
         format: DisplayFormat::Bgra8888,
     };
-    let good = encode_mode_reply(Ok(Some(mode)));
+    let good = encode_mode_reply(Ok(Some(OutputMode {
+        mode,
+        refresh: RefreshRate::from_mhz(75_000),
+    })));
     assert_eq!(
         decode_mode_reply(&good[..DISPLAY_MODE_REPLY_LEN - 1]),
         Err(Errno::BufferTooSmall)
@@ -454,6 +465,47 @@ fn mode_reply_decode_fails_closed() {
         decode_mode_reply(&thin_stride),
         Err(Errno::LengthOutOfRange)
     );
+    // A rate outside the bound is refused, never clamped into it.
+    for rate in [RefreshRate::MIN_MHZ - 1, RefreshRate::MAX_MHZ + 1, u32::MAX] {
+        let mut wild = good;
+        wild[QUERY_REFRESH_AT..QUERY_REFRESH_AT + 4].copy_from_slice(&rate.to_le_bytes());
+        assert_eq!(decode_mode_reply(&wild), Err(Errno::OutOfRange), "{rate}");
+    }
+    let mut rate_without_output = encode_mode_reply(Ok(None));
+    rate_without_output[QUERY_REFRESH_AT..QUERY_REFRESH_AT + 4]
+        .copy_from_slice(&60_000u32.to_le_bytes());
+    assert_eq!(
+        decode_mode_reply(&rate_without_output),
+        Err(Errno::BadMagic)
+    );
+}
+
+#[test]
+fn an_output_stating_no_rate_is_paced_at_the_assumed_one() {
+    let stated = RefreshRate::from_mhz(144_000);
+    assert_eq!(
+        stated.map(|rate| RefreshRate::or_assumed(Some(rate))),
+        stated
+    );
+    assert_eq!(RefreshRate::or_assumed(None), RefreshRate::ASSUMED);
+}
+
+#[test]
+fn a_rate_s_frame_is_its_period() {
+    assert_eq!(RefreshRate::ASSUMED.frame_ns(), 16_666_666);
+    assert_eq!(
+        RefreshRate::from_mhz(144_000).map(RefreshRate::frame_ns),
+        Some(6_944_444)
+    );
+    assert_eq!(
+        RefreshRate::from_mhz(RefreshRate::MIN_MHZ).map(RefreshRate::frame_ns),
+        Some(1_000_000_000)
+    );
+    assert_eq!(
+        RefreshRate::from_mhz(RefreshRate::MAX_MHZ).map(RefreshRate::frame_ns),
+        Some(1_000_000)
+    );
+    assert_eq!(RefreshRate::from_mhz(0), None);
 }
 
 fn frames(count: usize) -> ConfiguredFrames {

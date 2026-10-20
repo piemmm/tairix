@@ -387,6 +387,12 @@ pub const TARGETS: &[Target] = &[
             "page-zero accelerated candidates vs the portable reference (zeroes exactly the region, touches nothing past it)",
     },
     Target {
+        package: "tairix-raster",
+        test: "fuzz_kernels",
+        description:
+            "lib/raster vector blend, box blur, frost and run-scan kernels vs the portable per-pixel arithmetic (bit-identity, nothing written past a block)",
+    },
+    Target {
         package: "tairix-colour",
         test: "fuzz_colour",
         description:

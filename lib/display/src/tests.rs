@@ -17,7 +17,7 @@ use tairix_abi::display_ipc::{
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, AllocatedBuffer, BufferId, CursorCaps, DamageList,
     DamageRect, Display, DisplayFormat, DisplayMemory, DisplayMode, DisplayPower, HardwareCursor,
-    Presented, Serviced,
+    OutputMode, Presented, RefreshRate, Serviced,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::seat::{DisplayLease, ReleaseSurface};
@@ -183,6 +183,7 @@ struct MockBuffer {
 /// says what it was asked.
 struct MockDisplay {
     output: Option<DisplayMode>,
+    refresh: Option<RefreshRate>,
     frame_count: u32,
     /// Presents answer `Queued` rather than `Shown`.
     queues: bool,
@@ -215,6 +216,7 @@ impl MockDisplay {
     fn new() -> Self {
         Self {
             output: Some(MODE),
+            refresh: None,
             frame_count: 2,
             queues: false,
             next: 1,
@@ -250,6 +252,10 @@ impl MockDisplay {
 impl Display for MockDisplay {
     fn output(&self) -> Option<DisplayMode> {
         self.output
+    }
+
+    fn refresh(&self) -> Option<RefreshRate> {
+        self.refresh
     }
 
     fn abandon_queued(&mut self) {
@@ -405,7 +411,7 @@ impl Rig {
         decode_status_reply(&self.serve(request))
     }
 
-    fn query(&mut self) -> Result<Option<DisplayMode>, Errno> {
+    fn query(&mut self) -> Result<Option<OutputMode>, Errno> {
         decode_mode_reply(&self.serve(&DisplayRequest::Query { seat_id: SEAT }))
     }
 
@@ -510,12 +516,34 @@ fn layer(buffer: BufferId, width_px: u32, height_px: u32) -> AccelLayer {
 #[test]
 fn query_returns_the_mode_to_the_live_owner_only() {
     let mut rig = Rig::new();
-    assert_eq!(rig.query(), Ok(Some(MODE)));
+    assert_eq!(
+        rig.query(),
+        Ok(Some(OutputMode {
+            mode: MODE,
+            refresh: None
+        }))
+    );
     assert_eq!(rig.seat.asked, vec![(TICKET, SEAT)]);
     for refused in [Errno::SeatNotOwner, Errno::SeatRevoked, Errno::NotFound] {
         rig.seat.answer = Err(refused);
         assert_eq!(rig.query(), Err(refused));
     }
+}
+
+#[test]
+fn a_query_carries_the_rate_the_device_states_and_none_without_an_output() {
+    let mut rig = Rig::new();
+    let rate = RefreshRate::from_mhz(144_000);
+    rig.display.refresh = rate;
+    assert_eq!(
+        rig.query(),
+        Ok(Some(OutputMode {
+            mode: MODE,
+            refresh: rate
+        }))
+    );
+    rig.display.output = None;
+    assert_eq!(rig.query(), Ok(None), "a rate without an output is nothing");
 }
 
 #[test]

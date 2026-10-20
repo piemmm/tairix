@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{
     ClickKind, DoubleClickTracker, InputEvent, Key, Modifiers, NamedKey, PointerButton,
 };
@@ -867,11 +867,6 @@ impl PlaceChooser {
             None,
         );
     }
-}
-
-/// `value` as a coordinate, saturating.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 /// What a [`PlaceDialog`] concluded.

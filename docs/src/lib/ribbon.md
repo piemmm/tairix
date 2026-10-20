@@ -65,8 +65,9 @@ chunk before it, so a strip is two chunks rather than three.
 ## Pacing
 
 Both embedders pace the ribbon by `tairix_theme::motion::SceneClock`, the clock
-every idle scene moves by: a frame falls due every `SceneClock::FRAME_NS`
-while it moves, a late wake carries it at most a few frames on, and a ribbon
+every idle scene moves by: a frame falls due every `SceneClock::frame_on` of
+the display's rate while it moves, a late wake carries it at most a few frames
+on, and a ribbon
 made still under reduced motion asks for no frame at all.
 
 ## `SKY`

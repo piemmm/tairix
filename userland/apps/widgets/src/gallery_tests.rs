@@ -6,6 +6,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_controls::testkit::keystroke;
 use tairix_controls::{damage, SelectionState, WHEEL_STEP};
@@ -17,6 +18,9 @@ use tairix_theme::{Theme, ThemeRegistry};
 
 use crate::gallery::{Gallery, GalleryTab};
 use crate::widget::DemoWidget;
+
+/// The display the gallery's motion is paced on.
+const RATE: RefreshRate = RefreshRate::ASSUMED;
 
 /// A 14px font, as the `Run` binary resolves at the theme's UI size.
 fn font() -> BitmapFont {
@@ -1262,22 +1266,22 @@ fn the_busy_trace_on_show_sweeps_on_the_clock_and_nothing_else_asks_for_frames()
         "nothing moves before the clock is reported"
     );
     let mut first = damage::sink();
-    let due = gallery.animate(0, window(), Scale::ONE, theme, &mut first);
+    let due = gallery.animate(0, window(), (Scale::ONE, RATE), theme, &mut first);
     assert!(!first.is_empty(), "the busy trace starts its sweep");
     assert_eq!(
         gallery.animation_due_in(window(), Scale::ONE, theme),
-        Some(tairix_theme::Timeline::FRAME_NS)
+        Some(RATE.frame_ns())
     );
     assert_eq!(
         due,
-        Some(tairix_theme::Timeline::FRAME_NS),
+        Some(RATE.frame_ns()),
         "the step answers when its next frame is due"
     );
     let mut step = damage::sink();
     gallery.animate(
-        tairix_theme::Timeline::FRAME_NS,
+        RATE.frame_ns(),
         window(),
-        Scale::ONE,
+        (Scale::ONE, RATE),
         theme,
         &mut step,
     );
@@ -1301,7 +1305,7 @@ fn the_busy_trace_on_show_sweeps_on_the_clock_and_nothing_else_asks_for_frames()
 
     let mut still = select_tab(gallery, GalleryTab::Buttons);
     assert_eq!(
-        still.animate(0, window(), Scale::ONE, theme, &mut damage::sink()),
+        still.animate(0, window(), (Scale::ONE, RATE), theme, &mut damage::sink()),
         None
     );
     assert_eq!(still.animation_due_in(window(), Scale::ONE, theme), None);

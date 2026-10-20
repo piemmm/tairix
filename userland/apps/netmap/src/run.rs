@@ -1374,7 +1374,9 @@ mod program {
                 app_state.view.settle(now);
             }
             if (area.is_some() || frame_due) && app_state.window.is_open() {
-                let next = app_state.view.next_frame_in(now);
+                let next = app_state
+                    .view
+                    .next_frame_in(now, app_state.desktop.refresh());
                 deadlines
                     .frame_ns
                     .set(next.map(|wait| now.saturating_add(wait)));

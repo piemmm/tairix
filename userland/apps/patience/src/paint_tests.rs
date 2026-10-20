@@ -7,6 +7,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_raster::Pixel;
 use tairix_theme::Theme;
@@ -44,7 +45,12 @@ impl Scene {
         .0;
         let mut placements = Vec::new();
         layout.placements(&table, &mut placements);
-        let mut motion = Motion::new(variant.deck().count(), layout.card_size(), reduced);
+        let mut motion = Motion::new(
+            variant.deck().count(),
+            layout.card_size(),
+            reduced,
+            RefreshRate::ASSUMED,
+        );
         motion.snap(&placements, layout.card_size());
         let palette = Palette::resolve(&Theme::dark(), &Preferences::default());
         let art = CardArt::new(
@@ -321,7 +327,7 @@ fn the_victory_draws_its_bouncing_cards_over_what_is_there() {
     ));
     scene
         .motion
-        .advance(crate::motion::FRAME_NS, &mut Region::new());
+        .advance(RefreshRate::ASSUMED.frame_ns(), &mut Region::new());
     let cascade = scene.motion.cascade().expect("a victory");
     assert!(cascade.begun());
     let (_, at) = cascade.bouncing().next().expect("a card thrown");
@@ -332,7 +338,11 @@ fn the_victory_draws_its_bouncing_cards_over_what_is_there() {
         a: 255,
     };
     let mut surface = Surface::filled(CLIENT.width, CLIENT.height, fill).expect("a surface");
-    scene.draw(&mut surface, Extra::default(), crate::motion::FRAME_NS);
+    scene.draw(
+        &mut surface,
+        Extra::default(),
+        RefreshRate::ASSUMED.frame_ns(),
+    );
     let card = scene.layout.card_at(at);
     let width = usize::try_from(CLIENT.width).expect("a width");
     for (index, pixel) in surface.pixels().iter().enumerate() {

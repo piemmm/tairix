@@ -6,9 +6,9 @@
 //! copies sit evenly along it however unevenly the samples arrived, and draw
 //! back into the pointer as soon as it stops.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::Point;
 use tairix_inline::{ArrayVec, RingBuf};
-use tairix_theme::Timeline;
 use tairix_wallpaper::PointerTrail;
 use tairix_wm::{Ghost, MAX_GHOSTS};
 
@@ -24,6 +24,11 @@ const SAMPLE_NS: u64 = 4_000_000;
 /// Samples of the path kept: at [`SAMPLE_NS`] apart, a quarter of a second of
 /// it, which reaches past the longest trail.
 const PATH_SAMPLES: usize = 64;
+
+/// The longest a moving pointing device leaves between reports — the
+/// interval USB HID devices commonly poll at — so a pointer found somewhere
+/// new was where it rested until this long ago, whatever the display's rate.
+const REPORT_GAP_NS: u64 = 10_000_000;
 
 /// How many copies a trail of `length` draws, and how far apart in time.
 const fn shape(length: PointerTrail) -> Option<(usize, u64)> {
@@ -75,10 +80,8 @@ impl Trail {
         };
         match self.path.back().copied() {
             Some((_, last)) if last == at => return,
-            // Input arrives within a frame of the hand moving, so a pointer
-            // found somewhere new was where it rested until a frame ago.
             Some((then, last)) => {
-                let rested_until = now_ns.saturating_sub(Timeline::FRAME_NS).max(then);
+                let rested_until = now_ns.saturating_sub(REPORT_GAP_NS).max(then);
                 if rested_until > then {
                     self.record(rested_until, last);
                 }
@@ -161,10 +164,10 @@ impl Trail {
         out.reverse();
     }
 
-    /// Nanoseconds until the trail next changes, or `None` once every copy
-    /// has caught up with the pointer.
+    /// Nanoseconds until the trail next changes on a display refreshing at
+    /// `refresh`, or `None` once every copy has caught up with the pointer.
     #[must_use]
-    pub fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
+    pub fn next_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
         let (count, spacing) = shape(self.length)?;
         // One sample is where the pointer is, not a path it took.
         if self.path.len() < 2 {
@@ -172,7 +175,7 @@ impl Trail {
         }
         let (moved_ns, _) = self.path.back()?;
         let caught_up = moved_ns.saturating_add(span(count, spacing));
-        (now_ns < caught_up).then(|| (caught_up - now_ns).min(Timeline::FRAME_NS))
+        (now_ns < caught_up).then(|| (caught_up - now_ns).min(refresh.frame_ns()))
     }
 
     /// Forget the path, so nothing trails the pointer until it moves again.

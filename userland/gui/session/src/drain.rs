@@ -38,7 +38,12 @@ pub enum Routed {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SeatWake {
     /// The wake's input was served and the session still has the screen.
-    Served,
+    Served {
+        /// Whether the pointer carried what the next frame moves at any point
+        /// of the wake, so its cursor plane goes with that frame rather than
+        /// ahead of it — even when the wake's last event let go.
+        carried: bool,
+    },
     /// The session gave the screen to another account; nothing after that
     /// point was applied.
     SteppedAside,
@@ -145,6 +150,9 @@ impl SeatDrain {
         C: KeyInputChannel,
         R: SeatRouter,
     {
+        // A batch ends at an edge, so the state at each batch's start and at the
+        // last one's end covers every event that could have moved the frame.
+        let mut carried = seat.shell.pointer_carries();
         loop {
             let stopped = if seat.menu.is_open() {
                 drain_chain(seat, pointer, keyboard, router, &mut self.outcomes, now_ns)?
@@ -154,6 +162,7 @@ impl SeatDrain {
                 seat.shell
                     .pump(pointer, seat.compositor, now_ns, &mut self.outcomes)?
             };
+            carried |= seat.shell.pointer_carries();
             for outcome in self.outcomes.drain(..) {
                 if let Some(end) = route(router, seat, outcome, None, now_ns) {
                     return Ok(end);
@@ -184,7 +193,7 @@ impl SeatDrain {
         if typed {
             seat.shell.settle(seat.compositor);
         }
-        Ok(SeatWake::Served)
+        Ok(SeatWake::Served { carried })
     }
 }
 

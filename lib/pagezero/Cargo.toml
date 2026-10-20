@@ -25,10 +25,6 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The one shared non-cryptographic hash the self-verify fingerprint is taken
 # with, so this crate does not carry a private copy of a hash function.
 tairix-hash = { path = "../hash", version = "=0.0.0" }
-# The set-once cell holding the resolved implementation for the whole kernel
-# image (a fn pointer is `Copy + Send + Sync`), so no ad-hoc atomic/`unsafe` is
-# rolled here.
-tairix-sync = { path = "../sync", version = "=0.0.0" }
 
 [dev-dependencies]
 # Shared per-run seed / budget seam for the fuzz harness (never in a

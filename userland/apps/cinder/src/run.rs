@@ -35,7 +35,7 @@ extern crate alloc;
 mod program {
     use alloc::sync::Arc;
 
-    use tairix_abi::driver::display::{DamageRect, DisplayMode};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode, RefreshRate};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{
         AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol,
@@ -60,7 +60,8 @@ mod program {
     use tairix_raster::Surface;
     use tairix_rng::FastRng;
     use tairix_rt::work::WorkerGuard;
-    use tairix_theme::{Theme, ThemeRegistry, Timeline};
+    use tairix_theme::motion::seconds;
+    use tairix_theme::{Theme, ThemeRegistry};
     use tairix_util::mathf;
     use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::{
@@ -73,19 +74,6 @@ mod program {
     /// The icon-bar row that lets Cinder out or puts him away, numbered from
     /// the shared *Quit* id so the two can never collide.
     const ROW_OUT: u16 = tairix_window::QUIT_ROW + 1;
-
-    /// How long one animation frame is, in nanoseconds.
-    ///
-    /// The desktop's own animation period, which is also what the session's
-    /// frame pacer admits at — so a companion is never woken for a frame the
-    /// pacer would then refuse, and there is no second frame-period constant.
-    /// *Not* the stall budget below: that says how long a frame may take
-    /// before it is reported, which is an order of magnitude longer.
-    const FRAME_NS: u64 = Timeline::FRAME_NS;
-
-    /// One frame, in seconds, for the model's own arithmetic.
-    #[allow(clippy::cast_precision_loss)] // A frame budget is far below 2^53 ns.
-    const FRAME_SECONDS: f64 = FRAME_NS as f64 / 1_000_000_000.0;
 
     /// The name this program states its refusals under.
     const APP_NAME: &str = "cinder";
@@ -224,7 +212,9 @@ mod program {
         }
     }
 
-    /// Advance the whole companion by one frame.
+    /// Advance the whole companion by one frame of a desktop refreshing at
+    /// `refresh`, the period the session's pacer admits frames at — so a
+    /// companion is never woken for a frame the pacer would then refuse.
     ///
     /// Returns whether the pen needs repainting; the layer surface presents
     /// itself, because only it knows whether it moved.
@@ -232,9 +222,10 @@ mod program {
         companion: &mut Companion,
         client: &mut WindowClient<tairix_window::app::RtWindowTransport>,
         layout: &PenLayout,
+        refresh: RefreshRate,
     ) -> bool {
-        companion.elapsed += FRAME_SECONDS;
-        let dt = FRAME_SECONDS;
+        let dt = seconds(refresh.frame_ns());
+        companion.elapsed += dt;
 
         let Some(loose) = companion.loose.as_mut() else {
             return advance_in_pen(companion, layout, dt);
@@ -563,7 +554,7 @@ mod program {
             // A frame deadline while anything moves; none at all when nothing
             // does, so a dozing companion costs no wake.
             let wake = if companion.is_animated() {
-                let deadline = tairix_rt::clock_get().saturating_add(FRAME_NS);
+                let deadline = tairix_rt::clock_get().saturating_add(desktop.refresh().frame_ns());
                 match app::park_until(set, deadline) {
                     Ok(wake) => wake,
                     Err(_) => {
@@ -596,7 +587,8 @@ mod program {
                 Some(Wake::PressureChanged | Wake::PressureUnchanged | Wake::App(_)) => continue,
                 // The frame deadline: advance and present.
                 None => {
-                    let repaint = advance_frame(companion, window.client(), pen_layout);
+                    let repaint =
+                        advance_frame(companion, window.client(), pen_layout, desktop.refresh());
                     if repaint && pen_open {
                         present_pen(
                             companion,

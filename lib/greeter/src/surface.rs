@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use tairix_abi::account::{MAX_PASSWORD_LEN, MAX_USERNAME_LEN};
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::Duration64;
 use tairix_controls::{
     damage, ControlState, Keystroke, SecretField, TextAction, TextField, ValidationState,
@@ -798,9 +799,10 @@ impl AuthSurface {
         Outcome::rescanned(changed.damage())
     }
 
-    /// Nanoseconds until the next animation frame, or `None` when nothing is
-    /// animating — including under reduced motion, which leaves every
-    /// duration at zero and so arms no timer at all.
+    /// Nanoseconds until the next animation frame on a display refreshing at
+    /// `refresh`, or `None` when nothing is animating — including under
+    /// reduced motion, which leaves every duration at zero and so arms no
+    /// timer at all.
     ///
     /// An animation whose span ran out since the last [`advance`](Self::advance)
     /// still answers, with a frame due now: that frame is its settled end
@@ -808,20 +810,20 @@ impl AuthSurface {
     /// ends between the two. The secret marker's dots count too, on the same
     /// clock the keystrokes were taken by.
     #[must_use]
-    pub fn motion_due(&self, now_ns: u64) -> Option<u64> {
-        let mut due = self.selection_due(now_ns);
+    pub fn motion_due(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        let mut due = self.selection_due(now_ns, refresh);
         due = sooner(
             due,
             self.field.deadline_ns().map(|at| at.saturating_sub(now_ns)),
         );
         if let Some(stage) = self.stage {
-            due = sooner(due, stage.next_frame_in(now_ns));
+            due = sooner(due, stage.next_frame_in(now_ns, refresh));
         }
         if let Some(shake) = self.shake {
-            due = sooner(due, shake.next_frame_in(now_ns));
+            due = sooner(due, shake.next_frame_in(now_ns, refresh));
         }
         if let Some(veil) = self.veil {
-            due = sooner(due, veil.next_frame_in(now_ns));
+            due = sooner(due, veil.next_frame_in(now_ns, refresh));
         }
         due
     }
@@ -949,11 +951,11 @@ impl AuthSurface {
     }
 
     /// When the chooser's selection cross-fade next needs a frame.
-    fn selection_due(&self, now_ns: u64) -> Option<u64> {
+    fn selection_due(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
         if !matches!(self.mode, Mode::Chooser) && self.stage.is_none() {
             return None;
         }
-        self.chooser.as_ref()?.next_frame_in(now_ns)
+        self.chooser.as_ref()?.next_frame_in(now_ns, refresh)
     }
 
     /// One event on the chooser.

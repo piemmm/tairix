@@ -17,6 +17,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::{to_i32, Point, Rect, Region};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_theme::motion::ease_out;
@@ -24,9 +25,6 @@ use tairix_util::mathf;
 
 use crate::card::CardId;
 use crate::layout::Placement;
-
-/// One animation frame: a sixtieth of a second.
-pub const FRAME_NS: u64 = 1_000_000_000 / 60;
 
 /// How one card's flight is paced.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -264,12 +262,12 @@ impl Cascade {
         self.begun
     }
 
-    /// Put off the first throw to `now_ns` at the earliest: the trail is
-    /// drawn over the table as it last stood, so every card must have landed
-    /// first.
-    fn hold(&mut self, now_ns: u64) {
+    /// Put off the first throw to a frame of `frame_ns` after `now_ns` at the
+    /// earliest: the trail is drawn over the table as it last stood, so every
+    /// card must have landed first.
+    fn hold(&mut self, now_ns: u64, frame_ns: u64) {
         if !self.begun {
-            self.next_launch_ns = self.next_launch_ns.max(now_ns.saturating_add(FRAME_NS));
+            self.next_launch_ns = self.next_launch_ns.max(now_ns.saturating_add(frame_ns));
             self.stepped_ns = now_ns;
         }
     }
@@ -381,6 +379,8 @@ impl Glow {
 #[derive(Debug)]
 pub struct Motion {
     reduced: bool,
+    /// The rate the desktop composes at, which every frame is paced by.
+    refresh: RefreshRate,
     rest: Vec<Placement>,
     flights: Vec<Option<Flight>>,
     /// The cards in the air, in the order they took off: later ones are
@@ -392,11 +392,13 @@ pub struct Motion {
 }
 
 impl Motion {
-    /// Motion for a deck of `cards`, drawn `size`, animated unless `reduced`.
+    /// Motion for a deck of `cards`, drawn `size`, animated unless `reduced`
+    /// on a desktop refreshing at `refresh`.
     #[must_use]
-    pub fn new(cards: usize, size: (u32, u32), reduced: bool) -> Self {
+    pub fn new(cards: usize, size: (u32, u32), reduced: bool, refresh: RefreshRate) -> Self {
         Self {
             reduced,
+            refresh,
             rest: alloc::vec![Placement::default(); cards],
             flights: alloc::vec![None; cards],
             order: Vec::new(),
@@ -410,6 +412,23 @@ impl Motion {
     #[must_use]
     pub const fn reduced_motion(&self) -> bool {
         self.reduced
+    }
+
+    /// The rate the desktop composes at.
+    #[must_use]
+    pub const fn refresh(&self) -> RefreshRate {
+        self.refresh
+    }
+
+    /// One frame of the desktop, in nanoseconds.
+    #[must_use]
+    pub const fn frame_ns(&self) -> u64 {
+        self.refresh.frame_ns()
+    }
+
+    /// Pace every frame by a desktop now refreshing at `refresh`.
+    pub fn set_refresh(&mut self, refresh: RefreshRate) {
+        self.refresh = refresh;
     }
 
     /// Adopt the theme's reduced-motion policy, settling everything in
@@ -625,7 +644,7 @@ impl Motion {
     #[must_use]
     pub fn deadline_ns(&self, now_ns: u64) -> Option<u64> {
         if !self.order.is_empty() || self.cascade.is_some() {
-            return Some(now_ns.saturating_add(FRAME_NS));
+            return Some(now_ns.saturating_add(self.frame_ns()));
         }
         let glow = self.glow.as_ref()?;
         let ends = glow.start_ns.saturating_add(GLOW_NS);
@@ -634,7 +653,7 @@ impl Motion {
         Some(if self.reduced {
             ends
         } else {
-            now_ns.saturating_add(FRAME_NS).min(ends)
+            now_ns.saturating_add(self.frame_ns()).min(ends)
         })
     }
 
@@ -675,11 +694,12 @@ impl Motion {
                 self.glow = None;
             }
         }
+        let frame_ns = self.frame_ns();
         if let Some(cascade) = &mut self.cascade {
             if calm {
                 cascade.advance(now_ns, damage);
             } else {
-                cascade.hold(now_ns);
+                cascade.hold(now_ns, frame_ns);
             }
         }
     }

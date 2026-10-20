@@ -13,7 +13,7 @@ use crate::chooser::AccountTile;
 use crate::surface::{
     AuthSurface, Ticket, Tickets, Verdict, Verifier, CHECKING, CHOOSE_HINT, REFUSED,
 };
-use crate::testkit::{ask_in, feed, key, named, theme, Scripted, PRESS, RELEASE};
+use crate::testkit::{ask_in, feed, key, named, theme, Scripted, PRESS, RATE, RELEASE};
 
 /// Apply `event`, answering no question.
 fn press(surface: &mut AuthSurface, event: &InputEvent, verifier: &mut Scripted) {
@@ -36,7 +36,7 @@ fn an_offered_secret_is_checked_and_the_field_takes_nothing_meanwhile() {
     offer(&mut surface, "pw", &mut verifier);
     assert_eq!(surface.notice(), CHECKING);
     assert_eq!(
-        surface.motion_due(0),
+        surface.motion_due(0, RATE),
         None,
         "the erased secret has no marker"
     );

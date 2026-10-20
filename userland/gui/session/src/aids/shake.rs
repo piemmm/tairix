@@ -9,6 +9,7 @@
 //! fast never counts, and neither does the slower back-and-forth of aiming at
 //! something.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::{Point, Scale};
 use tairix_theme::{MotionInteraction, MotionTheme, Timeline};
 use tairix_wm::FULLY_ENLARGED;
@@ -166,11 +167,11 @@ impl Shake {
             .is_some_and(|at| now_ns.saturating_sub(at) < HOLD_NS)
     }
 
-    /// Nanoseconds until the pointer's size next changes, or `None` while it
-    /// rests at its own size.
+    /// Nanoseconds until the pointer's size next changes on a display
+    /// refreshing at `refresh`, or `None` while it rests at its own size.
     #[must_use]
-    pub fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
-        if let Some(next) = self.ramp.timeline.next_frame_in(now_ns) {
+    pub fn next_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        if let Some(next) = self.ramp.timeline.next_frame_in(now_ns, refresh) {
             return Some(next);
         }
         if self.ramp.to != FULLY_ENLARGED {

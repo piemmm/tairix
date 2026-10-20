@@ -2,18 +2,17 @@
 //! and back.
 //!
 //! A window channel carries an app's pixels in one `shm`-granted frame laid out
-//! by a [`DisplayMode`], exactly as the display service's scan-out frame is —
-//! but with one difference that matters: the screen is opaque, so
-//! [`ChannelOrder::encode`] writes a premultiplied channel unchanged, whereas a
-//! window frame carries the app's own alpha and therefore holds **straight**
-//! alpha. Both directions of that conversion live here, once, over the same
-//! [`ChannelOrder`] the scan-out path resolves, so nothing anywhere holds a
-//! second opinion about which byte is red.
+//! by a [`DisplayMode`], exactly as the display service's scan-out frame is:
+//! **premultiplied**, in the channel order the mode names, so the frame holds
+//! the very pixels the app composed and neither side divides. Both directions
+//! live here, once, over the same [`ChannelOrder`] the scan-out path resolves,
+//! so nothing anywhere holds a second opinion about which byte is red.
 //!
-//! * [`encode`] — the app's side: a [`Surface`] of premultiplied pixels out
-//!   into the frame it granted the session.
+//! * [`encode`] — the app's side: a [`Surface`] out into the frame it granted
+//!   the session, a byte-order copy.
 //! * [`decode`] — the desktop's side: a presented frame in to the compositor's
-//!   own window surface, reporting the sub-rectangle whose pixels the
+//!   own window surface, every colour channel clamped to its alpha because the
+//!   bytes are the client's, reporting the sub-rectangle whose pixels the
 //!   conversion actually *changed*.
 //!
 //! # Why only one side is given a real [`JobRunner`]
@@ -56,9 +55,9 @@ const PIXEL_BYTES: usize = 4;
 ///
 /// A band carrying fewer than this pays more in dispatch than it saves, so a
 /// small repaint — the common case once an app clips its damage — runs on the
-/// calling thread with no atomics and no syscall, exactly as it did before a
-/// pool existed. The same budget the compositor splits a composite by, for the
-/// same reason.
+/// calling thread with no atomics and no syscall. Four times the compositor's
+/// grain, because a pixel here is a copy and a clamp where a composited pixel
+/// is a blend.
 const MIN_PARALLEL_BAND_PX: usize = 64 * 1024;
 
 /// The validated shape of one conversion: the resolved channel order, the row
@@ -189,8 +188,8 @@ impl Shape {
     }
 }
 
-/// Convert `damage`'s pixels of `surface` into `frame` (laid out per `mode`) as
-/// the straight-alpha bytes a window frame holds.
+/// Write `damage`'s pixels of `surface` into `frame` (laid out per `mode`) as
+/// the premultiplied bytes a window frame holds.
 ///
 /// This is what an app calls before it presents: it converts exactly the
 /// rectangle it is about to declare, because that is the only rectangle the
@@ -255,12 +254,7 @@ fn encode_band(shape: &Shape, surface: &Surface, band: &mut EncodeBand<'_>) {
         let Some(target) = band.bytes.get_mut(span) else {
             continue;
         };
-        // The span is a whole number of pixels by construction, so the ragged
-        // tail this splits off is always empty.
-        let (slots, _tail) = target.as_chunks_mut::<PIXEL_BYTES>();
-        for (slot, pixel) in slots.iter_mut().zip(source) {
-            *slot = shape.order.encode_straight(*pixel);
-        }
+        let _ = shape.order.encode_run(source, target);
     }
 }
 
@@ -368,7 +362,7 @@ fn decode_band(shape: &Shape, frame: &[u8], band: &mut DecodeBand<'_>) {
         // loop runs over every damaged pixel of every application repaint.
         let (groups, _tail) = source.as_chunks::<PIXEL_BYTES>();
         for (index, (bytes, slot)) in groups.iter().zip(target).enumerate() {
-            let pixel = shape.order.decode_straight(*bytes);
+            let pixel = shape.order.decode(*bytes);
             if *slot == pixel {
                 continue;
             }

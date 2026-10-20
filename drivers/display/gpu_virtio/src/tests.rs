@@ -470,6 +470,95 @@ fn a_scanout_naming_no_size_takes_its_sink_s_preferred_timing() {
 }
 
 #[test]
+fn the_output_runs_at_the_rate_its_sink_states_for_the_size_it_shows() {
+    let sink = tairix_edid::synth::Base::new()
+        .descriptor(0, tairix_edid::synth::dtd_1080p())
+        .descriptor(1, tairix_edid::synth::dtd_720p())
+        .build();
+    for (scanout, rate) in [
+        ((0, 0), RefreshRate::from_mhz(60_000)),
+        ((1920, 1080), RefreshRate::from_mhz(60_000)),
+        ((1280, 720), RefreshRate::from_mhz(60_000)),
+        ((1280, 800), None),
+    ] {
+        let mut rig = Rig::new();
+        rig.features = TRANSPORT_FEATURES | wire::FEATURE_EDID;
+        rig.model().scanouts = vec![(scanout.0, scanout.1, true)];
+        rig.model().edid = Some(sink.to_vec());
+        let (gpu, _) = rig.open();
+        assert_eq!(gpu.refresh(), rate, "{scanout:?}");
+    }
+}
+
+/// A sink whose same-sized timing states no usable rate is passed over for
+/// one that does, rather than ending the search.
+#[test]
+fn the_rate_is_the_first_same_sized_timing_that_states_one() {
+    // A ten-kilohertz clock refreshes 1080 lines far below a hertz.
+    let unclocked = tairix_edid::synth::dtd(
+        10,
+        [1920, 88, 44, 148],
+        [1080, 4, 5, 36],
+        tairix_edid::synth::SYNC_POSITIVE,
+        (600, 340),
+    );
+    let mut rig = Rig::new();
+    rig.features = TRANSPORT_FEATURES | wire::FEATURE_EDID;
+    rig.model().scanouts = vec![(1920, 1080, true)];
+    rig.model().edid = Some(
+        tairix_edid::synth::Base::new()
+            .descriptor(0, unclocked)
+            .descriptor(1, tairix_edid::synth::dtd_1080p())
+            .build()
+            .to_vec(),
+    );
+    let (gpu, _) = rig.open();
+    assert_eq!(gpu.refresh(), RefreshRate::from_mhz(60_000));
+}
+
+/// A display that keeps its mode and changes only its rate shows exactly what
+/// it did: the rate is the display service's to read, and the scanout stands.
+#[test]
+fn a_rate_alone_changing_re_shows_nothing() {
+    let fifty = tairix_edid::synth::dtd(
+        148_500,
+        [1920, 528, 44, 148],
+        [1080, 4, 5, 36],
+        tairix_edid::synth::SYNC_POSITIVE,
+        (600, 340),
+    );
+    let sink = |descriptor: [u8; 18]| {
+        tairix_edid::synth::Base::new()
+            .descriptor(0, descriptor)
+            .build()
+            .to_vec()
+    };
+    let mut rig = Rig::new();
+    rig.features = TRANSPORT_FEATURES | wire::FEATURE_EDID;
+    rig.model().scanouts = vec![(1920, 1080, true)];
+    rig.model().edid = Some(sink(tairix_edid::synth::dtd_1080p()));
+    let (mut gpu, transport) = rig.open();
+    assert_eq!(gpu.refresh(), RefreshRate::from_mhz(60_000));
+    let flushes = rig.model.borrow().flushes.len();
+    rig.model().edid = Some(sink(fifty));
+    rig.model().commands.clear();
+    raise_display_event(&transport);
+    assert_eq!(gpu.service_events(), Ok(Serviced::default()));
+    assert_eq!(gpu.refresh(), RefreshRate::from_mhz(50_000));
+    let model = rig.model.borrow();
+    assert!(!model.commands.contains(&SET_SCANOUT), "the scanout stands");
+    assert_eq!(model.flushes.len(), flushes, "nothing is shown again");
+}
+
+#[test]
+fn an_output_with_no_sink_states_no_rate() {
+    let rig = Rig::new();
+    let (gpu, _) = rig.open();
+    assert!(gpu.output().is_some());
+    assert_eq!(gpu.refresh(), None);
+}
+
+#[test]
 fn a_scanout_naming_no_size_and_no_sink_is_no_output() {
     let rig = Rig::new();
     rig.model().scanouts = vec![(0, 0, true), (800, 600, false)];

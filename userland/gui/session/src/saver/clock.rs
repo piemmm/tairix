@@ -236,7 +236,7 @@ impl ClockFace {
             }
         }
         self.due_ns = if self.moving.is_some() {
-            now_ns.saturating_add(SceneClock::FRAME_NS)
+            now_ns.saturating_add(SceneClock::frame_on(compositor.refresh_rate()))
         } else {
             self.telling.tick_ns()
         };

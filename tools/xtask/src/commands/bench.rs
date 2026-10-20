@@ -23,6 +23,14 @@
 //! one-shot, median-of-rounds, `black_box`ed — with a host clock injected
 //! through its `CycleCounter` seam. There is deliberately no second timing
 //! loop here.
+//!
+//! # The kernels a process here would run
+//!
+//! The raster families are resolved against this host's own features first,
+//! as every TAIRiX process resolves them against the set its kernel delivers,
+//! so the numbers are the vector kernels' wherever the CPU offers them.
+//! `--portable` measures the portable kernels instead: the comparison a
+//! completion report quotes is the two runs side by side.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
@@ -31,7 +39,7 @@ use std::time::Instant;
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::seat::SEAT_PRIMARY;
 use tairix_controls::ListRow;
-use tairix_cpuops::{BenchHarness, CycleCounter};
+use tairix_cpuops::{BenchHarness, CpuFeature, CpuFeatureSet, CycleCounter, Decision};
 use tairix_display::ChannelOrder;
 use tairix_font::{glyph_cache_budget, glyph_cache_candidate, set_glyph_cache, BitmapFont};
 use tairix_geometry::Scale;
@@ -75,6 +83,8 @@ pub struct Options {
     pub rounds: u32,
     /// Run only the families whose name contains this substring.
     pub filter: Option<String>,
+    /// Measure the portable kernels rather than the host's vector ones.
+    pub portable: bool,
 }
 
 /// Parse `cargo xtask bench` arguments.
@@ -85,6 +95,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
     let mut iters = DEFAULT_ITERS;
     let mut rounds = DEFAULT_ROUNDS;
     let mut filter = None;
+    let mut portable = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         let Some(flag) = arg.to_str() else {
@@ -95,6 +106,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
         };
         match flag {
             "--iters" => iters = number(&mut rest, flag)?,
+            "--portable" => portable = true,
             "--rounds" => rounds = number(&mut rest, flag)?,
             "--filter" => {
                 let value = rest
@@ -108,7 +120,8 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
             _ => {
                 return Err(format!(
                     "bench: unknown argument `{flag}`\n\n\
-                     usage: cargo xtask bench [--iters N] [--rounds N] [--filter SUBSTRING]\n\
+                     usage: cargo xtask bench [--iters N] [--rounds N] [--filter SUBSTRING] \
+                     [--portable]\n\
                      families: {}",
                     family_names()
                 ))
@@ -119,12 +132,42 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
         iters,
         rounds,
         filter,
+        portable,
     })
+}
+
+/// The features this host's CPU offers the raster kernels.
+fn host_features() -> CpuFeatureSet {
+    let mut features = CpuFeatureSet::new();
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("sse2") {
+        features.insert(CpuFeature::Sse2);
+    }
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("neon") {
+        features.insert(CpuFeature::Asimd);
+    }
+    features
 }
 
 /// Measure every selected family and print the table.
 pub fn run(opts: &Options) -> Result<(), String> {
     let families = select(opts.filter.as_deref())?;
+    let offered = if opts.portable {
+        CpuFeatureSet::new()
+    } else {
+        host_features()
+    };
+    let decisions = tairix_raster::accel::resolve(offered);
+    let chosen = |decision: Option<Decision>| {
+        decision.map_or("already resolved", |decision| decision.chosen)
+    };
+    println!(
+        "bench: raster kernels {}, {} and {}",
+        chosen(decisions.blend),
+        chosen(decisions.blur),
+        chosen(decisions.scan)
+    );
     let clock = NanoClock::new();
     let harness = BenchHarness::with_budget(&clock, opts.iters, opts.rounds);
     // The harness clamps its budget, so report what it will actually run
@@ -1140,6 +1183,7 @@ mod tests {
         let opts = parse(&[]).expect("no arguments is the default budget");
         assert_eq!((opts.iters, opts.rounds), (DEFAULT_ITERS, DEFAULT_ROUNDS));
         assert!(opts.filter.is_none());
+        assert!(!opts.portable, "the host's own kernels unless asked");
         let args = [
             OsString::from("--iters"),
             OsString::from("3"),
@@ -1147,10 +1191,12 @@ mod tests {
             OsString::from("7"),
             OsString::from("--filter"),
             OsString::from("blur"),
+            OsString::from("--portable"),
         ];
         let opts = parse(&args).expect("an explicit budget parses");
         assert_eq!((opts.iters, opts.rounds), (3, 7));
         assert_eq!(opts.filter.as_deref(), Some("blur"));
+        assert!(opts.portable);
     }
 
     #[test]

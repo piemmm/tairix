@@ -27,6 +27,10 @@ From that, uniformly:
   every `BitmapFont::for_role` and every control's layout.
 - `Desktop::appearance()` is applied to the app's `ThemeRegistry` *before*
   the first frame, so a window opened into a light desktop opens light.
+- `Desktop::refresh()` is the rate the desktop composes at, which every
+  animation the app runs paces its frames by — never a period of its own. (A
+  game's frame *budget*, what a frame may cost, is a different number: WinterSun
+  states its at a 60 Hz baseline and still paces by the display.)
 - `app::adopt_desktop` answers a `Wake::DesktopChanged`: the app holds a
   `Desktop` system notice member (the shared shell arms it), reads the state
   the session published, and adopts it into both its `Desktop` and its theme
@@ -2722,10 +2726,7 @@ it rather than being displaced, and a refused write says why on `stderr` and
 puts the settings it carried back to what the store holds.
 
 The screen effects are an ordered, typed pipeline (`effects::Pass`) rather
-than code inlined into the renderer, so a display that can composite hardware
-layers can programme its own engine from the same description with the
-software passes staying the conformance oracle. Translucency is not a pass at
-all: the default background is filled at the profile's alpha, so the
+than code inlined into the renderer. Translucency is not a pass at all: the default background is filled at the profile's alpha, so the
 compositor's own premultiplied blend shows the desktop through while a glyph
 stays opaque. Backdrop blur is the compositor's (`set_backdrop_blur`), since
 only it can see behind a window. Scan lines, glow, fuzz, phosphor persistence,
@@ -2743,8 +2744,10 @@ what makes a lit glyph bloom rather than merely soften. It is still capped for
 the reason the opacity floor exists: a slider must not be able to make text
 unreadable. An animated effect is a pure function of a
 monotonically increasing `Phase` that the program advances on a one-shot frame
-deadline in its wait-set park — there is no poll loop, and a terminal with the
-effects off never wakes for them at all.
+deadline in its wait-set park — whole frames of the desktop's rate, at most
+twenty a second — so there is no poll loop, and a terminal with the effects
+off never wakes for them at all. Phosphor persistence decays on that clock and
+settles: once its trail has faded it asks for no further frame.
 
 A new terminal opens at **80% opacity with the backdrop blurred at half
 strength** (`Effects::default`), the five pass effects off. Translucency is
@@ -2756,16 +2759,19 @@ retained, and a terminal beneath that recomputes only what each frame needs of
 its frost (`docs/src/desktop/wm.md`, *Retention is rationed, front to back; a
 blur never is*).
 
-A pass is a *whole-frame* post-process by nature — wobble displaces rows,
-phosphor decays every pixel, and the glow spreads light across them — so when
-one is in force the finished screen is
-copied into a reused buffer, the passes run there, and the whole window is
-presented. The retained screen itself stays clean, so the next frame's cell
-diff still describes the text rather than the effect's own churn, and an
-animated terminal re-runs its passes without re-rendering the grid. That
-buffer exists only while an effect is on. Translucency and backdrop blur are
-not passes, so a see-through, frosted terminal still types at cell-diff
-cost.
+The passes run in three retained stages (`pipeline::Pipeline`): the displaced
+and dimmed picture (wobble, phosphor, scan lines), its glow, and its fuzz. A
+frame redraws only what changed — the cells the text diff reports, widened by
+the glow's reach, and what a moving pass moves — and presents exactly that, so
+a keystroke under glow costs its cell and its halo rather than the window.
+Fuzz moves every pixel at every step and so redraws the window; wobble redraws
+the rows whose displacement changed, and phosphor its fading trail until it
+settles. The retained screen itself stays clean, so
+the next frame's cell diff still describes the text rather than the effect's
+own churn. The stages exist only while an effect is on, and their rows are
+spread across a worker pool started on first use. Translucency and backdrop
+blur are not passes, so a see-through, frosted terminal still types at
+cell-diff cost.
 
 ### The menu and the settings sheet
 

@@ -360,12 +360,13 @@ impl Stack {
     }
 }
 
-/// What the cursor plane was last given: the pointer's shape and where its
-/// hot spot is.
+/// What the cursor plane was last given: the pointer's shape, where its hot
+/// spot is, and where it is to go once [moved](Compositor::move_plane).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) struct PlaneShown {
     shape: u64,
     at: Point,
+    due: Point,
 }
 
 /// What changed about a window a free layer shows.
@@ -1081,6 +1082,11 @@ impl Compositor {
     /// goes to a layer engine, where a pointer off the plane has a layer of
     /// its own when a plan can carry one.
     ///
+    /// The plane is only told where the pointer is due, and goes there on
+    /// [`move_plane`](Self::move_plane), so a frame carrying what the pointer
+    /// drags can be handed over first; a new shape is shown where the old one
+    /// stood, or where the pointer is when the plane showed nothing.
+    ///
     /// A plane that refuses keeps the pointer off it until the pointer's
     /// shape changes: the frame shows it instead, and a lost seat is the
     /// present's to report. Nor does the plane carry it through a screen
@@ -1119,7 +1125,9 @@ impl Compositor {
             }
             return;
         };
-        let given = if self.plane.is_none_or(|shown| shown.shape != shape) || !plane.showing() {
+        let stands = self.plane.map_or(at, |shown| shown.at);
+        let fresh = self.plane.is_none_or(|shown| shown.shape != shape) || !plane.showing();
+        let given = if fresh {
             let (width, height, hot) = (image.width(), image.height(), image.hotspot());
             encode_cursor(image.surface(), self.order, &mut self.plane_bytes)
                 .ok_or(DriverError::OutOfMemory)
@@ -1133,19 +1141,46 @@ impl Compositor {
                         u32::try_from(hot.y).unwrap_or(0),
                     )
                 })
-                .and_then(|()| plane.move_to(at.x, at.y))
-        } else if self.plane.is_some_and(|shown| shown.at != at) {
-            plane.move_to(at.x, at.y)
+                .and_then(|()| plane.move_to(stands.x, stands.y))
         } else {
             Ok(())
         };
         if given.is_ok() {
-            self.plane = Some(PlaneShown { shape, at });
+            self.plane = Some(PlaneShown {
+                shape,
+                at: stands,
+                due: at,
+            });
             self.pointer.set_route(PointerRoute::Plane);
         } else {
             self.refused.plane = Some(shape);
             self.plane = None;
             self.pointer.set_route(off_plane);
+            let _ = plane.hide();
+        }
+    }
+
+    /// Bring the cursor plane to where the pointer was last routed. A plane
+    /// that refuses the move gives the pointer back to the frame, which the
+    /// next composite draws it into.
+    pub(super) fn move_plane(&mut self, presenter: &mut dyn Presenter) {
+        let Some(shown) = self.plane.filter(|shown| shown.at != shown.due) else {
+            return;
+        };
+        let Some(plane) = presenter.cursor() else {
+            self.plane = None;
+            self.pointer.set_route(PointerRoute::Frame);
+            return;
+        };
+        if plane.move_to(shown.due.x, shown.due.y).is_ok() {
+            self.plane = Some(PlaneShown {
+                at: shown.due,
+                ..shown
+            });
+        } else {
+            self.refused.plane = Some(shown.shape);
+            self.plane = None;
+            self.pointer.set_route(PointerRoute::Frame);
             let _ = plane.hide();
         }
     }

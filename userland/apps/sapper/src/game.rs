@@ -16,6 +16,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
@@ -168,7 +169,8 @@ impl Game {
             .min(MAX_TIME_SECS)
     }
 
-    /// When the next wake is due, or `None` when the game owes none.
+    /// When the next wake is due on a desktop refreshing at `refresh`, or
+    /// `None` when the game owes none.
     ///
     /// The earlier of the animation's next frame and the clock's next whole
     /// second. A finished, still board asks for nothing at all, so an idle
@@ -178,8 +180,8 @@ impl Game {
     /// either: its next second would be an instant already past, and a park to
     /// one of those returns at once and spins.
     #[must_use]
-    pub fn deadline_ns(&self, now_ns: u64) -> Option<u64> {
-        let animation = self.motion.deadline_ns(now_ns);
+    pub fn deadline_ns(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        let animation = self.motion.deadline_ns(now_ns, refresh);
         let clock = self
             .started_ns
             .filter(|_| self.stopped_secs.is_none())

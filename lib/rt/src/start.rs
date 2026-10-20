@@ -265,6 +265,9 @@ unsafe extern "C" fn rust_rt_start(block_ptr: *const u8) -> ! {
     // Publish the validated view so the program can read the arguments its
     // spawner chose for it (`crate::startup`).
     crate::startup::install(view);
+    // Before `main`, so every accelerated family the program uses resolves
+    // against the set the kernel delivered rather than running its baseline.
+    tairix_cpuops::deliver(crate::startup::cpu_features());
 
     // SAFETY: `__tairix_rt_main` is the program's entry point, exported with a
     // matching Rust signature by `crate::entry!` and resolved at link time.

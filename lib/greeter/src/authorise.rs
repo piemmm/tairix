@@ -22,6 +22,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::account::MAX_PASSWORD_LEN;
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::Duration64;
 use tairix_controls::{
     blend_area, paint_icon_slot, paint_run, paint_surface_plate, plate_border, ArtworkTone, Button,
@@ -466,19 +467,20 @@ impl AuthoriseSheet {
         (width, layout.height)
     }
 
-    /// When the sheet next needs a frame — a shake, the band's answer, or the
-    /// password marker — as a relative wait from `now_ns`; `None` while it is
-    /// still.
+    /// When the sheet next needs a frame on a display refreshing at
+    /// `refresh` — a shake, the band's answer, or the password marker — as a
+    /// relative wait from `now_ns`; `None` while it is still.
     #[must_use]
-    pub fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
+    pub fn next_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
         let marker = self
             .field
             .deadline_ns()
             .map(|due| due.saturating_sub(now_ns));
         [
-            self.shake.and_then(|shake| shake.next_frame_in(now_ns)),
+            self.shake
+                .and_then(|shake| shake.next_frame_in(now_ns, refresh)),
             self.attended
-                .and_then(|attended| attended.next_frame_in(now_ns)),
+                .and_then(|attended| attended.next_frame_in(now_ns, refresh)),
             marker,
         ]
         .into_iter()

@@ -42,7 +42,7 @@
 //! change the runtime's rate limiter is holding back at that moment goes
 //! out on the next wake instead of arming one.
 
-use tairix_abi::driver::display::DisplayMode;
+use tairix_abi::driver::display::{DisplayMode, OutputMode};
 use tairix_abi::session_ipc::{SessionVerdict, SessionWake};
 use tairix_abi::{CapabilityId, Errno, Origin, WAITSET_TIMEOUT_NONE};
 
@@ -120,17 +120,18 @@ pub trait SeatReturn {
     /// this session may no longer take it.
     fn acquire_seat(&mut self) -> Result<(), Errno>;
 
-    /// Re-read the display's output: the mode it runs now, or [`None`] while
-    /// nothing is connected.
+    /// Re-read the display's output: the mode it runs now and the rate it
+    /// scans at, or [`None`] while nothing is connected.
     ///
     /// # Errors
     ///
     /// The display service's typed refusal or a transport failure. The mode
     /// is never guessed from the one this session came up with.
-    fn query_output(&mut self) -> Result<Option<DisplayMode>, Errno>;
+    fn query_output(&mut self) -> Result<Option<OutputMode>, Errno>;
 
-    /// Re-establish the shared frame region for `mode` and re-lay every
-    /// surface whose geometry comes from the mode.
+    /// Re-establish the shared frame region for `output`'s mode, compose at
+    /// its rate, and re-lay every surface whose geometry comes from the
+    /// mode.
     ///
     /// Everything mode-sized is rebuilt here rather than assumed: the frame
     /// region, the compositor's own buffers, the bar, the desktop icons,
@@ -139,9 +140,9 @@ pub trait SeatReturn {
     /// # Errors
     ///
     /// The refusal that stopped the frame being re-established, or
-    /// [`Errno::NotSupported`] when `mode` is not one this session can
+    /// [`Errno::NotSupported`] when the mode is not one this session can
     /// present into.
-    fn reconfigure(&mut self, mode: DisplayMode) -> Result<(), Errno>;
+    fn reconfigure(&mut self, output: OutputMode) -> Result<(), Errno>;
 
     /// Tell every application what the desktop now is: the screen a session
     /// comes back to need not be the one it stepped aside from, and an
@@ -400,10 +401,10 @@ impl SwitchUser {
             .map_err(ResumeFailure::ModeUnavailable)?;
         // The output moved after it was read: its announcement brings the
         // session onto where it went, so it comes back dormant meanwhile.
-        let output = match output.map(|mode| presentation.reconfigure(mode)) {
+        let output = match output.map(|output| presentation.reconfigure(output)) {
             Some(Err(Errno::Stale)) => None,
             Some(Err(err)) => return Err(ResumeFailure::FrameRefused(err)),
-            Some(Ok(())) | None => output,
+            Some(Ok(())) | None => output.map(|output| output.mode),
         };
         // Dormant or not, the desktop record on the board is the last
         // foreground session's, so this one's is published either way.

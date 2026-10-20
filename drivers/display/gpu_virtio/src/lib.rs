@@ -11,9 +11,10 @@
 //!
 //! The output is the first scanout the device reports enabled, at the size
 //! its display information states, or, where that names no size, the
-//! preferred timing of the EDID it offers. A presenter's frame is the
-//! backing of a 2D resource the driver creates for it, carved in memory the
-//! device reads and granted to the presenter, so a present copies no pixel:
+//! preferred timing of the EDID it offers; its rate is the EDID's for a timing
+//! of the size it shows. A presenter's frame is the backing of a 2D resource
+//! the driver creates for it, carved in memory the device reads and granted to
+//! the presenter, so a present copies no pixel:
 //! it has the device transfer the damaged rectangles from the backing into
 //! its copy and flush them to the scanout. The device answers every command,
 //! and a present returns once it has, so the frame is the presenter's again
@@ -44,7 +45,8 @@ pub mod wire;
 use tairix_abi::display_ipc::DISPLAY_MAX_BUFFERS;
 use tairix_abi::driver::display::{
     AllocatedBuffer, BufferId, CursorCaps, DamageRect, Display, DisplayFormat, DisplayMode,
-    DisplayPower, HardwareCursor, HostedConsole, Presented, Serviced, MAX_DAMAGE_RECTS,
+    DisplayPower, HardwareCursor, HostedConsole, Presented, RefreshRate, Serviced,
+    MAX_DAMAGE_RECTS,
 };
 use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::virtio::{VirtioHost, VIRTIO_GPU_DEVICE_ID};
@@ -217,6 +219,8 @@ pub trait ConsoleSource {
 struct Output {
     scanout: u32,
     mode: DisplayMode,
+    /// The rate its sink states for a timing of the size it shows.
+    refresh: Option<RefreshRate>,
 }
 
 /// The resource memory the device reads backs.
@@ -413,25 +417,36 @@ fn offset_of(rect: &DamageRect, width: u32) -> u64 {
     (u64::from(rect.y) * u64::from(width) + u64::from(rect.x)) * 4
 }
 
-/// The output a display-information response and, failing a size there, an
-/// EDID name: the first enabled scanout's.
+/// The output a display-information response and the first enabled
+/// scanout's `sink` timings name: that scanout, at the size the response
+/// states or, failing one, the sink's preferred timing's, at the rate the sink
+/// states for a timing of that size — its preferred timing's first.
 fn output_of(
     scanouts: &[wire::Scanout; wire::SCANOUTS_MAX],
-    preferred: impl FnOnce(u32) -> Option<(u32, u32)>,
+    sink: &[tairix_edid::Mode],
 ) -> Option<Output> {
     let (index, scanout) = scanouts
         .iter()
         .enumerate()
         .find(|(_, scanout)| scanout.enabled)?;
     let scanout_id = u32::try_from(index).ok()?;
+    let preferred = sink
+        .iter()
+        .find(|mode| mode.preferred)
+        .or_else(|| sink.first());
     let (width, height) = if scanout.width != 0 && scanout.height != 0 {
         (scanout.width, scanout.height)
     } else {
-        preferred(scanout_id)?
+        preferred.map(|mode| mode.timing.active_size())?
     };
     if width == 0 || height == 0 || width > SIDE_MAX || height > SIDE_MAX {
         return None;
     }
+    let refresh = preferred.into_iter().chain(sink).find_map(|mode| {
+        (mode.timing.active_size() == (width, height))
+            .then(|| RefreshRate::of(&mode.timing))
+            .flatten()
+    });
     Some(Output {
         scanout: scanout_id,
         mode: DisplayMode {
@@ -440,6 +455,7 @@ fn output_of(
             stride_bytes: width * 4,
             format: DisplayFormat::Bgra8888,
         },
+        refresh,
     })
 }
 
@@ -668,35 +684,23 @@ where
     fn read_output(&mut self) -> Result<Option<Output>, DriverError> {
         let scanouts =
             wire::display_info(self.ask(&wire::get_display_info(), wire::DISPLAY_INFO_LEN)?)?;
-        let edid = self.edid;
-        let mut preferred = None;
-        if let Some((index, _)) = scanouts
-            .iter()
-            .enumerate()
-            .find(|(_, scanout)| scanout.enabled && (scanout.width == 0 || scanout.height == 0))
-        {
-            if edid {
-                let scanout = u32::try_from(index).map_err(|_| DriverError::DeviceFault)?;
-                preferred = self.preferred_size(scanout);
+        let sink = match scanouts.iter().position(|scanout| scanout.enabled) {
+            Some(index) if self.edid => {
+                self.sink(u32::try_from(index).map_err(|_| DriverError::DeviceFault)?)
             }
-        }
-        Ok(output_of(&scanouts, |_| preferred))
+            _ => None,
+        };
+        Ok(output_of(
+            &scanouts,
+            sink.as_ref().map_or(&[], |edid| edid.modes.as_slice()),
+        ))
     }
 
-    /// The active size of the preferred timing in scanout `scanout`'s EDID,
-    /// or `None` where it states none the driver can read.
-    fn preferred_size(&mut self, scanout: u32) -> Option<(u32, u32)> {
+    /// Scanout `scanout`'s sink as its EDID describes it, or `None` where it
+    /// offers none the driver can read.
+    fn sink(&mut self, scanout: u32) -> Option<tairix_edid::Edid> {
         let response = self.ask(&wire::get_edid(scanout), wire::EDID_LEN).ok()?;
-        let edid = tairix_edid::Edid::parse(wire::edid(response).ok()?).ok()?;
-        let mode = edid
-            .modes
-            .iter()
-            .find(|mode| mode.preferred)
-            .or_else(|| edid.modes.first())?;
-        Some((
-            u32::from(mode.timing.horizontal.active),
-            u32::from(mode.timing.vertical.active),
-        ))
+        tairix_edid::Edid::parse(wire::edid(response).ok()?).ok()
     }
 
     /// A resource id no live resource carries.
@@ -872,7 +876,10 @@ where
         match self.read_output() {
             Ok(output) => {
                 self.output = output;
-                if output == before {
+                // A rate alone is the display service's to read; the device
+                // is told nothing new.
+                let shown = |output: Option<Output>| output.map(|o| (o.scanout, o.mode));
+                if shown(output) == shown(before) {
                     return Ok(());
                 }
                 self.follow(before)
@@ -1060,6 +1067,10 @@ where
 {
     fn output(&self) -> Option<DisplayMode> {
         self.output.map(|output| output.mode)
+    }
+
+    fn refresh(&self) -> Option<RefreshRate> {
+        self.output.and_then(|output| output.refresh)
     }
 
     fn service_events(&mut self) -> Result<Serviced, DriverError> {

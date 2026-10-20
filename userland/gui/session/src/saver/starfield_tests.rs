@@ -1,6 +1,7 @@
 //! Host tests of the starfield: its density, its flight, and a frame that
 //! repaints only where stars were and are.
 
+use crate::saver::{TEST_REFRESH, TEST_SCENE_FRAME_NS};
 use tairix_wallpaper::{StarDensity, StarfieldOptions};
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface};
 
@@ -20,7 +21,7 @@ fn field(now_ns: u64) -> Starfield {
         SCREEN,
         Scale::ONE,
         (false, StarfieldOptions::default()),
-        now_ns,
+        (now_ns, TEST_REFRESH),
     )
     .expect("a field")
 }
@@ -34,10 +35,10 @@ fn fly_until(
     wm: tairix_wm::WindowId,
     comp: &mut Compositor,
 ) -> u64 {
-    let mut now = SceneClock::FRAME_NS;
+    let mut now = TEST_SCENE_FRAME_NS;
     while now < until {
         stars.advance(now, wm, comp);
-        now += SceneClock::FRAME_NS;
+        now += TEST_SCENE_FRAME_NS;
     }
     stars.advance(now, wm, comp);
     now
@@ -81,7 +82,7 @@ fn the_field_is_as_dense_as_the_screen_is_large_and_bounded_either_way() {
         (64, 48),
         Scale::ONE,
         (false, StarfieldOptions::default()),
-        0,
+        (0, TEST_REFRESH),
     )
     .expect("a field");
     assert_eq!(tiny.stars.len(), usize::try_from(MIN_STARS).expect("small"));
@@ -89,7 +90,7 @@ fn the_field_is_as_dense_as_the_screen_is_large_and_bounded_either_way() {
         (15_360, 8_640),
         Scale::ONE,
         (false, StarfieldOptions::default()),
-        0,
+        (0, TEST_REFRESH),
     )
     .expect("a field");
     assert_eq!(vast.stars.len(), usize::try_from(MAX_STARS).expect("small"));
@@ -103,7 +104,7 @@ fn the_flight_surges_into_warp_and_back_without_a_jump() {
     assert!((speed_at(CRUISE_S + SURGE_S + WARP_S / 2.0) - WARP_SPEED).abs() < 1e-9);
     let cycle = CRUISE_S + SURGE_S + WARP_S + SETTLE_S;
     assert!((speed_at(cycle) - CRUISE_SPEED).abs() < 1e-9, "and round");
-    let frame = tairix_theme::motion::seconds(SceneClock::FRAME_NS);
+    let frame = tairix_theme::motion::seconds(TEST_SCENE_FRAME_NS);
     let most = (WARP_SPEED - CRUISE_SPEED) * 1.5 * frame / SURGE_S.min(SETTLE_S);
     let mut t = 0.0;
     while t < 2.0 * cycle {
@@ -130,7 +131,7 @@ fn stars_stay_in_the_volume_and_their_footprints_on_the_screen() {
         for streak in &stars.streaks {
             assert_eq!(streak.footprint.intersection(&screen), streak.footprint);
         }
-        now += SceneClock::FRAME_NS * 7;
+        now += TEST_SCENE_FRAME_NS * 7;
     }
 }
 
@@ -145,7 +146,7 @@ fn a_frame_leaves_only_its_own_stars_lit() {
     // Into the warp, where the streaks are longest.
     assert!((speed_at(20.0) - WARP_SPEED).abs() < 1e-9, "in warp");
     let in_warp = fly_until(&mut stars, 20 * SEC, wm, &mut comp);
-    stars.advance(in_warp + SceneClock::FRAME_NS, wm, &mut comp);
+    stars.advance(in_warp + TEST_SCENE_FRAME_NS, wm, &mut comp);
     let footprints: alloc::vec::Vec<Rect> = stars
         .streaks
         .iter()
@@ -193,7 +194,7 @@ fn a_frame_writes_only_where_its_stars_were_and_are() {
         .flat_map(|i| (1..9).map(move |j| (i * SCREEN.0 / 16, j * SCREEN.1 / 9)))
         .collect();
     mark(&mut comp, wm, &grid);
-    stars.advance(in_warp + SceneClock::FRAME_NS, wm, &mut comp);
+    stars.advance(in_warp + TEST_SCENE_FRAME_NS, wm, &mut comp);
     let after: alloc::vec::Vec<Rect> = stars.streaks.iter().map(|s| s.footprint).collect();
     let content = comp
         .window(wm)
@@ -230,11 +231,11 @@ fn a_frame_into_a_fresh_buffer_is_black_but_for_its_stars() {
     let mut comp = compositor();
     let wm = canvas(&mut comp);
     let mut stars = field(0);
-    stars.advance(SceneClock::FRAME_NS, wm, &mut comp);
+    stars.advance(TEST_SCENE_FRAME_NS, wm, &mut comp);
     let mut stale = Surface::new(8, 8).expect("a surface");
     stale.fill(MARK);
     assert!(comp.set_surface(wm, stale));
-    stars.advance(2 * SceneClock::FRAME_NS, wm, &mut comp);
+    stars.advance(2 * TEST_SCENE_FRAME_NS, wm, &mut comp);
     let footprints: alloc::vec::Vec<Rect> = stars
         .streaks
         .iter()
@@ -253,11 +254,11 @@ fn a_late_wake_moves_the_field_no_more_than_a_few_frames() {
     let mut comp = compositor();
     let wm = canvas(&mut comp);
     let mut stars = field(0);
-    stars.advance(SceneClock::FRAME_NS, wm, &mut comp);
+    stars.advance(TEST_SCENE_FRAME_NS, wm, &mut comp);
     let before: alloc::vec::Vec<super::Star> = stars.stars.clone();
     stars.advance(60 * SEC, wm, &mut comp);
     let most =
-        WARP_SPEED * tairix_theme::motion::seconds(SceneClock::MOST_FRAMES * SceneClock::FRAME_NS);
+        WARP_SPEED * tairix_theme::motion::seconds(SceneClock::MOST_FRAMES * TEST_SCENE_FRAME_NS);
     let mut flown = 0;
     for (star, was) in stars.stars.iter().zip(before) {
         // A respawn scatters a star afresh; the same star kept its place
@@ -281,7 +282,7 @@ fn a_late_wake_carries_the_warp_cycle_no_further_than_the_field() {
     let mut comp = compositor();
     let wm = canvas(&mut comp);
     let mut stars = field(0);
-    stars.advance(SceneClock::FRAME_NS, wm, &mut comp);
+    stars.advance(TEST_SCENE_FRAME_NS, wm, &mut comp);
     let before: alloc::vec::Vec<super::Star> = stars.stars.clone();
     assert!(
         (speed_at(20.0) - WARP_SPEED).abs() < 1e-9,
@@ -290,8 +291,8 @@ fn a_late_wake_carries_the_warp_cycle_no_further_than_the_field() {
 
     stars.advance(20 * SEC, wm, &mut comp);
 
-    let most = CRUISE_SPEED
-        * tairix_theme::motion::seconds(SceneClock::MOST_FRAMES * SceneClock::FRAME_NS);
+    let most =
+        CRUISE_SPEED * tairix_theme::motion::seconds(SceneClock::MOST_FRAMES * TEST_SCENE_FRAME_NS);
     let mut flown = 0;
     for (star, was) in stars.stars.iter().zip(before) {
         if star.x.to_bits() != was.x.to_bits() || star.y.to_bits() != was.y.to_bits() {
@@ -310,12 +311,17 @@ fn a_late_wake_carries_the_warp_cycle_no_further_than_the_field() {
 fn a_calm_field_only_cruises() {
     let mut comp = compositor();
     let wm = canvas(&mut comp);
-    let mut stars = Starfield::new(SCREEN, Scale::ONE, (true, StarfieldOptions::default()), 0)
-        .expect("a field");
+    let mut stars = Starfield::new(
+        SCREEN,
+        Scale::ONE,
+        (true, StarfieldOptions::default()),
+        (0, TEST_REFRESH),
+    )
+    .expect("a field");
     let warp = fly_until(&mut stars, 20 * SEC, wm, &mut comp);
     let before: alloc::vec::Vec<super::Star> = stars.stars.clone();
-    stars.advance(warp + SceneClock::FRAME_NS, wm, &mut comp);
-    let cruise = CRUISE_SPEED * tairix_theme::motion::seconds(SceneClock::FRAME_NS);
+    stars.advance(warp + TEST_SCENE_FRAME_NS, wm, &mut comp);
+    let cruise = CRUISE_SPEED * tairix_theme::motion::seconds(TEST_SCENE_FRAME_NS);
     let mut flown = 0;
     for (star, was) in stars.stars.iter().zip(before) {
         if star.x.to_bits() != was.x.to_bits() {
@@ -335,7 +341,7 @@ fn the_same_start_flies_the_same_field() {
     let wm = canvas(&mut comp);
     let (mut one, mut two, mut other) = (field(42), field(42), field(43));
     for stars in [&mut one, &mut two, &mut other] {
-        stars.advance(42 + SceneClock::FRAME_NS, wm, &mut comp);
+        stars.advance(42 + TEST_SCENE_FRAME_NS, wm, &mut comp);
     }
     let spots = |field: &Starfield| -> alloc::vec::Vec<Rect> {
         field
@@ -358,7 +364,7 @@ fn a_denser_field_has_more_stars_and_a_sparser_fewer_at_every_size() {
                 size,
                 Scale::ONE,
                 (false, StarfieldOptions { stars, warp: true }),
-                0,
+                (0, TEST_REFRESH),
             )
             .expect("a field")
             .stars
@@ -385,10 +391,11 @@ fn a_field_without_warp_never_surges() {
         stars: StarDensity::Normal,
         warp: false,
     };
-    let mut stars = Starfield::new(SCREEN, Scale::ONE, (false, cruising), 0).expect("a field");
+    let mut stars =
+        Starfield::new(SCREEN, Scale::ONE, (false, cruising), (0, TEST_REFRESH)).expect("a field");
     // Well into where a warping field would be at full warp.
     let in_warp = fly_until(&mut stars, 20 * SEC, wm, &mut comp);
-    stars.advance(in_warp + SceneClock::FRAME_NS, wm, &mut comp);
+    stars.advance(in_warp + TEST_SCENE_FRAME_NS, wm, &mut comp);
     let longest = stars
         .streaks
         .iter()
@@ -398,7 +405,7 @@ fn a_field_without_warp_never_surges() {
         .fold(0.0f64, f64::max);
     let mut warping = field(0);
     let warped = fly_until(&mut warping, 20 * SEC, wm, &mut comp);
-    warping.advance(warped + SceneClock::FRAME_NS, wm, &mut comp);
+    warping.advance(warped + TEST_SCENE_FRAME_NS, wm, &mut comp);
     let warp_longest = warping
         .streaks
         .iter()

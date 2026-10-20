@@ -131,11 +131,11 @@ pub enum DataFault {
 /// Routed through the shared `lib/crc32c`, so on a core with the `crc32c*`
 /// (aarch64) / SSE4.2 `crc32` (x86_64) instruction it runs in one
 /// general-purpose-register instruction per word; on every other core it is
-/// the portable table baseline. Which one is used is selected once at driver
-/// bring-up (`tairix_crc32c::resolve`); until then, and on any core without
-/// the instruction, it is the baseline — always the same value (the hardware
-/// path is self-verified bit-identical to the reference before it can be
-/// selected).
+/// the portable table baseline. Which one is used is selected once, on the
+/// first checksum, against the feature set the driver was delivered; on any
+/// core without the instruction it is the baseline — always the same value
+/// (the hardware path is self-verified bit-identical to the reference before
+/// it can be selected).
 #[must_use]
 pub fn physical_checksum(bytes: &[u8]) -> [u8; PHYS_CHECKSUM_LEN] {
     tairix_crc32c::checksum(bytes).to_le_bytes()

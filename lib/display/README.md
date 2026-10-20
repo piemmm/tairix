@@ -65,10 +65,12 @@ and the client can never drift apart.
   link-time optimisation in the profile the debug image uses, so without it
   a four-byte shuffle costs an out-of-line call.
 - **Window-frame codec** (`winframe`): the same pixel/byte boundary for the
-  frame a *window* channel carries, in both directions — `encode` writes an
-  app's premultiplied surface out as the straight-alpha bytes the frame holds,
-  and `decode` reads a presented frame into the compositor's own window surface
-  and reports the sub-rectangle whose pixels genuinely changed. It lives beside
+  frame a *window* channel carries, in both directions. A frame holds
+  premultiplied pixels in the mode's channel order, so `encode` is a byte-order
+  copy of the app's surface, and `decode` copies a presented frame into the
+  compositor's own window surface — clamping each colour channel to its alpha,
+  since the frame is the client's — and reports the sub-rectangle whose pixels
+  genuinely changed. It lives beside
   the scan-out encode because the channel-order decision is the same one, and no
   program may hold a second opinion about which byte is red. Both directions are
   row-independent and are expressed over `lib/parallel`'s `JobRunner`: the

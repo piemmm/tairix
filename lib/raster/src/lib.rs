@@ -38,11 +38,13 @@
 //! [`Rgb`]: tairix_colour::Rgb
 
 #![no_std]
+#![deny(unsafe_code)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
 extern crate alloc;
 
+pub mod accel;
 pub mod affine;
 pub mod artwork;
 pub mod blur;
@@ -72,7 +74,8 @@ pub use blur::{
     SOFTEN_PASSES,
 };
 pub use color::{
-    blend_solid_span, blend_span, div255, div255_biased, mix_span, Color, Pixel, ROUND_NEAREST,
+    blend_solid_span, blend_span, div255, div255_biased, leading_opaque, leading_translucent,
+    mix_span, Color, Pixel, ROUND_NEAREST,
 };
 pub use dither::DitherRow;
 pub use mesh::{

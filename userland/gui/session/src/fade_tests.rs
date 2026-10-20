@@ -8,6 +8,7 @@
 use tairix_wm::{Color, Surface};
 
 use super::BackdropFade;
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::WAITSET_TIMEOUT_NONE;
 
 /// The span the desktop's own theme gives a backdrop change, in milliseconds.
@@ -35,7 +36,7 @@ fn a_backdrop_that_has_never_changed_owes_nothing() {
     assert_eq!(fade.arriving(), None, "the ground is painted plainly");
     assert!(fade.leaving().is_none());
     assert_eq!(
-        fade.park_deadline_ns(BEGAN_NS, WAITSET_TIMEOUT_NONE),
+        fade.park_deadline_ns(BEGAN_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE,
         "an idle desktop arms no timer for a fade it is not running"
     );
@@ -95,7 +96,7 @@ fn a_reduced_motion_theme_arrives_before_it_has_drawn_anything() {
     assert_eq!(fade.arriving(), None);
     assert!(fade.leaving().is_none());
     assert_eq!(
-        fade.park_deadline_ns(BEGAN_NS, WAITSET_TIMEOUT_NONE),
+        fade.park_deadline_ns(BEGAN_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE
     );
 }
@@ -104,7 +105,7 @@ fn a_reduced_motion_theme_arrives_before_it_has_drawn_anything() {
 fn a_dissolving_backdrop_tightens_the_park_and_an_arrived_one_leaves_it() {
     let mut fade = BackdropFade::default();
     fade.begin(BEGAN_NS, SPAN_MS, None);
-    let deadline = fade.park_deadline_ns(BEGAN_NS, WAITSET_TIMEOUT_NONE);
+    let deadline = fade.park_deadline_ns(BEGAN_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED);
     assert!(
         deadline > 0 && deadline < WAITSET_TIMEOUT_NONE,
         "the desktop wakes for the next frame of the fade, got {deadline}"
@@ -112,7 +113,11 @@ fn a_dissolving_backdrop_tightens_the_park_and_an_arrived_one_leaves_it() {
 
     fade.advance(BEGAN_NS + SPAN_NS);
     assert_eq!(
-        fade.park_deadline_ns(BEGAN_NS + SPAN_NS, WAITSET_TIMEOUT_NONE),
+        fade.park_deadline_ns(
+            BEGAN_NS + SPAN_NS,
+            WAITSET_TIMEOUT_NONE,
+            RefreshRate::ASSUMED
+        ),
         WAITSET_TIMEOUT_NONE,
         "an arrived fade hands the wait straight back"
     );

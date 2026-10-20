@@ -17,6 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_appdata::Refusal;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_raster::Surface;
@@ -29,7 +30,7 @@ use crate::card::CardId;
 use crate::deal::DealNumber;
 use crate::layout::{Layout, Placement};
 use crate::menu::{self, Offer, Offers};
-use crate::motion::{Cascade, Glide, Motion, Timing, FRAME_NS};
+use crate::motion::{Cascade, Glide, Motion, Timing};
 use crate::paint::{self, Cursor, Status, View};
 use crate::play::Play;
 use crate::prefs::Preferences;
@@ -77,6 +78,8 @@ pub struct Setup {
     pub scale: Scale,
     /// Whether the theme asks for motion to be suppressed.
     pub reduced: bool,
+    /// The rate the desktop composes at.
+    pub refresh: RefreshRate,
 }
 
 /// Which alert an answer belongs to.
@@ -290,7 +293,7 @@ impl Game {
             layout,
             scale: setup.scale,
             placements: Vec::new(),
-            motion: Motion::new(variant.deck().count(), size, setup.reduced),
+            motion: Motion::new(variant.deck().count(), size, setup.reduced, setup.refresh),
             art: None,
             pointer: Point::ORIGIN,
             press: None,
@@ -434,7 +437,7 @@ impl Game {
             .as_ref()
             .and_then(|drag| drag.glide)
             .filter(|glide| glide.moving(now_ns))
-            .map(|_| now_ns.saturating_add(FRAME_NS));
+            .map(|_| now_ns.saturating_add(self.motion.frame_ns()));
         [
             self.motion.deadline_ns(now_ns),
             clock,
@@ -537,6 +540,11 @@ impl Game {
         self.end_cascade(damage);
         self.snap();
         damage.add(client);
+    }
+
+    /// Pace every frame by a desktop now refreshing at `refresh`.
+    pub fn set_refresh(&mut self, refresh: RefreshRate) {
+        self.motion.set_refresh(refresh);
     }
 
     /// Adopt the theme's reduced-motion policy.
@@ -816,6 +824,7 @@ impl Game {
                 variant.deck().count(),
                 self.layout.card_size(),
                 self.motion.reduced_motion(),
+                self.motion.refresh(),
             );
             damage.add(self.layout.client);
         }

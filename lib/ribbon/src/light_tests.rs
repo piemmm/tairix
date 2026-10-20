@@ -9,6 +9,7 @@ use tairix_geometry::{Rect, Region};
 use tairix_raster::{DitherRow, Pixel, Surface};
 
 use crate::SKY;
+use tairix_abi::driver::display::RefreshRate;
 use tairix_theme::motion::{seconds, SceneClock};
 use tairix_util::mathf::single;
 
@@ -283,7 +284,7 @@ fn the_ribbon_roams_freely_and_smoothly() {
     let mut light = Light::new(size, Rect::EMPTY, 0.0).expect("a ribbon");
     let mut before: Vec<[f32; STRAND_COUNT]> =
         light.placed.iter().map(|placed| placed.at).collect();
-    let frame_s = seconds(SceneClock::FRAME_NS);
+    let frame_s = seconds(SceneClock::frame_on(RefreshRate::ASSUMED));
     run(&mut light, Rect::EMPTY, 60 * 30, frame_s, |light| {
         for (placed, was) in light.placed.iter().zip(&before) {
             for (now, then) in placed.at.iter().zip(was) {
@@ -801,7 +802,7 @@ fn a_frame_repaints_under_half_the_screen() {
         let mut light = Light::new(size, clock, 0.0).expect("a ribbon");
         let screen = u64::from(size.0) * u64::from(size.1);
         let mut damage = Region::new();
-        let frame_s = seconds(SceneClock::FRAME_NS);
+        let frame_s = seconds(SceneClock::frame_on(RefreshRate::ASSUMED));
         for frame in 1..=90 {
             damage.clear();
             light.step(f64::from(frame) * frame_s, clock, &mut damage);

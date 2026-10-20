@@ -287,8 +287,8 @@ column, and the chrome along the top of the screen, which the ribbon is not
 kept away from, stay legible. The screen is drawn in the dark theme whatever
 the default appearance — dark ink on the ribbon's black would be unreadable.
 
-The ribbon draws a frame every `SceneClock::FRAME_NS`, every other display
-frame, paced by the clock every idle scene shares
+The ribbon draws on whole frames of the display's own rate, at most thirty a
+second (`SceneClock::frame_on`), paced by the clock every idle scene shares
 (`tairix_theme::motion::SceneClock`), which also bounds how far a late wake
 carries it; under reduced motion it holds still and asks for no frame at all. The
 chrome is rebuilt only when the wall-clock minute turns, not on every frame the

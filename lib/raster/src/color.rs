@@ -153,7 +153,11 @@ impl Color {
 }
 
 /// A premultiplied-alpha pixel: every colour channel is `<= a`.
+///
+/// `#[repr(C)]` with four byte fields, so a span of pixels is its bytes in
+/// `r, g, b, a` order: what the vector kernels load and store.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct Pixel {
     /// Red channel, premultiplied by `a`.
     pub r: u8,
@@ -165,6 +169,8 @@ pub struct Pixel {
     pub a: u8,
 }
 
+const _: () = assert!(core::mem::size_of::<Pixel>() == 4 && core::mem::align_of::<Pixel>() == 1);
+
 impl Pixel {
     /// Fully transparent (all channels zero).
     pub const TRANSPARENT: Self = Self {
@@ -173,6 +179,14 @@ impl Pixel {
         b: 0,
         a: 0,
     };
+
+    /// The BT.601 luma of the premultiplied channels: the light this pixel
+    /// adds over black, which is [`Color::luma`] scaled by its coverage.
+    #[must_use]
+    #[inline]
+    pub fn luma(self) -> u8 {
+        u8::try_from(luma(self.r, self.g, self.b)).unwrap_or(u8::MAX)
+    }
 
     /// Recover the straight-alpha [`Color`] this pixel encodes.
     ///
@@ -388,7 +402,7 @@ impl Pixel {
 ///
 /// [`Surface::blit`]: crate::Surface::blit
 pub fn blend_span(dst: &mut [Pixel], src: &[Pixel], factor: u8, dither: DitherRow, first_x: u32) {
-    blend_span_mapped(dst, src, factor, dither, first_x, |pixel| pixel);
+    (crate::accel::blend().span)(dst, src, factor, &dither.tile_at(first_x));
 }
 
 /// [`blend_span`] for a run whose source is one colour rather than a second
@@ -409,9 +423,61 @@ pub fn blend_solid_span(
     if src.a == 0 {
         return;
     }
-    let identity = |pixel: Pixel| pixel;
-    dither_tiles(dst, dither, first_x, |dst, bias| {
-        blend_one(dst, src, factor, bias, &identity);
+    (crate::accel::blend().solid)(dst, src, factor, &dither.tile_at(first_x));
+}
+
+/// How many pixels lead `span` whose alpha is full: a run that replaces
+/// whatever lies beneath it exactly, which a compositor copies rather than
+/// blends.
+#[must_use]
+#[inline]
+pub fn leading_opaque(span: &[Pixel]) -> usize {
+    (crate::accel::scan().opaque)(span)
+}
+
+/// How many pixels lead `span` whose alpha is not full: how far a compositor
+/// blends before the next run it can copy.
+#[must_use]
+#[inline]
+pub fn leading_translucent(span: &[Pixel]) -> usize {
+    (crate::accel::scan().translucent)(span)
+}
+
+/// The portable [`leading_opaque`]: the reference every vector candidate is
+/// verified against.
+pub(crate) fn leading_opaque_portable(span: &[Pixel]) -> usize {
+    span.iter().take_while(|pixel| pixel.a == u8::MAX).count()
+}
+
+/// The portable [`leading_translucent`], as [`leading_opaque_portable`] is.
+pub(crate) fn leading_translucent_portable(span: &[Pixel]) -> usize {
+    span.iter().take_while(|pixel| pixel.a != u8::MAX).count()
+}
+
+/// The portable [`blend_span`] over a span whose first pixel rounds at
+/// `tile[0]`: the reference every vector candidate is verified against, what
+/// runs where none is, and the tail each finishes a span with.
+pub(crate) fn blend_span_portable(
+    dst: &mut [Pixel],
+    src: &[Pixel],
+    factor: u8,
+    tile: &[u32; DitherRow::PERIOD],
+) {
+    blend_tiled(dst, src, factor, tile, &|pixel| pixel);
+}
+
+/// The portable [`blend_solid_span`], as [`blend_span_portable`] is.
+pub(crate) fn blend_solid_portable(
+    dst: &mut [Pixel],
+    src: Pixel,
+    factor: u8,
+    tile: &[u32; DitherRow::PERIOD],
+) {
+    if src.a == 0 {
+        return;
+    }
+    paint_tiles(dst, tile, |dst, bias| {
+        blend_one(dst, src, factor, bias, &|pixel| pixel);
     });
 }
 
@@ -435,23 +501,34 @@ pub(crate) fn blend_span_mapped(
     first_x: u32,
     map: impl Fn(Pixel) -> Pixel,
 ) {
+    blend_tiled(dst, src, factor, &dither.tile_at(first_x), &map);
+}
+
+/// The tiled walk [`blend_span_mapped`] and [`blend_span_portable`] share.
+#[inline]
+fn blend_tiled(
+    dst: &mut [Pixel],
+    src: &[Pixel],
+    factor: u8,
+    tile: &[u32; DitherRow::PERIOD],
+    map: &impl Fn(Pixel) -> Pixel,
+) {
     let paired = dst.len().min(src.len());
     let (Some(dst), Some(src)) = (dst.get_mut(..paired), src.get(..paired)) else {
         return;
     };
-    let tile = dither.tile_at(first_x);
     let (dst_tiles, dst_rest) = dst.as_chunks_mut::<{ DitherRow::PERIOD }>();
     let (src_tiles, src_rest) = src.as_chunks::<{ DitherRow::PERIOD }>();
     // A whole tile's length is a constant, which is what the two loop headers
     // buy: the optimiser unrolls the first into eight independent blends at
     // eight constant biases. Both reach the one blend below.
     for (dst, src) in dst_tiles.iter_mut().zip(src_tiles) {
-        for ((dst, src), &bias) in dst.iter_mut().zip(src).zip(&tile) {
-            blend_one(dst, *src, factor, bias, &map);
+        for ((dst, src), &bias) in dst.iter_mut().zip(src).zip(tile) {
+            blend_one(dst, *src, factor, bias, map);
         }
     }
-    for ((dst, src), &bias) in dst_rest.iter_mut().zip(src_rest).zip(&tile) {
-        blend_one(dst, *src, factor, bias, &map);
+    for ((dst, src), &bias) in dst_rest.iter_mut().zip(src_rest).zip(tile) {
+        blend_one(dst, *src, factor, bias, map);
     }
 }
 
@@ -468,16 +545,26 @@ pub(crate) fn dither_tiles(
     span: &mut [Pixel],
     dither: DitherRow,
     first_x: u32,
+    paint: impl FnMut(&mut Pixel, u32),
+) {
+    paint_tiles(span, &dither.tile_at(first_x), paint);
+}
+
+/// Walk `span` in whole tiles of the resolved `tile`, handing `paint` each
+/// pixel and the bias it rounds at.
+#[inline]
+fn paint_tiles(
+    span: &mut [Pixel],
+    tile: &[u32; DitherRow::PERIOD],
     mut paint: impl FnMut(&mut Pixel, u32),
 ) {
-    let tile = dither.tile_at(first_x);
     let (tiles, rest) = span.as_chunks_mut::<{ DitherRow::PERIOD }>();
     for tiled in tiles {
-        for (dst, &bias) in tiled.iter_mut().zip(&tile) {
+        for (dst, &bias) in tiled.iter_mut().zip(tile) {
             paint(dst, bias);
         }
     }
-    for (dst, &bias) in rest.iter_mut().zip(&tile) {
+    for (dst, &bias) in rest.iter_mut().zip(tile) {
         paint(dst, bias);
     }
 }

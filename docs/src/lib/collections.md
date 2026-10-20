@@ -265,8 +265,10 @@ churn passes through it.
 
 The scan is a [`lib/cpuops`](./cpuops.md) family: an SSE2 candidate, a NEON
 candidate, and a portable word-at-a-time baseline. Which one runs is decided
-once per boot (`kernel/core`'s `resolve_accelerated_ops`) through the
-capability gate and the mandatory self-verify, so a vector instruction is never
+once per process — the first time a table scans, against the feature set the
+process was delivered, and in the kernel by `kernel/core`'s
+`resolve_accelerated_ops` — through the capability gate and the mandatory
+self-verify, so a vector instruction is never
 reached on a core that lacks it, and a candidate that disagrees with the
 baseline on any vector cannot be selected. It is never benchmarked: the control
 bytes it reads are tags derived from the per-boot hash key, and a benchmark is

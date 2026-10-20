@@ -8,6 +8,9 @@ use tairix_geometry::Region;
 use tairix_rng::NonCryptoRng;
 use tairix_theme::Theme;
 
+/// The desktop the game is paced on.
+const RATE: RefreshRate = RefreshRate::ASSUMED;
+
 use crate::board::{Cover, Dimensions, Phase};
 use crate::scores::MAX_TIME_SECS;
 
@@ -91,7 +94,11 @@ fn a_new_game_is_ready_with_the_clock_at_zero() {
     assert_eq!(game.board().phase(), Phase::Ready);
     assert_eq!(game.elapsed_secs(0), 0);
     assert_eq!(game.elapsed_secs(60 * SECOND_NS), 0, "not started yet");
-    assert_eq!(game.deadline_ns(0), None, "an untouched game owes no wake");
+    assert_eq!(
+        game.deadline_ns(0, RATE),
+        None,
+        "an untouched game owes no wake"
+    );
 }
 
 #[test]
@@ -126,7 +133,7 @@ fn a_running_game_asks_only_for_its_next_whole_second() {
     let quiet = start + 10 * SECOND_NS;
     let mut region = damage::sink();
     game.tick(quiet, &mut region);
-    assert_eq!(game.deadline_ns(quiet), Some(start + 11 * SECOND_NS));
+    assert_eq!(game.deadline_ns(quiet, RATE), Some(start + 11 * SECOND_NS));
 }
 
 #[test]
@@ -134,9 +141,9 @@ fn an_animating_game_asks_for_a_frame() {
     let mut game = game();
     let start = 0;
     click(&mut game, Coord::new(4, 4), PointerButton::Primary, start);
-    let deadline = game.deadline_ns(start).expect("a wave is in flight");
+    let deadline = game.deadline_ns(start, RATE).expect("a wave is in flight");
     assert!(
-        deadline <= start + crate::anim::FRAME_NS,
+        deadline <= start + RATE.frame_ns(),
         "a frame is due before the clock's next second"
     );
 }
@@ -151,7 +158,7 @@ fn a_finished_game_owes_no_wake_once_its_animation_ends() {
     let mut region = damage::sink();
     game.tick(settled, &mut region);
     assert_eq!(
-        game.deadline_ns(settled),
+        game.deadline_ns(settled, RATE),
         None,
         "a finished, still board must not wake at all"
     );
@@ -190,15 +197,15 @@ fn a_clock_at_its_last_reading_stops_asking_to_be_woken() {
     game.tick(capped, &mut region);
     assert_eq!(game.elapsed_secs(capped), MAX_TIME_SECS);
     assert_eq!(
-        game.deadline_ns(capped),
+        game.deadline_ns(capped, RATE),
         None,
         "a capped clock owes no further wake"
     );
-    assert_eq!(game.deadline_ns(capped * 2), None);
+    assert_eq!(game.deadline_ns(capped * 2, RATE), None);
 
     // One second short of the cap it is still ticking.
     let short = capped - SECOND_NS;
-    assert!(game.deadline_ns(short).is_some());
+    assert!(game.deadline_ns(short, RATE).is_some());
 }
 
 // --- Revealing ----------------------------------------------------------

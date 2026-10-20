@@ -56,13 +56,8 @@ and the bar rather than cut at the panel's edge.
 ## Presenting what changed
 
 The gallery is the worked example of an app that presents the rectangle it
-repainted instead of its window. Three whole-window passes used to run on every
-pointer sample: a window-sized surface allocated and zeroed, the gallery drawn
-into all of it, and every pixel unpremultiplied into the shared frame under a
-full-window damage rectangle — after which the session diffed the whole window
-again.
-
-Now the `Run` binary holds one surface for the life of the window, and each
+repainted instead of its window. The `Run` binary holds one surface for the life
+of the window, and each
 round of input carries a damage region (`tairix_controls::damage::sink()`) that
 the controls and the gallery report into. `tairix_window::present_damage` turns
 that into the rectangle to present: what was reported, clipped to the window;

@@ -19,7 +19,9 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use tairix_abi::desktop::DOUBLE_CLICK_DEFAULT;
-use tairix_abi::driver::display::{DamageRect, DisplayMode, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS};
+use tairix_abi::driver::display::{
+    DamageRect, DisplayMode, RefreshRate, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
+};
 use tairix_abi::sysinfo::DesktopFrameTotals;
 use tairix_abi::time::Duration64;
 use tairix_abi::DriverError;
@@ -344,6 +346,8 @@ pub struct Compositor {
     /// double-click: the seat's one interval, which the title bars pair under
     /// and the session publishes to every application.
     double_click: Duration64,
+    /// The rate the output is composed for.
+    refresh_rate: RefreshRate,
 }
 
 /// The composite specialisations a test may withhold, so one scene can be
@@ -555,6 +559,7 @@ impl Compositor {
             fast_paths: FastPaths::ALL,
             next_id: 1,
             double_click: DOUBLE_CLICK_DEFAULT,
+            refresh_rate: RefreshRate::ASSUMED,
         };
         let screen = compositor.screen_rect();
         compositor.mark(screen);
@@ -866,6 +871,23 @@ impl Compositor {
     /// nothing is marked.
     pub fn set_double_click(&mut self, interval: Duration64) {
         self.double_click = interval;
+    }
+
+    /// The rate the output is composed for, which every animation on it
+    /// paces its frames by.
+    #[must_use]
+    pub const fn refresh_rate(&self) -> RefreshRate {
+        self.refresh_rate
+    }
+
+    /// Compose for an output refreshing at `rate`, or at
+    /// [`RefreshRate::ASSUMED`] for one that states none, answering whether
+    /// the rate changed. Nothing on screen moves, so nothing is marked.
+    pub fn set_refresh_rate(&mut self, rate: Option<RefreshRate>) -> bool {
+        let rate = RefreshRate::or_assumed(rate);
+        let changed = rate != self.refresh_rate;
+        self.refresh_rate = rate;
+        changed
     }
 
     /// The active desktop theme this output decorates windows with.
@@ -2621,7 +2643,7 @@ impl Compositor {
     pub fn next_elevation_frame_in(&self, now_ns: u64) -> Option<u64> {
         self.windows
             .iter()
-            .filter_map(|window| window.shadow_frame_in(now_ns))
+            .filter_map(|window| window.shadow_frame_in(now_ns, self.refresh_rate))
             .min()
     }
 
@@ -4073,6 +4095,10 @@ impl Compositor {
     /// so the bytes moved are proportional to what changed rather than to the
     /// box around it.
     ///
+    /// The cursor plane goes to the pointer once the frame is handed over, so
+    /// a pointer carrying what the frame moves reaches the screen with it; a
+    /// present with nothing to draw moves it at once.
+    ///
     /// # Errors
     ///
     /// Propagates any [`DriverError`] the display returns.
@@ -4099,10 +4125,12 @@ impl Compositor {
         // wakes themselves would make the totals move for ever on an idle
         // desktop and never let such a reader settle.
         if !self.has_damage() {
+            self.move_plane(presenter);
             return Ok(());
         }
         self.stats.begin_frame(self.screen_px());
         if layered && self.present_layered(presenter)? {
+            self.move_plane(presenter);
             return Ok(());
         }
         let mut region = core::mem::take(&mut self.composed);
@@ -4117,16 +4145,19 @@ impl Compositor {
             self.undelivered = region;
         } else {
             self.composed = region;
+            self.move_plane(presenter);
         }
         sent
     }
 
     /// Bring the cursor plane to the pointer, between frames: what a seat
     /// does once per batch of pointer input, since moving a pointer on the
-    /// plane presents no frame.
+    /// plane presents no frame — unless the pointer carries what the next
+    /// frame moves, which [`present`](Self::present) then moves it with.
     pub fn place_pointer(&mut self, presenter: &mut dyn Presenter) {
         let layered = self.layers.is_some();
         self.route_pointer(presenter, layered);
+        self.move_plane(presenter);
     }
 
     /// Present the frame's `region` to `presenter`, recording how the frame

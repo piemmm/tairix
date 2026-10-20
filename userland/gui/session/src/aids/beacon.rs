@@ -6,10 +6,11 @@
 //! rim, so it reads over a light picture as well as a dark one. With motion
 //! reduced, one ring stands around the pointer for the same time instead.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_geometry::Scale;
 use tairix_theme::motion::{ease_out, smoothstep};
-use tairix_theme::{Theme, Timeline};
+use tairix_theme::Theme;
 use tairix_wm::{Color, Halo, HaloRing};
 
 /// How long each ring takes to close in.
@@ -117,16 +118,17 @@ impl Beacon {
         halo
     }
 
-    /// Nanoseconds until the rings next change, or `None` while there are
-    /// none. A still ring changes only when it goes.
+    /// Nanoseconds until the rings next change on a display refreshing at
+    /// `refresh`, or `None` while there are none. A still ring changes only
+    /// when it goes.
     #[must_use]
-    pub fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
+    pub fn next_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
         let started = self.started_ns?;
         let left = started.saturating_add(SHOWN_NS).saturating_sub(now_ns);
         Some(if self.still {
             left
         } else {
-            left.min(Timeline::FRAME_NS)
+            left.min(refresh.frame_ns())
         })
     }
 }

@@ -126,27 +126,33 @@ would cut the line at the `#`; the colour and its six digits are
 `lib/colour`'s opaque `Rgb`. A change to the custom colours makes a terminal's
 picture stale only while the custom scheme is the one in force.
 
-## Screen effects (`effects`)
+## Screen effects (`effects`, `pipeline`)
 
-A typed, ordered `Pass` list rather than code inlined into the renderer, so a
-display that can composite hardware layers can programme its own engine from
-the same description with the software passes staying the conformance oracle.
+A typed, ordered `Pass` list resolved from the profile's strengths.
 Translucency is not a pass: the default background is filled at the profile's
 alpha, so the compositor's own premultiplied blend does the work and a glyph
 stays opaque over it. Backdrop blur is the compositor's, since only it can see
-behind a window. Scan lines, glow, fuzz, phosphor persistence, and wobble run
-over the finished frame in integer arithmetic, with one `EffectState` carrying
-what the stateful passes remember in grown-once buffers rather than allocating
-per frame. The glow is halation — the light of brightly-driven pixels spread
-into their neighbourhood — measured by peak channel rather than a luma
-weighting, so saturated red text glows as hard as green, and spread by the
-shared `tairix_raster::box_blur` run twice for a tent falloff. `EffectKey` is
-the one ordered list of which effects exist, what each is called, and where its
-strength lives, so the settings sheet cannot map a slider onto the wrong
-field. Every animated pass is a
-pure function of a monotonically increasing `Phase`, which the `Run` binary
-advances on a one-shot frame deadline — never a poll loop, and no wake at all
-when the effects are off.
+behind a window. `EffectKey` is the one ordered list of which effects exist,
+what each is called, and where its strength lives, so the settings sheet cannot
+map a slider onto the wrong field.
+
+The passes run in integer arithmetic in three retained stages
+(`pipeline::Pipeline`), split by what an output pixel reads: wobble, phosphor
+and scan lines read one screen pixel and its row; glow the neighbourhood its
+reach spans; fuzz one pixel and the step. A render redraws each stage only
+where its input changed and presents exactly that, so a keystroke under glow
+costs its cells and their halo rather than the window, and an unchanging screen
+costs nothing. The stages exist only while an effect is on, are held at the
+window's size rather than allocated per frame, and spread their rows across a
+worker pool started on first use. The glow is halation — the light of
+brightly-driven pixels spread into their neighbourhood — measured by peak
+channel rather than a luma weighting, so saturated red text glows as hard as
+green, and spread by the shared `tairix_raster::box_blur` run twice for a tent
+falloff. Every animated pass is a pure function of a monotonically increasing
+`Phase`, which the `Run` binary advances on a one-shot deadline of whole
+display frames — never a poll loop, and no wake at all when the effects are
+off. The phosphor trail decays on that clock and settles, asking for no frame
+once it has faded.
 
 ## Menu and settings (`menu`, `settings`, `swatch`)
 

@@ -79,7 +79,7 @@ mod program {
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::audio::StreamDirection;
-    use tairix_abi::driver::display::DisplayMode;
+    use tairix_abi::driver::display::{DisplayMode, OutputMode};
     use tairix_abi::elevate::{
         elevate_endpoint, ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY,
     };
@@ -1174,7 +1174,7 @@ mod program {
         now_ns: u64,
     ) {
         shell.observe_pointer_aids(now_ns, compositor);
-        if !pacer.due(now_ns) {
+        if !pacer.due(now_ns, compositor.refresh_rate()) {
             return;
         }
         fade.advance(now_ns, compositor);
@@ -1311,7 +1311,11 @@ mod program {
             if fade.settled() {
                 return;
             }
-            tairix_rt::park_ns(fade.park_deadline_ns(tairix_rt::clock_get(), WAITSET_TIMEOUT_NONE));
+            tairix_rt::park_ns(fade.park_deadline_ns(
+                tairix_rt::clock_get(),
+                WAITSET_TIMEOUT_NONE,
+                compositor.refresh_rate(),
+            ));
             fade.advance(tairix_rt::clock_get(), compositor);
         }
     }
@@ -2294,11 +2298,12 @@ mod program {
             Ok(())
         }
 
-        fn query_output(&mut self) -> Result<Option<DisplayMode>, Errno> {
+        fn query_output(&mut self) -> Result<Option<OutputMode>, Errno> {
             DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query()
         }
 
-        fn reconfigure(&mut self, mode: DisplayMode) -> Result<(), Errno> {
+        fn reconfigure(&mut self, OutputMode { mode, refresh }: OutputMode) -> Result<(), Errno> {
+            self.parts.compositor.set_refresh_rate(refresh);
             let ring = match establish_frames(&mode) {
                 Ok(ring) => ring,
                 Err(FramesRefused::Configure(Errno::Stale)) => return Err(Errno::Stale),
@@ -2388,7 +2393,10 @@ mod program {
         // A present still waiting to latch when the output is announced again
         // went to a driver that may not be there to latch it.
         let forgotten = forgotten || display.as_ref().is_some_and(|ring| !ring.ready());
-        match Follow::of(output, held, forgotten) {
+        let rate_moved = parts
+            .compositor
+            .set_refresh_rate(output.and_then(|output| output.refresh));
+        match Follow::of(output.map(|output| output.mode), held, forgotten) {
             Follow::Release => {
                 if display.is_some() {
                     let _ = hold_display(set, display, None);
@@ -2398,6 +2406,11 @@ mod program {
             }
             Follow::Repaint => {
                 parts.compositor.owe_output();
+                // A new mode tells every application through the re-lay; the
+                // same mode at a new rate is told here.
+                if rate_moved {
+                    publish_desktop(parts.compositor, parts.shell);
+                }
                 Ok(Followed::Settled)
             }
             Follow::Reconfigure(mode) => {
@@ -2439,7 +2452,7 @@ mod program {
     /// The output the session comes up on: the one connected now, or the
     /// first to arrive, parked for on `set`, which already holds the output's
     /// announcement so none is missed between a read and the park.
-    fn first_output(set: u64) -> Result<DisplayMode, (i32, &'static str)> {
+    fn first_output(set: u64) -> Result<OutputMode, (i32, &'static str)> {
         let mut client = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY);
         let mut told = false;
         loop {
@@ -2525,19 +2538,19 @@ mod program {
         // configure. A configure refused as stale means the output moved
         // after it was read, and its announcement is what is waited for.
         let mut moved = false;
-        let (ring, mode) = loop {
+        let (ring, OutputMode { mode, refresh }) = loop {
             if moved {
                 let mut token = 0u64;
                 if tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token) != 0 {
                     return app::fail(APP_NAME, EXIT_WAIT_FAILED, "display output wait failed");
                 }
             }
-            let mode = match first_output(set) {
-                Ok(mode) => mode,
+            let output = match first_output(set) {
+                Ok(output) => output,
                 Err((code, reason)) => return app::fail(APP_NAME, code, reason),
             };
-            match establish_frames(&mode) {
-                Ok(ring) => break (ring, mode),
+            match establish_frames(&output.mode) {
+                Ok(ring) => break (ring, output),
                 Err(FramesRefused::Configure(Errno::Stale)) => moved = true,
                 Err(refused) => {
                     return app::fail(APP_NAME, refused_exit(refused), refused.reason());
@@ -2631,8 +2644,9 @@ mod program {
                 "compositor rejected the queried mode",
             );
         };
+        compositor.set_refresh_rate(refresh);
         let cpus = tairix_procinfo::cpu_info(&IpcTransport).ok();
-        let online = online_cpus(cpus.as_deref());
+        let online = tairix_procinfo::online_count(cpus.as_deref());
         compositor.set_job_runner(composite_pool(online));
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
         let Ok(mut pointer) = DeviceInputSource::new(
@@ -3797,6 +3811,7 @@ mod program {
             post_push(&mut effects, &mut cue_posts, set);
             let timeout_ns = {
                 let now_ns = tairix_rt::clock_get();
+                let refresh = compositor.refresh_rate();
                 // A thumbnail slice is owed *now*: the wait still reports a
                 // ready member first, so slicing never starves input.
                 let owed = if shell.window_thumbnails_owed() {
@@ -3806,7 +3821,7 @@ mod program {
                 };
                 let mut park = tairix_rt::cachereport::fold_wait_deadline_ns(owed);
                 if !saver.is_dark() {
-                    park = pacer.park_deadline_ns(now_ns, park);
+                    park = pacer.park_deadline_ns(now_ns, park, refresh);
                 }
                 park = frame_stats.park_deadline_ns(now_ns, park);
                 park = frames.park_deadline_ns(now_ns, park);
@@ -3827,15 +3842,15 @@ mod program {
                 // Exactly what `animate` steps, which it steps only on a
                 // frame the pacer has due.
                 let mut step = WAITSET_TIMEOUT_NONE;
-                step = shell.backdrop_park_deadline_ns(now_ns, step);
-                step = shell.pointer_aids_park_deadline_ns(now_ns, step);
-                step = fade.park_deadline_ns(now_ns, step);
+                step = shell.backdrop_park_deadline_ns(now_ns, step, refresh);
+                step = shell.pointer_aids_park_deadline_ns(now_ns, step, refresh);
+                step = fade.park_deadline_ns(now_ns, step, refresh);
                 step = park_within(step, compositor.next_elevation_frame_in(now_ns));
                 step = shell.clock().park_deadline_ns(now_ns, step);
-                step = lock.park_deadline_ns(now_ns, step);
-                step = elevate.park_deadline_ns(now_ns, step);
+                step = lock.park_deadline_ns(now_ns, step, refresh);
+                step = elevate.park_deadline_ns(now_ns, step, refresh);
                 step = saver.park_deadline_ns(now_ns, step);
-                park = pacer.step_deadline_ns(now_ns, park, step);
+                park = pacer.step_deadline_ns(now_ns, park, step, refresh);
                 serve_park_ns(&switch, departure.as_ref(), now_ns, park)
             };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
@@ -3969,6 +3984,7 @@ mod program {
                         now_ns,
                         compositor.has_damage(),
                         display.as_ref().is_none_or(Presenter::ready),
+                        compositor.refresh_rate(),
                     )
                 {
                     if let Err(code) = present(
@@ -5078,8 +5094,8 @@ mod program {
                     },
                     tairix_rt::clock_get(),
                 );
-                match drained {
-                    Ok(SeatWake::Served) => {}
+                let carried = match drained {
+                    Ok(SeatWake::Served { carried }) => carried,
                     // The screen belongs to somebody else now: nothing more of
                     // this wake is applied, and nothing is drawn.
                     Ok(SeatWake::SteppedAside) => continue,
@@ -5087,13 +5103,18 @@ mod program {
                         departure.get_or_insert_with(|| {
                             Departure::begin(tairix_rt::clock_get(), EXIT_LOGGED_OUT)
                         });
+                        false
                     }
                     Err(err) => return drain_fault(&mut shell, &mut compositor, err),
-                }
+                };
                 // The pointer on a cursor plane follows the batch now, ahead
-                // of any frame: moving it presents nothing.
+                // of any frame: moving it presents nothing. One carrying what
+                // the owed frame moves goes with that frame instead, so the
+                // window it drags does not trail it.
                 if let Some(ring) = display.as_mut() {
-                    compositor.place_pointer(ring);
+                    if !carried || !compositor.has_damage() {
+                        compositor.place_pointer(ring);
+                    }
                 }
                 // An answer already back — carried here for want of a thread —
                 // is adopted on the same turn.
@@ -5285,6 +5306,7 @@ mod program {
                     now_ns,
                     compositor.has_damage(),
                     display.as_ref().is_none_or(Presenter::ready),
+                    compositor.refresh_rate(),
                 )
             {
                 if let Err(code) = present(
@@ -7101,17 +7123,6 @@ mod program {
         }
     }
 
-    /// How many CPUs `cpus` reports online, or one when the question could
-    /// not be asked.
-    ///
-    /// *Discovered* through the System Information API — the only interface
-    /// live machine facts come from — never a constant, so the same binary uses
-    /// a four-core Pi's cores and a server's without a rebuild. Asked once, at
-    /// bring-up, for everything the session spreads across the machine.
-    fn online_cpus(cpus: Option<&[tairix_abi::sysinfo::CpuInfoRecord]>) -> usize {
-        cpus.map_or(1, <[_]>::len).max(1)
-    }
-
     /// The pool each composite's per-pixel work is spread across: one
     /// participant per `online` CPU, of which the serve loop's own thread is
     /// one.
@@ -7125,29 +7136,11 @@ mod program {
     /// pool torn down at some arbitrary point would only mean joining them again
     /// at exit.
     fn composite_pool(online: usize) -> &'static Pool {
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(pool_across(online, "composing")))
-    }
-
-    /// A pool of one participant per `online` CPU, the calling thread among
-    /// them, for work described as `doing`.
-    ///
-    /// Fewer workers than the machine has cores is a refusal worth stating:
-    /// the work still gets done, more slowly than the hardware allows.
-    fn pool_across(online: usize, doing: &str) -> Pool {
-        let pool = Pool::for_cpus(online);
-        let wanted = online.saturating_sub(1);
-        if pool.worker_count() < wanted {
-            app::report(
-                APP_NAME,
-                format_args!(
-                    "{doing} on {} of {online} cores (the kernel granted \
-                 {} of {wanted} threads)",
-                    pool.worker_count().saturating_add(1),
-                    pool.worker_count()
-                ),
-            );
-        }
-        pool
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(app::pool_across(
+            APP_NAME,
+            online,
+            "composing",
+        )))
     }
 
     /// The ray-traced screensaver's threads: a tracing thread for each reveal,
@@ -7198,7 +7191,7 @@ mod program {
                 // neither the workers' creation nor their teardown.
                 let pool = match options.cpu {
                     CpuUse::Idle => None,
-                    CpuUse::Performance => Some(pool_across(online, "ray tracing")),
+                    CpuUse::Performance => Some(app::pool_across(APP_NAME, online, "ray tracing")),
                 };
                 let runner: &dyn JobRunner = match &pool {
                     Some(pool) => pool,

@@ -65,6 +65,16 @@ pub enum Scope {
         /// it.
         reason: &'static str,
     },
+    /// The crate's `--lib` tests within `module` alone, for the reason
+    /// carried here: a crate whose `unsafe` the compiler confines to that
+    /// module, whose own tests drive all of it.
+    LibModule {
+        /// The libtest filter naming the module, `path::` and all.
+        module: &'static str,
+        /// Why the rest of the library tells the interpreter nothing the
+        /// module's own tests do not.
+        reason: &'static str,
+    },
     /// The crate's integration test `name` alone (`--test <name>`), for the
     /// reason carried here: a crate whose library is dealt across cores
     /// enrols each integration test beside it, since one listing reports one
@@ -91,7 +101,7 @@ impl Scope {
     const fn binary(self) -> Option<&'static str> {
         match self {
             Self::AllTargets => None,
-            Self::LibOnly(_) | Self::LibExcept { .. } => Some("lib"),
+            Self::LibOnly(_) | Self::LibExcept { .. } | Self::LibModule { .. } => Some("lib"),
             Self::Test { name, .. } => Some(name),
         }
     }
@@ -99,9 +109,29 @@ impl Scope {
     /// The libtest `--skip` patterns this scope excludes.
     const fn skip_patterns(self) -> &'static [&'static str] {
         match self {
-            Self::AllTargets | Self::LibOnly(_) | Self::Test { .. } => &[],
+            Self::AllTargets | Self::LibOnly(_) | Self::LibModule { .. } | Self::Test { .. } => &[],
             Self::LibExcept { skip, .. } => skip,
         }
+    }
+
+    /// The libtest filter this scope runs within, if any.
+    const fn filter(self) -> Option<&'static str> {
+        match self {
+            Self::LibModule { module, .. } => Some(module),
+            Self::AllTargets | Self::LibOnly(_) | Self::LibExcept { .. } | Self::Test { .. } => {
+                None
+            }
+        }
+    }
+
+    /// The arguments the test binary is handed: the scope's filter, then its
+    /// exclusions.
+    fn harness_args(self) -> Vec<&'static str> {
+        let mut args: Vec<&'static str> = self.filter().into_iter().collect();
+        for pattern in self.skip_patterns() {
+            args.extend(["--skip", pattern]);
+        }
+        args
     }
 }
 
@@ -296,6 +326,22 @@ pub const TARGETS: &[Target] = &[
                       data-race detector can read it",
         features: &[],
         scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-raster",
+        description: "the vector blend, blur and run-scan kernels: SSE2 loads, stores, lane \
+                      arithmetic and alpha masks over pixel and running-sum rows of every \
+                      length, driven against the portable reference over random rows and every \
+                      verify case",
+        features: &[],
+        scope: Scope::LibModule {
+            module: "accel::",
+            reason: "the crate denies `unsafe` outside its two kernel modules, and these \
+                     tests drive every kernel directly; the rest of the library reaches the \
+                     same kernels through dispatch at image size, hours interpreted for no \
+                     path these do not already take",
+        },
         spread: Spread::OneProcess,
     },
     Target {
@@ -839,7 +885,7 @@ fn base_command(ctx: &Context, target: &Target, seed: u64) -> Command {
     cmd.args(["miri", "test", "-p", target.package, "--locked"]);
     match target.scope {
         Scope::AllTargets => {}
-        Scope::LibOnly(_) | Scope::LibExcept { .. } => {
+        Scope::LibOnly(_) | Scope::LibExcept { .. } | Scope::LibModule { .. } => {
             cmd.arg("--lib");
         }
         Scope::Test { name, .. } => {
@@ -866,6 +912,7 @@ fn scope_label(target: &Target) -> String {
         Scope::AllTargets => String::new(),
         Scope::LibOnly(_) => " --lib".to_string(),
         Scope::LibExcept { .. } => " --lib (part)".to_string(),
+        Scope::LibModule { module, .. } => format!(" --lib {module}"),
         Scope::Test { name, .. } => format!(" --test {name}"),
     };
     if target.features.is_empty() {
@@ -882,12 +929,9 @@ fn scope_label(target: &Target) -> String {
 /// One package's whole interpreted test run, in a single process.
 fn whole_job(ctx: &Context, target: &Target, seed: u64) -> Job {
     let mut cmd = base_command(ctx, target, seed);
-    let skip = target.scope.skip_patterns();
-    if !skip.is_empty() {
-        cmd.arg("--");
-        for pattern in skip {
-            cmd.args(["--skip", pattern]);
-        }
+    let harness = target.scope.harness_args();
+    if !harness.is_empty() {
+        cmd.arg("--").args(harness);
     }
     Job::new(format!("{} (seed {seed})", scope_label(target)), cmd)
 }
@@ -932,10 +976,9 @@ fn shard_jobs(ctx: &Context, target: &Target, seed: u64) -> Result<Vec<Job>, Str
 /// cargo no-ops that go straight to interpreting.
 fn enumerate(ctx: &Context, target: &Target, seed: u64) -> Result<Vec<String>, String> {
     let mut cmd = base_command(ctx, target, seed);
-    cmd.arg("--").arg("--list");
-    for pattern in target.scope.skip_patterns() {
-        cmd.args(["--skip", pattern]);
-    }
+    cmd.arg("--")
+        .arg("--list")
+        .args(target.scope.harness_args());
     let label = format!("{} --list", scope_label(target));
     let listing = capture(&label, cmd)?;
     parse_listing(&listing).map_err(|why| format!("{label}: {why}"))
@@ -1112,6 +1155,7 @@ mod tests {
                 Scope::AllTargets => None,
                 Scope::LibOnly(reason)
                 | Scope::LibExcept { reason, .. }
+                | Scope::LibModule { reason, .. }
                 | Scope::Test { reason, .. } => Some(reason),
             };
             if let Some(reason) = reason {

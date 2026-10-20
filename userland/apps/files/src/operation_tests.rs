@@ -130,15 +130,22 @@ fn a_window_too_small_for_the_button_resolves_no_cancel() {
     );
 }
 
-/// A new count is shown once a desktop frame, however many land in it.
+/// A new count is shown once a desktop frame, however many land in it, on
+/// whatever display the desktop refreshes at.
 #[test]
 fn the_progress_is_shown_once_a_frame() {
     use super::progress_due;
-    use tairix_theme::Timeline;
+    use tairix_abi::driver::display::RefreshRate;
 
     let shown = 5_000_000;
-    assert!(!progress_due(shown + Timeline::FRAME_NS - 1, shown));
-    assert!(progress_due(shown + Timeline::FRAME_NS, shown));
+    for rate in [
+        RefreshRate::ASSUMED,
+        RefreshRate::from_mhz(144_000).expect("in bounds"),
+    ] {
+        let frame = rate.frame_ns();
+        assert!(!progress_due(shown + frame - 1, shown, rate));
+        assert!(progress_due(shown + frame, shown, rate));
+    }
 }
 
 /// A refused create says why it was refused, and claims a taken name only for

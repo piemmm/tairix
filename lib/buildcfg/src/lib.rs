@@ -8,7 +8,9 @@
 //!
 //! A crate whose code must differ per instruction set — a trap, a start
 //! trampoline, a register probe — names the set in its own cfg, chosen from
-//! [`native_arch_of`] here in build glue, never in source.
+//! [`native_arch_of`] here in build glue, never in source; one whose packed
+//! candidates assume a vector unit chooses from [`vector_unit_of`] the same
+//! way.
 //!
 //! The classification is `no_std`. Reading the target cargo is building and
 //! printing the directives for it need `std`, so those functions are behind
@@ -33,6 +35,19 @@ const TARGET_OS_KEY: &str = "CARGO_CFG_TARGET_OS";
 #[cfg(feature = "std")]
 const TARGET_ARCH_KEY: &str = "CARGO_CFG_TARGET_ARCH";
 
+/// Cargo's environment key listing the target's features, comma-separated.
+#[cfg(feature = "std")]
+const TARGET_FEATURE_KEY: &str = "CARGO_CFG_TARGET_FEATURE";
+
+/// A vector extension packed candidates are written for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VectorUnit {
+    /// SSE2, on x86_64.
+    Sse2,
+    /// NEON (Advanced SIMD), on aarch64.
+    Neon,
+}
+
 /// Whether a target whose operating system is `os` is bare metal.
 #[must_use]
 pub fn is_freestanding(os: &str) -> bool {
@@ -48,6 +63,35 @@ pub fn native_arch_of(os: &str, arch: &str) -> Option<&'static str> {
         return None;
     }
     NATIVE_ARCHES.into_iter().find(|&native| native == arch)
+}
+
+/// The vector unit a target of instruction set `arch` carries in its own
+/// feature set `features` (cargo's comma-separated spelling), or `None`.
+///
+/// The feature as well as the instruction set: a soft-float target cannot
+/// lower vector-register code, so a candidate is compiled only where the unit
+/// is part of the target itself, and every call to it is then sound whoever
+/// makes it.
+#[must_use]
+pub fn vector_unit_of(arch: &str, features: &str) -> Option<VectorUnit> {
+    let has = |name: &str| features.split(',').any(|feature| feature == name);
+    match arch {
+        "x86_64" if has("sse2") => Some(VectorUnit::Sse2),
+        "aarch64" if has("neon") => Some(VectorUnit::Neon),
+        _ => None,
+    }
+}
+
+/// The vector unit cargo's target carries, as [`vector_unit_of`]. Call from a
+/// build script.
+///
+/// The answer reads only the target, so the script is rerun only when it
+/// changes itself.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn vector_unit() -> Option<VectorUnit> {
+    std::println!("cargo:rerun-if-changed=build.rs");
+    vector_unit_of(&target(TARGET_ARCH_KEY), &target(TARGET_FEATURE_KEY))
 }
 
 /// Whether cargo is building for a bare-metal target. Call from a build
@@ -107,5 +151,24 @@ mod tests {
         assert_eq!(native_arch_of("unknown", "wasm32"), None);
         assert_eq!(native_arch_of("none", "wasm32"), None);
         assert_eq!(native_arch_of("none", "arm"), None);
+    }
+
+    #[test]
+    fn a_vector_unit_is_named_only_where_the_target_carries_it() {
+        assert_eq!(
+            vector_unit_of("x86_64", "fxsr,sse,sse2"),
+            Some(VectorUnit::Sse2)
+        );
+        assert_eq!(
+            vector_unit_of("aarch64", "fp-armv8,neon"),
+            Some(VectorUnit::Neon)
+        );
+        // A soft-float target names the instruction set without the unit.
+        assert_eq!(vector_unit_of("x86_64", "soft-float"), None);
+        assert_eq!(vector_unit_of("aarch64", "strict-align"), None);
+        assert_eq!(vector_unit_of("riscv64", "a,c,d,f,m"), None);
+        // A feature named on the wrong instruction set, or as part of another.
+        assert_eq!(vector_unit_of("aarch64", "sse2"), None);
+        assert_eq!(vector_unit_of("x86_64", "sse2x"), None);
     }
 }

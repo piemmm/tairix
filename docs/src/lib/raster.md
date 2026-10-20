@@ -22,6 +22,12 @@ call; this page is what the parts are for and the rules they share.
   is drawn through these, and nothing else in the tree needs a second
   rasteriser.
 
+The span blend, the box blur and the row scan a compositor splits a window row
+by have vector kernels — SSE2 and NEON — chosen per process on first use and
+taken only where they reproduce the portable kernel exactly, so a picture is
+still the same bits on every target; the README's *vector kernels* section
+lists them and the gates that hold them to it.
+
 The fills draw into a `Surface` or one `RowBand` of it, and the mesh path into
 a `DepthBuffer` or one `DepthBand` of it, handing each fragment to the caller's
 shader, so a pass cut into bands on several cores draws the picture the whole

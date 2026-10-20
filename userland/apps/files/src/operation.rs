@@ -18,13 +18,14 @@
 
 use alloc::string::String;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::Errno;
 use tairix_browse::render::progress_cancel_at;
 use tairix_browse::DeletePlan;
 use tairix_geometry::{Rect, Scale};
-use tairix_theme::{MotionInteraction, MotionTheme, Theme, Timeline};
+use tairix_theme::{MotionInteraction, MotionTheme, Theme};
 
 use crate::sidebar::press_point;
 
@@ -79,11 +80,12 @@ pub const fn mode_flip_allowed(writing: bool, rereading: bool) -> bool {
     !writing && !rereading
 }
 
-/// Whether a new count is shown now, at `now_ns`: once a desktop frame since
-/// the progress window last showed one at `shown_ns`.
+/// Whether a new count is shown now, at `now_ns`: once a frame of a desktop
+/// refreshing at `refresh` since the progress window last showed one at
+/// `shown_ns`.
 #[must_use]
-pub const fn progress_due(now_ns: u64, shown_ns: u64) -> bool {
-    now_ns.saturating_sub(shown_ns) >= Timeline::FRAME_NS
+pub const fn progress_due(now_ns: u64, shown_ns: u64, refresh: RefreshRate) -> bool {
+    now_ns.saturating_sub(shown_ns) >= refresh.frame_ns()
 }
 
 /// How long a completed operation's window stays once its bar has filled: long

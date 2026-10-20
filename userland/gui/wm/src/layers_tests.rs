@@ -32,6 +32,16 @@ struct Buffer {
     bytes: Vec<u8>,
 }
 
+/// What a mock cursor plane refuses.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PlaneRefuses {
+    Nothing,
+    /// Every image it is handed.
+    Images,
+    /// Every move it is asked for.
+    Moves,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum PlaneOp {
     Show {
@@ -67,10 +77,12 @@ struct MockEngine {
 
     plane: Vec<PlaneOp>,
     plane_up: bool,
-    /// The plane refuses every image it is handed.
-    plane_refuses: bool,
+    /// What the plane refuses.
+    plane_refuses: PlaneRefuses,
     /// Images the plane was handed, taken or not.
     plane_asks: usize,
+    /// How many frames had been shown when each move reached the plane.
+    moved_after: Vec<usize>,
 }
 
 const CAPS: AccelCaps = AccelCaps {
@@ -103,9 +115,15 @@ impl MockEngine {
 
             plane: Vec::new(),
             plane_up: false,
-            plane_refuses: false,
+            plane_refuses: PlaneRefuses::Nothing,
             plane_asks: 0,
+            moved_after: Vec::new(),
         }
+    }
+
+    /// Frames shown so far, composited or stacked.
+    fn shown(&self) -> usize {
+        self.frames + self.stacks.len()
     }
 
     fn with_cursor(mut self) -> Self {
@@ -320,7 +338,7 @@ impl CursorPlane for MockEngine {
     ) -> Result<(), DriverError> {
         assert!(image.len() >= (stride_bytes * height_px) as usize);
         self.plane_asks += 1;
-        if self.plane_refuses {
+        if self.plane_refuses == PlaneRefuses::Images {
             return Err(DriverError::NoSpace);
         }
         self.plane.push(PlaneOp::Show {
@@ -333,7 +351,11 @@ impl CursorPlane for MockEngine {
     }
 
     fn move_to(&mut self, x: i32, y: i32) -> Result<(), DriverError> {
+        if self.plane_refuses == PlaneRefuses::Moves {
+            return Err(DriverError::DeviceFault);
+        }
         self.plane.push(PlaneOp::Move(x, y));
+        self.moved_after.push(self.shown());
         Ok(())
     }
 
@@ -734,6 +756,109 @@ fn the_pointer_rides_the_cursor_plane_and_its_moves_present_nothing() {
     c.place_pointer(&mut engine);
     assert_eq!(engine.plane.last(), Some(&PlaneOp::Move(30, 20)));
     assert_eq!(engine.stacks.len(), 1, "and presents nothing");
+}
+
+/// What a pointer carrying a window sees: with no move between frames, the
+/// frame showing the window where it went is handed over before the plane
+/// goes there, so the two reach the screen together.
+#[test]
+fn a_frame_s_present_moves_the_plane_once_the_frame_is_handed_over() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let carried = c.add_window(Point::new(2, 2), opaque(8, 8, GREEN));
+    c.set_cursor(solid_cursor(4, RED), Point::new(4, 4));
+    let mut engine = MockEngine::new(output).with_cursor();
+    c.present(&mut engine).expect("presents");
+    let before = engine.shown();
+
+    assert!(c.move_window(carried, Point::new(12, 10)));
+    assert!(c.move_cursor(Point::new(14, 12)));
+    c.present(&mut engine).expect("presents");
+    assert!(engine.shown() > before, "the frame went");
+    assert_eq!(engine.plane.last(), Some(&PlaneOp::Move(14, 12)));
+    assert_eq!(
+        engine.moved_after.last(),
+        Some(&engine.shown()),
+        "the plane went after the frame did"
+    );
+}
+
+/// A pointer that changes shape as it starts to carry a window shows its new
+/// image where the old one stood, and goes where it is due only once the frame
+/// carrying the window is handed over.
+#[test]
+fn a_new_shape_shows_where_the_old_stood_and_moves_after_the_frame() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let carried = c.add_window(Point::new(2, 2), opaque(8, 8, GREEN));
+    c.set_cursor(solid_cursor(4, RED), Point::new(4, 4));
+    let mut engine = MockEngine::new(output).with_cursor();
+    c.present(&mut engine).expect("presents");
+
+    assert!(c.move_window(carried, Point::new(12, 10)));
+    c.set_cursor(solid_cursor(6, RED), Point::new(14, 12));
+    c.present(&mut engine).expect("presents");
+    let shown = engine
+        .plane
+        .iter()
+        .rposition(|op| matches!(op, PlaneOp::Show { width: 6, .. }))
+        .expect("the new shape was shown");
+    assert_eq!(
+        engine.plane[shown + 1..],
+        [PlaneOp::Move(4, 4), PlaneOp::Move(14, 12)],
+        "shown where the old one stood, then moved"
+    );
+    assert_eq!(
+        engine.moved_after.last(),
+        Some(&engine.shown()),
+        "the plane went after the frame did"
+    );
+}
+
+/// A pointer with nothing to draw — a gesture pinned against the screen's
+/// edge — still moves at once rather than waiting for a frame that never
+/// comes.
+#[test]
+fn a_present_with_nothing_to_draw_still_moves_the_plane() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    three(&mut c);
+    c.set_cursor(solid_cursor(4, RED), Point::new(4, 4));
+    let mut engine = MockEngine::new(output).with_cursor();
+    c.present(&mut engine).expect("presents");
+    let shown = engine.shown();
+    assert!(c.move_cursor(Point::new(20, 16)));
+    assert!(!c.has_damage());
+    c.present(&mut engine).expect("presents");
+    assert_eq!(engine.plane.last(), Some(&PlaneOp::Move(20, 16)));
+    assert_eq!(engine.shown(), shown, "and presents no frame");
+}
+
+/// A move the plane refuses gives the pointer back to the frame, which the
+/// next composite draws it into.
+#[test]
+fn a_refused_plane_move_hands_the_pointer_to_the_frame() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    three(&mut c);
+    c.set_cursor(solid_cursor(4, RED), Point::new(4, 4));
+    let mut engine = MockEngine::new(output).with_cursor();
+    c.present(&mut engine).expect("presents");
+    engine.plane_refuses = PlaneRefuses::Moves;
+    assert!(c.move_cursor(Point::new(20, 16)));
+    c.place_pointer(&mut engine);
+    assert_eq!(
+        engine.plane.last(),
+        Some(&PlaneOp::Hide),
+        "the plane is let go"
+    );
+    assert!(c.has_damage(), "the frame owes the pointer");
+    c.present(&mut engine).expect("presents");
+    assert_eq!(
+        pixel(&engine.screen, output, 21, 17),
+        [255, 0, 0, 255],
+        "drawn in the frame"
+    );
 }
 
 #[test]
@@ -1380,7 +1505,7 @@ fn a_refusing_cursor_plane_is_asked_again_only_for_a_new_shape() {
     three(&mut c);
     c.set_cursor(solid_cursor(4, RED), Point::new(28, 2));
     let mut engine = MockEngine::new(output).with_cursor();
-    engine.plane_refuses = true;
+    engine.plane_refuses = PlaneRefuses::Images;
     c.present(&mut engine).expect("presents");
     assert_eq!(engine.plane_asks, 1);
     assert_eq!(pixel(&engine.screen, output, 29, 3), [255, 0, 0, 255]);
@@ -1393,7 +1518,7 @@ fn a_refusing_cursor_plane_is_asked_again_only_for_a_new_shape() {
         "the same shape is not handed over again"
     );
 
-    engine.plane_refuses = false;
+    engine.plane_refuses = PlaneRefuses::Nothing;
     c.set_cursor(solid_cursor(6, RED), Point::new(26, 18));
     c.place_pointer(&mut engine);
     assert_eq!(engine.plane_asks, 2);

@@ -6,6 +6,10 @@ use alloc::vec;
 
 const COLS: u16 = 8;
 
+/// The desktop the waves are paced on, and one of its frames.
+const RATE: RefreshRate = RefreshRate::ASSUMED;
+const FRAME_NS: u64 = RATE.frame_ns();
+
 fn steps(cells: &[(u16, u16, u16)]) -> Vec<Step> {
     cells
         .iter()
@@ -20,7 +24,15 @@ fn steps(cells: &[(u16, u16, u16)]) -> Vec<Step> {
 fn a_new_motion_is_idle_and_asks_for_no_deadline() {
     let motion = Motion::new(COLS, false);
     assert!(motion.is_idle());
-    assert_eq!(motion.deadline_ns(0), None);
+    assert_eq!(motion.deadline_ns(0, RATE), None);
+}
+
+#[test]
+fn a_wave_asks_for_its_own_desktop_s_frames() {
+    let mut motion = Motion::new(COLS, false);
+    motion.begin(WaveKind::Reveal, &steps(&[(0, 0, 0)]), 0);
+    let fast = RefreshRate::from_mhz(144_000).expect("in bounds");
+    assert_eq!(motion.deadline_ns(0, fast), Some(fast.frame_ns()));
 }
 
 #[test]
@@ -28,7 +40,7 @@ fn a_wave_asks_for_a_frame_and_stops_asking_when_it_ends() {
     let mut motion = Motion::new(COLS, false);
     motion.begin(WaveKind::Reveal, &steps(&[(0, 0, 0)]), 0);
     assert!(!motion.is_idle());
-    assert_eq!(motion.deadline_ns(0), Some(FRAME_NS));
+    assert_eq!(motion.deadline_ns(0, RATE), Some(FRAME_NS));
 
     let span = WaveKind::Reveal.span_ns();
     assert!(
@@ -36,7 +48,7 @@ fn a_wave_asks_for_a_frame_and_stops_asking_when_it_ends() {
         "still running one nanosecond short"
     );
     assert!(!motion.advance(span), "the span is over");
-    assert_eq!(motion.deadline_ns(span), None, "and no wake is owed");
+    assert_eq!(motion.deadline_ns(span, RATE), None, "and no wake is owed");
 }
 
 #[test]
@@ -46,7 +58,7 @@ fn the_deadline_never_overshoots_the_end_of_the_last_wave() {
     let span = WaveKind::Reveal.span_ns();
     // Close enough to the end that a whole frame would pass it.
     let near = span - FRAME_NS / 2;
-    assert_eq!(motion.deadline_ns(near), Some(span));
+    assert_eq!(motion.deadline_ns(near, RATE), Some(span));
 }
 
 #[test]
@@ -124,7 +136,7 @@ fn reduced_motion_starts_nothing() {
     let mut motion = Motion::new(COLS, true);
     motion.begin(WaveKind::Detonate, &steps(&[(0, 0, 0), (1, 1, 1)]), 0);
     assert!(motion.is_idle(), "a suppressed wave is simply not started");
-    assert_eq!(motion.deadline_ns(0), None);
+    assert_eq!(motion.deadline_ns(0, RATE), None);
     assert_eq!(motion.cell(Coord::new(0, 0), 0), None);
 }
 
@@ -164,7 +176,7 @@ fn clearing_ends_every_wave() {
     motion.begin(WaveKind::Victory, &steps(&[(0, 0, 0)]), 0);
     motion.clear();
     assert!(motion.is_idle());
-    assert_eq!(motion.deadline_ns(0), None);
+    assert_eq!(motion.deadline_ns(0, RATE), None);
 }
 
 #[test]

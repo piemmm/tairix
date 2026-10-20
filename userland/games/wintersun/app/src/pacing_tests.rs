@@ -5,6 +5,10 @@ use super::*;
 
 const NS: u64 = 1_000_000_000;
 
+/// The display the cadence tests draw on, and one of its frames.
+const RATE: RefreshRate = RefreshRate::ASSUMED;
+const FRAME: u64 = RATE.frame_ns();
+
 fn pacer() -> Pacer {
     Pacer::new(TickRate::default_rate())
 }
@@ -190,43 +194,55 @@ fn a_wake_between_frames_owes_no_frame() {
     // Input, a worker's answer, or another window's event wakes the loop
     // between frames; none of them is a frame the screen will show.
     let mut cadence = Cadence::new();
-    cadence.begun(NS);
+    cadence.begun(NS, RATE);
     assert!(!cadence.is_due(NS));
-    assert!(!cadence.is_due(NS + FRAME_NS / 2));
-    assert!(!cadence.is_due(NS + FRAME_NS - 1));
-    assert!(cadence.is_due(NS + FRAME_NS));
+    assert!(!cadence.is_due(NS + FRAME / 2));
+    assert!(!cadence.is_due(NS + FRAME - 1));
+    assert!(cadence.is_due(NS + FRAME));
 }
 
 #[test]
 fn what_a_frame_costs_is_not_added_to_the_wait_for_the_next() {
     let mut cadence = Cadence::new();
-    cadence.begun(NS);
+    cadence.begun(NS, RATE);
     // Woken a little late, and the frame then takes most of its interval:
     // the next is still due one interval after this one was.
-    cadence.begun(NS + FRAME_NS + FRAME_NS / 8);
-    assert_eq!(cadence.due(), NS + 2 * FRAME_NS);
+    cadence.begun(NS + FRAME + FRAME / 8, RATE);
+    assert_eq!(cadence.due(), NS + 2 * FRAME);
     let mut beats = 0u64;
     let mut due = cadence.due();
     for _ in 0..600 {
-        cadence.begun(due + FRAME_NS / 3);
+        cadence.begun(due + FRAME / 3, RATE);
         beats += 1;
         due = cadence.due();
     }
     assert_eq!(
         due,
-        NS + (2 + beats) * FRAME_NS,
+        NS + (2 + beats) * FRAME,
         "late starts within the interval drifted the beat"
     );
+}
+
+/// The beat is the display's: a faster one is owed its frames sooner, and a
+/// display that changes rate is followed from the next frame.
+#[test]
+fn frames_fall_due_one_display_frame_apart() {
+    let fast = RefreshRate::from_mhz(144_000).expect("in bounds");
+    let mut cadence = Cadence::new();
+    cadence.begun(NS, fast);
+    assert_eq!(cadence.due(), NS + fast.frame_ns());
+    cadence.begun(cadence.due(), RATE);
+    assert_eq!(cadence.due(), NS + fast.frame_ns() + FRAME);
 }
 
 #[test]
 fn a_frame_begun_a_whole_interval_late_restarts_the_beat_rather_than_bursting() {
     let mut cadence = Cadence::new();
-    cadence.begun(NS);
+    cadence.begun(NS, RATE);
     // A window off the screen for five seconds, or one frame that ran long.
     let resumed = NS + 5 * NS;
-    cadence.begun(resumed);
-    assert_eq!(cadence.due(), resumed + FRAME_NS);
+    cadence.begun(resumed, RATE);
+    assert_eq!(cadence.due(), resumed + FRAME);
     assert!(
         !cadence.is_due(resumed + 1),
         "the missed frames were owed as a burst"
@@ -236,8 +252,8 @@ fn a_frame_begun_a_whole_interval_late_restarts_the_beat_rather_than_bursting() 
 #[test]
 fn a_cadence_at_the_end_of_the_clock_saturates() {
     let mut cadence = Cadence::new();
-    cadence.begun(u64::MAX - 1);
+    cadence.begun(u64::MAX - 1, RATE);
     assert_eq!(cadence.due(), u64::MAX);
-    cadence.begun(u64::MAX);
+    cadence.begun(u64::MAX, RATE);
     assert_eq!(cadence.due(), u64::MAX);
 }

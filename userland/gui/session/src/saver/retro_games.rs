@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 use core::ops::{Add, Mul, Range, Sub};
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_parallel::JobRunner;
 use tairix_raster::{DitherRow, Pixel, RowBand, ScanScratch, SUBPIXEL};
 use tairix_rng::{NonCryptoRng, RandU64};
@@ -114,13 +115,14 @@ pub(super) struct RetroGames {
 
 impl RetroGames {
     /// The scene for a `size` screen at `scale` as `options` describe it,
-    /// first drawn at `now_ns`, and still when `calm`; `None` for an empty
-    /// screen or when the heap will not give it.
+    /// first drawn at `now_ns` on a display refreshing at `refresh`, and still
+    /// when `calm`; `None` for an empty screen or when the heap will not give
+    /// it.
     pub(super) fn new(
         size: (u32, u32),
         scale: Scale,
         (calm, options): (bool, RetroGamesOptions),
-        now_ns: u64,
+        (now_ns, refresh): (u64, RefreshRate),
     ) -> Option<Self> {
         let view = View::new(size, scale)?;
         let scatter = seed_from(now_ns);
@@ -143,7 +145,7 @@ impl RetroGames {
             showing,
             under: Under::new(),
             scratch,
-            clock: SceneClock::new(now_ns, calm),
+            clock: SceneClock::new(now_ns, calm, refresh),
             speed,
             damage: Region::new(),
         })
@@ -170,8 +172,8 @@ impl RetroGames {
         if !self.clock.frame_due(now_ns) {
             return;
         }
-        let time = self.clock.advance(now_ns);
-        let moment = Moment::at(time, self.speed);
+        let time = self.clock.advance(now_ns, compositor.refresh_rate());
+        let moment = Moment::at(time, self.speed, self.clock.frame_ns());
         self.stage_craft(moment);
         self.damage.clear();
         self.damage.add(self.view.floor());
@@ -333,12 +335,13 @@ struct Moment {
 }
 
 impl Moment {
-    /// The flight `time` seconds in, at `speed` cells a second.
-    fn at(time: f64, speed: f64) -> Self {
+    /// The flight `time` seconds in, at `speed` cells a second, drawn in
+    /// frames of `frame_ns`.
+    fn at(time: f64, speed: f64, frame_ns: u64) -> Self {
         Self {
             time,
             flown: speed * time,
-            travel: speed * seconds(SceneClock::FRAME_NS) * SHUTTER,
+            travel: speed * seconds(frame_ns) * SHUTTER,
             sway: SWAY * mathf::sin(TAU * time / SWAY_PERIOD),
         }
     }

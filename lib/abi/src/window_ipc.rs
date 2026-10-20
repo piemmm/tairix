@@ -6,7 +6,10 @@
 //! `shm_create`s a region holding its window frames, hands the session the
 //! endpoint-directed `shm_grant` handle once (`Create`), and thereafter
 //! presents by **frame index** plus a damage rectangle (`Present`) — no
-//! pixel bytes ever cross the IPC. The session keys every window to the
+//! pixel bytes ever cross the IPC. A frame holds premultiplied pixels in the
+//! channel order its mode names, and the session clamps each colour channel to
+//! its pixel's alpha on the way in rather than trusting the app to have kept
+//! that invariant. The session keys every window to the
 //! kernel-attested identity of the task that created it (`call_peer_origin`),
 //! never to anything claimed on the wire, so one app can never present or
 //! close another's window.

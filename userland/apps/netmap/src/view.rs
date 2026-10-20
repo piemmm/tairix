@@ -20,13 +20,14 @@ use alloc::vec::Vec;
 use core::f64::consts::FRAC_PI_2;
 use core::ops::Range;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::net_ipc::address_parts;
 use tairix_abi::touch::PINCH_SCALE_ONE;
 use tairix_abi::window_ipc::TOOLTIP_TEXT_MAX;
 use tairix_abi::Errno;
 use tairix_controls::{wheel_steps, Fact, FactList, WHEEL_STEP};
 use tairix_font::{BitmapFont, ELLIPSIS};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::{badge, glyph_mask, BadgeHue, IconKind, PlateShape};
 use tairix_input::{past_drag_slop, InputEvent, Key, NamedKey, PinchPhase, PointerButton};
 use tairix_procinfo::{render_ip, render_mac};
@@ -669,13 +670,13 @@ impl MapView {
         })
     }
 
-    /// Nanoseconds until the next animation frame is due, or `None` when
-    /// nothing is moving.
+    /// Nanoseconds until the next animation frame is due on a display
+    /// refreshing at `refresh`, or `None` when nothing is moving.
     #[must_use]
-    pub fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
+    pub fn next_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
         self.spreads
             .iter()
-            .filter_map(|spread| spread.fade.next_frame_in(now_ns))
+            .filter_map(|spread| spread.fade.next_frame_in(now_ns, refresh))
             .min()
     }
 
@@ -1138,7 +1139,7 @@ impl MapView {
             };
             let footprint = match pass {
                 Pass::Map => label.rect,
-                Pass::Spread => grown(label.rect, pad),
+                Pass::Spread => label.rect.outset(pad),
             };
             if Some(node.id) == selected {
                 occupancy.mark(footprint);
@@ -1177,21 +1178,6 @@ fn stroke(surface: &mut Surface, a: Point, b: Point, weight: i32, hue: BadgeHue)
 /// A line `logical` pixels wide at `scale`, in subpixels.
 fn line_weight(scale: Scale, logical: u32) -> i32 {
     to_i32(scale.scale_length(logical)).saturating_mul(SUBPIXEL)
-}
-
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
-}
-
-/// `rect` grown by `by` on every side.
-fn grown(rect: Rect, by: u32) -> Rect {
-    let inset = to_i32(by);
-    Rect::new(
-        rect.left().saturating_sub(inset),
-        rect.top().saturating_sub(inset),
-        rect.width.saturating_add(by * 2),
-        rect.height.saturating_add(by * 2),
-    )
 }
 
 /// The canvas-coloured pill a spread service's name stands on.
@@ -1649,13 +1635,7 @@ fn fact_label(key: &str) -> &str {
 /// The canvas widened by a node's radius, so a node half off the edge still
 /// draws its visible half.
 fn canvas_bounds(canvas: Rect, radius: u32) -> Rect {
-    let pad = i32::try_from(radius * 2).unwrap_or(0);
-    Rect::new(
-        canvas.left() - pad,
-        canvas.top() - pad,
-        canvas.width.saturating_add(radius * 4),
-        canvas.height.saturating_add(radius * 4),
-    )
+    canvas.outset(radius.saturating_mul(2))
 }
 
 /// How far a node's plate and its widest halo reach from its centre.

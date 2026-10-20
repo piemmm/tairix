@@ -104,8 +104,11 @@ is the price the other seven participants are bought with.
 
 ### The one whole-window pass above the compositor
 
-An application's `Present` hands the session a frame of straight-alpha bytes and
-declares which rectangle it changed. Converting that rectangle into the window's
+An application's `Present` hands the session a frame of premultiplied pixels in
+the mode's channel order and declares which rectangle it changed; the session's
+decode is a copy that clamps each colour channel to its pixel's alpha, because a
+channel above its alpha would break the invariant every blend relies on and the
+frame is the client's to get wrong. Converting that rectangle into the window's
 own content surface is the third pass a repaint costs above the compositor, and
 it is the one the session **cannot** make smaller: the app declares the damage,
 so a client that repaints everything makes the desktop convert everything. It is
@@ -317,7 +320,16 @@ next.
 **The pointer** takes one of three routes: composited into the frame; on the
 display's cursor plane (`Presenter::cursor`), which only a single sprite with
 no trail or halo, unscaled, is given, so moving it presents nothing; or a
-layer of its own above every window. A presenter that was replaced — the
+layer of its own above every window. Routing a pointer records where it is
+due — a new shape is shown where the old one stood — and `place_pointer` or the
+next `present` moves it there: `present` once the frame is handed over, so a
+pointer carrying a window reaches the scan-out with it rather than ahead of it.
+The session moves the plane between frames except while the pointer carries
+what an owed frame moves at any point of the input batch it drained
+(`SeatWake::Served`'s `carried`, from `DesktopShell::pointer_carries`), so the
+batch whose release ends a drag still takes its last move with the frame. The
+compositor also holds the rate the output scans at (`set_refresh_rate`), which
+every animation on it is paced by. A presenter that was replaced — the
 driver restarted under the session — is noticed by its buffers and plane no
 longer being held, and the layers are rebuilt.
 

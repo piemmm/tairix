@@ -1,3 +1,4 @@
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_geometry::{Point, Scale};
 use tairix_theme::{MotionInteraction, MotionTheme, Theme};
@@ -73,7 +74,10 @@ fn a_shake_short_of_its_strokes_does_nothing() {
     );
     detector.observe(end + 10 * MS, Point::new(420, 500), Scale::ONE);
     assert_eq!(run_for(&mut detector, end, 400 * MS), 0);
-    assert_eq!(detector.next_frame_in(end + 400 * MS), None);
+    assert_eq!(
+        detector.next_frame_in(end + 400 * MS, RefreshRate::ASSUMED),
+        None
+    );
 }
 
 #[test]
@@ -117,13 +121,16 @@ fn a_shaken_pointer_holds_then_settles_home_and_asks_for_nothing_more() {
     // Grown, it asks to be woken exactly when the hold runs out.
     let held_at = end + grow + 32 * MS;
     let expected = (last_turn + HOLD_NS).saturating_sub(held_at);
-    assert_eq!(detector.next_frame_in(held_at), Some(expected));
+    assert_eq!(
+        detector.next_frame_in(held_at, RefreshRate::ASSUMED),
+        Some(expected)
+    );
 
     let restore = u64::from(motion().duration(MotionInteraction::PointerRestore)) * MS;
     let home = run_for(&mut detector, held_at, expected + restore + 32 * MS);
     assert_eq!(home, 0);
     assert_eq!(
-        detector.next_frame_in(held_at + expected + restore + 64 * MS),
+        detector.next_frame_in(held_at + expected + restore + 64 * MS, RefreshRate::ASSUMED),
         None
     );
 }
@@ -157,11 +164,14 @@ fn with_motion_reduced_it_changes_size_at_once() {
     let end = stroke(&mut detector, 0, 6, wide(), 0, 80 * MS);
     assert_eq!(detector.level(end, reduced), FULLY_ENLARGED);
     assert_eq!(
-        detector.next_frame_in(end),
+        detector.next_frame_in(end, RefreshRate::ASSUMED),
         Some((end - 80 * MS + HOLD_NS) - end)
     );
     assert_eq!(detector.level(end - 80 * MS + HOLD_NS, reduced), 0);
-    assert_eq!(detector.next_frame_in(end + HOLD_NS), None);
+    assert_eq!(
+        detector.next_frame_in(end + HOLD_NS, RefreshRate::ASSUMED),
+        None
+    );
 }
 
 #[test]
@@ -192,5 +202,8 @@ fn a_reset_puts_the_pointer_back_at_once() {
     let _ = run_for(&mut detector, end, 200 * MS);
     detector.reset();
     assert_eq!(detector.level(end + 200 * MS, motion()), 0);
-    assert_eq!(detector.next_frame_in(end + 200 * MS), None);
+    assert_eq!(
+        detector.next_frame_in(end + 200 * MS, RefreshRate::ASSUMED),
+        None
+    );
 }

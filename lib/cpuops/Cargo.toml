@@ -28,3 +28,6 @@ alloc = []
 # so the framework gates candidates on the *same* bits the ports produce
 # without acquiring a forbidden edge to `kernel/*`.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The set-once cell the process's delivered feature set and each family's
+# resolved implementation are published through.
+tairix-sync = { path = "../sync", version = "=0.0.0" }

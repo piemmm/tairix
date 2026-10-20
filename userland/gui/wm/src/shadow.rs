@@ -32,6 +32,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_raster::{blend_solid_span, round_rect_coverage, DitherRow};
 use tairix_theme::{Fade, Theme};
 use tairix_util::fallible;
@@ -126,13 +127,14 @@ impl Lift {
         self.target == self.fade.target() && !self.fade.running()
     }
 
-    /// Nanoseconds until the next step is owed, or `None` for a shadow at
-    /// rest: at once for a change no step has started.
-    pub(crate) fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
+    /// Nanoseconds until the next step is owed on a display refreshing at
+    /// `refresh`, or `None` for a shadow at rest: at once for a change no step
+    /// has started.
+    pub(crate) fn next_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
         if self.target != self.fade.target() {
             return Some(0);
         }
-        self.fade.next_frame_in(now_ns)
+        self.fade.next_frame_in(now_ns, refresh)
     }
 }
 

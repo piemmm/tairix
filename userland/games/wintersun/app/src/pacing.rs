@@ -21,14 +21,13 @@
 //!
 //! # When a frame is owed
 //!
-//! [`Cadence`] is the display's half: frames fall due one [`FRAME_NS`] apart
+//! [`Cadence`] is the display's half: frames fall due one display frame apart
 //! on a fixed beat, whatever wakes the client in between, so input arriving
 //! faster than the screen refreshes never draws frames nobody sees.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_wintersun_net::value::WorldPoint;
 use tairix_wintersun_rules::clock::TickRate;
-
-use crate::budget::FRAME_NS;
 
 /// Nanoseconds in a second.
 const NS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
@@ -121,10 +120,13 @@ impl Pacer {
 
 /// When the window is owed its next frame.
 ///
-/// Each frame falls due one [`FRAME_NS`] after the last one was due, not after
+/// Each frame falls due one display frame after the last one was due, not after
 /// it finished, so the time a frame takes to draw is not added to the wait
 /// before the next. A frame begun a whole interval late restarts the beat from
 /// itself rather than drawing a burst to catch up.
+///
+/// The beat is the display's, not the frame budget's: a faster display is
+/// given more frames where the machine has them, never less detail.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Cadence {
     due_ns: u64,
@@ -149,14 +151,15 @@ impl Cadence {
         now_ns >= self.due_ns
     }
 
-    /// Record a frame begun at `started_ns`, which is when the next falls due
-    /// from.
-    pub fn begun(&mut self, started_ns: u64) {
-        let on_beat = self.due_ns.saturating_add(FRAME_NS);
+    /// Record a frame begun at `started_ns` on a display refreshing at
+    /// `refresh`, which is when the next falls due from.
+    pub fn begun(&mut self, started_ns: u64, refresh: RefreshRate) {
+        let frame_ns = refresh.frame_ns();
+        let on_beat = self.due_ns.saturating_add(frame_ns);
         self.due_ns = if on_beat > started_ns {
             on_beat
         } else {
-            started_ns.saturating_add(FRAME_NS)
+            started_ns.saturating_add(frame_ns)
         };
     }
 }

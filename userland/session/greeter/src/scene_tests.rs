@@ -2,6 +2,7 @@
 //! keeps dark, the frames it asks for, and that a frame repaints only what it
 //! reports.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::{Point, Rect};
 use tairix_raster::Surface;
 use tairix_ribbon::SKY;
@@ -9,13 +10,17 @@ use tairix_theme::motion::SceneClock;
 
 use super::Scene;
 
+/// The display the ribbon is paced on, and one of its scene frames.
+const RATE: RefreshRate = RefreshRate::ASSUMED;
+const FRAME_NS: u64 = SceneClock::frame_on(RATE);
+
 /// A screen and a column across its upper middle, as the login screen lays
 /// them out.
 const SCREEN: Rect = Rect::new(0, 0, 640, 360);
 const COLUMN: Rect = Rect::new(210, 20, 220, 210);
 
 fn moving() -> Scene {
-    Scene::new(SCREEN, COLUMN, 0, false).expect("a ribbon")
+    Scene::new(SCREEN, COLUMN, (0, RATE), false).expect("a ribbon")
 }
 
 /// Every pixel whose value differs between `before` and `after`.
@@ -54,27 +59,24 @@ fn the_ribbon_is_painted_as_it_is_raised_and_keeps_the_column_dark() {
 #[test]
 fn a_moving_ribbon_asks_for_its_frames_and_a_still_one_for_none() {
     let scene = moving();
-    assert_eq!(scene.due_in(0), Some(SceneClock::FRAME_NS));
+    assert_eq!(scene.due_in(0), Some(FRAME_NS));
+    assert_eq!(scene.due_in(FRAME_NS / 2), Some(FRAME_NS - FRAME_NS / 2));
     assert_eq!(
-        scene.due_in(SceneClock::FRAME_NS / 2),
-        Some(SceneClock::FRAME_NS - SceneClock::FRAME_NS / 2)
-    );
-    assert_eq!(
-        scene.due_in(SceneClock::FRAME_NS * 3),
+        scene.due_in(FRAME_NS * 3),
         Some(0),
         "an overdue frame is due now"
     );
 
-    let mut still = Scene::new(SCREEN, COLUMN, 0, true).expect("a ribbon");
+    let mut still = Scene::new(SCREEN, COLUMN, (0, RATE), true).expect("a ribbon");
     assert_eq!(still.due_in(0), None);
-    assert!(!still.advance(u64::MAX), "a still ribbon never moves");
+    assert!(!still.advance(u64::MAX, RATE), "a still ribbon never moves");
 }
 
 #[test]
 fn an_early_wake_moves_nothing() {
     let mut scene = moving();
     let before = scene.layer().clone();
-    assert!(!scene.advance(SceneClock::FRAME_NS - 1));
+    assert!(!scene.advance(FRAME_NS - 1, RATE));
     assert_eq!(changed(&before, scene.layer()).count(), 0, "it repainted");
 }
 
@@ -85,9 +87,9 @@ fn a_frame_repaints_only_what_it_reports() {
     let mut scene = moving();
     let mut now = 0;
     for _ in 0..12 {
-        now += SceneClock::FRAME_NS;
+        now += FRAME_NS;
         let before = scene.layer().clone();
-        assert!(scene.advance(now), "a frame moved the ribbon");
+        assert!(scene.advance(now, RATE), "a frame moved the ribbon");
         let damage = scene.damage();
         assert!(!damage.is_empty());
         for pixel in changed(&before, scene.layer()) {
@@ -98,7 +100,7 @@ fn a_frame_repaints_only_what_it_reports() {
         }
         assert_eq!(
             scene.due_in(now),
-            Some(SceneClock::FRAME_NS),
+            Some(FRAME_NS),
             "the next frame a frame on"
         );
     }
@@ -106,5 +108,5 @@ fn a_frame_repaints_only_what_it_reports() {
 
 #[test]
 fn an_empty_screen_has_no_ribbon() {
-    assert!(Scene::new(Rect::new(0, 0, 0, 360), COLUMN, 0, false).is_none());
+    assert!(Scene::new(Rect::new(0, 0, 0, 360), COLUMN, (0, RATE), false).is_none());
 }

@@ -201,7 +201,10 @@ pub use resinfo::{
     ResourceResponse, ResponsePayload, Sensitivity, Unit, ValueKind, MAX_INFO_VALUE_LEN,
     MAX_METRIC_NAME_LEN, MAX_QUERY_LEN, RESINFO_VERSION_CURRENT, RESINFO_VERSION_V1,
 };
-pub use resolve::{cpu_info, hostname, resolve, system_identity, ResolveInfoError, CPU_INFO_PAGE};
+pub use resolve::{
+    cpu_info, hostname, online_count, online_cpus, resolve, system_identity, ResolveInfoError,
+    CPU_INFO_PAGE,
+};
 pub use transport::{Output, Transport};
 pub use users::{
     for_each_group, for_each_user, group_names, self_account, user_name, user_names,

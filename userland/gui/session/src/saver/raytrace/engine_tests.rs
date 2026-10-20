@@ -10,14 +10,14 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_raster::Pixel;
 use tairix_raytrace::{Detail, Quality, Setting, Tracer};
 use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
+use tairix_theme::motion::work_slice_ns;
 
-use super::{
-    draw_setting, pace, Detailing, Engine, Memory, Stage, Traced, MIN_BATCH, PLAIN, SLICE_NS,
-};
+use super::{draw_setting, pace, Detailing, Engine, Memory, Stage, Traced, MIN_BATCH, PLAIN};
 use crate::saver::raytrace::crew::{Status, TraceDesk, Turn};
 #[cfg(feature = "scene-tests")]
 use {
@@ -27,6 +27,9 @@ use {
 };
 
 const SIZE: (u32, u32) = (48, 27);
+
+/// The slice of the display the tests trace for.
+const SLICE_NS: u64 = work_slice_ns(RefreshRate::ASSUMED);
 
 /// A clock that reads `step` later every time it is read.
 fn ticking(step: u64) -> impl FnMut() -> u64 {
@@ -86,8 +89,8 @@ fn traced_alone(engine: &Engine) -> Vec<Pixel> {
 
 #[test]
 fn a_screen_with_no_pixels_has_no_reveal() {
-    assert!(Engine::new((0, 10), 1, PLAIN).is_none());
-    assert!(Engine::new((10, 0), 1, PLAIN).is_none());
+    assert!(Engine::new((0, 10), 1, PLAIN, SLICE_NS).is_none());
+    assert!(Engine::new((10, 0), 1, PLAIN, SLICE_NS).is_none());
 }
 
 /// A scene with grids to fill is prepared over several slices, tracing
@@ -95,7 +98,7 @@ fn a_screen_with_no_pixels_has_no_reveal() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn a_scene_is_prepared_over_slices_before_any_pixel_is_traced() {
-    let mut engine = Engine::new(SIZE, 5, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 5, PLAIN, SLICE_NS).expect("an engine");
     engine.plan.setting = Setting::Bubbles;
     let mut clock = ticking(MS);
     let mut traced = Vec::new();
@@ -127,7 +130,7 @@ fn a_scene_is_prepared_over_slices_before_any_pixel_is_traced() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn tracing_tells_its_progress_until_the_picture_is_whole() {
-    let mut engine = Engine::new(SIZE, 21, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 21, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let mut clock = ticking(MS);
     let mut traced = Vec::new();
@@ -152,7 +155,7 @@ fn tracing_tells_its_progress_until_the_picture_is_whole() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn the_reveal_traces_every_pixel_as_tracing_it_alone_shows() {
-    let mut engine = Engine::new(SIZE, 11, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 11, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let expected = traced_alone(&engine);
     let order = engine.reveal.clone();
@@ -179,7 +182,7 @@ fn the_reveal_traces_every_pixel_as_tracing_it_alone_shows() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn the_first_pass_spans_the_picture_in_a_few_steps() {
-    let mut engine = Engine::new(SIZE, 23, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 23, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let steps = run_until(&mut engine, whole);
     let coarsest = Reveal::coarsest(SIZE);
@@ -204,15 +207,23 @@ fn the_first_pass_spans_the_picture_in_a_few_steps() {
 #[test]
 fn each_slice_does_what_fits_half_a_frame() {
     let most = 1 << 15;
-    assert_eq!(pace(100, SLICE_NS, most), 100);
-    assert_eq!(pace(100, SLICE_NS / 10, most), 200, "grows at most twofold");
-    assert_eq!(pace(100, SLICE_NS * 4, most), 25);
-    assert_eq!(pace(most, 1, most), most);
-    assert_eq!(pace(MIN_BATCH, u64::MAX, most), MIN_BATCH);
-    assert_eq!(pace(0, 0, most), MIN_BATCH);
-    assert_eq!(pace(1 << 14, 1, most), most, "never past its bound");
+    assert_eq!(pace(100, SLICE_NS, SLICE_NS, most), 100);
     assert_eq!(
-        pace(5, 1, 0),
+        pace(100, SLICE_NS / 10, SLICE_NS, most),
+        200,
+        "grows at most twofold"
+    );
+    assert_eq!(pace(100, SLICE_NS * 4, SLICE_NS, most), 25);
+    assert_eq!(pace(most, 1, SLICE_NS, most), most);
+    assert_eq!(pace(MIN_BATCH, u64::MAX, SLICE_NS, most), MIN_BATCH);
+    assert_eq!(pace(0, 0, SLICE_NS, most), MIN_BATCH);
+    assert_eq!(
+        pace(1 << 14, 1, SLICE_NS, most),
+        most,
+        "never past its bound"
+    );
+    assert_eq!(
+        pace(5, 1, SLICE_NS, 0),
         MIN_BATCH,
         "a bound of nothing still does one"
     );
@@ -220,7 +231,7 @@ fn each_slice_does_what_fits_half_a_frame() {
 
 #[test]
 fn the_first_slice_traces_one_step_and_quick_slices_grow_the_batch() {
-    let mut engine = Engine::new(SIZE, 3, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 3, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     assert_eq!(engine.batch, MIN_BATCH);
     let mut traced = Vec::new();
@@ -238,7 +249,7 @@ fn the_first_slice_traces_one_step_and_quick_slices_grow_the_batch() {
 /// quality: there is no budget a slow reveal is cut down to meet.
 #[test]
 fn a_slow_reveal_still_traces_every_pixel_at_the_best_quality() {
-    let mut slow = Engine::new(SIZE, 7, PLAIN).expect("an engine");
+    let mut slow = Engine::new(SIZE, 7, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut slow, tracing);
     let expected = traced_alone(&slow);
     // Each slice takes an hour of the clock.
@@ -256,7 +267,7 @@ fn a_slow_reveal_still_traces_every_pixel_at_the_best_quality() {
 /// on real threads at once.
 #[test]
 fn a_slice_splits_its_steps_across_the_workers() {
-    let mut engine = Engine::new(SIZE, 13, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 13, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let Stage::Tracing(scene) = core::mem::replace(&mut engine.stage, Stage::Composing) else {
         panic!("tracing");
@@ -295,7 +306,7 @@ fn a_new_setting_is_never_the_last_and_every_other_comes_up() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn the_next_scene_is_set_elsewhere_and_revealed_from_its_start() {
-    let mut engine = Engine::new(SIZE, 17, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 17, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let _ = run_until(&mut engine, whole);
     let first = engine.plan.setting;
@@ -362,7 +373,7 @@ fn stretched(engine: &mut Engine, runner: &dyn tairix_parallel::JobRunner) -> Ve
 #[cfg(feature = "scene-tests")]
 #[test]
 fn each_stretch_traces_its_pass_across_every_core_and_the_reveal_whole() {
-    let mut engine = Engine::new(SIZE, 17, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 17, PLAIN, SLICE_NS).expect("an engine");
     engine.keep_pictures();
     let _ = run_until(&mut engine, tracing);
     let expected = traced_alone(&engine);
@@ -404,7 +415,7 @@ fn each_stretch_traces_its_pass_across_every_core_and_the_reveal_whole() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn a_pass_is_handed_out_once_however_costly_its_pixels() {
-    let mut engine = Engine::new(SIZE, 37, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 37, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let reveal = Reveal::new(SIZE, engine.plan.order).expect("a reveal");
     let mut passes = 0;
@@ -425,7 +436,7 @@ fn a_pass_is_handed_out_once_however_costly_its_pixels() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn a_stretch_told_to_stop_leaves_nothing_lost_or_traced_twice() {
-    let mut engine = Engine::new(SIZE, 19, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 19, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let expected = traced_alone(&engine);
     let runner = tairix_parallel::Threaded::new(4);
@@ -450,7 +461,7 @@ fn a_stretch_told_to_stop_leaves_nothing_lost_or_traced_twice() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn a_stretch_ends_once_its_time_is_up() {
-    let mut engine = Engine::new(SIZE, 23, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 23, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let taking = Taking::upto(usize::MAX);
     let late = || u64::MAX;
@@ -464,7 +475,7 @@ fn a_stretch_ends_once_its_time_is_up() {
 /// before it traces.
 #[test]
 fn an_order_begins_the_scene_asked_for_before_its_slice() {
-    let mut engine = Engine::new(SIZE, 29, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 29, PLAIN, SLICE_NS).expect("an engine");
     let first = engine.plan.setting;
     let mut desk = TraceDesk::new();
     desk.next();
@@ -489,7 +500,7 @@ fn an_order_begins_the_scene_asked_for_before_its_slice() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn a_whole_picture_is_handed_over_once_as_traced() {
-    let mut engine = Engine::new(SIZE, 31, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 31, PLAIN, SLICE_NS).expect("an engine");
     engine.keep_pictures();
     let _ = run_until(&mut engine, tracing);
     assert!(engine.take_finished().is_none(), "nothing is whole yet");
@@ -519,7 +530,7 @@ fn a_whole_picture_is_handed_over_once_as_traced() {
         .expect("held");
     assert_ne!(next.setting, kept.setting);
 
-    let mut plain = Engine::new(SIZE, 31, PLAIN).expect("an engine");
+    let mut plain = Engine::new(SIZE, 31, PLAIN, SLICE_NS).expect("an engine");
     let _ = run_until(&mut plain, tracing);
     let _ = run_until(&mut plain, whole);
     assert!(plain.take_finished().is_none());
@@ -529,7 +540,7 @@ fn a_whole_picture_is_handed_over_once_as_traced() {
 #[cfg(feature = "scene-tests")]
 #[test]
 fn a_picture_too_large_to_hold_is_reported_unheld() {
-    let mut engine = Engine::new(SIZE, 41, PLAIN).expect("an engine");
+    let mut engine = Engine::new(SIZE, 41, PLAIN, SLICE_NS).expect("an engine");
     engine.keep_pictures();
     let _ = run_until(&mut engine, tracing);
     // As the heap refusing it leaves it.
@@ -599,7 +610,7 @@ fn each_scene_is_composed_at_the_detail_the_memory_spares_and_a_change_is_told_o
         },
         tell: told,
     };
-    let mut engine = Engine::new(SIZE, 3, detailing).expect("an engine");
+    let mut engine = Engine::new(SIZE, 3, detailing, SLICE_NS).expect("an engine");
     let mut clock = ticking(MS);
     let mut out = Vec::new();
     let mut composed = |engine: &mut Engine, band: PressureBand| {

@@ -27,6 +27,7 @@
 //! yet the desktop the user configured
 //! ([`ScreenFade::set_awaiting_backdrop`]).
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_log::{log, Event, EventId, Level, Sink};
 use tairix_theme::{Fade, MotionInteraction};
 use tairix_wm::{Compositor, Surface};
@@ -123,16 +124,17 @@ impl ScreenFade {
         self.fade.running() && self.apply(now_ns, compositor)
     }
 
-    /// `park_ns` shortened to this fade's next frame, or left exactly as it
-    /// is when nothing is fading — an idle desktop arms no timer of its own.
+    /// `park_ns` shortened to this fade's next frame on a display refreshing
+    /// at `refresh`, or left exactly as it is when nothing is fading — an idle
+    /// desktop arms no timer of its own.
     ///
     /// A fade whose span ran out while the loop was presenting shortens it to
     /// nothing rather than leaving it alone: the frame that completes the
     /// fade is still owed, and only [`advance`](Self::advance) drawing it
     /// settles the fade.
     #[must_use]
-    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        park_within(park_ns, self.fade.next_frame_in(now_ns))
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64, refresh: RefreshRate) -> u64 {
+        park_within(park_ns, self.fade.next_frame_in(now_ns, refresh))
     }
 
     /// Note whether the desktop's first backdrop is still being prepared.
@@ -331,11 +333,12 @@ impl BackdropFade {
         changed
     }
 
-    /// `park_ns` shortened to this fade's next frame, or left exactly as it
-    /// is when nothing is dissolving — an idle desktop arms no timer.
+    /// `park_ns` shortened to this fade's next frame on a display refreshing
+    /// at `refresh`, or left exactly as it is when nothing is dissolving — an
+    /// idle desktop arms no timer.
     #[must_use]
-    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        park_within(park_ns, self.fade.next_frame_in(now_ns))
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64, refresh: RefreshRate) -> u64 {
+        park_within(park_ns, self.fade.next_frame_in(now_ns, refresh))
     }
 
     /// Settle on the arriving ground, releasing the screen-sized surface the

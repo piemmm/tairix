@@ -946,8 +946,9 @@ where its pixels go:
   of `Appearance::Dark` whatever the default appearance, because dark ink on
   the ribbon's black would be unreadable.
 - **Paced by the idle-scene clock.** `tairix_theme::motion::SceneClock`, the
-  clock every screensaver shares, draws a frame every `SceneClock::FRAME_NS`
-  (every other display frame) and bounds how far a late one moves it; the frame is one more deadline in the park. Under reduced motion
+  clock every screensaver shares, draws on whole frames of the display's rate,
+  at most thirty a second (`SceneClock::frame_on`), and bounds how far a late
+  one moves it; the frame is one more deadline in the park. Under reduced motion
   the ribbon holds still: painted once, no frame asked for.
 - **Cost.** A frame repaints under half the screen's rows and re-composes
   only those strips. The chrome is rebuilt only when the wall-clock minute

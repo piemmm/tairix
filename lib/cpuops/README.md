@@ -39,6 +39,11 @@ crate recovers, per booted core, everything the conservative floor gives up.
   routine depends on the crate with `default-features = false`.
 - `Decision` / `DecisionSink` — a typed record of every choice for the audit
   log. The crate performs no I/O; the caller (`kernel/core`) logs it.
+- `deliver` / `delivered` / `Resolved<T>` — the feature set this process was
+  delivered, which `lib/rt` records before `main`, and a family's
+  implementation resolved against it the first time the family is used, so no
+  program resolves anything itself. With nothing delivered — a host test, or
+  the kernel, which installs its own — a family runs its baseline.
 
 ## Rules this crate keeps
 

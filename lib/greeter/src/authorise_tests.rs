@@ -14,7 +14,7 @@ use tairix_raster::Surface;
 use super::{AuthoriseAction, AuthoriseSheet, AUTHORISE_WIDTH, ROWS_IN_VIEW};
 use crate::chooser::AccountTile;
 use crate::surface::{CHECKING, HINT, REFUSED};
-use crate::testkit::{centre, moved, still, theme, PRESS, RELEASE};
+use crate::testkit::{centre, moved, still, theme, PRESS, RATE, RELEASE};
 
 const SCALE: Scale = Scale::ONE;
 
@@ -222,13 +222,16 @@ fn while_checking_the_sheet_takes_nothing_and_a_refusal_asks_again() {
     sheet.refuse(0, &theme());
     assert!(!sheet.is_checking());
     assert_eq!(sheet.stated(), REFUSED);
-    assert!(sheet.next_frame_in(0).is_some(), "the question shakes");
+    assert!(
+        sheet.next_frame_in(0, RATE).is_some(),
+        "the question shakes"
+    );
     type_in(&mut sheet, "x");
     assert_eq!(sheet.stated(), HINT, "typing asks the question again");
 
     let mut calm = sheet_refused_in_still_motion();
     assert!(
-        calm.next_frame_in(0).is_none(),
+        calm.next_frame_in(0, RATE).is_none(),
         "reduced motion shakes nothing"
     );
     assert_eq!(calm.stated(), REFUSED);
@@ -269,7 +272,7 @@ fn the_secure_attention_key_answers_on_the_band_and_takes_the_keyboard_to_the_pa
     sheet.set_authorisers(Some(ada()), others(1));
     let _ = named(&mut sheet, NamedKey::Tab);
     sheet.attend(0);
-    assert!(sheet.next_frame_in(0).is_some(), "the band answers");
+    assert!(sheet.next_frame_in(0, RATE).is_some(), "the band answers");
     type_in(&mut sheet, "byron");
     assert_eq!(
         named(&mut sheet, NamedKey::Enter),
@@ -278,7 +281,10 @@ fn the_secure_attention_key_answers_on_the_band_and_takes_the_keyboard_to_the_pa
     let at = bounds(&sheet);
     let mut owed = damage::sink();
     sheet.advance(1_000_000_000, at, SCALE, &theme(), &mut owed);
-    assert!(sheet.next_frame_in(1_000_000_000).is_none(), "and settles");
+    assert!(
+        sheet.next_frame_in(1_000_000_000, RATE).is_none(),
+        "and settles"
+    );
 }
 
 #[test]

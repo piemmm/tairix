@@ -4,12 +4,12 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_rng::NonCryptoRng;
 
 use crate::card::{Face, Rank, Slot, Suit};
 use crate::game::{Game, Setup};
-use crate::motion::FRAME_NS;
 use crate::play::Play;
 use crate::prefs::Preferences;
 use crate::stats::Stats;
@@ -88,6 +88,7 @@ pub(crate) fn setup(prefs: Preferences, resume: Option<(Play, u32)>) -> Setup {
         client: CLIENT,
         scale: Scale::ONE,
         reduced: false,
+        refresh: RefreshRate::ASSUMED,
     }
 }
 
@@ -106,7 +107,7 @@ pub(crate) fn settle(game: &mut Game, from_ns: u64) -> u64 {
             .as_ref()
             .and_then(|drag| drag.glide)
             .filter(|glide| glide.moving(now));
-        let Some(next) = moving.or(gliding.map(|_| now + FRAME_NS)) else {
+        let Some(next) = moving.or(gliding.map(|_| now + game.motion.frame_ns())) else {
             return now;
         };
         now = next;

@@ -2713,7 +2713,7 @@ impl TileLayout {
         let picture = self.core_rect(bounds, scale, theme);
         let name = self
             .name_rect(bounds, scale, theme, label, cut)
-            .map(|name| grown(name, margin).intersection(&bounds))
+            .map(|name| name.outset(margin).intersection(&bounds))
             .filter(|name| !name.is_empty());
         (picture.is_some() || name.is_some()).then_some(TileParts { picture, name })
     }
@@ -2725,7 +2725,7 @@ impl TileLayout {
         let (x, y, side) = self.icon_slot(bounds, scale, theme)?;
         let (_, margin) = tile_insets(scale, theme);
         let picture = Rect::new(to_i32(x), to_i32(y), side, side);
-        let core = grown(picture, margin).intersection(&bounds);
+        let core = picture.outset(margin).intersection(&bounds);
         (!core.is_empty()).then_some(core)
     }
 
@@ -2745,8 +2745,9 @@ impl TileLayout {
         cut: Cut,
     ) -> Option<Rect> {
         let (_, margin) = tile_insets(scale, theme);
-        let name =
-            grown(self.name_rect(bounds, scale, theme, label, cut)?, margin).intersection(&bounds);
+        let name = (self.name_rect(bounds, scale, theme, label, cut)?)
+            .outset(margin)
+            .intersection(&bounds);
         let core = self.core_rect(bounds, scale, theme);
         let target = match self.arrangement {
             Arrangement::Stacked(_) => {
@@ -2937,16 +2938,6 @@ fn paint_frame(
         thickness,
         Color::from(theme.palette().frame),
     );
-}
-
-/// `rect` with `by` pixels added to every side.
-fn grown(rect: Rect, by: u32) -> Rect {
-    Rect::new(
-        rect.left().saturating_sub_unsigned(by),
-        rect.top().saturating_sub_unsigned(by),
-        rect.width.saturating_add(by.saturating_mul(2)),
-        rect.height.saturating_add(by.saturating_mul(2)),
-    )
 }
 
 /// An icon tile's inset and the half inset that separates its name band from

@@ -6,6 +6,9 @@ use alloc::vec::Vec;
 
 use super::*;
 
+/// One frame of the desktop the motion is paced on.
+const FRAME_NS: u64 = RefreshRate::ASSUMED.frame_ns();
+
 const SIZE: (u32, u32) = (80, 112);
 const MS: u64 = 1_000_000;
 
@@ -21,7 +24,7 @@ fn at(x: i32, y: i32, up: bool) -> Placement {
 }
 
 fn resting(placements: &[Placement], reduced: bool) -> Motion {
-    let mut motion = Motion::new(placements.len(), SIZE, reduced);
+    let mut motion = Motion::new(placements.len(), SIZE, reduced, RefreshRate::ASSUMED);
     motion.snap(placements, SIZE);
     motion
 }
@@ -42,6 +45,21 @@ fn run_still(motion: &mut Motion, from_ns: u64) -> u64 {
 fn nothing_moving_owes_no_frame() {
     let motion = resting(&[at(0, 0, true), at(100, 0, true)], false);
     assert_eq!(motion.deadline_ns(5), None);
+}
+
+#[test]
+fn a_card_in_the_air_is_drawn_on_every_frame_of_its_own_desktop() {
+    let mut motion = resting(&[at(0, 0, true)], false);
+    motion.retarget(
+        0,
+        &[at(300, 200, true)],
+        &[],
+        |_| Timing::SLIDE,
+        &mut Region::new(),
+    );
+    let fast = RefreshRate::from_mhz(144_000).expect("in bounds");
+    motion.set_refresh(fast);
+    assert_eq!(motion.deadline_ns(0), Some(fast.frame_ns()));
 }
 
 #[test]

@@ -14,6 +14,7 @@
 //! Density and contrast are likewise data: they change metrics and emphasis,
 //! never the *meaning* of a state (spec §6, §14, §15).
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::NANOS_PER_MILLI;
 
 /// One animated interaction, keyed to a spec §9 timing target.
@@ -203,13 +204,6 @@ impl Timeline {
         duration_ns: 0,
     };
 
-    /// The shortest gap between two animation frames.
-    ///
-    /// A sixtieth of a second, shared by every animation so they are all
-    /// equally smooth: no shipped display refreshes faster, so a finer step
-    /// would compose frames nobody ever sees.
-    pub const FRAME_NS: u64 = 1_000_000_000 / 60;
-
     /// A timeline of `duration_ms` beginning at `now_ns`.
     ///
     /// A zero duration — what a reduced-motion theme answers for every
@@ -281,17 +275,19 @@ impl Timeline {
         *self = Self::SETTLED;
     }
 
-    /// Nanoseconds until the next frame is worth drawing, or `None` when this
-    /// timeline is settled and owes nothing.
+    /// Nanoseconds until the next frame is worth drawing on a display
+    /// refreshing at `refresh`, or `None` when this timeline is settled and
+    /// owes nothing.
     ///
-    /// A running timeline always asks for one: the nearer of the frame cadence
-    /// and what remains of the span, and `0` — draw it now — once the span has
-    /// run out or the clock has jumped behind the start, because that frame is
-    /// the end state and nothing has drawn it yet. The owner draws the frame
-    /// it is given and then [`settle`](Self::settle)s or drops the timeline;
-    /// that, not the clock, is what ends the asking.
+    /// A running timeline always asks for one: the nearer of the display's
+    /// next frame and what remains of the span, and `0` — draw it now — once
+    /// the span has run out or the clock has jumped behind the start, because
+    /// that frame is the end state and nothing has drawn it yet. A finer step
+    /// than the display's would compose frames nobody sees. The owner draws
+    /// the frame it is given and then [`settle`](Self::settle)s or drops the
+    /// timeline; that, not the clock, is what ends the asking.
     #[must_use]
-    pub fn next_frame_in(self, now_ns: u64) -> Option<u64> {
+    pub fn next_frame_in(self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
         if self.duration_ns == 0 {
             return None;
         }
@@ -300,7 +296,7 @@ impl Timeline {
         let remaining = now_ns
             .checked_sub(self.started_ns)
             .map_or(0, |elapsed| self.duration_ns.saturating_sub(elapsed));
-        Some(remaining.min(Self::FRAME_NS))
+        Some(remaining.min(refresh.frame_ns()))
     }
 }
 
@@ -385,11 +381,12 @@ impl Fade {
         self.timeline.running()
     }
 
-    /// Nanoseconds until the next frame is worth drawing, or `None` when this
-    /// fade owes nothing — see [`Timeline::next_frame_in`].
+    /// Nanoseconds until the next frame is worth drawing on a display
+    /// refreshing at `refresh`, or `None` when this fade owes nothing — see
+    /// [`Timeline::next_frame_in`].
     #[must_use]
-    pub fn next_frame_in(self, now_ns: u64) -> Option<u64> {
-        self.timeline.next_frame_in(now_ns)
+    pub fn next_frame_in(self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        self.timeline.next_frame_in(now_ns, refresh)
     }
 
     /// Stop running, having arrived: the strength becomes
@@ -443,24 +440,42 @@ pub struct SceneClock {
     moving: Option<(u64, f64)>,
     /// When its next frame is due.
     next_ns: u64,
+    /// How long each of its frames stands.
+    frame_ns: u64,
 }
 
 impl SceneClock {
-    /// How often a moving scene draws: every other frame the display would,
-    /// since nothing in one moves fast enough for the frames between to show.
-    pub const FRAME_NS: u64 = 2 * Timeline::FRAME_NS;
+    /// The fastest a moving scene draws, in millihertz: nothing in one moves
+    /// fast enough for a finer step to show.
+    pub const FASTEST_MHZ: u32 = 30_000;
 
     /// The most frames one step carries a scene, however late it came: a late
     /// wake moves it a few frames on rather than all the way to the clock.
     pub const MOST_FRAMES: u64 = 4;
 
-    /// A scene setting off at `now_ns`, or holding still when `still`.
+    /// A scene setting off at `now_ns` on a display refreshing at `refresh`,
+    /// or holding still when `still`.
     #[must_use]
-    pub fn new(now_ns: u64, still: bool) -> Self {
+    pub fn new(now_ns: u64, still: bool, refresh: RefreshRate) -> Self {
+        let frame_ns = Self::frame_on(refresh);
         Self {
             moving: (!still).then_some((now_ns, 0.0)),
-            next_ns: now_ns.saturating_add(Self::FRAME_NS),
+            next_ns: now_ns.saturating_add(frame_ns),
+            frame_ns,
         }
+    }
+
+    /// How long a scene's frame stands on a display refreshing at `refresh`:
+    /// [`whole_frames_ns`] of it at [`FASTEST_MHZ`](Self::FASTEST_MHZ).
+    #[must_use]
+    pub const fn frame_on(refresh: RefreshRate) -> u64 {
+        whole_frames_ns(refresh, Self::FASTEST_MHZ)
+    }
+
+    /// How long each of this scene's frames stands.
+    #[must_use]
+    pub const fn frame_ns(&self) -> u64 {
+        self.frame_ns
     }
 
     /// When the next frame is due, or `None` while the scene holds still.
@@ -482,21 +497,51 @@ impl SceneClock {
         self.moving.map_or(0.0, |(_, moved_for)| moved_for)
     }
 
-    /// Move on to `now_ns`, answering the seconds of motion the scene now
-    /// stands at, with its next frame due a frame later. A scene holding
-    /// still stays at the start of its time.
-    pub fn advance(&mut self, now_ns: u64) -> f64 {
+    /// Move on to `now_ns` on a display now refreshing at `refresh`,
+    /// answering the seconds of motion the scene stands at, with its next
+    /// frame due a frame later. A scene holding still stays at the start of
+    /// its time.
+    pub fn advance(&mut self, now_ns: u64, refresh: RefreshRate) -> f64 {
         let Some((last_ns, moved_for)) = self.moving.as_mut() else {
             return 0.0;
         };
+        self.frame_ns = Self::frame_on(refresh);
         let step = now_ns
             .saturating_sub(*last_ns)
-            .min(Self::MOST_FRAMES * Self::FRAME_NS);
+            .min(Self::MOST_FRAMES * self.frame_ns);
         *last_ns = now_ns;
         *moved_for += seconds(step);
-        self.next_ns = now_ns.saturating_add(Self::FRAME_NS);
+        self.next_ns = now_ns.saturating_add(self.frame_ns);
         *moved_for
     }
+}
+
+/// How far past its cap a capped animation may draw, as a fraction of the
+/// cap: the rounding a real timing's nominal rate carries, so a "60 Hz"
+/// output that computes 60.003 Hz still draws every other frame at thirty.
+pub(crate) const CAP_SLACK_DIVISOR: u32 = 200;
+
+/// How long one frame of an animation held to at most `fastest_mhz` stands on
+/// a display refreshing at `refresh`: the fewest whole display frames that
+/// keep it there, so every frame lands on the display's own cadence rather
+/// than beating against it.
+#[must_use]
+pub const fn whole_frames_ns(refresh: RefreshRate, fastest_mhz: u32) -> u64 {
+    let cap = fastest_mhz.saturating_add(fastest_mhz / CAP_SLACK_DIVISOR);
+    let cap = if cap == 0 { 1 } else { cap };
+    refresh.mhz().div_ceil(cap) as u64 * refresh.frame_ns()
+}
+
+/// The longest a serve loop works through a slice of its own work before it
+/// turns back to its input, on a display refreshing at `refresh`: half a
+/// frame, so input and every client are still answered within the frame,
+/// and never more than half of [`RefreshRate::ASSUMED`]'s, so a slow display
+/// does not slow the answer.
+#[must_use]
+pub const fn work_slice_ns(refresh: RefreshRate) -> u64 {
+    let frame = refresh.frame_ns();
+    let ceiling = RefreshRate::ASSUMED.frame_ns();
+    (if frame < ceiling { frame } else { ceiling }) / 2
 }
 
 /// `whole` nanoseconds as seconds.

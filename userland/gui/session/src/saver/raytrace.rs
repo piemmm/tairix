@@ -35,6 +35,7 @@ pub use engine::{Detailing, Engine, Memory, Traced};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_parallel::JobRunner;
 use tairix_raster::DitherRow;
@@ -47,7 +48,7 @@ use super::seed_from;
 use crossfade::Crossfade;
 use preview::Preview;
 use readout::{Doing, Readout};
-use tairix_theme::motion::SceneClock;
+use tairix_theme::motion::{work_slice_ns, SceneClock};
 
 /// How long the whole picture is held before it fades, and how long the
 /// screen rests black after the heap refused a scene.
@@ -76,11 +77,10 @@ const DETAIL_WAIT_NS: u64 = 1_500_000_000;
 /// never looks stalled.
 const MOST_WAIT_NS: u64 = 3_000_000_000;
 
-// Clamping to the cadence's bounds cannot panic, its anchor lies within, and
-// its longest wait is a fade's span in milliseconds.
+// Clamping to the cadence's bounds cannot panic, and its longest wait is a
+// fade's span in milliseconds.
 const _: () = assert!(
-    SceneClock::FRAME_NS <= FIRST_WAIT_NS
-        && FIRST_WAIT_NS <= DETAIL_WAIT_NS
+    FIRST_WAIT_NS <= DETAIL_WAIT_NS
         && DETAIL_WAIT_NS <= MOST_WAIT_NS
         && (MOST_WAIT_NS / NANOS_PER_MILLI) >> u16::BITS == 0
 );
@@ -166,12 +166,12 @@ impl Feed {
     }
 
     /// When the loop is to come back to a reveal that wants it back at
-    /// `wanted_ns`: on the loop's own feed a scene frame later at the latest,
-    /// to trace the next slice.
-    fn due(&self, now_ns: u64, wanted_ns: u64) -> u64 {
+    /// `wanted_ns`: on the loop's own feed a scene frame of `frame_ns` later
+    /// at the latest, to trace the next slice.
+    fn due(&self, now_ns: u64, wanted_ns: u64, frame_ns: u64) -> u64 {
         match self {
             Self::Crew(_) => wanted_ns,
-            Self::Inline { .. } => wanted_ns.min(now_ns.saturating_add(SceneClock::FRAME_NS)),
+            Self::Inline { .. } => wanted_ns.min(now_ns.saturating_add(frame_ns)),
         }
     }
 }
@@ -192,6 +192,8 @@ pub(super) struct Raytrace {
     calm: bool,
     /// What the machine's memory can spare the crossfade.
     memory: Memory,
+    /// How long a scene frame stands on the display, as of the last frame.
+    frame_ns: u64,
     due_ns: u64,
     /// How many steps come before the fine detail: every point of the
     /// `DETAIL_GRID` grid.
@@ -204,15 +206,15 @@ pub(super) struct Raytrace {
 }
 
 impl Raytrace {
-    /// A reveal for a `size` screen beginning at `now_ns`, `calm` under
-    /// reduced motion, traced as `options` ask — on threads `host` grants
-    /// where it grants any, each scene at the detail `memory` can spare,
-    /// `tell` told when that changes — its readout in `theme`'s type at
-    /// `scale`. `None` when the screen has no pixels or the heap will not
-    /// hold the reveal.
+    /// A reveal for a `size` screen refreshing at `refresh` beginning at
+    /// `now_ns`, `calm` under reduced motion, traced as `options` ask — on
+    /// threads `host` grants where it grants any, each scene at the detail
+    /// `memory` can spare, `tell` told when that changes — its readout in
+    /// `theme`'s type at `scale`. `None` when the screen has no pixels or the
+    /// heap will not hold the reveal.
     pub(super) fn new(
         size: (u32, u32),
-        (calm, now_ns): (bool, u64),
+        (calm, now_ns, refresh): (bool, u64, RefreshRate),
         (options, memory, tell): (RaytraceOptions, Memory, fn(Detail)),
         host: Option<&dyn TraceHost>,
         (theme, scale): (&Theme, Scale),
@@ -227,7 +229,7 @@ impl Raytrace {
             memory,
             tell,
         };
-        let engine = Engine::new(size, seed_from(now_ns), detailing)?;
+        let engine = Engine::new(size, seed_from(now_ns), detailing, work_slice_ns(refresh))?;
         let feed = match host {
             Some(host) => match host.launch(engine, options) {
                 Ok(link) => Feed::Crew(link),
@@ -252,6 +254,7 @@ impl Raytrace {
             readout: Readout::new(theme, scale, size),
             calm,
             memory,
+            frame_ns: SceneClock::frame_on(refresh),
             due_ns: now_ns,
             detail_from: u64::from(size.0.div_ceil(DETAIL_GRID))
                 * u64::from(size.1.div_ceil(DETAIL_GRID)),
@@ -298,6 +301,7 @@ impl Raytrace {
         if now_ns < self.due_ns {
             return;
         }
+        self.frame_ns = SceneClock::frame_on(compositor.refresh_rate());
         let phase = core::mem::replace(&mut self.phase, Phase::Revealing);
         self.phase = match phase {
             Phase::Revealing => self.reveal(now_ns, wm, compositor, clock),
@@ -359,14 +363,16 @@ impl Raytrace {
         match status {
             Status::Preparing(done) => {
                 self.readout.show(compositor, wm, Doing::Generating, done);
-                self.due_ns = self
-                    .feed
-                    .due(now_ns, now_ns.saturating_add(READOUT_WAIT_NS));
+                self.due_ns = self.feed.due(
+                    now_ns,
+                    now_ns.saturating_add(READOUT_WAIT_NS),
+                    self.frame_ns,
+                );
                 Phase::Revealing
             }
             Status::Tracing(done) => {
                 self.readout.show(compositor, wm, Doing::Rendering, done);
-                self.due_ns = self.feed.due(now_ns, self.wanted_ns(now_ns));
+                self.due_ns = self.feed.due(now_ns, self.wanted_ns(now_ns), self.frame_ns);
                 Phase::Revealing
             }
             Status::Whole => {
@@ -383,9 +389,9 @@ impl Raytrace {
     /// and a scene frame on while a change is fading in.
     fn wanted_ns(&self, now_ns: u64) -> u64 {
         match &self.laying {
-            Laying::Fading(fade) if !fade.settled() => self
-                .paint_due_ns
-                .min(now_ns.saturating_add(SceneClock::FRAME_NS)),
+            Laying::Fading(fade) if !fade.settled() => {
+                self.paint_due_ns.min(now_ns.saturating_add(self.frame_ns))
+            }
             _ => self.paint_due_ns,
         }
     }
@@ -440,7 +446,8 @@ impl Raytrace {
         };
         self.laying = laying;
         if painted {
-            self.paint_due_ns = now_ns.saturating_add(paint_wait(self.shown, self.detail_from));
+            self.paint_due_ns =
+                now_ns.saturating_add(paint_wait(self.shown, self.detail_from, self.frame_ns));
         }
         painted
     }
@@ -461,7 +468,7 @@ impl Raytrace {
         }
         if !self.drawn.is_empty() {
             self.take_drawn(true);
-            let wait_ms = paint_wait(self.shown, self.detail_from) / NANOS_PER_MILLI;
+            let wait_ms = paint_wait(self.shown, self.detail_from, self.frame_ns) / NANOS_PER_MILLI;
             let timeline = Timeline::start(now_ns, u16::try_from(wait_ms).unwrap_or(u16::MAX));
             let runner = compositor.job_runner();
             let picture = fade.begin((self.preview.changed(), &mut self.damage), timeline, runner);
@@ -537,7 +544,7 @@ impl Raytrace {
         if target == 0 {
             return self.next(now_ns);
         }
-        self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
+        self.due_ns = now_ns.saturating_add(self.frame_ns);
         Phase::Fading {
             fade,
             strength: target.min(strength),
@@ -556,14 +563,14 @@ fn unbegun(calm: bool) -> Laying {
 }
 
 /// The wait after a paint leaving `shown` steps of a reveal on screen,
-/// `detail_from` coming before its fine detail: a scene frame while none is,
-/// so the first are shown as soon as they are traced, then in proportion to
-/// the steps shown, so each pass, four times as long as the one before, is
-/// shown in about as many paints — `FIRST_WAIT_NS` at least, `DETAIL_WAIT_NS`
-/// as the fine detail begins, and `MOST_WAIT_NS` at most.
-fn paint_wait(shown: u64, detail_from: u64) -> u64 {
+/// `detail_from` coming before its fine detail: a scene frame of `frame_ns`
+/// while none is, so the first are shown as soon as they are traced, then in
+/// proportion to the steps shown, so each pass, four times as long as the one
+/// before, is shown in about as many paints — `FIRST_WAIT_NS` at least,
+/// `DETAIL_WAIT_NS` as the fine detail begins, and `MOST_WAIT_NS` at most.
+fn paint_wait(shown: u64, detail_from: u64, frame_ns: u64) -> u64 {
     if shown == 0 {
-        return SceneClock::FRAME_NS;
+        return frame_ns.min(FIRST_WAIT_NS);
     }
     let wait = u128::from(shown) * u128::from(DETAIL_WAIT_NS) / u128::from(detail_from.max(1));
     u64::try_from(wait).map_or(MOST_WAIT_NS, |wait| wait.clamp(FIRST_WAIT_NS, MOST_WAIT_NS))

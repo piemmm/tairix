@@ -1,22 +1,29 @@
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::Duration64;
 use tairix_abi::WAITSET_TIMEOUT_NONE;
-use tairix_theme::Timeline;
 
 use super::{frame_budget, park_timeout, Idle, ENERGY_SAVING_AFTER_NS, NANOS_PER_SEC};
 
 #[test]
 fn a_frame_budget_covers_the_whole_span_and_one_frame_more() {
-    let a_second = frame_budget(1_000);
-    let cadences = u32::try_from(NANOS_PER_SEC / Timeline::FRAME_NS).expect("a small count");
+    let a_second = frame_budget(1_000, RefreshRate::ASSUMED);
+    let cadences =
+        u32::try_from(NANOS_PER_SEC / RefreshRate::ASSUMED.frame_ns()).expect("a small count");
     assert_eq!(a_second, cadences + 1, "the frame on the end is drawn too");
 
     // An animation the theme has done away with still leaves room for the
     // one frame that draws its finished state.
-    assert_eq!(frame_budget(0), 1);
+    assert_eq!(frame_budget(0, RefreshRate::ASSUMED), 1);
 
     // The longest span a theme can author is still a bounded number of
     // frames rather than an open loop.
-    assert!(frame_budget(u16::MAX) > a_second);
+    assert!(frame_budget(u16::MAX, RefreshRate::ASSUMED) > a_second);
+}
+
+#[test]
+fn a_faster_display_is_budgeted_its_own_frames() {
+    let fast = RefreshRate::from_mhz(144_000).expect("in bounds");
+    assert_eq!(frame_budget(1_000, fast), 144 + 1);
 }
 
 #[test]

@@ -217,6 +217,22 @@ impl Rect {
         )
     }
 
+    /// This rectangle with `by` pixels added to every side, saturating at the
+    /// coordinate range; an empty rectangle stays [`Rect::EMPTY`].
+    #[must_use]
+    pub fn outset(&self, by: u32) -> Self {
+        if self.is_empty() {
+            return Self::EMPTY;
+        }
+        let grow = by.saturating_mul(2);
+        Self::new(
+            self.origin.x.saturating_sub_unsigned(by),
+            self.origin.y.saturating_sub_unsigned(by),
+            self.width.saturating_add(grow),
+            self.height.saturating_add(grow),
+        )
+    }
+
     /// Cut a band `height` pixels tall — all of it, where there is less — off
     /// the top, answering the band and leaving the rest.
     #[must_use]

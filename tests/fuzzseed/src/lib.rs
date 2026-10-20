@@ -285,6 +285,17 @@ impl Prng {
         self.next_u64().to_be_bytes()[0]
     }
 
+    /// A byte that is `0` a quarter of the time, `255` a quarter, and any
+    /// value otherwise: the two a pixel kernel treats specially, drawn often
+    /// enough that a sweep crosses them every few pixels.
+    pub fn edge_biased_u8(&mut self) -> u8 {
+        match self.below(4) {
+            0 => 0,
+            1 => u8::MAX,
+            _ => self.next_u8(),
+        }
+    }
+
     /// A value in `0..n`, or `0` when `n == 0`.
     pub fn below(&mut self, n: usize) -> usize {
         self.within(u128::from(n as u64))

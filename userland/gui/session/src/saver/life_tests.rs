@@ -4,13 +4,14 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_wallpaper::{CellSize, LifeOptions, Pace};
 use tairix_wm::{Compositor, Point, Scale, Surface, WindowId};
 
 use super::{Life, FAMILIES, GENERATIONS_PER_SECOND, MAX_CELLS, QUIET_LIMIT, SETTLED_GRACE};
+use crate::saver::{TEST_REFRESH, TEST_SCENE_FRAME_NS};
 use crate::tests::compositor;
-use tairix_theme::motion::SceneClock;
 
 /// A world `cols` by `rows` cells, emptied: no cell alive, lit, or waiting
 /// to be drawn.
@@ -19,7 +20,7 @@ fn world(cols: u32, rows: u32) -> Life {
         (cols * 8, rows * 8),
         Scale::ONE,
         (false, LifeOptions::default()),
-        0,
+        (0, TEST_REFRESH),
     )
     .expect("a world");
     let size = |n: u32| usize::try_from(n).expect("small");
@@ -191,14 +192,20 @@ fn a_vast_screen_grows_its_cells_rather_than_its_board() {
         (15_360, 8_640),
         Scale::ONE,
         (false, LifeOptions::default()),
-        0,
+        (0, TEST_REFRESH),
     )
     .expect("a world");
     let cells = u64::try_from(life.cols * life.rows).expect("small");
     assert!(cells <= MAX_CELLS, "{cells}");
     assert!(life.cell > 8);
     assert!(
-        Life::new((16, 16), Scale::ONE, (false, LifeOptions::default()), 0).is_none(),
+        Life::new(
+            (16, 16),
+            Scale::ONE,
+            (false, LifeOptions::default()),
+            (0, TEST_REFRESH)
+        )
+        .is_none(),
         "no room for a world"
     );
 }
@@ -218,7 +225,7 @@ fn a_calm_world_is_born_and_dies_at_once() {
         (24 * 8, 16 * 8),
         Scale::ONE,
         (true, LifeOptions::default()),
-        0,
+        (0, TEST_REFRESH),
     )
     .expect("a world");
     let wm = canvas(&mut comp, &life);
@@ -269,7 +276,6 @@ fn a_frame_repaints_only_its_changing_cells() {
     assert!(comp.repaint_window(wm, life.size, &spot, |surface, _| {
         surface.fill_rect(x, y, 1, 1, tairix_wm::Color::rgb(1, 2, 3));
     }));
-    life.frames = 0;
     life.advance(0, wm, &mut comp);
     let at = Point::new(
         i32::try_from(x).expect("small"),
@@ -301,7 +307,6 @@ fn a_frame_into_a_fresh_buffer_repaints_the_whole_board() {
     life.level[5 * life.cols + 5] = u8::MAX;
     let wm = canvas(&mut comp, &life);
     assert!(comp.set_surface(wm, Surface::new(4, 4).expect("a surface")));
-    life.frames = 0;
     life.advance(0, wm, &mut comp);
     let content = comp
         .window(wm)
@@ -341,11 +346,11 @@ fn a_settled_board_repaints_nothing_between_generations() {
     let mut now = 0;
     for _ in 0..12 {
         life.advance(now, wm, &mut comp);
-        now += SceneClock::FRAME_NS;
+        now += TEST_SCENE_FRAME_NS;
     }
     assert!(life.active.is_empty(), "every cell is where it is going");
     comp.composite();
-    life.frames = 0;
+    life.next_generation_ns = u64::MAX;
     life.advance(now, wm, &mut comp);
     assert!(!comp.has_damage(), "nothing changed, nothing repainted");
 }
@@ -365,7 +370,7 @@ fn the_cell_size_decides_how_fine_the_board_is() {
                     ..LifeOptions::default()
                 },
             ),
-            0,
+            (0, TEST_REFRESH),
         )
         .expect("a world")
         .cols
@@ -378,35 +383,68 @@ fn the_cell_size_decides_how_fine_the_board_is() {
     assert!(small > medium && medium > large, "{small} {medium} {large}");
 }
 
-/// The speed decides how many frames pass between generations, and a birth
-/// still completes within one generation at every speed.
+/// A world runs as many generations a second as its speed asks on every
+/// display, however many of the display's frames a generation spans, and a
+/// birth still completes before the next generation comes.
 #[test]
-fn the_speed_paces_the_generations_and_keeps_a_birth_within_one() {
-    let pace = |speed: Pace| {
-        let life = Life::new(
-            (1_280, 720),
-            Scale::ONE,
-            (
-                false,
-                LifeOptions {
-                    speed,
-                    ..LifeOptions::default()
-                },
-            ),
-            0,
-        )
-        .expect("a world");
-        assert!(
-            u32::from(life.steps.0) * life.pace >= 255,
-            "{speed:?}: a newborn cell is still arriving when the next generation comes"
-        );
-        life.pace
-    };
-    let (slow, normal, fast) = (pace(Pace::Slow), pace(Pace::Normal), pace(Pace::Fast));
-    assert!(slow > normal && normal > fast, "{slow} {normal} {fast}");
-    let per_second = |pace: u32| 1_000_000_000 / (u64::from(pace) * SceneClock::FRAME_NS);
-    let owed = |pace: Pace| GENERATIONS_PER_SECOND * u64::from(pace.percent()) / 100;
-    assert_eq!(per_second(normal), 10);
-    assert_eq!(per_second(slow), owed(Pace::Slow));
-    assert_eq!(per_second(fast), owed(Pace::Fast));
+fn the_speed_paces_the_generations_on_every_display() {
+    const SECONDS: u64 = 10;
+    for mhz in [
+        24_000, 50_000, 59_940, 60_000, 75_000, 120_000, 144_000, 165_000, 240_000,
+    ] {
+        let refresh = RefreshRate::from_mhz(mhz).expect("in bounds");
+        for speed in Pace::ALL {
+            let mut comp = compositor();
+            comp.set_refresh_rate(Some(refresh));
+            let mut life = Life::new(
+                (24 * 8, 16 * 8),
+                Scale::ONE,
+                (
+                    false,
+                    LifeOptions {
+                        speed,
+                        ..LifeOptions::default()
+                    },
+                ),
+                (0, refresh),
+            )
+            .expect("a world");
+            let fewest_frames = (life.cadence.generation_ns / life.cadence.frame_ns).max(1);
+            assert!(
+                u64::from(life.cadence.steps.0) * fewest_frames >= 255,
+                "{mhz} {speed:?}: a newborn is still arriving when the next generation comes"
+            );
+            let wm = canvas(&mut comp, &life);
+            let (mut now, mut generations) = (0, 0u64);
+            while now < SECONDS * 1_000_000_000 {
+                let due = life.next_generation_ns;
+                life.advance(now, wm, &mut comp);
+                generations += u64::from(life.next_generation_ns != due);
+                now = life.due_ns();
+            }
+            let owed = GENERATIONS_PER_SECOND * u64::from(speed.percent()) / 100 * SECONDS;
+            assert!(
+                generations.abs_diff(owed) <= 1,
+                "{mhz} {speed:?}: {generations} generations of {owed}"
+            );
+        }
+    }
+}
+
+/// A generation missed outright, the saver having been held off the CPU, is
+/// dropped rather than made up in a burst.
+#[test]
+fn a_stalled_world_resumes_its_pace_without_a_burst() {
+    let mut comp = compositor();
+    let mut life = world(24, 16);
+    let wm = canvas(&mut comp, &life);
+    let interval = life.cadence.generation_ns;
+    let stalled = 50 * interval + interval / 2;
+    let due = life.next_generation_ns;
+    life.advance(stalled, wm, &mut comp);
+    assert_ne!(life.next_generation_ns, due, "the late generation runs");
+    assert_eq!(life.next_generation_ns, stalled + interval);
+    let due = life.next_generation_ns;
+    life.advance(life.due_ns(), wm, &mut comp);
+    assert_eq!(life.next_generation_ns, due, "the next waits its interval");
 }

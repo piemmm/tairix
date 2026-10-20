@@ -23,20 +23,19 @@
 //! candidates (`x86_64`/`aarch64` modules, compiled behind a build-script-emitted
 //! `crc32c_<arch>` cfg — the charter-legal `lib/abi-trap` precedent, so no
 //! target-architecture conditional-compilation predicate appears in the source
-//! the `cfg-check` guards). Which one
-//! a process uses is decided **once**, by [`resolve`], from the
-//! [`CpuFeatureSet`] the kernel delivers it (never by probing the instruction
-//! blindly, which would trap). Selection goes through the generic `lib/cpuops`
-//! framework, so the hardware candidate is:
+//! the `cfg-check` guards). Which one a process uses is decided **once**, the
+//! first time it checksums, from the [`CpuFeatureSet`] the kernel delivered it
+//! — or by [`resolve`], against a set of the caller's own — never by probing
+//! the instruction blindly, which would trap. Selection goes through the
+//! generic `lib/cpuops` framework, so the hardware candidate is:
 //!
 //! 1. **capability-gated** — chosen only when the required feature bit is set;
 //! 2. **self-verified** — its output is checked bit-for-bit against the
 //!    portable reference over a fixed vector of edge-case inputs before it can
 //!    ever be selected, so a decode bug is structurally unpickable;
 //! 3. **fail-closed** — if the bit is absent or verification fails, the
-//!    portable baseline is used. [`checksum`] before [`resolve`] runs (or after
-//!    a failed resolve) is the portable baseline too — never a trap, never a
-//!    panic.
+//!    portable baseline is used, as it is in a process delivered no set — never
+//!    a trap, never a panic.
 //!
 //! [`checksum`] is the hot-path entry consumers call; it reads the resolved
 //! implementation from a set-once cell (no code patching — a plain function
@@ -50,8 +49,9 @@
 // legitimately unused there (`CpuFeatureSet` is always used).
 #[cfg_attr(not(any(crc32c_x86_64, crc32c_aarch64)), allow(unused_imports))]
 use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
-use tairix_cpuops::{Candidate, CoreKey, Decision, Family, FamilyId, Selection, Selector};
-use tairix_sync::OnceCell;
+use tairix_cpuops::{
+    Candidate, CoreKey, Decision, Family, FamilyId, Resolved, Selected, Selection, Selector,
+};
 
 #[cfg(crc32c_aarch64)]
 pub mod aarch64;
@@ -125,13 +125,10 @@ pub fn crc32c_portable(data: &[u8]) -> u32 {
     !portable_update(0xFFFF_FFFF, data)
 }
 
-/// The set-once resolved implementation for the whole process/kernel image.
-///
-/// Holds the winning function pointer once [`resolve`] runs. A `Crc32cFn` is
-/// `Copy + Send + Sync`, so the cell needs no `unsafe`; before it is set (or if
-/// resolution ever failed and left it unset) [`checksum`] falls closed to the
-/// portable baseline.
-static RESOLVED: OnceCell<Crc32cFn> = OnceCell::new();
+/// The implementation in force: installed by [`resolve`], or resolved on first
+/// use against the set this process was delivered. Until either, [`checksum`]
+/// runs the portable baseline.
+static RESOLVED: Resolved<Crc32cFn> = Resolved::new();
 
 /// The accelerated candidates available on this build, in descending declared
 /// priority. Assembled per architecture; a target with no CRC instruction has
@@ -232,24 +229,26 @@ pub fn resolve_pinned(features: CpuFeatureSet, pin: &'static str) -> Decision {
 }
 
 fn select_and_install(features: CpuFeatureSet, pin: Option<&'static str>) -> Decision {
-    let family = family();
+    let selected = select(features, pin);
+    // The first resolve wins the installed implementation; a later one still
+    // returns its decision for the log.
+    let _ = RESOLVED.install(selected.impl_);
+    selected.decision
+}
+
+fn select(features: CpuFeatureSet, pin: Option<&'static str>) -> Selected<Crc32cFn> {
     let mut selector = Selector::new();
     if let Some(name) = pin {
         selector.pin(FAMILY_ID, name);
     }
-    let selected = selector.select(&family, features, CoreKey(features.bits()), None);
-    // Set-once: the first resolve wins the installed implementation; a later
-    // call's `AlreadySet` is expected and ignored (the decision is still
-    // returned for logging).
-    let _ = RESOLVED.set(selected.impl_);
-    selected.decision
+    selector.select(&family(), features, CoreKey(features.bits()), None)
 }
 
 /// The CRC-32C of `data` using the resolved implementation.
 ///
-/// The hot-path entry every consumer calls. Reads the set-once resolved
-/// function pointer; before [`resolve`] runs, or if resolution failed, it is
-/// the portable baseline (fail closed — never a trap, never a panic).
+/// The hot-path entry every consumer calls; before anything has resolved the
+/// family it is the portable baseline (fail closed — never a trap, never a
+/// panic).
 #[must_use]
 pub fn checksum(data: &[u8]) -> u32 {
     !update(0xFFFF_FFFF, data)
@@ -261,10 +260,7 @@ pub fn checksum(data: &[u8]) -> u32 {
 /// are raw registers.
 #[must_use]
 pub fn update(state: u32, data: &[u8]) -> u32 {
-    match RESOLVED.get() {
-        Ok(Some(implementation)) => implementation(state, data),
-        _ => portable_update(state, data),
-    }
+    RESOLVED.get(|features| select(features, None).impl_, portable_update)(state, data)
 }
 
 #[cfg(test)]

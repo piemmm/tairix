@@ -20,6 +20,7 @@
 use alloc::format;
 use alloc::string::String;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -726,8 +727,9 @@ pub struct Progress {
     label: Option<String>,
     /// Whether it states its own percentage or note beneath the band.
     captioned: bool,
-    /// The frame clock and motion its owner last reported; `None` draws still.
-    clock: Option<(u64, MotionTheme)>,
+    /// The frame clock, motion and display rate its owner last reported;
+    /// `None` draws still.
+    clock: Option<(u64, MotionTheme, RefreshRate)>,
     /// When the sweep set out, or `None` until the next clock report sets it
     /// off, as for [`FillEase`].
     sweep_from_ns: Option<u64>,
@@ -875,7 +877,7 @@ impl Progress {
         let sets_off = self
             .next_frame_in()
             .and(self.clock)
-            .map(|(clocked, _)| clocked);
+            .map(|(clocked, _, _)| clocked);
         if let ActivityState::Progress(value) = state.activity {
             // A failed trace stands where its work stopped.
             let rising = !failed
@@ -892,12 +894,13 @@ impl Progress {
         self.state = state;
     }
 
-    /// Report the frame clock, `now_ns`, and the theme's motion: the trace
-    /// moves only once its owner does this, and draws the instant reported.
-    pub fn set_clock(&mut self, now_ns: u64, motion: MotionTheme) {
+    /// Report the frame clock, `now_ns`, the theme's motion, and the rate the
+    /// trace's display refreshes at: the trace moves only once its owner does
+    /// this, and draws the instant reported.
+    pub fn set_clock(&mut self, now_ns: u64, motion: MotionTheme, refresh: RefreshRate) {
         self.fill.started_ns.get_or_insert(now_ns);
         self.sweep_from_ns.get_or_insert(now_ns);
-        self.clock = Some((now_ns, motion));
+        self.clock = Some((now_ns, motion, refresh));
     }
 
     /// Nanoseconds until the trace next changes on its own, or `None` while
@@ -905,9 +908,9 @@ impl Progress {
     /// shows is moving.
     #[must_use]
     pub fn next_frame_in(&self) -> Option<u64> {
-        let (now, motion) = self.clock?;
+        let (now, motion, refresh) = self.clock?;
         if self.sweep_period_ns().is_some() {
-            return Some(self.sweep_from_ns.map_or(0, |_| Timeline::FRAME_NS));
+            return Some(self.sweep_from_ns.map_or(0, |_| refresh.frame_ns()));
         }
         let ActivityState::Progress(value) = self.state.activity else {
             return None;
@@ -920,7 +923,7 @@ impl Progress {
         };
         let ease = Self::ease(started, motion);
         (!ease.finished(now))
-            .then(|| ease.next_frame_in(now))
+            .then(|| ease.next_frame_in(now, refresh))
             .flatten()
     }
 
@@ -946,7 +949,7 @@ impl Progress {
             return 0;
         };
         let target = value.permille();
-        let Some((now, motion)) = self.clock else {
+        let Some((now, motion, _)) = self.clock else {
             return target;
         };
         let from = self.fill.from.min(target);
@@ -961,7 +964,7 @@ impl Progress {
     /// One crossing of the sweep, while the trace is busy, unfailed, clocked
     /// and the theme lets it move.
     fn sweep_period_ns(&self) -> Option<u64> {
-        let (_, motion) = self.clock?;
+        let (_, motion, _) = self.clock?;
         let millis = motion.duration(MotionInteraction::ProgressSweep);
         (Self::busy(self.state.activity) && !self.is_failed() && millis > 0)
             .then(|| u64::from(millis) * tairix_abi::time::NANOS_PER_MILLI)
@@ -1113,7 +1116,7 @@ impl Progress {
     /// still one is centred and feathered at both ends.
     fn comet(&self) -> Comet {
         let full = u32::from(FULL);
-        let (Some(period), Some((now, _))) = (self.sweep_period_ns(), self.clock) else {
+        let (Some(period), Some((now, _, _))) = (self.sweep_period_ns(), self.clock) else {
             return Comet {
                 tail: (full - COMET) / 2,
                 head: u32::midpoint(full, COMET),

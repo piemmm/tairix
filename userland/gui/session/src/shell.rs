@@ -38,6 +38,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::input::KeyInput;
 use tairix_abi::notify_ipc::NotifyRequest;
 use tairix_abi::sound_cue::SoundEvent;
@@ -564,6 +565,14 @@ impl DesktopShell {
         &self.router
     }
 
+    /// Whether the pointer carries what the next frame moves: a window it
+    /// moves or resizes, or a drag's plate. Its cursor plane then moves with
+    /// that frame rather than ahead of it.
+    #[must_use]
+    pub fn pointer_carries(&self) -> bool {
+        self.router.is_moving() || self.router.wm().resizing().is_some() || self.drag_active()
+    }
+
     /// The taskbar presenter (its bar and popup window ids).
     #[must_use]
     pub const fn presenter(&self) -> &TaskbarPresenter {
@@ -713,11 +722,16 @@ impl DesktopShell {
         self.aids.advance(now_ns, at, &mut self.cursor, compositor);
     }
 
-    /// Fold the next frame the pointer aids owe into `park_ns`; nothing while
-    /// every one of them is at rest.
+    /// Fold the next frame the pointer aids owe on a display refreshing at
+    /// `refresh` into `park_ns`; nothing while every one of them is at rest.
     #[must_use]
-    pub fn pointer_aids_park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        self.aids.park_deadline_ns(now_ns, park_ns)
+    pub fn pointer_aids_park_deadline_ns(
+        &self,
+        now_ns: u64,
+        park_ns: u64,
+        refresh: RefreshRate,
+    ) -> u64 {
+        self.aids.park_deadline_ns(now_ns, park_ns, refresh)
     }
 
     /// Open `surface` as a top-level window at `origin`, list it on the taskbar
@@ -1537,11 +1551,17 @@ impl DesktopShell {
         self.backdrop_fade.advance(now_ns)
     }
 
-    /// `park_ns` shortened to the backdrop crossfade's next frame, or left as
-    /// it is when nothing is dissolving.
+    /// `park_ns` shortened to the backdrop crossfade's next frame on a display
+    /// refreshing at `refresh`, or left as it is when nothing is dissolving.
     #[must_use]
-    pub fn backdrop_park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        self.backdrop_fade.park_deadline_ns(now_ns, park_ns)
+    pub fn backdrop_park_deadline_ns(
+        &self,
+        now_ns: u64,
+        park_ns: u64,
+        refresh: RefreshRate,
+    ) -> u64 {
+        self.backdrop_fade
+            .park_deadline_ns(now_ns, park_ns, refresh)
     }
 
     /// Repaint the whole desktop layer — the wallpaper (or the backdrop colour

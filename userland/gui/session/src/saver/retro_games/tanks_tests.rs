@@ -2,6 +2,7 @@
 //! however its frames fall, keeps clear of the flight's path, and wrecks
 //! what it strikes.
 
+use crate::saver::TEST_SCENE_FRAME_NS;
 use tairix_rng::NonCryptoRng;
 use tairix_util::space::Vec3;
 use tairix_wm::Scale;
@@ -20,7 +21,7 @@ fn view() -> View {
 /// A battle begun at `start`, from `seed`, with the camera where the flight
 /// stands then.
 fn battle(seed: u64, start: f64) -> Battle {
-    let camera = Camera::at(&view(), Moment::at(start, SPEED));
+    let camera = Camera::at(&view(), Moment::at(start, SPEED, TEST_SCENE_FRAME_NS));
     Battle::new(NonCryptoRng::seed_from_u64(seed), start, &camera, SPEED)
 }
 
@@ -37,7 +38,7 @@ fn play(
     let (mut time, end) = (battle.start, battle.start + within);
     while time < end {
         time = (time + step).min(end);
-        let camera = Camera::at(&view, Moment::at(time, SPEED));
+        let camera = Camera::at(&view, Moment::at(time, SPEED, TEST_SCENE_FRAME_NS));
         battle.advance(time, &camera, models, blasts);
         blasts.retire(time);
         if battle.is_over() {
@@ -109,7 +110,7 @@ fn the_tanks_keep_clear_of_the_flights_path() {
         let mut time = 0.0;
         while time < 12.0 {
             time += 0.1;
-            let camera = Camera::at(&view, Moment::at(time, SPEED));
+            let camera = Camera::at(&view, Moment::at(time, SPEED, TEST_SCENE_FRAME_NS));
             fight.advance(time, &camera, &models, &mut blasts);
             for tank in fight.tanks.iter().filter(|tank| tank.fighting()) {
                 let (at, _, _) = tank.at(time);
@@ -141,7 +142,7 @@ fn a_hit_wrecks_what_it_strikes() {
         let mut time = 0.0;
         while time < 30.0 {
             time += 1.0 / 30.0;
-            let camera = Camera::at(&view, Moment::at(time, SPEED));
+            let camera = Camera::at(&view, Moment::at(time, SPEED, TEST_SCENE_FRAME_NS));
             let landing = fight
                 .shells
                 .iter()

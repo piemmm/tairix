@@ -1,10 +1,12 @@
 //! Unit tests for the window-frame pixel codec.
 //!
-//! Two properties carry the module: a frame round-trips an app's pixels
-//! including their alpha, and splitting the conversion across bands changes the
-//! wall-clock cost and nothing else. Both are asserted against a runner that
-//! reports a width it does not have and runs its pieces backwards, so the order
-//! dependence a real pool could expose is exercised with no thread involved.
+//! Three properties carry the module: a frame round-trips an app's pixels
+//! exactly at every alpha, a frame a client wrote out of range decodes to a
+//! valid premultiplied pixel, and splitting the conversion across bands changes
+//! the wall-clock cost and nothing else — the last asserted against a runner
+//! that reports a width it does not have and runs its pieces backwards, so the
+//! order dependence a real pool could expose is exercised with no thread
+//! involved.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -55,16 +57,17 @@ fn painted() -> Surface {
     surface
 }
 
-/// The pixel `painted` puts at `(x, y)`.
-///
-/// Alpha is kept at or above the largest channel so un-premultiplying and
-/// premultiplying again is exact: a straight-alpha frame cannot represent a
-/// channel brighter than its own alpha, and a test that asked it to would be
-/// asserting against the format rather than against this code.
+/// The pixel `painted` puts at `(x, y)`: every alpha from transparent to
+/// opaque, the faint ones included.
 fn sample(x: u32, y: u32) -> Pixel {
-    let a = 128 + u8::try_from((x * 3 + y) % 128).unwrap_or(0);
-    let scale = |v: u32| u8::try_from(u32::from(a) * (v % 64) / 64).unwrap_or(0);
-    Color::rgba(scale(x), scale(y * 2), scale(x + y), a).premultiply()
+    let a = u8::try_from((x * 7 + y * 3) % 256).unwrap_or(0);
+    let scale = |v: u32| u8::try_from(u32::from(a) * (v % 64) / 63).unwrap_or(0);
+    Pixel {
+        r: scale(x),
+        g: scale(y * 2),
+        b: scale(x + y),
+        a,
+    }
 }
 
 fn blank() -> Surface {
@@ -102,6 +105,47 @@ fn a_frame_round_trips_every_pixel_in_both_channel_orders() {
             "{format:?} lost or reordered a channel"
         );
         assert_eq!(changed, Rect::new(0, 0, WIDTH, HEIGHT));
+    }
+}
+
+#[test]
+fn a_channel_a_client_wrote_above_its_alpha_decodes_clamped_to_it() {
+    let mode = packed(DisplayFormat::Rgba8888);
+    let mut frame = frame_for(&mode);
+    // Brighter than its own coverage, and colour with no coverage at all.
+    frame[..8].copy_from_slice(&[200, 90, 255, 100, 255, 255, 255, 0]);
+    let mut target = blank();
+    decode(&frame, &mut target, &mode, whole(), &SERIAL).expect("decode");
+    assert_eq!(
+        target.get(0, 0),
+        Some(Pixel {
+            r: 100,
+            g: 90,
+            b: 100,
+            a: 100
+        })
+    );
+    assert_eq!(target.get(1, 0), Some(Pixel::TRANSPARENT));
+}
+
+#[test]
+fn a_frame_holds_the_premultiplied_pixels_in_the_mode_s_order() {
+    let mut source = blank();
+    let pixel = Pixel {
+        r: 10,
+        g: 20,
+        b: 30,
+        a: 40,
+    };
+    source.set(0, 0, pixel);
+    for (format, bytes) in [
+        (DisplayFormat::Rgba8888, [10, 20, 30, 40]),
+        (DisplayFormat::Bgra8888, [30, 20, 10, 40]),
+    ] {
+        let mode = packed(format);
+        let mut frame = frame_for(&mode);
+        encode(&source, &mut frame, &mode, whole(), &SERIAL).expect("encode");
+        assert_eq!(frame[..4], bytes, "{format:?}");
     }
 }
 

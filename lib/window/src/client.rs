@@ -391,6 +391,27 @@ pub fn retained_damage(
     })
 }
 
+/// The rectangles a present into a window shaped as `mode` sends: `damage`, or
+/// the whole window when the session has `released` its copy, since the fresh
+/// region it lands in holds none of the pixels a partial present would leave
+/// standing.
+///
+/// # Errors
+///
+/// [`DamageList::new`]'s, for a mode with no pixels.
+#[cfg(any(test, all(freestanding, feature = "rt")))]
+pub(crate) fn presented_damage(
+    mode: &DisplayMode,
+    released: bool,
+    damage: DamageList,
+) -> Result<DamageList, Errno> {
+    if released {
+        DamageList::new(&[DamageRect::full(mode)])
+    } else {
+        Ok(damage)
+    }
+}
+
 /// The error alert stating that what `headline` names was not done because of
 /// `reason`, a clause written to follow a colon on `stderr`.
 ///

@@ -16,7 +16,7 @@
 //! [`ChannelOrder::encode_run`], which is that same encoder in bulk — and
 //! neither pretends to be the other.
 //!
-//! The three per-pixel codecs are `#[inline]`: each is reached once per pixel
+//! The two per-pixel codecs are `#[inline]`: each is reached once per pixel
 //! from another module or crate — the window-frame codec's rows, the
 //! compositor's reveal encode — and the desktop's crates are built with many
 //! codegen units and no link-time optimisation in the profile the debug image
@@ -24,7 +24,7 @@
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
 use tairix_geometry::{Rect, Region};
-use tairix_raster::{Color, Pixel};
+use tairix_raster::Pixel;
 
 /// The byte order a display format wants each pixel written in.
 ///
@@ -55,10 +55,8 @@ impl ChannelOrder {
         }
     }
 
-    /// Encode one premultiplied pixel into its four scan-out bytes.
-    ///
-    /// The screen is opaque, so a premultiplied channel already equals its
-    /// straight-alpha form and no un-premultiply is needed.
+    /// Encode one premultiplied pixel into its four bytes: the form a
+    /// scan-out frame and a window frame both hold.
     #[must_use]
     #[inline]
     pub const fn encode(self, pixel: Pixel) -> [u8; 4] {
@@ -68,38 +66,28 @@ impl ChannelOrder {
         }
     }
 
-    /// Encode one premultiplied pixel as the four **straight-alpha** bytes a
-    /// window frame holds.
+    /// Decode four premultiplied bytes a client wrote, the inverse of
+    /// [`encode`](Self::encode), with every colour channel clamped to the
+    /// pixel's alpha.
     ///
-    /// Unlike [`encode`](Self::encode), which writes to an opaque scan-out
-    /// frame where a premultiplied channel already equals its straight form,
-    /// this un-premultiplies first: a window frame carries the app's own alpha,
-    /// so a translucent region has to survive the round trip. The inverse is
-    /// [`decode_straight`](Self::decode_straight).
+    /// The bytes are untrusted, and a channel above its alpha breaks the
+    /// invariant every blend relies on, so the decoded pixel is always
+    /// premultiplied whatever the client wrote. An encoded pixel decodes to
+    /// itself.
     #[must_use]
     #[inline]
-    pub fn encode_straight(self, pixel: Pixel) -> [u8; 4] {
-        let colour = pixel.unpremultiply();
-        match self {
-            Self::Rgba => [colour.r, colour.g, colour.b, colour.a],
-            Self::Bgra => [colour.b, colour.g, colour.r, colour.a],
+    pub fn decode(self, bytes: [u8; 4]) -> Pixel {
+        let [b0, b1, b2, a] = bytes;
+        let (r, g, b) = match self {
+            Self::Rgba => (b0, b1, b2),
+            Self::Bgra => (b2, b1, b0),
+        };
+        Pixel {
+            r: r.min(a),
+            g: g.min(a),
+            b: b.min(a),
+            a,
         }
-    }
-
-    /// Decode four straight-alpha window-frame bytes into a premultiplied
-    /// pixel — the inverse of [`encode_straight`](Self::encode_straight).
-    ///
-    /// The alpha byte is the app's own and is honoured, so a compositor can
-    /// blend a translucent window region correctly.
-    #[must_use]
-    #[inline]
-    pub fn decode_straight(self, bytes: [u8; 4]) -> Pixel {
-        let [b0, b1, b2, b3] = bytes;
-        match self {
-            Self::Rgba => Color::rgba(b0, b1, b2, b3),
-            Self::Bgra => Color::rgba(b2, b1, b0, b3),
-        }
-        .premultiply()
     }
 
     /// Encode a run of premultiplied pixels into `out`, returning the number
@@ -109,10 +97,8 @@ impl ChannelOrder {
     /// four-byte groups and each is handed to that one encoder, so a run and
     /// a single pixel can never disagree about a channel. There is no
     /// bulk-copy special case for the order that already matches the pixel in
-    /// memory: [`Pixel`] carries no layout guarantee to copy through, and it
-    /// would buy nothing if it did, since a matching order is already a
-    /// four-byte move per pixel with no shuffle left for the optimiser to
-    /// remove.
+    /// memory: a matching order is already a four-byte move per pixel, with no
+    /// shuffle left for the optimiser to remove.
     ///
     /// Writes `min(pixels.len(), out.len() / 4)` pixels and reports that
     /// count. A short `out` truncates rather than refusing or overrunning, a

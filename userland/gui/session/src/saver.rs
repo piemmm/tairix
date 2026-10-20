@@ -29,6 +29,16 @@ mod telling;
 #[cfg(test)]
 pub(crate) use system_monitor::fixtures as monitor_fixtures;
 
+/// The display the saver's tests run on.
+#[cfg(test)]
+pub(crate) const TEST_REFRESH: tairix_abi::driver::display::RefreshRate =
+    tairix_abi::driver::display::RefreshRate::ASSUMED;
+
+/// One scene frame on [`TEST_REFRESH`].
+#[cfg(test)]
+pub(crate) const TEST_SCENE_FRAME_NS: u64 =
+    tairix_theme::motion::SceneClock::frame_on(TEST_REFRESH);
+
 use tairix_abi::switchboard_ipc::MachineReport;
 use tairix_abi::time::WallClockReading;
 use tairix_abi::DriverError;
@@ -228,6 +238,7 @@ impl Screensaver {
         let screen = compositor.screen_rect();
         let size = (screen.width, screen.height);
         let scale = compositor.scale();
+        let refresh = compositor.refresh_rate();
         let calm = setup.theme.motion().reduced_motion();
         let frame = match (kind, setup.ground) {
             (ScreensaverKind::Dim, Some(mut ground)) => {
@@ -261,7 +272,7 @@ impl Screensaver {
             }
             ScreensaverKind::Ribbon => Ribbon::new(
                 setup.theme,
-                (scale, size),
+                (scale, size, refresh),
                 (setup.wall, setup.civil, now_ns),
                 (calm, options.ribbon),
             )
@@ -270,21 +281,23 @@ impl Screensaver {
                 Scene::Ribbon(face)
             }),
             ScreensaverKind::Starfield => {
-                Starfield::new(size, scale, (calm, options.starfield), now_ns)
+                Starfield::new(size, scale, (calm, options.starfield), (now_ns, refresh))
                     .map_or(Scene::Still, Scene::Starfield)
             }
-            ScreensaverKind::Life => Life::new(size, scale, (calm, options.life), now_ns)
-                .map_or(Scene::Still, Scene::Life),
+            ScreensaverKind::Life => {
+                Life::new(size, scale, (calm, options.life), (now_ns, refresh))
+                    .map_or(Scene::Still, Scene::Life)
+            }
             ScreensaverKind::Raytrace => Raytrace::new(
                 size,
-                (calm, now_ns),
+                (calm, now_ns, refresh),
                 (options.raytrace, setup.memory, setup.tell_detail),
                 setup.tracers,
                 (setup.theme, scale),
             )
             .map_or(Scene::Still, Scene::Raytrace),
             ScreensaverKind::RetroGames => {
-                RetroGames::new(size, scale, (calm, options.retro_games), now_ns).map_or(
+                RetroGames::new(size, scale, (calm, options.retro_games), (now_ns, refresh)).map_or(
                     Scene::Still,
                     |mut scene| {
                         scene.paint(&mut frame, compositor.job_runner());

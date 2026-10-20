@@ -2,6 +2,7 @@
 //! brings its acts on now and then with rests between, and a seed plays the
 //! same show every time.
 
+use crate::saver::TEST_SCENE_FRAME_NS;
 use alloc::vec::Vec;
 
 use tairix_wm::Scale;
@@ -22,7 +23,7 @@ fn show(seed: u64, calm: bool, seconds: f64) -> [Vec<(&'static str, f64, f64)>; 
     let mut time = 0.0;
     while time < seconds {
         time += 1.0 / 15.0;
-        let moment = Moment::at(time, SPEED);
+        let moment = Moment::at(time, SPEED, TEST_SCENE_FRAME_NS);
         cast.advance(moment, &Camera::at(&view, moment), &models);
         for (lane, log) in cast.lanes.iter().zip(&mut played) {
             let kind = lane.act.as_ref().map(|act| match act {
@@ -87,7 +88,11 @@ fn each_lane_plays_now_and_then() {
 fn a_lanes_first_act_is_either_kind_alike() {
     let view = View::new((960, 540), Scale::ONE).expect("a view");
     let models = Models::new().expect("the solids");
-    let moment = Moment::at(Realm::Sky.first().1.max(Realm::Ground.first().1), SPEED);
+    let moment = Moment::at(
+        Realm::Sky.first().1.max(Realm::Ground.first().1),
+        SPEED,
+        TEST_SCENE_FRAME_NS,
+    );
     let mut seconds = [0u32; 2];
     for seed in 0..400 {
         let mut cast = Cast::new(seed, SPEED, false).expect("a cast");

@@ -7,7 +7,7 @@ use std::vec::Vec;
 
 use tairix_abi::driver::display::{
     AccelLayer, AcceleratedDisplay, AllocatedBuffer, BufferId, DamageRect, Display, DisplayFormat,
-    DisplayMode, DisplayPower, HardwareCursor, Presented, Scan, Timing,
+    DisplayMode, DisplayPower, HardwareCursor, Presented, RefreshRate, Scan, Timing,
 };
 use tairix_abi::driver::encoder::{Phase, PipeLimits};
 use tairix_abi::seat::ReleaseSurface;
@@ -356,6 +356,26 @@ fn a_present_scans_the_presenters_buffer_where_it_lies_once_the_frame_starts() {
         shown(&rig, &mut engine, 0),
         Some(rig.buffers.bus_of(second.region))
     );
+}
+
+#[test]
+fn the_output_runs_at_its_sink_s_rate_and_states_none_without_one() {
+    let rig = Rig {
+        hdmi0: Encoders::new(40, false, FULL_HD, Phase::Off),
+        ..Rig::new()
+    };
+    let mut engine = rig.open().expect("opened");
+    assert_eq!(engine.refresh(), None, "nothing connected, no rate");
+    let fifty = Timing {
+        clock_khz: 148_500,
+        horizontal: axis(1920, 528, 44, 148),
+        ..FULL_HD
+    };
+    rig.hdmi0.plug(true, fifty);
+    engine.service_events().expect("serviced");
+    assert_eq!(engine.output(), Some(mode(1920, 1080)));
+    assert_eq!(engine.refresh(), RefreshRate::of(&fifty));
+    assert_eq!(engine.refresh().map(RefreshRate::mhz), Some(50_000));
 }
 
 #[test]
@@ -1115,6 +1135,40 @@ fn the_pointer_moves_and_changes_in_the_lists_it_is_read_from_with_no_present() 
         engine.set_cursor(big.id, 0, 0),
         Err(DriverError::LengthOutOfRange),
         "past the images it draws from"
+    );
+}
+
+/// A pointer moved while a present waits moves in the list that present
+/// latches, so it reaches the screen with the frame rather than ahead of it;
+/// a present withdrawn instead leaves it moved in the list still shown.
+#[test]
+fn a_pointer_moved_while_a_present_waits_goes_with_its_frame() {
+    let rig = Rig::new();
+    let mut engine = rig.open().expect("opened");
+    let shown = latched_frame(&rig, &mut engine);
+    let arrow = engine.alloc_buffer(16, 16).expect("an image");
+    engine.set_cursor(arrow.id, 0, 0).expect("shown");
+    engine.move_cursor(10, 20).expect("moved");
+    let mode = engine.output().expect("an output");
+    let frame = filled(&rig, &mut engine, &mode, 2);
+    let full = [DamageRect::full(&mode)];
+    assert_eq!(engine.present(frame.id, &full), Ok(Presented::Queued));
+    let next = slot(0, List::Stack(1));
+    let queued = next + plane_len(&rig, next);
+
+    engine.move_cursor(100, 200).expect("moved");
+    assert_eq!(
+        rig.model.list_word(shown + UNITY_POSITION),
+        pair(20, 10),
+        "the screen keeps it until the frame it goes with"
+    );
+    assert_eq!(rig.model.list_word(queued + UNITY_POSITION), pair(200, 100));
+
+    engine.abandon_queued();
+    assert_eq!(
+        rig.model.list_word(shown + UNITY_POSITION),
+        pair(200, 100),
+        "withdrawn, the present leaves the pointer where it went"
     );
 }
 

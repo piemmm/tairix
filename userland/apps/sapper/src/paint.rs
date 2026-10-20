@@ -478,7 +478,7 @@ fn cell(
     // most cells have nothing to write; skipping them here is what keeps a
     // two-cell repaint from walking the whole board's geometry.
     let reach = motion.map_or(0, |m| motion_bleed(m.kind, rect.width));
-    if !writes_any(surface, grown(rect, reach)) {
+    if !writes_any(surface, rect.outset(reach)) {
         return;
     }
 
@@ -626,12 +626,7 @@ fn shockwave(surface: &mut Surface, layout: &Layout, rect: Rect, motion: CellMot
     }
     let reach = rect.width.saturating_mul(SHOCKWAVE_REACH) / 1000;
     let grown = reach.saturating_mul(progress) / 255;
-    let ring_rect = Rect::new(
-        rect.left() - i32::try_from(grown).unwrap_or(0),
-        rect.top() - i32::try_from(grown).unwrap_or(0),
-        rect.width.saturating_add(grown * 2),
-        rect.height.saturating_add(grown * 2),
-    );
+    let ring_rect = rect.outset(grown);
     // The wave outlives its own cell, so it is clipped to the grid rather than
     // to the tile: it washes over the neighbours it reaches.
     let fade = u8::try_from(255 - progress).unwrap_or(0);
@@ -755,16 +750,6 @@ pub fn motion_bleed(kind: WaveKind, cell: u32) -> u32 {
         WaveKind::Detonate => cell.saturating_mul(SHOCKWAVE_REACH) / 1000,
         WaveKind::Reveal | WaveKind::Mark | WaveKind::Victory | WaveKind::Rejected => 0,
     }
-}
-
-/// `rect` grown by `by` on every side.
-fn grown(rect: Rect, by: u32) -> Rect {
-    Rect::new(
-        rect.left() - to_i32(by),
-        rect.top() - to_i32(by),
-        rect.width.saturating_add(by.saturating_mul(2)),
-        rect.height.saturating_add(by.saturating_mul(2)),
-    )
 }
 
 /// Whether any pixel of `rect` is one `surface` would write.

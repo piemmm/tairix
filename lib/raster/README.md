@@ -522,6 +522,49 @@ specialised, let alone vectorised. Measured on the bench harness, restoring the
 inlining and hoisting the span counter took a full-screen opaque blit from 1.96
 to 0.90 ns/px and a translucent window stack from 7.69 to 5.69 ns/px.
 
+## The vector kernels (`accel`)
+
+Three per-pixel families have packed candidates, each chosen per process by
+`lib/cpuops` on the capability axis (`plans/FIX-DESKTOP-SPEEDUP.md` Stage F):
+
+| Family | Entry points | Candidates |
+|---|---|---|
+| `raster-blend` | `blend_span`, `blend_solid_span` | SSE2, NEON |
+| `raster-blur` | the box blur's line pass, and the frost's column sums' add, slide and mean | SSE2, NEON |
+| `raster-scan` | `leading_opaque`, `leading_translucent` | SSE2, NEON |
+
+- **A candidate never changes a pixel.** A family resolves on first use
+  against the feature set the process was delivered (`tairix_cpuops::Resolved`),
+  taking a candidate only when its feature is present and it reproduces the
+  portable kernel over the family's fixed vectors. With nothing delivered — a
+  host test — the portable kernels run; `accel::resolve` takes a set of its own.
+- **Exact by construction.** The blend's terms fit sixteen-bit lanes, where
+  `div255` is `(x + 1 + (x >> 8)) >> 8`, exact for every such sum; the blur's
+  mean multiplies by `LaneDivisor`'s 32-bit reciprocal, exact for every window
+  sum; the scan compares whole alpha bytes. A window too wide for that
+  reciprocal could hold sums past 32 bits, where only the portable kernels'
+  saturating arithmetic is defined, so it takes them (`accel::blur_for`).
+- **No crate source carries a target cfg.** `build.rs` emits `raster_sse2` or
+  `raster_neon` from the vector unit the target itself carries
+  (`tairix_buildcfg::vector_unit`), so every candidate is a safe function: its
+  extension is part of the target's baseline, whoever calls it. The NEON
+  kernels reach memory only through `LD4`/`ST4`, which need no more than their
+  element's alignment; under the target's strict alignment a plain vector load
+  is split into its bytes.
+- **`unsafe` lives in the two kernel modules alone.** The crate denies it
+  elsewhere. The `accel::` tests miri interprets reach the SSE2 module; the
+  NEON module is never compiled on the host, so the aarch64 guest vertical is
+  what holds it to the portable kernels.
+- **One number on every target.** `accel::conformance_digest` (the
+  `conformance` feature) folds a fixed workload through the families in force:
+  the host holds the portable and SSE2 kernels to `CONFORMANCE_DIGEST`, and the
+  aarch64 guest vertical `raster_kernels_qemu_aarch64` holds the NEON ones to
+  it. `tests/fuzz_kernels.rs` holds the resolved public calls — the frost's
+  column kernels among them — to an oracle in the per-pixel operators.
+
+riscv64 (no user vector state) and wasm32 (`simd128` is not in its baseline)
+run the portable kernels.
+
 ## The resampler
 
 `resample(src, region, w, h)` scales a rectangle of a straight-alpha RGBA8
@@ -679,7 +722,13 @@ guessed (`plans/FIX-DESKTOP-SPEEDUP.md` A.2):
 cargo xtask bench                       # every family, the default budget
 cargo xtask bench --filter blur         # one family
 cargo xtask bench --iters 64 --rounds 9 # a longer, steadier budget
+cargo xtask bench --portable            # the portable kernels, for comparison
 ```
+
+The vector families are resolved against the host's own features first, as a
+process resolves them against the set its kernel delivers, so the figures are
+the kernels a process on the host would run; `--portable` measures the
+baseline beside them.
 
 It reports **ns per pixel** and **ns per frame** for `Surface::blit` (opaque
 and translucent sources), `fill_round_rect`, `box_blur` and `frost_region`

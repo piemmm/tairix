@@ -2594,7 +2594,8 @@ pub fn desktop_info(
             )
             .with_double_click(compositor.double_click())?
             .with_text(DesktopText::new(fonts.ui_family(), fonts.base_size_px()).ok())
-            .with_machine_zone(machine_zone),
+            .with_machine_zone(machine_zone)
+            .with_refresh(compositor.refresh_rate()),
     )
 }
 

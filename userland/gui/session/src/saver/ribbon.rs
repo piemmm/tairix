@@ -6,6 +6,7 @@
 //! The text never moves; the ribbon is what changes. Under reduced motion the
 //! ribbon holds still too, and only the minute turning redraws anything.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::font_ipc::FontWeight;
 use tairix_abi::time::WallClockReading;
 use tairix_font::BitmapFont;
@@ -68,12 +69,12 @@ pub(super) struct Ribbon {
 }
 
 impl Ribbon {
-    /// A face for a `screen` at `scale`, telling `wall` in `civil` as of
-    /// `now_ns` with the lines `options` ask for, still when `calm`; `None`
-    /// when the heap will not give the ribbon.
+    /// A face for a `screen` at `scale` refreshing at `refresh`, telling
+    /// `wall` in `civil` as of `now_ns` with the lines `options` ask for,
+    /// still when `calm`; `None` when the heap will not give the ribbon.
     pub(super) fn new(
         theme: &Theme,
-        (scale, screen): (Scale, (u32, u32)),
+        (scale, screen, refresh): (Scale, (u32, u32), RefreshRate),
         time: (Option<WallClockReading>, CivilClock<'static>, u64),
         (calm, options): (bool, RibbonOptions),
     ) -> Option<Self> {
@@ -91,7 +92,7 @@ impl Ribbon {
             block,
             at,
             light,
-            motion: SceneClock::new(now_ns, calm),
+            motion: SceneClock::new(now_ns, calm, refresh),
             due_ns: now_ns,
             damage: Region::new(),
             screen,
@@ -143,7 +144,7 @@ impl Ribbon {
         }
         let mut moved = false;
         if retold.is_some() || self.motion.frame_due(now_ns) {
-            let t = self.motion.advance(now_ns);
+            let t = self.motion.advance(now_ns, compositor.refresh_rate());
             moved = self.light.step(
                 t,
                 lettered_rect(self.block.as_ref(), self.at),

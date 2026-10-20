@@ -344,7 +344,7 @@ are live (stage D7b):
 - **The wire protocol** is `tairix_abi::display_ipc`: one reserved,
   squat-protected rendezvous (`DISPLAY_ENDPOINT`, bindable only under
   `CAP_IPC_BIND_PRIVILEGED`) serving fixed-width, fail-closed requests:
-  `Query` (→ the mode reply), `Configure { mode, events port }`,
+  `Query` (→ the mode and the rate it scans at), `Configure { mode, events port }`,
   `Present { buffer, damage }`, and the layer and pointer requests
   (`QueryPlanes`, `AllocBuffer`, `FreeBuffer`, `PresentLayers`,
   `SetCursor`, `MoveCursor`, `HideCursor`). Requests carry the seat id

@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
 use tairix_abi::driver::display::{
-    DamageList, DamageRect, DisplayFormat, DisplayMode, DisplayPower,
+    DamageList, DamageRect, DisplayFormat, DisplayMode, DisplayPower, RefreshRate,
 };
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::switchboard_ipc::{
@@ -3269,6 +3269,25 @@ fn begin_move_through_the_shell_arms_a_grab_on_the_focused_window() {
     shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert!(shell.begin_move(&comp));
     assert!(shell.router().is_moving());
+}
+
+/// A pointer moving a window carries what the frame moves, so its cursor
+/// plane goes with the frame; a pointer merely moving does not.
+#[test]
+fn a_pointer_moving_a_window_carries_it_and_a_free_one_does_not() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    shell.handle(moved(250, 250), &mut comp, 0);
+    assert!(
+        !shell.pointer_carries(),
+        "a pointer moving alone carries nothing"
+    );
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert!(shell.begin_move(&comp));
+    assert!(shell.pointer_carries(), "the move carries the window");
+    shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    assert!(!shell.pointer_carries(), "the release lets it go");
 }
 
 #[test]
@@ -10942,7 +10961,7 @@ fn a_lockout_the_broker_reports_counts_down_and_holds_every_password_back() {
     let settled = LOCK_EVENT_NS + 2 * second;
     lock.advance(settled, &shell, &mut comp);
     assert!(
-        lock.park_deadline_ns(settled, u64::MAX) <= second / 2,
+        lock.park_deadline_ns(settled, u64::MAX, RefreshRate::ASSUMED) <= second / 2,
         "2.5 s left shows as 3 until 2 s are left"
     );
 
@@ -11239,7 +11258,7 @@ fn a_lock_refused_its_frame_over_a_grown_screen_stays_uncovered_without_spinning
         "the old frame covers the old screen only"
     );
     assert_eq!(
-        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE),
+        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE,
         "and the refused frame arms no wake"
     );
@@ -11376,7 +11395,7 @@ fn a_burst_of_keys_at_the_lock_is_painted_once_at_the_frame_and_only_the_field()
     assert!(!comp.has_damage(), "no key paints or damages anything");
     assert!(lock_content(&comp) == before, "the kept frame is untouched");
     assert_eq!(
-        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE),
+        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         0,
         "an owed frame wakes the loop for the next frame"
     );
@@ -14529,11 +14548,19 @@ fn desktop_info_reports_compositor_state() {
     let scale_200 = Scale::from_percent(200).expect("200% is in range");
     assert!(comp.set_scale(scale_200));
 
+    let fast = RefreshRate::from_mhz(144_000);
+    assert!(comp.set_refresh_rate(fast));
+
     let info = desktop_info(&comp, None).expect("info exists");
     assert_eq!(info.scale_percent(), 200);
     assert_eq!(info.screen_width_px(), 1920);
     assert_eq!(info.screen_height_px(), 1080);
     assert_eq!(info.appearance(), Appearance::Light);
+    assert_eq!(
+        Some(info.refresh()),
+        fast,
+        "the rate the output is composed for"
+    );
 
     let mut shell = shell();
     let mut picker = SessionPicker::new(TreeSource::fixture);
@@ -15371,12 +15398,12 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
     // The bar coming up is the desktop's first frame, and a first frame is
     // admitted at once.
     shell.present(&mut comp);
-    assert!(pacer.admit(0, comp.has_damage(), true));
+    assert!(pacer.admit(0, comp.has_damage(), true, RefreshRate::ASSUMED));
     comp.composite();
     assert!(!comp.has_damage(), "the opening frame has been drained");
 
     // Sixteen samples crossing the bar, all inside one frame period.
-    let step = Timeline::FRAME_NS / 16;
+    let step = RefreshRate::ASSUMED.frame_ns() / 16;
     let mut composites = 0u32;
     let mut outcomes = Vec::new();
     for sample in 1..=16i32 {
@@ -15390,7 +15417,7 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
             )
             .expect("the in-memory source never faults");
         assert!(comp.has_damage(), "sample {sample} changed nothing");
-        if pacer.admit(at, comp.has_damage(), true) {
+        if pacer.admit(at, comp.has_damage(), true, RefreshRate::ASSUMED) {
             comp.composite();
             composites += 1;
         }
@@ -15404,16 +15431,19 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
     // armed for it, not on some later unrelated wake — and the park folds back
     // to indefinite once it has.
     let last_ns = 16 * step;
-    let due = pacer.park_deadline_ns(last_ns, WAITSET_TIMEOUT_NONE);
+    let due = pacer.park_deadline_ns(last_ns, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED);
     assert!(due > 0, "a deadline of nothing would be a busy poll");
-    assert!(due < Timeline::FRAME_NS, "one period at most, not {due}ns");
-    assert!(pacer.admit(last_ns + due, comp.has_damage(), true));
+    assert!(
+        due < RefreshRate::ASSUMED.frame_ns(),
+        "one period at most, not {due}ns"
+    );
+    assert!(pacer.admit(last_ns + due, comp.has_damage(), true, RefreshRate::ASSUMED));
     assert!(
         !comp.composite().is_empty(),
         "the held frame reached the screen having drawn nothing"
     );
     assert_eq!(
-        pacer.park_deadline_ns(last_ns + due, WAITSET_TIMEOUT_NONE),
+        pacer.park_deadline_ns(last_ns + due, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE
     );
 }
@@ -15456,7 +15486,10 @@ fn still_dark() -> Theme {
 fn motion_wakes(timeline: Timeline, start_ns: u64) -> Vec<u64> {
     let mut at = start_ns;
     let mut wakes = Vec::new();
-    while let Some(delta) = timeline.next_frame_in(at).filter(|delta| *delta > 0) {
+    while let Some(delta) = timeline
+        .next_frame_in(at, RefreshRate::ASSUMED)
+        .filter(|delta| *delta > 0)
+    {
         at = at.saturating_add(delta);
         wakes.push(at);
     }
@@ -15551,8 +15584,8 @@ fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
         "the desktop starts from the black the login screen left behind"
     );
     assert_eq!(
-        fade.park_deadline_ns(SESSION_START_NS, WAITSET_TIMEOUT_NONE),
-        Timeline::FRAME_NS,
+        fade.park_deadline_ns(SESSION_START_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
+        RefreshRate::ASSUMED.frame_ns(),
         "an indefinite park is bounded to the fade's next frame"
     );
 
@@ -15579,7 +15612,7 @@ fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
         "a settled fade is no further work"
     );
     assert_eq!(
-        fade.park_deadline_ns(end, WAITSET_TIMEOUT_NONE),
+        fade.park_deadline_ns(end, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE,
         "and arms no further timer"
     );
@@ -15634,7 +15667,7 @@ fn a_fade_that_ended_while_its_frame_was_presented_still_tightens_the_park() {
     let asked = end + 1;
     for park in [WAITSET_TIMEOUT_NONE, OTHER_PARK_NS] {
         assert_eq!(
-            fade.park_deadline_ns(asked, park),
+            fade.park_deadline_ns(asked, park, RefreshRate::ASSUMED),
             0,
             "the frame that completes the reveal is owed now"
         );
@@ -15644,7 +15677,7 @@ fn a_fade_that_ended_while_its_frame_was_presented_still_tightens_the_park() {
     assert_eq!(comp.reveal(), u8::MAX);
     for park in [WAITSET_TIMEOUT_NONE, OTHER_PARK_NS] {
         assert_eq!(
-            fade.park_deadline_ns(asked, park),
+            fade.park_deadline_ns(asked, park, RefreshRate::ASSUMED),
             park,
             "only then is the park left alone"
         );
@@ -15665,12 +15698,12 @@ fn an_idle_desktop_parks_exactly_as_it_would_without_a_fade() {
 
     for park in [WAITSET_TIMEOUT_NONE, OTHER_PARK_NS] {
         assert_eq!(
-            fade.park_deadline_ns(end, park),
+            fade.park_deadline_ns(end, park, RefreshRate::ASSUMED),
             park,
             "a settled fade arms no timer"
         );
         assert_eq!(
-            lock.park_deadline_ns(end, park),
+            lock.park_deadline_ns(end, park, RefreshRate::ASSUMED),
             park,
             "nor does an unengaged lock"
         );
@@ -15696,7 +15729,7 @@ fn reduced_motion_shows_the_desktop_at_once_with_no_frame_and_no_timer() {
         "and no frame is owed"
     );
     assert_eq!(
-        fade.park_deadline_ns(SESSION_START_NS, WAITSET_TIMEOUT_NONE),
+        fade.park_deadline_ns(SESSION_START_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE,
         "nor a timer"
     );
@@ -15732,7 +15765,7 @@ fn a_refused_present_mid_fade_still_reaches_a_fully_revealed_desktop() {
         "time finishes the fade, never a present that succeeded"
     );
     assert_eq!(
-        fade.park_deadline_ns(end, WAITSET_TIMEOUT_NONE),
+        fade.park_deadline_ns(end, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE,
         "and it stops asking for frames"
     );
@@ -15824,8 +15857,8 @@ fn the_desktop_dissolves_back_to_black_when_it_gives_the_screen_up() {
     assert_eq!(comp.reveal(), u8::MAX, "the departure starts from the lit");
     assert!(!fade.settled(), "and has a span to run");
     assert_eq!(
-        fade.park_deadline_ns(arrived, WAITSET_TIMEOUT_NONE),
-        Timeline::FRAME_NS,
+        fade.park_deadline_ns(arrived, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
+        RefreshRate::ASSUMED.frame_ns(),
         "which the park is bounded to"
     );
 
@@ -15842,7 +15875,11 @@ fn the_desktop_dissolves_back_to_black_when_it_gives_the_screen_up() {
     assert_eq!(comp.reveal(), 0, "and it ends on black");
     assert!(fade.settled(), "with nothing further owed");
     assert_eq!(
-        fade.park_deadline_ns(arrived + (arrived - SESSION_START_NS), WAITSET_TIMEOUT_NONE),
+        fade.park_deadline_ns(
+            arrived + (arrived - SESSION_START_NS),
+            WAITSET_TIMEOUT_NONE,
+            RefreshRate::ASSUMED
+        ),
         WAITSET_TIMEOUT_NONE,
         "and no timer armed"
     );
@@ -15937,7 +15974,7 @@ fn reduced_motion_blacks_the_screen_at_once_with_no_frame_and_no_timer() {
     assert_eq!(comp.reveal(), 0, "black immediately");
     assert!(fade.settled(), "with no frame owed");
     assert_eq!(
-        fade.park_deadline_ns(SESSION_START_NS, WAITSET_TIMEOUT_NONE),
+        fade.park_deadline_ns(SESSION_START_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE,
         "nor a timer"
     );
@@ -15957,7 +15994,7 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
     assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::refusing();
     assert_eq!(
-        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE),
+        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE,
         "an idle lock screen arms no timer"
     );
@@ -15972,7 +16009,7 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
     );
 
     assert_eq!(
-        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE),
+        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         0,
         "the refusal owes its frame at once"
     );
@@ -15982,7 +16019,7 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
     let mut repainted = comp.has_damage();
     let mut frames = 0u32;
     loop {
-        let due = lock.park_deadline_ns(at, WAITSET_TIMEOUT_NONE);
+        let due = lock.park_deadline_ns(at, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED);
         if due == WAITSET_TIMEOUT_NONE {
             break;
         }
@@ -15991,7 +16028,7 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
             "a drawn frame leaves none due now, which would spin the loop"
         );
         assert_eq!(
-            lock.park_deadline_ns(at, OTHER_PARK_NS),
+            lock.park_deadline_ns(at, OTHER_PARK_NS, RefreshRate::ASSUMED),
             OTHER_PARK_NS.min(due),
             "an animating lock shortens a park it already has, never lengthens it"
         );
@@ -16006,7 +16043,7 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
     assert!(repainted, "and redrew the lock while it did");
     assert!(lock.is_locked(), "a refusal never unlocks");
     assert_eq!(
-        lock.park_deadline_ns(at, WAITSET_TIMEOUT_NONE),
+        lock.park_deadline_ns(at, WAITSET_TIMEOUT_NONE, RefreshRate::ASSUMED),
         WAITSET_TIMEOUT_NONE,
         "a settled lock screen is back to arming no timer"
     );
@@ -17029,7 +17066,7 @@ fn a_lockout_the_broker_reports_counts_down_on_the_sheet() {
         .unwrap_or_default();
     assert!(stated.contains("5s"), "{stated}");
     assert!(
-        prompt.park_deadline_ns(0, u64::MAX) <= 500_000_000,
+        prompt.park_deadline_ns(0, u64::MAX, RefreshRate::ASSUMED) <= 500_000_000,
         "it wakes when the shown second turns over"
     );
     type_into_prompt(&mut prompt, "right", &mut elevator, &mut shell, &mut comp);
@@ -17327,7 +17364,7 @@ fn an_idle_prompt_ignores_every_event() {
     }
     assert!(elevator.offers.is_empty() && elevator.listings.is_empty());
     assert_eq!(
-        prompt.park_deadline_ns(0, u64::MAX),
+        prompt.park_deadline_ns(0, u64::MAX, RefreshRate::ASSUMED),
         u64::MAX,
         "and arms nothing"
     );

@@ -11,6 +11,8 @@
 | H | `bcm2711_hvs` as an `AcceleratedDisplay`: frames and layers scanned out of the buffers it allocated, one display-list plane per layer, the end-of-frame interrupt | done |
 | D | The WM's retained hardware layers: per-window layer buffers re-baked by damage, flattened layers for frosted and translucent surfaces, a layered present consuming the damage it carried | done |
 | E | Flips signalled by completion and paced off it, `Busy` coalesced rather than fatal, and hardware scaling of the scaled desktop | done |
+| R | The output's refresh rate: `Display::refresh`, the `Query` reply's rate, `gpu_virtio` reading it from the EDID and the HVS from the timing its surface is shaped for | done |
+| P.2 | The cursor plane moved by the frame's present while a gesture carries a window | done |
 
 No item is optional and none defers work as "future". Items land together;
 the whole-project gate runs once on the final tree.
@@ -40,9 +42,9 @@ asks (§15.7).
    The server grants each buffer to the presenting client with
    `shm_grant_peer`, and the client maps it as a `RegionGrant`. No new
    capability, no new shared-memory class. Apps keep their ordinary,
-   app-owned window frames: the session's existing straight-to-premultiplied
-   decode is the one copy, and the session's per-window copy stays the stable
-   snapshot the compositor reads.
+   app-owned window frames: the session's decode of a frame is the one copy,
+   and the session's per-window copy stays the stable snapshot the compositor
+   reads.
 2. **`gpu_virtio` is an honest 2D driver and reports no layer compositor.**
    virtio-gpu's scanouts are separate monitors, not overlay planes: a device
    has one primary plane per scanout and one cursor. Its zero-copy path is the
@@ -216,7 +218,7 @@ read unless the caller holds that seat's live lease.
 
 | Request | Answer |
 |---|---|
-| `Query` | the output's mode, or none |
+| `Query` | the output's mode and the rate it scans at, or none |
 | `Configure { mode, events port }` | the frame count, the stride, one `RegionGrant` per frame, the grantor; the port must be the caller's (`call_peer_port`) and admit this endpoint |
 | `QueryPlanes` | `AccelCaps` or none, `CursorCaps` or none |
 | `AllocBuffer { width, height }` / `FreeBuffer { id }` | the buffer's id, stride and grant / status |
@@ -298,6 +300,32 @@ read unless the caller holds that seat's live lease.
   fits it; a trail or the halo composites in software. A pointer that moves
   while on the plane damages nothing. The session moves the cursor once per
   drained input batch.
+
+### P.2 — the cursor moves with the frame during a gesture
+
+While a gesture carries a window the plane is moved by the frame's present,
+after the frame is handed over, so the pointer and what it drags reach the
+scan-out together; `plans/FIX-DESKTOP-SPEEDUP.md` E.6 states the rule and its
+edge cases. `CursorPlane` gains nothing: the change is when the compositor
+calls `move_to`.
+
+## R — the output's refresh rate
+
+- `Display::refresh` answers the rate the output scans at as a
+  `RefreshRate` (millihertz, `MIN_MHZ..=MAX_MHZ`), or none; it moves across
+  `service_events` with `output`, and the server's `DisplayOutput` notice
+  announces a change of either.
+- **Not part of `DisplayMode`.** The mode is a frame layout, compared whole to
+  decide whether every buffer must be rebuilt; a rate that changes alone
+  rebuilds nothing.
+- `Query` answers the rate beside the mode; a decoded rate outside the bound is
+  refused, not clamped.
+- `gpu_virtio` takes the rate from the EDID timing whose active size is the
+  scan-out's, preferring the preferred timing, and re-reads it on every
+  display-change event. The HVS answers the timing of the first connected
+  output, the one its surface is shaped for. The framebuffer and VESA drivers
+  answer none.
+- Consumers: `plans/FIX-DESKTOP-SPEEDUP.md` E.5.
 
 ## H — `bcm2711_hvs` as an `AcceleratedDisplay`
 

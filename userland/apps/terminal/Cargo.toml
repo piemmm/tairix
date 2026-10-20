@@ -65,6 +65,9 @@ tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The screen fuzz's reproducible per-row jitter.
 tairix-mix = { path = "../../../lib/mix", version = "=0.0.0" }
+# The runner the effect stages spread their rows across; the pool itself is the
+# `Run` binary's, reached through `tairix_window::app::pool_across`.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }
 
 # The package is both the terminal-emulator engine library (above) and the
 # `Run` entry-point binary of the on-disk `terminal.app` bundle
@@ -124,6 +127,9 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # test transport (never a running `fontd`) via the `test-util` feature.
 [dev-dependencies]
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The backwards runner the effect stages' splits are proved order-independent
+# with.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", features = ["test-util"] }
 # The shared fake app-data service the profile's host tests drive the client
 # over: it speaks the real `appdata-v1` codec, so a test exercises the wire the
 # service actually answers rather than a mock of it.

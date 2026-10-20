@@ -15,7 +15,7 @@ use crate::layout::Prompt;
 use crate::surface::{panel_rect, AuthSurface, Backdrop, Chrome, Verdict};
 use crate::testkit::{
     changed_pixels, chrome, feed, key, named, render, render_over_light, submit, theme, Scripted,
-    SCREEN,
+    RATE, SCREEN,
 };
 
 fn accounts() -> Vec<AccountTile> {
@@ -249,7 +249,7 @@ fn advance_reports_animating_tile_damage_or_nothing() {
     let _ = render(&surface);
 
     assert!(!surface.advance(0).redraw(), "idle advance changes nothing");
-    assert_eq!(surface.motion_due(0), None);
+    assert_eq!(surface.motion_due(0, RATE), None);
 
     let millis = theme()
         .motion()
@@ -267,7 +267,7 @@ fn advance_reports_animating_tile_damage_or_nothing() {
 
     assert!(surface.advance(span_ns).redraw());
     assert!(!surface.advance(span_ns + 1).redraw());
-    assert_eq!(surface.motion_due(span_ns + 1), None);
+    assert_eq!(surface.motion_due(span_ns + 1, RATE), None);
 }
 
 /// A question at rest asks for nothing: the seam folds every mode, so what
@@ -277,5 +277,5 @@ fn advancing_a_resting_question_is_quiet() {
     let mut surface = AuthSurface::new("ann", "ann");
     let _ = render(&surface);
     assert!(!surface.advance(1_000).redraw());
-    assert_eq!(surface.motion_due(1_000), None);
+    assert_eq!(surface.motion_due(1_000, RATE), None);
 }

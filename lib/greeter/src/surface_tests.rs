@@ -29,7 +29,8 @@ use crate::surface::{
 };
 use crate::testkit::{
     centre, changed_pixels, chrome, contrast_in, feed, feed_at, feed_in, key, moved, named,
-    painted, render, render_in, separation, still, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
+    painted, render, render_in, separation, still, submit, theme, Scripted, PRESS, RATE, RELEASE,
+    SCREEN,
 };
 
 /// Where the chrome's identity and clock are drawn on `screen` at the
@@ -271,7 +272,7 @@ fn an_arrived_screen_owes_no_further_frame_and_holds_no_veil() {
 
     assert!(!surface.veiled(), "and the veil is gone with it");
     assert!(!surface.advance(u64::MAX).redraw(), "nothing after it");
-    assert_eq!(surface.motion_due(u64::MAX), None);
+    assert_eq!(surface.motion_due(u64::MAX, RATE), None);
     assert_eq!(
         render(&surface),
         render(&AuthSurface::new("ann", "ann")),
@@ -287,7 +288,9 @@ fn leaving_part_way_through_the_entry_fade_does_not_brighten_the_screen() {
     let theme = theme();
     let mut surface = AuthSurface::new("ann", "ann");
     surface.begin_entry_fade(0, &theme);
-    let frame = surface.motion_due(0).expect("an arriving screen asks");
+    let frame = surface
+        .motion_due(0, RATE)
+        .expect("an arriving screen asks");
     surface.advance(frame);
     let arriving = render(&surface);
 
@@ -309,7 +312,7 @@ fn a_reduced_motion_entry_fade_is_over_before_it_begins() {
     assert!(!surface.begin_entry_fade(0, &still()).redraw());
 
     assert!(!surface.veiled(), "there is nothing to uncover");
-    assert_eq!(surface.motion_due(0), None, "nothing is armed");
+    assert_eq!(surface.motion_due(0, RATE), None, "nothing is armed");
     assert!(!surface.session_fade_begun());
     assert_eq!(render(&surface), render(&AuthSurface::new("ann", "ann")));
 }
@@ -764,13 +767,17 @@ fn a_screen_with_no_pixels_yields_no_frame() {
 fn the_secret_markers_dots_move_on_a_scheduled_frame_confined_to_the_field() {
     let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
-    assert_eq!(surface.motion_due(0), None, "nothing typed, nothing moving");
+    assert_eq!(
+        surface.motion_due(0, RATE),
+        None,
+        "nothing typed, nothing moving"
+    );
 
     feed_at(&mut surface, &key(Key::Char('p')), &mut verifier, 10);
-    assert_eq!(surface.motion_due(10), Some(SECRET_TICK_NS));
+    assert_eq!(surface.motion_due(10, RATE), Some(SECRET_TICK_NS));
     let frame = 10 + SECRET_TICK_NS;
     assert_eq!(
-        surface.motion_due(frame),
+        surface.motion_due(frame, RATE),
         Some(0),
         "a frame due now answers now"
     );
@@ -800,7 +807,7 @@ fn under_reduced_motion_the_secret_marker_arms_no_frame() {
         10,
         &still(),
     );
-    assert_eq!(surface.motion_due(10), None);
+    assert_eq!(surface.motion_due(10, RATE), None);
 }
 
 /// An unreachable authority shakes nothing, so whatever would still move after
@@ -811,7 +818,7 @@ fn an_offered_secret_takes_its_marker_down_with_it() {
     let mut verifier = Scripted::new(vec![Verdict::Unreachable]);
     submit(&mut surface, "pw", &mut verifier);
     assert_eq!(
-        surface.motion_due(0),
+        surface.motion_due(0, RATE),
         None,
         "the erased secret has no marker to move"
     );

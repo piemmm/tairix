@@ -39,7 +39,7 @@ use tairix_abi::display_ipc::{
 };
 use tairix_abi::driver::display::{
     AccelLayer, BufferId, DamageList, DamageRect, Display, DisplayDeviceReport, DisplayFormat,
-    DisplayMode, DisplayPower, Presented, Serviced,
+    DisplayMode, DisplayPower, OutputMode, Presented, Serviced,
 };
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::seat::{DisplayLease, ReleaseSurface, SEAT_PRIMARY};
@@ -229,7 +229,7 @@ impl<C: MonotonicClock> DisplayServer<C> {
                 frame(reply, &encode_stats_reply(result))
             }
             DisplayRequest::Query { seat_id } => {
-                let result = leased(peer, ticket, seat_id).map(|_| display.output());
+                let result = leased(peer, ticket, seat_id).map(|_| output_mode(display));
                 frame(reply, &encode_mode_reply(result))
             }
             DisplayRequest::Configure {
@@ -802,6 +802,15 @@ fn grant_buffer(
             Err(err)
         }
     }
+}
+
+/// What `display`'s output runs, as a `Query` answers and the output notice
+/// follows: its mode, and its rate where the device states one.
+pub(crate) fn output_mode(display: &dyn Display) -> Option<OutputMode> {
+    display.output().map(|mode| OutputMode {
+        mode,
+        refresh: display.refresh(),
+    })
 }
 
 /// The lease `seat_id`'s live owner holds, when the caller `ticket` is it.

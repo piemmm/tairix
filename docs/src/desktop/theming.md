@@ -290,9 +290,9 @@ bundles, under a stable `ThemeId`:
   the interaction it is beginning, asks how far through it is when it paints
   (`progress` for a strength fade, `eased` for anything that travels), and asks
   when to wake next (`next_frame_in`, the nearer of what remains and one frame
-  at 60 Hz). It reads no clock: the embedder passes the monotonic instant it
-  already holds, which is what lets a surface animate on the host with no
-  kernel. Running and settled are the whole of the model: a zero duration
+  of the display's `RefreshRate`). It reads no clock: the embedder passes the
+  monotonic instant and the rate it already holds, which is what lets a surface
+  animate on the host with no kernel. Running and settled are the whole of the model: a zero duration
   starts *settled* — complete, with no wake asked for — so reduced motion needs
   no second code path and an idle surface arms no timer at all, while a
   *running* timeline always owes at least one more frame. Once its span has run
@@ -315,8 +315,11 @@ bundles, under a stable `ThemeId`:
   because the strength is what the eye reads rather than the travel.
 - `SceneClock` — the pace of a scene that moves until it is dismissed rather
   than for a span: every screensaver and the login screen's ribbon. A frame
-  falls due every `FRAME_NS`, every other frame the display would; `advance`
-  answers the seconds of motion the scene now stands at, each step held to
+  stands the fewest whole display frames that keep the scene at or below
+  thirty a second (`frame_on`), so it lands on the display's own cadence;
+  `advance` takes the display's rate as it stands, so a rate that changes is
+  followed at the next frame, and answers the seconds of motion the scene now
+  stands at, each step held to
   `MOST_FRAMES` so a late wake carries it a few frames on rather than all the
   way to the clock. A scene made still under reduced motion asks for no frame.
 - `MotionTheme` — one duration per `MotionInteraction`, in milliseconds, so no

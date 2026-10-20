@@ -12,7 +12,7 @@ use tairix_controls::{
 };
 use tairix_font::BitmapFont;
 use tairix_fsmeta::calendar::{month_name, WEEKDAY_ABBREVIATIONS};
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Ring, RingInk, Surface};
@@ -599,11 +599,6 @@ fn centred(surface: &mut Surface, font: BitmapFont, text: &str, area: Rect, colo
         .saturating_add(to_i32(area.width.saturating_sub(width) / 2));
     let y = font.centred_top(area.top(), area.height);
     paint_run(surface, font, run, (x, y), color, None);
-}
-
-/// `value` as a coordinate, saturating.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 #[cfg(test)]

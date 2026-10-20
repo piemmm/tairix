@@ -41,7 +41,7 @@ use tairix_abi::display_ipc::{
 };
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, BufferId, CursorCaps, DamageList, DamageRect, DisplayDeviceReport,
-    DisplayFormat, DisplayMode, DisplayPower, Presented,
+    DisplayFormat, DisplayMode, DisplayPower, OutputMode, Presented, RefreshRate,
 };
 use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, NetChannelNotify, NetChannelRequest,
@@ -2254,6 +2254,12 @@ fn display_reply_seeds() -> Vec<Vec<u8>> {
         buffer: buffer(1),
         grant: 0x41,
     };
+    let mode = DisplayMode {
+        width_px: 640,
+        height_px: 480,
+        stride_bytes: 2560,
+        format: DisplayFormat::Bgra8888,
+    };
     let stats = DisplayStats {
         seat_id: 1,
         busy_ns: 5,
@@ -2264,14 +2270,14 @@ fn display_reply_seeds() -> Vec<Vec<u8>> {
             accel: Some(caps),
             cursor: Some(cursor),
         },
-        mode: Some(DisplayMode {
-            width_px: 640,
-            height_px: 480,
-            stride_bytes: 2560,
-            format: DisplayFormat::Bgra8888,
-        }),
+        mode: Some(mode),
     };
     std::vec![
+        encode_mode_reply(Ok(Some(OutputMode {
+            mode,
+            refresh: RefreshRate::from_mhz(59_940),
+        })))
+        .to_vec(),
         encode_configure_reply(Ok(
             ConfiguredFrames::new(2560, grantor, &[grant, grant]).expect("two frames")
         ))

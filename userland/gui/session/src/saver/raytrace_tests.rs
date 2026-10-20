@@ -5,6 +5,7 @@
 //! and the next scene, a lost buffer painted afresh, the options a reveal is
 //! launched with, and a whole reveal ending as a reveal traced alone ends.
 
+use crate::saver::{TEST_REFRESH, TEST_SCENE_FRAME_NS};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -30,7 +31,8 @@ use super::{
 #[cfg(feature = "scene-tests")]
 use crate::saver::seed_from;
 use crate::tests::compositor;
-use tairix_theme::motion::SceneClock;
+#[cfg(feature = "scene-tests")]
+use tairix_theme::motion::work_slice_ns;
 
 const SIZE: (u32, u32) = (48, 27);
 const LIT: Pixel = Pixel {
@@ -138,7 +140,7 @@ fn launched_on(
 ) -> Option<Raytrace> {
     Raytrace::new(
         size,
-        (calm, 0),
+        (calm, 0, TEST_REFRESH),
         (options, memory, PLAIN.tell),
         host,
         (&Theme::dark(), Scale::ONE),
@@ -298,7 +300,7 @@ fn a_whole_picture_is_held_then_faded_then_the_next_scene_asked_for() {
     assert_eq!(script.borrow().asked, 0, "nothing asked while fading");
     while matches!(saver.phase, Phase::Fading { .. }) {
         saver.advance(now, wm, &mut comp, &mut clock);
-        now = saver.due_ns().max(now + SceneClock::FRAME_NS);
+        now = saver.due_ns().max(now + TEST_SCENE_FRAME_NS);
     }
     assert_eq!(brightness(&comp, wm), 0, "faded to black");
     assert!(matches!(saver.phase, Phase::Revealing));
@@ -353,7 +355,7 @@ fn a_picture_with_nowhere_to_paint_rests_the_saver() {
     saver.advance(0, wm, &mut comp, &mut clock);
     assert!(matches!(saver.phase, Phase::Resting { .. }));
     assert_eq!(saver.due_ns(), HOLD_NS);
-    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    saver.advance(TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
     assert_eq!(script.borrow().asked, 0, "nothing is asked while it rests");
     saver.advance(HOLD_NS, wm, &mut comp, &mut clock);
     assert_eq!(script.borrow().asked, 1);
@@ -593,7 +595,7 @@ fn a_frame_with_nothing_traced_repaints_nothing() {
     let now = saver.due_ns();
     saver.advance(now, wm, &mut comp, &mut ticking(MS));
     assert!(!comp.has_damage());
-    assert_eq!(saver.due_ns(), 2 * SceneClock::FRAME_NS);
+    assert_eq!(saver.due_ns(), 2 * TEST_SCENE_FRAME_NS);
 }
 
 /// The wait between paints grows with the share of the picture shown: a scene
@@ -605,16 +607,42 @@ fn the_wait_between_paints_grows_with_the_picture_shown() {
     // A 1920 × 1080 picture's 4 px grid, and its 32 px grid.
     let detail_from = 480 * 270;
     let formed = 60 * 34;
-    assert_eq!(paint_wait(0, detail_from), SceneClock::FRAME_NS);
-    assert_eq!(paint_wait(1, detail_from), FIRST_WAIT_NS);
-    assert_eq!(paint_wait(formed, detail_from), FIRST_WAIT_NS);
-    assert_eq!(paint_wait(detail_from / 2, detail_from), DETAIL_WAIT_NS / 2);
-    assert_eq!(paint_wait(detail_from, detail_from), DETAIL_WAIT_NS);
-    assert_eq!(paint_wait(4 * detail_from, detail_from), MOST_WAIT_NS);
-    assert_eq!(paint_wait(u64::MAX, detail_from), MOST_WAIT_NS);
+    assert_eq!(
+        paint_wait(0, detail_from, TEST_SCENE_FRAME_NS),
+        TEST_SCENE_FRAME_NS
+    );
+    assert_eq!(
+        paint_wait(0, detail_from, 2 * FIRST_WAIT_NS),
+        FIRST_WAIT_NS,
+        "a slow display's frame still shows the first steps within the first wait"
+    );
+    assert_eq!(
+        paint_wait(1, detail_from, TEST_SCENE_FRAME_NS),
+        FIRST_WAIT_NS
+    );
+    assert_eq!(
+        paint_wait(formed, detail_from, TEST_SCENE_FRAME_NS),
+        FIRST_WAIT_NS
+    );
+    assert_eq!(
+        paint_wait(detail_from / 2, detail_from, TEST_SCENE_FRAME_NS),
+        DETAIL_WAIT_NS / 2
+    );
+    assert_eq!(
+        paint_wait(detail_from, detail_from, TEST_SCENE_FRAME_NS),
+        DETAIL_WAIT_NS
+    );
+    assert_eq!(
+        paint_wait(4 * detail_from, detail_from, TEST_SCENE_FRAME_NS),
+        MOST_WAIT_NS
+    );
+    assert_eq!(
+        paint_wait(u64::MAX, detail_from, TEST_SCENE_FRAME_NS),
+        MOST_WAIT_NS
+    );
     let mut last = 0;
     for shown in (1..=8 * detail_from).step_by(997) {
-        let wait = paint_wait(shown, detail_from);
+        let wait = paint_wait(shown, detail_from, TEST_SCENE_FRAME_NS);
         assert!(wait >= last, "{shown}: {wait} after {last}");
         assert!((FIRST_WAIT_NS..=MOST_WAIT_NS).contains(&wait));
         last = wait;
@@ -633,7 +661,7 @@ struct Steady {
 impl TraceLink for Steady {
     fn collect(&self, into: &mut Vec<Traced>) -> Status {
         let count = self.order.count();
-        let due = (self.now.get() * self.per_frame / SceneClock::FRAME_NS).min(u64::from(count));
+        let due = (self.now.get() * self.per_frame / TEST_SCENE_FRAME_NS).min(u64::from(count));
         let due = u32::try_from(due).expect("within the reveal");
         for index in self.handed.get()..due {
             into.push(Traced {
@@ -751,7 +779,7 @@ fn a_paints_change_fades_in_over_the_wait_until_the_next_paint() {
         let next = saver.due_ns();
         assert_eq!(
             next,
-            (now + SceneClock::FRAME_NS).min(FIRST_WAIT_NS),
+            (now + TEST_SCENE_FRAME_NS).min(FIRST_WAIT_NS),
             "a scene frame on"
         );
         now = next;
@@ -826,11 +854,11 @@ fn a_band_wanting_the_memory_back_ends_the_crossfade() {
     let mut saver = on_screen(&script, false, tightening);
     let mut clock = ticking(MS);
     saver.advance(0, wm, &mut comp, &mut clock);
-    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    saver.advance(TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
     assert!(fading(&saver).is_some());
     assert_ne!(content(&comp, wm), &whole, "part way in");
     TIGHTENING.report(PressureBand::Mild);
-    saver.advance(2 * SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    saver.advance(2 * TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
     assert!(matches!(saver.laying, Laying::Straight));
     assert_eq!(content(&comp, wm), &whole, "laid on whole");
 
@@ -882,10 +910,10 @@ fn a_buffer_let_go_mid_fade_is_painted_afresh_and_the_rest_laid_straight_on() {
     );
     let mut clock = ticking(MS);
     saver.advance(0, wm, &mut comp, &mut clock);
-    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    saver.advance(TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
     assert!(fading(&saver).is_some());
     let _ = comp.set_surface(wm, Surface::new(4, 4).expect("a small surface"));
-    saver.advance(2 * SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    saver.advance(2 * TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
     assert!(matches!(saver.laying, Laying::Straight));
     assert_eq!(content(&comp, wm), &laid_straight(&[first]));
 }
@@ -905,11 +933,11 @@ fn a_scene_refused_once_shown_rests_the_screen_black() {
         let mut saver = on_screen(&script, calm, PLAIN.memory);
         let mut clock = ticking(MS);
         saver.advance(0, wm, &mut comp, &mut clock);
-        saver.landed(SceneClock::FRAME_NS);
-        saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+        saver.landed(TEST_SCENE_FRAME_NS);
+        saver.advance(TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
         assert!(brightness(&comp, wm) > 0, "some of it is shown");
-        saver.landed(2 * SceneClock::FRAME_NS);
-        saver.advance(2 * SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+        saver.landed(2 * TEST_SCENE_FRAME_NS);
+        saver.advance(2 * TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
         assert!(matches!(saver.phase, Phase::Resting { .. }));
         assert!(matches!(saver.laying, Laying::Straight));
         assert_eq!(brightness(&comp, wm), 0, "black while it rests");
@@ -937,11 +965,11 @@ fn a_scene_readied_on_its_thread_is_shown_from_its_first_steps() {
     saver.landed(readied);
     assert_eq!(saver.due_ns(), readied, "back at once");
     saver.advance(readied, wm, &mut comp, &mut clock);
-    assert_eq!(saver.due_ns(), SceneClock::FRAME_NS);
-    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    assert_eq!(saver.due_ns(), TEST_SCENE_FRAME_NS);
+    saver.advance(TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
     assert!(fading(&saver).is_some(), "the first step is fading in");
-    assert_eq!(saver.due_ns(), 2 * SceneClock::FRAME_NS);
-    saver.advance(2 * SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    assert_eq!(saver.due_ns(), 2 * TEST_SCENE_FRAME_NS);
+    saver.advance(2 * TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
     assert!(
         content(&comp, wm)
             .get(0, 0)
@@ -965,14 +993,14 @@ fn steps_collected_early_are_painted_with_the_next() {
     let mut clock = ticking(MS);
     saver.advance(0, wm, &mut comp, &mut clock);
     comp.composite();
-    let early = SceneClock::FRAME_NS / 2;
+    let early = TEST_SCENE_FRAME_NS / 2;
     saver.landed(early);
     saver.advance(early, wm, &mut comp, &mut clock);
     assert!(!comp.has_damage(), "not yet due");
     assert_eq!(saver.drawn.len(), 1);
-    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    saver.advance(TEST_SCENE_FRAME_NS, wm, &mut comp, &mut clock);
     assert!(saver.drawn.is_empty(), "both are painted");
-    faded_in(&mut saver, wm, &mut comp, &mut clock, SceneClock::FRAME_NS);
+    faded_in(&mut saver, wm, &mut comp, &mut clock, TEST_SCENE_FRAME_NS);
     let picture = content(&comp, wm);
     for (x, y) in [(0, 0), (46, 26)] {
         assert!(
@@ -1025,7 +1053,7 @@ fn on_the_loop_a_slice_is_traced_each_frame_and_painted_on_the_cadence() {
             break;
         }
         assert!(
-            saver.due_ns() <= now + SceneClock::FRAME_NS,
+            saver.due_ns() <= now + TEST_SCENE_FRAME_NS,
             "a slice a frame"
         );
         waited |= !saver.drawn.is_empty();
@@ -1084,7 +1112,8 @@ fn a_reveal_on_the_loop_ends_as_the_reveal_traced_alone() {
     let mut saver = launched(SIZE, false, idle(), None).expect("a reveal");
     reveal_whole(&mut saver, wm, &mut comp);
 
-    let mut alone = Engine::new(SIZE, seed_from(0), PLAIN).expect("an engine");
+    let mut alone =
+        Engine::new(SIZE, seed_from(0), PLAIN, work_slice_ns(TEST_REFRESH)).expect("an engine");
     let mut clock = ticking(MS);
     let mut steps = Vec::new();
     while alone

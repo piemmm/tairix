@@ -41,7 +41,9 @@ use tairix_raster::Surface;
 use tairix_rt::work::{Desk, Worker};
 use tairix_theme::{Accessibility, ThemeRegistry};
 
-use crate::client::{refusal_alert, retained_damage, WindowClient, WindowTransport};
+use crate::client::{
+    presented_damage, refusal_alert, retained_damage, WindowClient, WindowTransport,
+};
 use crate::desktop::Desktop;
 use crate::frames::WindowFrames;
 use crate::server::{DialogSpec, LayerSpec, PopupSpec, ToolSpec, TransientSpec};
@@ -162,6 +164,29 @@ pub fn refuse<T: WindowTransport>(
         );
     }
     raised.ok()
+}
+
+/// A worker pool with one participant per `online` CPU
+/// ([`tairix_procinfo::online_count`]), the calling thread among them, for
+/// work described as `doing`.
+///
+/// Fewer workers than the machine has cores is a refusal stated under `name`:
+/// the work still gets done, more slowly than the hardware allows.
+#[must_use]
+pub fn pool_across(name: &str, online: usize, doing: &str) -> tairix_parallel::Pool {
+    let pool = tairix_parallel::Pool::for_cpus(online);
+    let wanted = online.saturating_sub(1);
+    if pool.worker_count() < wanted {
+        report(
+            name,
+            format_args!(
+                "{doing} on {} of {online} cores (the kernel granted {} of {wanted} threads)",
+                pool.worker_count().saturating_add(1),
+                pool.worker_count()
+            ),
+        );
+    }
+    pool
 }
 
 /// State the abnormal-exit `reason` under `name` and hand `code` back.
@@ -540,9 +565,9 @@ fn follow(themes: &mut ThemeRegistry, desktop: &Desktop) {
 /// light/dark switch — or a contrast, density, motion or text change — with
 /// the same one call it opened with. The read is a
 /// plain syscall rather than a call to the session, so it costs no IPC round
-/// trip on the loop that owes the user a frame; the answer is `false` when the
-/// published state equals the one already held, so a wake with nothing in it
-/// costs no repaint.
+/// trip on the loop that owes the user a frame. The answer is whether the
+/// window must be redrawn, as [`Desktop::adopt`] gives it, so a wake with
+/// nothing in it, or with a new frame rate alone, costs no repaint.
 ///
 /// # Errors
 ///
@@ -950,10 +975,9 @@ impl WindowPane {
     /// Whether the session has released its copy of the window's pixels and
     /// this side has given the region back.
     ///
-    /// A released region holds none of the pixels a partial present would leave
-    /// standing, so a caller resolving a *reported* damage set promotes it to
-    /// the whole window when this is true — otherwise a round that reported
-    /// nothing would leave the window blank.
+    /// The next present sends the whole window from the surface it is handed,
+    /// so a caller whose surface does not already hold the whole picture paints
+    /// it whole first.
     #[must_use]
     pub const fn content_released(&self) -> bool {
         self.frames.is_released()
@@ -962,10 +986,9 @@ impl WindowPane {
     /// Copy `damage` of `surface` into the shared frame and present exactly
     /// that rectangle.
     ///
-    /// A region the session released is re-attached first, so a paint after a
-    /// release lands in a live one. Covering the whole window when
-    /// [`Self::content_released`] said so is the caller's, because only the
-    /// caller knows what it painted.
+    /// A region the session released is re-attached first and sent whole, since
+    /// the fresh region holds none of the pixels a partial present would leave
+    /// standing; `surface` is therefore the whole window's picture.
     ///
     /// # Errors
     ///
@@ -998,13 +1021,14 @@ impl WindowPane {
     ) -> Result<(), Errno> {
         let mode = self.mode;
         let window = self.window;
+        let damage = presented_damage(&mode, self.frames.is_released(), *damage)?;
         let pixels = client
             .frame_pixels(&mut self.frames, window, FRAME_COUNT, &mode)
             .ok_or(Errno::NotAttached)?;
         for rect in damage.rects() {
             winframe::encode(surface, pixels, &mode, *rect, &SERIAL)?;
         }
-        client.present(window, 0, *damage)
+        client.present(window, 0, damage)
     }
 
     /// Re-map the frame region onto `new_mode`.

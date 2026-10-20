@@ -85,13 +85,14 @@ mod program {
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
-    use tairix_raster::Surface;
+    use tairix_parallel::{JobRunner, Pool};
     use tairix_terminal::appbar::{self, BarCommand};
-    use tairix_terminal::effects::{frame_due, EffectState, Effects, Phase, FRAME_INTERVAL_NS};
+    use tairix_terminal::effects::{frame_due, frame_interval_ns, Effects, Phase};
     use tairix_terminal::layout::{
         cell_font, fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
     };
     use tairix_terminal::menu::{self, Command};
+    use tairix_terminal::pipeline::Pipeline;
     // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
     use tairix_appdata::{Opening, Publication, PublishWorker, RtHost, Settings as SettingsStore};
     use tairix_soundtheme::cue::RtCuePost;
@@ -109,8 +110,9 @@ mod program {
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
-        damage_in, key_input_event, pointer_input_events, pointer_point, scroll_input_events,
-        Desktop, EventError, EventMailbox, WindowClient, WindowEvents, WindowTransport,
+        damage_in, key_input_event, pointer_input_events, pointer_point, present_damage_list,
+        scroll_input_events, Desktop, EventError, EventMailbox, Repaint, WindowClient,
+        WindowEvents, WindowTransport,
     };
 
     /// The wait-set token of the settings worker's wake pipe: readable exactly
@@ -478,16 +480,40 @@ mod program {
         scale: Scale,
         /// The animation step the effects are drawn at.
         phase: Phase,
-        /// What the stateful passes carry between frames.
-        state: EffectState,
-        /// Where the effect pipeline runs, so it never accumulates into the
-        /// retained screen. Held only while an effect is in force.
-        effected: Option<Surface>,
+        /// The effect passes' stages, kept between frames.
+        pipeline: Pipeline,
+        /// The workers the passes spread across.
+        pool: &'static EffectPool,
+    }
+
+    /// The worker pool the screen effects spread across, started the first
+    /// time a pass draws, so a terminal with the effects off holds no worker
+    /// threads.
+    ///
+    /// The CPU count is asked once at start-up rather than here, because the
+    /// question is a call to another service and this is reached from the
+    /// loop that owes the windows their frames.
+    struct EffectPool {
+        online: usize,
+        pool: core::cell::OnceCell<Pool>,
+    }
+
+    impl EffectPool {
+        fn runner(&self) -> &dyn JobRunner {
+            self.pool
+                .get_or_init(|| app::pool_across(OWN_WORD, self.online, "drawing screen effects"))
+        }
     }
 
     impl Look {
-        /// The look `profile` implies on `desktop` under `theme`.
-        fn resolve(profile: &Profile, theme: &Theme, desktop: &Desktop) -> Self {
+        /// The look `profile` implies on `desktop` under `theme`, its passes
+        /// spread across `pool`.
+        fn resolve(
+            profile: &Profile,
+            theme: &Theme,
+            desktop: &Desktop,
+            pool: &'static EffectPool,
+        ) -> Self {
             let screen = (desktop.screen_width_px(), desktop.screen_height_px());
             let size = fit_font_size(profile.font_size_px, screen, theme, desktop.scale());
             Self {
@@ -501,8 +527,8 @@ mod program {
                 effects: profile.effects,
                 scale: desktop.scale(),
                 phase: Phase::default(),
-                state: EffectState::new(),
-                effected: None,
+                pipeline: Pipeline::new(),
+                pool,
             }
         }
 
@@ -516,7 +542,7 @@ mod program {
         /// [`adopt`](Self::adopt), which touches only what it named.
         fn refresh(&mut self, profile: &Profile, theme: &Theme, desktop: &Desktop) {
             let phase = self.phase;
-            *self = Self::resolve(profile, theme, desktop);
+            *self = Self::resolve(profile, theme, desktop, self.pool);
             self.phase = phase;
         }
 
@@ -553,7 +579,7 @@ mod program {
             // colours would ghost over the new ones. Turning an effect's
             // strength up or down leaves what was lit still true.
             if changed.metrics() || changed.painted() {
-                self.state.clear();
+                self.pipeline.clear();
             }
         }
     }
@@ -739,6 +765,8 @@ mod program {
         env: &'a [Vec<u8>],
         /// Where the shell of a window that fails to open is left to be reaped.
         ending: &'a mut EndingShells,
+        /// The workers its screen effects spread across.
+        pool: &'static EffectPool,
     }
 
     /// One window's pseudo-terminal, the shell hosted on it, and the screen
@@ -806,7 +834,7 @@ mod program {
     /// is.
     #[allow(clippy::needless_pass_by_value)] // The context is a bundle of borrows, moved so the caller cannot reuse a stale one.
     fn open_window(ctx: WindowContext<'_>) -> Result<TerminalWindow, &'static str> {
-        let look = Look::resolve(ctx.profile, ctx.theme, ctx.desktop);
+        let look = Look::resolve(ctx.profile, ctx.theme, ctx.desktop, ctx.pool);
         let output = (
             ctx.desktop.screen_width_px(),
             ctx.desktop.screen_height_px(),
@@ -908,20 +936,16 @@ mod program {
     const NO_WINDOW: &str = "No terminal window could be opened";
 
     /// Bring the retained screen up to date, copy what changed into `frame`,
-    /// and present that rectangle.
+    /// and present it.
     ///
-    /// **Only the cells that changed are drawn, copied, and presented.** A
-    /// keystroke costs the cell it wrote and the two the cursor moved
-    /// between; a shell write that scrolls costs the grid. A wake that
-    /// changed nothing presents nothing at all, so it costs the session no
-    /// composite either.
-    ///
-    /// A screen effect is a whole-frame post-process — a wobble displaces
-    /// rows and a phosphor trail decays every pixel — so when one is in force
-    /// the finished screen is copied into [`Look::effected`], the passes run
-    /// there, and the whole window is presented. The retained screen itself
-    /// stays clean, so the next frame's diff still describes the *text*
-    /// rather than the effect's own churn.
+    /// **Only what changed is drawn, copied, and presented.** A keystroke
+    /// costs the cell it wrote and the two the cursor moved between, plus the
+    /// glow's reach around them when one is on; a step of a moving effect
+    /// costs what that step moved. A wake that changed nothing presents
+    /// nothing at all, so it costs the session no composite either. The
+    /// passes draw into the pipeline's own stages, never the retained screen,
+    /// so the next frame's diff still describes the text rather than the
+    /// effect's own churn.
     ///
     /// An open overlay is *not* drawn here: it lives in its own popup window
     /// above this one, so the screen effects can never wobble a menu or a
@@ -950,6 +974,9 @@ mod program {
         let damage = screen.paint(terminal.grid(), &look.painted, look.font);
         let (_, passes) = look.effects.passes(look.scale.percent());
         if passes == 0 {
+            if look.pipeline.retire() {
+                return pane.present(client, screen.surface(), DamageRect::full(&mode));
+            }
             if damage.is_empty() {
                 return Ok(());
             }
@@ -962,30 +989,22 @@ mod program {
             };
             return pane.present(client, screen.surface(), rect);
         }
-        // Reused between frames, so an animated terminal allocates once
-        // rather than once a frame; a resize is what makes it stale.
-        let clean = screen.surface();
-        let held = match look.effected.take() {
-            Some(held) if held.width() == clean.width() && held.height() == clean.height() => {
-                Some(held)
-            }
-            _ => Surface::new(clean.width(), clean.height()),
-        };
-        // A refused buffer costs the effect, never the terminal: present the
-        // plain screen rather than exiting over decoration.
-        let Some(mut effected) = held else {
-            return pane.present(client, clean, DamageRect::full(&mode));
-        };
-        effected.overwrite(0, 0, clean);
-        look.effects.apply(
-            &mut effected,
-            &mut look.state,
-            look.phase,
+        let Some(frame) = look.pipeline.render(
+            screen.surface(),
+            damage,
+            look.effects,
             look.scale.percent(),
-        );
-        let presented = pane.present(client, &effected, DamageRect::full(&mode));
-        look.effected = Some(effected);
-        presented
+            look.phase,
+            look.pool.runner(),
+        ) else {
+            // A refused buffer costs the effect, never the terminal: present
+            // the plain screen rather than exiting over decoration.
+            return pane.present(client, screen.surface(), DamageRect::full(&mode));
+        };
+        let Some(changed) = present_damage_list(&mode, Repaint::Reported, frame.changed) else {
+            return Ok(());
+        };
+        pane.present_list(client, frame.picture, &changed)
     }
 
     /// Tell the session how far to blur what is behind this window.
@@ -1028,6 +1047,12 @@ mod program {
         let publisher =
             alloc::sync::Arc::new(tairix_appdata::publish_worker(Opening::Defaults(OWN_WORD)));
         let _publisher_guard = tairix_rt::work::WorkerGuard::new(&publisher);
+
+        let pool: &'static EffectPool =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(EffectPool {
+                online: tairix_procinfo::online_cpus(&tairix_procinfo::IpcTransport),
+                pool: core::cell::OnceCell::new(),
+            }));
 
         // --- The desktop these windows will be shown on: the screen, the
         // density, and the appearance.
@@ -1102,6 +1127,7 @@ mod program {
             desktop: &desktop,
             env: &env,
             ending: &mut ending,
+            pool,
         }) {
             Ok(first) => {
                 next_slot += 1;
@@ -1134,11 +1160,12 @@ mod program {
         let mut next_frame_ns: Option<u64> = None;
         let code = 'serve: loop {
             let now = tairix_rt::clock_get();
-            let animated = publication
-                .live()
-                .effects
-                .is_animated(desktop.scale().percent());
-            next_frame_ns = frame_due(animated, next_frame_ns, now);
+            let animated = windows.iter().any(|open| {
+                open.look
+                    .pipeline
+                    .animated(open.look.effects, open.look.scale.percent())
+            });
+            next_frame_ns = frame_due(animated, next_frame_ns, now, desktop.refresh());
             let held = windows
                 .iter_mut()
                 .filter_map(|open| open.overlay.as_mut()?.sheet.repeat_deadline(now))
@@ -1176,7 +1203,8 @@ mod program {
                         }
                     }
                     if next_frame_ns.is_some_and(|due| now >= due) {
-                        next_frame_ns = Some(now.saturating_add(FRAME_INTERVAL_NS));
+                        next_frame_ns =
+                            Some(now.saturating_add(frame_interval_ns(desktop.refresh())));
                         for open in &mut windows {
                             open.look.phase = open.look.phase.advance();
                             if open.present(&mut client).is_err() {
@@ -1235,6 +1263,7 @@ mod program {
                             publisher: &publisher,
                             env: &env,
                             ending: &mut ending,
+                            pool,
                         },
                     ) {
                         Applied::Running => {}
@@ -1265,6 +1294,7 @@ mod program {
                             publisher: &publisher,
                             env: &env,
                             ending: &mut ending,
+                            pool,
                         },
                     ) {
                         Applied::Running => {}
@@ -1301,6 +1331,7 @@ mod program {
                                 publisher: &publisher,
                                 env: &env,
                                 ending: &mut ending,
+                                pool,
                             },
                         ) {
                             Applied::Running => {}
@@ -1317,7 +1348,7 @@ mod program {
                     // state that only matter while an effect is on, so they
                     // give first under pressure; the next frame starts clean.
                     for open in &mut windows {
-                        open.look.state.clear();
+                        open.look.pipeline.clear();
                     }
                 }
                 Wake::PressureUnchanged => {}
@@ -1580,6 +1611,8 @@ mod program {
         env: &'a [Vec<u8>],
         /// The shells of closed windows, still to be reaped.
         ending: &'a mut EndingShells,
+        /// The workers every window's screen effects spread across.
+        pool: &'static EffectPool,
     }
 
     /// Whether the process carries on after an outcome was applied.
@@ -1653,6 +1686,7 @@ mod program {
                     desktop: ctx.desktop,
                     env: ctx.env,
                     ending: ctx.ending,
+                    pool: ctx.pool,
                 }) {
                     Ok(opened) => {
                         *ctx.next_slot = slot.saturating_add(1);
@@ -1817,7 +1851,7 @@ mod program {
                     let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
                     // What the passes remember is the shape of the old
                     // screen; a resized one must not ghost it.
-                    open.look.state.clear();
+                    open.look.pipeline.clear();
                     if open.present(client).is_err() {
                         return Applied::Lost("present refused");
                     }

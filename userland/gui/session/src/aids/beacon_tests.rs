@@ -1,5 +1,6 @@
+use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::Scale;
-use tairix_theme::{Accessibility, Contrast, Density, Motion, Theme, Timeline};
+use tairix_theme::{Accessibility, Contrast, Density, Motion, Theme};
 use tairix_wm::Halo;
 
 use super::{Beacon, FROM_RADIUS_PX, LAG_NS, MS, RING_NS, SHOWN_NS, STILL_RADIUS_PX, TO_RADIUS_PX};
@@ -27,7 +28,7 @@ fn nothing_is_drawn_until_it_is_sent_and_nothing_once_it_is_done() {
     let theme = Theme::dark();
     let mut beacon = Beacon::new();
     assert!(beacon.halo(0, &theme, Scale::ONE).rings().is_empty());
-    assert_eq!(beacon.next_frame_in(0), None);
+    assert_eq!(beacon.next_frame_in(0, RefreshRate::ASSUMED), None);
     beacon.start(1_000 * MS);
     assert!(!beacon
         .halo(1_010 * MS, &theme, Scale::ONE)
@@ -38,7 +39,7 @@ fn nothing_is_drawn_until_it_is_sent_and_nothing_once_it_is_done() {
         .rings()
         .is_empty());
     assert_eq!(
-        beacon.next_frame_in(1_000 * MS + SHOWN_NS),
+        beacon.next_frame_in(1_000 * MS + SHOWN_NS, RefreshRate::ASSUMED),
         None,
         "and it asks for nothing more"
     );
@@ -123,7 +124,10 @@ fn with_motion_reduced_one_ring_stands_still_and_wakes_once() {
             [(STILL_RADIUS_PX, theme.palette().accent.a)]
         );
     }
-    assert_eq!(beacon.next_frame_in(100 * MS), Some(SHOWN_NS - 100 * MS));
+    assert_eq!(
+        beacon.next_frame_in(100 * MS, RefreshRate::ASSUMED),
+        Some(SHOWN_NS - 100 * MS)
+    );
     assert!(beacon.halo(SHOWN_NS, &theme, Scale::ONE).rings().is_empty());
 }
 
@@ -133,10 +137,16 @@ fn a_moving_ring_asks_for_every_frame_and_no_sooner() {
     let mut beacon = Beacon::new();
     beacon.start(0);
     let _ = beacon.halo(0, &theme, Scale::ONE);
-    assert_eq!(beacon.next_frame_in(0), Some(Timeline::FRAME_NS));
-    assert_eq!(beacon.next_frame_in(SHOWN_NS - MS), Some(MS));
+    assert_eq!(
+        beacon.next_frame_in(0, RefreshRate::ASSUMED),
+        Some(RefreshRate::ASSUMED.frame_ns())
+    );
+    assert_eq!(
+        beacon.next_frame_in(SHOWN_NS - MS, RefreshRate::ASSUMED),
+        Some(MS)
+    );
     beacon.stop();
-    assert_eq!(beacon.next_frame_in(0), None);
+    assert_eq!(beacon.next_frame_in(0, RefreshRate::ASSUMED), None);
 }
 
 #[test]

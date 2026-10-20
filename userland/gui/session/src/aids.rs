@@ -16,6 +16,7 @@ mod beacon;
 mod shake;
 mod trail;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::Point;
 use tairix_inline::ArrayVec;
 use tairix_wallpaper::{DesktopSettings, PointerTrail};
@@ -167,13 +168,14 @@ impl PointerAids {
         compositor.set_pointer_halo(&Halo::new());
     }
 
-    /// Fold what the aids next owe a frame into `park_ns`, relative to
-    /// `now_ns`; nothing while every one of them is at rest.
+    /// Fold what the aids next owe a frame on a display refreshing at
+    /// `refresh` into `park_ns`, relative to `now_ns`; nothing while every one
+    /// of them is at rest.
     #[must_use]
-    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        let park_ns = park_within(park_ns, self.shake.next_frame_in(now_ns));
-        let park_ns = park_within(park_ns, self.trail.next_frame_in(now_ns));
-        park_within(park_ns, self.beacon.next_frame_in(now_ns))
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64, refresh: RefreshRate) -> u64 {
+        let park_ns = park_within(park_ns, self.shake.next_frame_in(now_ns, refresh));
+        let park_ns = park_within(park_ns, self.trail.next_frame_in(now_ns, refresh));
+        park_within(park_ns, self.beacon.next_frame_in(now_ns, refresh))
     }
 }
 

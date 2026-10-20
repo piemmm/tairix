@@ -83,8 +83,9 @@ track's start and eases to each new value; a busy trace sweeps a comet across
 the track, so nothing about it reads as an amount; a failed one keeps the amount
 it reached in the recovery colour beside its reason; a complete one is full in
 the success colour. The motion is its owner's to clock: it calls
-`Progress::set_clock` with the frame clock and the theme's motion and draws the
-frames `next_frame_in` asks for, so a screen with no moving trace takes no timer.
+`Progress::set_clock` with the frame clock, the theme's motion and the display's
+refresh rate, and draws the frames `next_frame_in` asks for, so a screen with no
+moving trace takes no timer.
 Unclocked, or under reduced motion, a busy trace is a still segment centred on
 the track, feathered at both ends.
 

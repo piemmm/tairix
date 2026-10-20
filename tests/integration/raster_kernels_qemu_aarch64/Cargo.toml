@@ -1,0 +1,27 @@
+[package]
+name = "tairix-test-raster-kernels-qemu-aarch64"
+description = "QEMU integration test: the compositor's per-pixel kernels resolve to their NEON candidates on aarch64 and fold to tairix_raster::accel::CONFORMANCE_DIGEST. The host cannot execute NEON, so this is where the candidates are proved bit-identical to the portable blend and blur the host suite pins."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-raster-kernels-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0", features = ["conformance"] }
+tairix-cpuops = { path = "../../../lib/cpuops", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

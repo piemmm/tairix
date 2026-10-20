@@ -213,13 +213,13 @@ fn blur_block<S: Sample>(
         let Some((src, dst)) = row_pair(region, aux, y, width) else {
             return;
         };
-        blur_span(src, dst, 1, width, radius, recip, 0..width);
+        S::line(src, dst, width, radius, recip, 0..width);
     }
     for x in 0..width {
         let Some((src, dst)) = column_pair(aux, region, x, count) else {
             return;
         };
-        blur_span(src, dst, width, height, radius, recip, 0..height);
+        blur_span::<S, S::Window>(src, dst, width, height, radius, recip, 0..height);
     }
 }
 
@@ -957,10 +957,9 @@ impl PlaneRead<'_> {
             };
             for band in reading() {
                 if let Some(out) = target.get_mut(band.cols.clone()) {
-                    blur_span(
+                    Pixel::line(
                         source,
                         out,
-                        1,
                         width,
                         frost.radius,
                         frost.recip,
@@ -1042,15 +1041,14 @@ impl PlaneRead<'_> {
         if width == 0 {
             return;
         }
+        let ops = crate::accel::blur_for(self.frost.recip);
         for (row, out) in rows.clone().zip(block.chunks_exact_mut(width)) {
             if row == piece.rows.start {
-                self.prime(plane, piece, row, sums);
+                self.prime(plane, piece, row, sums, ops.add);
             }
-            for (slot, sum) in out.iter_mut().zip(sums.iter()) {
-                *slot = sum.mean(self.frost.recip);
-            }
+            (ops.mean)(out, sums, self.frost.recip);
             if row.saturating_add(1) < piece.rows.end {
-                self.slide(plane, piece, row, sums);
+                self.slide(plane, piece, row, sums, ops.slide);
             }
         }
     }
@@ -1060,29 +1058,36 @@ impl PlaneRead<'_> {
     /// copies of its first or last row — arithmetically, as `blur_span` counts
     /// them, so priming costs the rectangle's height at most whatever the
     /// radius.
-    fn prime(&self, plane: &Surface, piece: &Piece, row: usize, sums: &mut [PixelSum]) {
-        sums.fill(PixelSum::default());
-        let Some(last) = self.frost.height().checked_sub(1) else {
-            return;
-        };
-        let radius = self.frost.radius;
-        self.gather(plane, piece, 0, sums, radius.saturating_sub(row));
-        for sample in row.saturating_sub(radius)..=row.saturating_add(radius).min(last) {
-            self.gather(plane, piece, sample, sums, 1);
-        }
-        let past = row.saturating_add(radius).saturating_sub(last);
-        self.gather(plane, piece, last, sums, past);
-    }
-
-    /// Add `times` copies of the averages the rectangle's own row `row` holds
-    /// over `piece`'s columns to `sums`.
-    fn gather(
+    fn prime(
         &self,
         plane: &Surface,
         piece: &Piece,
         row: usize,
         sums: &mut [PixelSum],
-        times: usize,
+        add: crate::accel::RowAdd,
+    ) {
+        sums.fill(PixelSum::default());
+        let Some(last) = self.frost.height().checked_sub(1) else {
+            return;
+        };
+        let radius = self.frost.radius;
+        self.gather(plane, piece, (0, radius.saturating_sub(row)), sums, add);
+        for sample in row.saturating_sub(radius)..=row.saturating_add(radius).min(last) {
+            self.gather(plane, piece, (sample, 1), sums, add);
+        }
+        let past = row.saturating_add(radius).saturating_sub(last);
+        self.gather(plane, piece, (last, past), sums, add);
+    }
+
+    /// Add `times` copies of the averages the rectangle's own row `row` holds
+    /// over `piece`'s columns to `sums`, one copy through `add`.
+    fn gather(
+        &self,
+        plane: &Surface,
+        piece: &Piece,
+        (row, times): (usize, usize),
+        sums: &mut [PixelSum],
+        add: crate::accel::RowAdd,
     ) {
         if times == 0 {
             return;
@@ -1091,9 +1096,7 @@ impl PlaneRead<'_> {
             return;
         };
         if times == 1 {
-            for (sum, &pixel) in sums.iter_mut().zip(averaged) {
-                sum.add(pixel);
-            }
+            add(sums, averaged);
         } else {
             for (sum, &pixel) in sums.iter_mut().zip(averaged) {
                 sum.add_many(pixel, times);
@@ -1103,7 +1106,14 @@ impl PlaneRead<'_> {
 
     /// Move `sums` from the window around the rectangle's own row `row` to
     /// the one around the row after it.
-    fn slide(&self, plane: &Surface, piece: &Piece, row: usize, sums: &mut [PixelSum]) {
+    fn slide(
+        &self,
+        plane: &Surface,
+        piece: &Piece,
+        row: usize,
+        sums: &mut [PixelSum],
+        kernel: crate::accel::RowSlide,
+    ) {
         let Some(last) = self.frost.height().checked_sub(1) else {
             return;
         };
@@ -1116,10 +1126,7 @@ impl PlaneRead<'_> {
         ) else {
             return;
         };
-        for ((sum, &enter), &leave) in sums.iter_mut().zip(added).zip(removed) {
-            sum.add(enter);
-            sum.sub(leave);
-        }
+        kernel(sums, added, removed);
     }
 
     /// The horizontal averages the rectangle's own row `row` holds over
@@ -1268,7 +1275,7 @@ fn column_pair<'a, S>(
 /// the line before the walk begins rather than trusted to end with it: a
 /// caller passing a buffer with further pixels after the line (a band of a
 /// larger scratch) would otherwise read one of those as a replicated edge.
-fn blur_span<S: Sample>(
+pub(crate) fn blur_span<S: Copy, W: Window<S>>(
     src: &[S],
     dst: &mut [S],
     stride: usize,
@@ -1309,7 +1316,7 @@ fn blur_span<S: Sample>(
         from.saturating_sub(radius),
         from.saturating_add(radius).min(last),
     );
-    let mut sum = S::Window::default();
+    let mut sum = W::default();
     sum.add_many(first, radius.saturating_sub(from));
     for &sample in src
         .get(lead.saturating_mul(stride)..)
@@ -1359,14 +1366,76 @@ fn blur_span<S: Sample>(
 trait Sample: Copy {
     /// The running sums of the samples inside the window.
     type Window: Window<Self>;
+
+    /// [`blur_span`] along a line, stride one: the pass a vector candidate
+    /// can take.
+    fn line(
+        src: &[Self],
+        dst: &mut [Self],
+        len: usize,
+        radius: usize,
+        recip: Reciprocal,
+        out: Range<usize>,
+    ) {
+        blur_span::<Self, Self::Window>(src, dst, 1, len, radius, recip, out);
+    }
 }
 
 impl Sample for Pixel {
     type Window = PixelSum;
+
+    fn line(
+        src: &[Self],
+        dst: &mut [Self],
+        len: usize,
+        radius: usize,
+        recip: Reciprocal,
+        out: Range<usize>,
+    ) {
+        (crate::accel::blur_for(recip).line)(src, dst, len, radius, recip, out);
+    }
 }
 
 impl Sample for u8 {
     type Window = CoverageSum;
+}
+
+/// Add `row` into the column sums `sums`, pairwise: the portable reference.
+pub(crate) fn add_portable(sums: &mut [PixelSum], row: &[Pixel]) {
+    for (sum, &pixel) in sums.iter_mut().zip(row) {
+        sum.add(pixel);
+    }
+}
+
+/// Move the column sums `sums` a row on, adding `entering` and removing
+/// `leaving`, pairwise: the portable reference.
+pub(crate) fn slide_portable(sums: &mut [PixelSum], entering: &[Pixel], leaving: &[Pixel]) {
+    for ((sum, &enter), &leave) in sums.iter_mut().zip(entering).zip(leaving) {
+        sum.add(enter);
+        sum.sub(leave);
+    }
+}
+
+/// Write each column sum's mean over `recip` to `out`, pairwise: the
+/// portable reference.
+pub(crate) fn mean_portable(out: &mut [Pixel], sums: &[PixelSum], recip: Reciprocal) {
+    for (slot, sum) in out.iter_mut().zip(sums) {
+        *slot = sum.mean(recip);
+    }
+}
+
+/// The portable horizontal pass over pixels: the reference the vector
+/// candidates are verified against, and the tail they hand a divisor they
+/// have no lanes for.
+pub(crate) fn line_portable(
+    src: &[Pixel],
+    dst: &mut [Pixel],
+    len: usize,
+    radius: usize,
+    recip: Reciprocal,
+    out: Range<usize>,
+) {
+    blur_span::<Pixel, PixelSum>(src, dst, 1, len, radius, recip, out);
 }
 
 /// The running sums of the samples currently inside a sliding window.
@@ -1377,7 +1446,7 @@ impl Sample for u8 {
 /// operation saturates so that a caller passing an absurd radius — the
 /// entry points are public and take any `usize` — gets a flattened region
 /// rather than an arithmetic panic.
-trait Window<S>: Copy + Default {
+pub(crate) trait Window<S>: Copy + Default {
     /// Add `times` copies of `sample` to the window.
     fn add_many(&mut self, sample: S, times: usize);
     /// Add one copy of `sample` to the window.
@@ -1388,13 +1457,18 @@ trait Window<S>: Copy + Default {
     fn mean(self, recip: Reciprocal) -> S;
 }
 
-#[derive(Copy, Clone, Default)]
-struct PixelSum {
-    r: u32,
-    g: u32,
-    b: u32,
-    a: u32,
+/// One window's four channel sums: `#[repr(C)]`, so a vector candidate
+/// reads a run of them as lanes.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub(crate) struct PixelSum {
+    pub(crate) r: u32,
+    pub(crate) g: u32,
+    pub(crate) b: u32,
+    pub(crate) a: u32,
 }
+
+const _: () = assert!(core::mem::size_of::<PixelSum>() == 16);
 
 impl Window<Pixel> for PixelSum {
     fn add_many(&mut self, pixel: Pixel, times: usize) {
@@ -1467,7 +1541,7 @@ const RECIPROCAL_MAX_COUNT: u32 = 65_536;
 /// once for the pass instead of dividing four times per pixel per pass — which
 /// was the dominant cost of a frosted window.
 #[derive(Copy, Clone)]
-enum Reciprocal {
+pub(crate) enum Reciprocal {
     /// Multiply by a fixed-point reciprocal, which for every window the blur
     /// is used at gives *exactly* the same answer as the divide.
     ///
@@ -1488,30 +1562,96 @@ enum Reciprocal {
     /// The product saturates so the answer stays a total function of its
     /// argument: a numerator from outside a window of `d` samples — which no
     /// blur produces — reads as fully bright rather than overflowing.
-    Multiply { m: u64, half: u32 },
+    Multiply {
+        m: u64,
+        half: u32,
+        #[cfg(raster_lanes)]
+        lanes: LaneDivisor,
+    },
     /// Divide, for a count past the range the multiply is exact over. No
-    /// surface is drawn at such a radius; correctness does not depend on that.
+    /// surface is drawn at such a radius; correctness does not depend on that,
+    /// and its windows take the portable kernels, whose sums saturate.
     Divide { d: u32 },
+}
+
+/// The same rounded mean in a form 32-bit vector lanes can take:
+/// `floor((sum + half) * m / 2^shift)` with `m` below `2^32`.
+///
+/// Exact for every sum a window of `d` samples can hold, by the argument
+/// above with `S = 8 + 2b` and `d <= 2^b`: then `n < 256*d` and `e < d` give
+/// `n*e < 256*d*d <= 2^S`, and `m <= 2^S/d + 1 < 2^(9+b)`, so `m` fits a lane
+/// for every count up to [`RECIPROCAL_MAX_COUNT`] and the product fits 64
+/// bits. `blur_tests` checks every count at every boundary of the quotient.
+#[cfg(raster_lanes)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LaneDivisor {
+    pub(crate) m: u32,
+    pub(crate) shift: u32,
+    pub(crate) half: u32,
+}
+
+#[cfg(raster_lanes)]
+impl LaneDivisor {
+    /// The lane form of division by `d`, for `d` in `1..=RECIPROCAL_MAX_COUNT`;
+    /// a count outside it is held to it rather than overflowing the shift.
+    fn new(d: u32) -> Self {
+        let d = d.clamp(1, RECIPROCAL_MAX_COUNT);
+        let bits = u32::BITS - (d - 1).leading_zeros();
+        let shift = 8 + 2 * bits;
+        let m = (1u64 << shift).div_ceil(u64::from(d));
+        Self {
+            m: u32::try_from(m).unwrap_or(u32::MAX),
+            shift,
+            half: d / 2,
+        }
+    }
+
+    /// One channel's rounded mean, as a lane computes it.
+    #[cfg(test)]
+    pub(crate) fn apply(self, sum: u32) -> u32 {
+        let n = u64::from(sum.wrapping_add(self.half));
+        u32::try_from((n * u64::from(self.m)) >> self.shift).unwrap_or(u32::MAX)
+    }
 }
 
 impl Reciprocal {
     /// The divisor for a window of `count` samples. A count of zero would make
     /// no window, so it reads as one.
-    fn new(count: usize) -> Self {
+    pub(crate) fn new(count: usize) -> Self {
         let d = u32::try_from(count).unwrap_or(u32::MAX).max(1);
         if d <= RECIPROCAL_MAX_COUNT {
             let m = (1u64 << RECIPROCAL_SHIFT).div_ceil(u64::from(d));
-            Self::Multiply { m, half: d / 2 }
+            Self::Multiply {
+                m,
+                half: d / 2,
+                #[cfg(raster_lanes)]
+                lanes: LaneDivisor::new(d),
+            }
         } else {
             Self::Divide { d }
         }
     }
 
+    /// Whether every sum a window of this count holds — at most 255 for each
+    /// of its samples — fits a 32-bit lane: true wherever the multiply is.
+    pub(crate) const fn sums_fit_lanes(self) -> bool {
+        matches!(self, Self::Multiply { .. })
+    }
+
+    /// The lane form of this division, where the count admits one.
+    #[cfg(raster_lanes)]
+    pub(crate) const fn lanes(self) -> Option<LaneDivisor> {
+        match self {
+            Self::Multiply { lanes, .. } => Some(lanes),
+            Self::Divide { .. } => None,
+        }
+    }
+
     /// One channel's rounded mean, clamped to the channel range.
     #[inline]
-    fn apply(self, sum: u32) -> u8 {
+    pub(crate) fn apply(self, sum: u32) -> u8 {
         let rounded = match self {
-            Self::Multiply { m, half } => {
+            Self::Multiply { m, half, .. } => {
                 u64::from(sum.saturating_add(half)).saturating_mul(m) >> RECIPROCAL_SHIFT
             }
             Self::Divide { d } => u64::from(sum.saturating_add(d / 2)) / u64::from(d),

@@ -13,8 +13,12 @@ use crate::corner::Corners;
 use crate::geometry::{Rect, Scale};
 use crate::surface::Surface;
 use crate::window::{Window, WindowId, WindowShape};
+use tairix_abi::driver::display::RefreshRate;
 use tairix_colour::Rgba;
-use tairix_theme::{Fade, Theme, Timeline};
+use tairix_theme::{Fade, Theme};
+
+/// The display the shadows ease on.
+const RATE: RefreshRate = RefreshRate::ASSUMED;
 
 fn kit() -> ShadowKit {
     ShadowKit::new(Scale::ONE, &Theme::dark())
@@ -337,7 +341,7 @@ fn a_theme_without_a_shadow_casts_nothing_anywhere() {
 fn eased(lift: &mut Lift, start: u64, ms: u16) -> Vec<u8> {
     let mut drawn = Vec::new();
     let mut now = start;
-    while let Some(wait) = lift.next_frame_in(now) {
+    while let Some(wait) = lift.next_frame_in(now, RATE) {
         now = now.saturating_add(wait.max(1));
         lift.step(now, ms);
         drawn.push(lift.drawn().0);
@@ -350,7 +354,7 @@ fn eased(lift: &mut Lift, start: u64, ms: u16) -> Vec<u8> {
 fn a_shadow_eases_to_its_new_level_and_then_asks_for_nothing() {
     let mut lift = Lift::at(Elevation::LIFTED);
     assert_eq!(
-        lift.next_frame_in(0),
+        lift.next_frame_in(0, RATE),
         None,
         "a shadow at rest owes no frame"
     );
@@ -361,7 +365,7 @@ fn a_shadow_eases_to_its_new_level_and_then_asks_for_nothing() {
         "nothing moves until a step"
     );
     assert_eq!(
-        lift.next_frame_in(0),
+        lift.next_frame_in(0, RATE),
         Some(0),
         "a change is owed a step at once"
     );
@@ -388,7 +392,11 @@ fn reduced_motion_steps_a_shadow_straight_to_its_level() {
     lift.aim(Elevation::RESTING, false);
     assert!(lift.step(5, 0), "the level drawn moved");
     assert_eq!(lift.drawn(), Elevation::RESTING);
-    assert_eq!(lift.next_frame_in(5), None, "and no frame or timer is owed");
+    assert_eq!(
+        lift.next_frame_in(5, RATE),
+        None,
+        "and no frame or timer is owed"
+    );
 }
 
 #[test]
@@ -396,7 +404,7 @@ fn a_shadow_nobody_can_see_takes_its_level_at_once() {
     let mut lift = Lift::at(Elevation::RESTING);
     lift.aim(Elevation::LIFTED, true);
     assert_eq!(lift.drawn(), Elevation::LIFTED);
-    assert_eq!(lift.next_frame_in(0), None);
+    assert_eq!(lift.next_frame_in(0, RATE), None);
 }
 
 /// An ease is paced by the shared frame cadence and the timeline's own end,
@@ -406,10 +414,10 @@ fn an_ease_is_paced_by_the_frame_cadence() {
     let mut lift = Lift::at(Elevation::LIFTED);
     lift.aim(Elevation::RESTING, false);
     lift.step(0, 120);
-    let wait = lift.next_frame_in(0).expect("easing");
-    assert!(wait > 0 && wait <= Timeline::FRAME_NS);
+    let wait = lift.next_frame_in(0, RATE).expect("easing");
+    assert!(wait > 0 && wait <= RATE.frame_ns());
     assert_eq!(
-        Fade::start(0, 120, 255, 0).next_frame_in(0),
+        Fade::start(0, 120, 255, 0).next_frame_in(0, RATE),
         Some(wait),
         "the shared fade's cadence, not one of its own"
     );

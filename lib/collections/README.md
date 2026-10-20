@@ -77,7 +77,9 @@ control update.
 
 The scan itself is a `lib/cpuops` ops table: an SSE2 candidate, a NEON
 candidate, and a portable word-at-a-time baseline. Which one runs is decided
-once per boot through the capability gate and the mandatory self-verify, so a
+once per process, the first time a table scans, against the feature set the
+process was delivered, through the capability gate and the mandatory
+self-verify, so a
 vector instruction is never reached on a core that lacks it and a candidate
 that disagrees with the baseline on any vector cannot be selected. A target
 without one in its own feature set — riscv64 and wasm32 — compiles no

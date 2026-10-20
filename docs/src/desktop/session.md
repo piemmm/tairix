@@ -2178,8 +2178,9 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   screen, the lock included, so `screensaver.system_monitor.tasks` can leave
   them out.
 
-The animated scenes draw every other desktop frame (`SceneClock::FRAME_NS`, the
-one idle-scene clock in `tairix_theme::motion`), each
+The animated scenes draw on whole frames of the output's rate, at most thirty a
+second (`SceneClock::frame_on`, the one idle-scene clock in
+`tairix_theme::motion`), each
 frame repainting only what changed through `Compositor::repaint_window` — the
 footprints the stars left and reached, the cells whose look moved, the block
 where it was and is, the cells about the points the ray tracer traced since
@@ -2539,11 +2540,13 @@ the loop composite and present once a deadline arrives.
   costs it not one wake. `admit` holds only a frame that is *not* yet due, so
   the deadline it arms is never zero-length and the loop cannot spin between a
   refusal and its frame.
-- **The period is the one the desktop already animates at.**
-  `tairix_theme::Timeline::FRAME_NS` is the shortest gap between two frames
-  worth drawing, which is the same fact whether a frame carries an animation
-  step or a drag. Sharing it also keeps an animated surface from being woken
-  for a frame the pacer would then refuse.
+- **The period is the output's own.** One frame of the rate the output scans
+  at, as the display service states it (`RefreshRate`, assumed 60 Hz for a
+  firmware framebuffer that states none), held by the compositor and handed to
+  the pacer and to every animated surface alike — the same fact whether a frame
+  carries an animation step or a drag, so no surface is woken for a frame the
+  pacer would then refuse. The session publishes the rate to applications in
+  the desktop record, and a rate that changes alone republishes it.
 - **An undamaged frame is never held, and never starts the period.**
   Presenting one moves nothing, and it is what re-reads the frame counters as
   idle for the monitor's Resources page — so holding it would suppress that

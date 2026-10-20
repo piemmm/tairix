@@ -2,7 +2,9 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, DisplayPower};
+use tairix_abi::driver::display::{
+    DamageRect, DisplayFormat, DisplayMode, DisplayPower, RefreshRate,
+};
 use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::session_ipc::{SessionRequest, SessionVerdict};
 use tairix_abi::time::{Duration64, Time64};
@@ -16,7 +18,7 @@ use tairix_greeter::{AccountTile, Verdict};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Pixel;
 use tairix_theme::motion::SceneClock;
-use tairix_theme::{MotionInteraction, Theme, Timeline};
+use tairix_theme::{MotionInteraction, Theme};
 
 use super::LoginScreen;
 use crate::accounts::SessionTransport;
@@ -835,7 +837,7 @@ fn an_unveiled_screen_still_draws_its_pointer() {
     confined(&drawn_over(&login));
 
     assert!(!offer(&mut login, "wrong", 0).verified);
-    refreshed(&mut login, Timeline::FRAME_NS, None);
+    refreshed(&mut login, RefreshRate::ASSUMED.frame_ns(), None);
     login.repaint();
     confined(&drawn_over(&login));
 }
@@ -993,7 +995,7 @@ fn a_running_lockout_is_the_nearer_deadline() {
     let twenty_past = Time64::from_secs(1_700_000_060);
     assert_eq!(
         login.park_timeout(0, Some(twenty_past)),
-        Timeline::FRAME_NS,
+        RefreshRate::ASSUMED.frame_ns(),
         "the refusal's shake is the nearest thing owing a frame"
     );
     assert_eq!(
@@ -1913,7 +1915,12 @@ fn a_display_that_cannot_switch_off_sleeps_black() {
     );
     assert_eq!(login.park_timeout(SLEPT, None), WAITSET_TIMEOUT_NONE);
     assert_eq!(
-        refreshed(&mut login, SLEPT + SceneClock::FRAME_NS, None).present,
+        refreshed(
+            &mut login,
+            SLEPT + SceneClock::frame_on(RefreshRate::ASSUMED),
+            None
+        )
+        .present,
         Present::Nothing,
         "nor does the ribbon move behind the black"
     );
@@ -1988,7 +1995,7 @@ fn a_ribbon_frame_recomposes_what_it_moved_and_paints_nothing() {
     let mut login = ribboned();
     let before = login.frame().to_vec();
     stamp(&mut login, (0, 0));
-    let step = refreshed(&mut login, SceneClock::FRAME_NS, None);
+    let step = refreshed(&mut login, SceneClock::frame_on(RefreshRate::ASSUMED), None);
     assert_ne!(step.present, Present::Nothing, "the ribbon moved");
     assert_ne!(step.present, Present::Whole, "and only where it moved");
     assert_eq!(
@@ -2010,7 +2017,11 @@ fn a_ribbon_frame_recomposes_what_it_moved_and_paints_nothing() {
 fn a_ribbon_frame_leaves_no_stale_pixel() {
     let mut login = ribboned();
     for frame in 1..=6 {
-        refreshed(&mut login, frame * SceneClock::FRAME_NS, None);
+        refreshed(
+            &mut login,
+            frame * SceneClock::frame_on(RefreshRate::ASSUMED),
+            None,
+        );
     }
     let composed = login.frame().to_vec();
     login.repaint();
@@ -2023,7 +2034,11 @@ fn a_ribbon_frame_leaves_no_stale_pixel() {
 fn the_ribbon_keeps_the_column_dark() {
     let mut login = ribboned();
     for frame in 1..=6 {
-        refreshed(&mut login, frame * 30 * SceneClock::FRAME_NS, None);
+        refreshed(
+            &mut login,
+            frame * 30 * SceneClock::frame_on(RefreshRate::ASSUMED),
+            None,
+        );
     }
     let column = login.surface.column_rect(login.screen(), Scale::ONE);
     let painted = login.painted.as_ref().expect("a surface is kept");
@@ -2047,7 +2062,10 @@ fn the_ribbon_keeps_the_column_dark() {
 #[test]
 fn the_ribbon_asks_for_its_frames_and_holds_still_under_reduced_motion() {
     let login = ribboned();
-    assert_eq!(login.park_timeout(0, None), SceneClock::FRAME_NS);
+    assert_eq!(
+        login.park_timeout(0, None),
+        SceneClock::frame_on(RefreshRate::ASSUMED)
+    );
 
     let mut calm = screen_in(
         vec![AccountTile::new("Ann Example", "ann")],
@@ -2063,7 +2081,12 @@ fn the_ribbon_asks_for_its_frames_and_holds_still_under_reduced_motion() {
         "a still ribbon arms no frame"
     );
     assert_eq!(
-        refreshed(&mut calm, 10 * SceneClock::FRAME_NS, None).present,
+        refreshed(
+            &mut calm,
+            10 * SceneClock::frame_on(RefreshRate::ASSUMED),
+            None
+        )
+        .present,
         Present::Nothing
     );
 }

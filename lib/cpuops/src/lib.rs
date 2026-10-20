@@ -9,10 +9,12 @@
 //!
 //! The crate is `no_std`, contains no `unsafe`, and names no architecture,
 //! board, or `SoC`: concrete routines live in their owning crates and are gated
-//! on the discovered feature bits this framework matches against. The selection
-//! algorithm allocates nothing; only the optional [`OpsTables`] uses the heap,
-//! behind the default-on `alloc` feature, so an allocator-free consumer depends
-//! on this crate with `default-features = false`.
+//! on the discovered feature bits this framework matches against. A family
+//! resolves itself on first use against the set this process was delivered
+//! ([`process`]). The selection algorithm allocates nothing; only the optional
+//! [`OpsTables`] uses the heap, behind the default-on `alloc` feature, so an
+//! allocator-free consumer depends on this crate with `default-features =
+//! false`.
 
 #![no_std]
 
@@ -25,11 +27,13 @@
 extern crate alloc;
 
 pub mod bench;
+pub mod process;
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 pub use bench::{BenchHarness, CycleCounter};
+pub use process::{deliver, delivered, Resolved};
 // The capability vocabulary is shared with the Arch HAL from the one ABI
 // definition, so a candidate's required-feature gate is the exact set the ports
 // produce.

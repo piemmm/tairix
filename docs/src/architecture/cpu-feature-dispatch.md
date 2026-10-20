@@ -75,7 +75,10 @@ startup vector (`ProcessStart::cpu_features`, read through
 set advertises is legal on every core, so a dispatched routine can never trap
 after a migration. Until the set is finalised it is empty — the program uses
 the portable baseline, which is always correct (fail closed). The set is a
-non-secret capability fact, so delivering it grants no authority.
+non-secret capability fact, so delivering it grants no authority. The runtime
+records it before `main` (`tairix_cpuops::deliver`), and each family resolves
+against it the first time the program uses it (`tairix_cpuops::Resolved`), so
+no program calls a resolve of its own.
 
 ## The crypto carve-out
 
@@ -93,8 +96,9 @@ logical hash — so a first-party implementation is permitted. On a core with th
 `crc32c*` / SSE4.2 instruction it runs in one general-purpose-register
 instruction per word; everywhere else it is the portable table baseline, and
 the hardware path is self-verified bit-identical to that baseline before it can
-be selected. The kernel resolves it once, after SMP bring-up, against the
-finalised common feature set.
+be selected. The kernel resolves its own once, after SMP bring-up, against the
+finalised common feature set; a process — the ARXFS driver among them —
+resolves its on the first checksum, against the set it was delivered.
 
 ## Consumer: page-zero (`lib/pagezero`)
 
@@ -117,5 +121,5 @@ fixed vector of lengths and alignments, including that it zeroes *exactly* the
 requested region and touches nothing past it — before it can be selected. Like
 CRC-32C, the kernel resolves one routine, after SMP bring-up, against the
 finalised common feature set (a kernel routine may migrate between cores, so it
-must be legal on all of them); the `ERMS` (x86_64) and `DcZva` (aarch64)
+must be legal on all of them), and a process resolves its own on first use; the `ERMS` (x86_64) and `DcZva` (aarch64)
 capability bits gate the two candidates.

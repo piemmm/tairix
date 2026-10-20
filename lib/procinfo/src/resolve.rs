@@ -1064,6 +1064,21 @@ pub fn cpu_info(transport: &dyn Transport) -> Result<Vec<CpuInfoRecord>, Resolve
     Ok(records)
 }
 
+/// How many CPUs `cpus`, a [`cpu_info`] answer, reports online — one when
+/// the question could not be asked, which is the least a machine has and what
+/// a pool spread across it then runs on.
+#[must_use]
+pub fn online_count(cpus: Option<&[CpuInfoRecord]>) -> usize {
+    cpus.map_or(1, <[_]>::len).max(1)
+}
+
+/// How many CPUs the machine reports online, asked over `transport`: the count
+/// for a consumer that needs no other processor fact.
+#[must_use]
+pub fn online_cpus(transport: &dyn Transport) -> usize {
+    online_count(cpu_info(transport).ok().as_deref())
+}
+
 /// The performance-class topology string: the online core count and the
 /// per-class breakdown, e.g. `4 (performance:2 efficiency:2)`. A
 /// homogeneous machine still lists both classes (one at zero) so the shape

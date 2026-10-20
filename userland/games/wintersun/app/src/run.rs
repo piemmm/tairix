@@ -1283,7 +1283,8 @@ mod program {
         clips: &Clips<'_>,
     ) -> i32 {
         let params = field.params();
-        let pool = Pool::for_cpus(online_cpus());
+        let online = tairix_procinfo::online_cpus(&tairix_procinfo::IpcTransport);
+        let pool = app::pool_across(APP_NAME, online, "refining the realm's land");
         let Ok(land) = RealmLand::new(field, &pool) else {
             return app::fail(
                 APP_NAME,
@@ -1474,12 +1475,6 @@ mod program {
         }
     }
 
-    /// How many cores the machine reported, discovered rather than
-    /// assumed, so the same binary uses a Pi's four and a server's many.
-    fn online_cpus() -> usize {
-        tairix_procinfo::cpu_info(&tairix_procinfo::IpcTransport).map_or(1, |cpus| cpus.len())
-    }
-
     /// Start the chunk worker, answering whether one is running.
     fn start_quarry(quarry: &Arc<Quarry>, set: u64) -> bool {
         if !quarry.wake.is_armed() {
@@ -1579,7 +1574,7 @@ mod program {
             // the picture to the next, and a minimized window keeps the
             // region the session released.
             if session.shell.running() && cadence.is_due(now) {
-                cadence.begun(now);
+                cadence.begun(now, session.look.desktop.refresh());
                 match draw(session, world, decals, player, pool, now) {
                     Ok(true) => governed(session, now),
                     Ok(false) => {}
@@ -1682,7 +1677,8 @@ mod program {
     /// The reference scene in the game's window, held still until the player
     /// leaves.
     fn reference_scene(mut window: AppWindow, look: Look, endpoint: u64, set: u64) -> i32 {
-        let pool = Pool::for_cpus(online_cpus());
+        let online = tairix_procinfo::online_cpus(&tairix_procinfo::IpcTransport);
+        let pool = app::pool_across(APP_NAME, online, "generating the reference realm");
         let Ok(world) = reference::World::generate(&pool) else {
             return app::fail(
                 APP_NAME,

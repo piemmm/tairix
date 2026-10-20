@@ -62,9 +62,10 @@
 // legitimately unused there (`CpuFeatureSet` is always used).
 #[cfg_attr(not(any(pagezero_x86_64, pagezero_aarch64)), allow(unused_imports))]
 use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
-use tairix_cpuops::{Candidate, CoreKey, Decision, Family, FamilyId, Selection, Selector};
+use tairix_cpuops::{
+    Candidate, CoreKey, Decision, Family, FamilyId, Resolved, Selected, Selection, Selector,
+};
 use tairix_hash::FastHash;
-use tairix_sync::OnceCell;
 
 #[cfg(pagezero_aarch64)]
 pub mod aarch64;
@@ -102,12 +103,10 @@ pub fn zero_portable(buf: &mut [u8]) {
     buf.fill(0);
 }
 
-/// The set-once resolved implementation for the whole kernel image.
-///
-/// Holds the winning function pointer once [`resolve`] runs. Before it is set
-/// (or if resolution ever failed and left it unset) [`zero`] falls closed to
-/// the portable baseline.
-static RESOLVED: OnceCell<PageZeroFn> = OnceCell::new();
+/// The implementation in force once [`resolve`] runs. Before that, [`zero`]
+/// falls closed to the portable baseline: the kernel resolves explicitly and
+/// is delivered no feature set, so nothing resolves it earlier.
+static RESOLVED: Resolved<PageZeroFn> = Resolved::new();
 
 /// The accelerated candidates available on this build, in descending declared
 /// priority. A target with no block-zero instruction has none and the baseline
@@ -215,6 +214,14 @@ pub fn resolve_pinned(features: CpuFeatureSet, pin: &'static str) -> Decision {
 }
 
 fn select_and_install(features: CpuFeatureSet, pin: Option<&'static str>) -> Decision {
+    let selected = select(features, pin);
+    // The first resolve wins the installed implementation; a later one still
+    // returns its decision for the log.
+    let _ = RESOLVED.install(selected.impl_);
+    selected.decision
+}
+
+fn select(features: CpuFeatureSet, pin: Option<&'static str>) -> Selected<PageZeroFn> {
     // One shared scratch buffer on the stack; every case pre-fills and zeroes
     // it in turn (the selector runs `run` then `reference` sequentially per
     // case, so the borrows never overlap). A single 4 KiB buffer keeps the
@@ -255,12 +262,7 @@ fn select_and_install(features: CpuFeatureSet, pin: Option<&'static str>) -> Dec
     }
     // Keyed by the feature bits for the log; a kernel-wide routine is resolved
     // against the common set, so one key is correct.
-    let selected = selector.select(&family, features, CoreKey(features.bits()), None);
-    // Set-once: the first resolve wins the installed implementation; a later
-    // call's `AlreadySet` is expected and ignored (the decision is still
-    // returned for logging).
-    let _ = RESOLVED.set(selected.impl_);
-    selected.decision
+    selector.select(&family, features, CoreKey(features.bits()), None)
 }
 
 /// Zero every byte of `buf` using the resolved implementation.
@@ -269,10 +271,7 @@ fn select_and_install(features: CpuFeatureSet, pin: Option<&'static str>) -> Dec
 /// function pointer; before [`resolve`] runs, or if resolution failed, it is
 /// the portable baseline (fail closed — never a trap, never a panic).
 pub fn zero(buf: &mut [u8]) {
-    match RESOLVED.get() {
-        Ok(Some(implementation)) => implementation(buf),
-        _ => zero_portable(buf),
-    }
+    RESOLVED.get(|features| select(features, None).impl_, zero_portable)(buf);
 }
 
 #[cfg(test)]

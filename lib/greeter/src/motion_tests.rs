@@ -13,7 +13,7 @@ use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{Key, NamedKey};
 use tairix_raster::Surface;
-use tairix_theme::{MotionInteraction, Timeline};
+use tairix_theme::MotionInteraction;
 
 use crate::chooser::{AccountTile, Chooser};
 use crate::layout::Prompt;
@@ -21,7 +21,7 @@ use crate::motion::{between_rects, Shake, Stage, Toward, Veil};
 use crate::surface::{AuthSurface, Verdict, CHOOSE_HINT, REFUSED};
 use crate::testkit::{
     changed_pixels, contrast_in, darkest_in, feed_at, feed_in, key, named, painted, render,
-    render_in, render_over_light, still, theme, Scripted, SCREEN,
+    render_in, render_over_light, still, theme, Scripted, RATE, SCREEN,
 };
 
 /// A monotonic instant a person could plausibly log in at.
@@ -86,11 +86,11 @@ fn a_zero_duration_starts_nothing() {
 #[test]
 fn an_idle_surface_asks_for_no_frame() {
     let chooser = placed();
-    assert_eq!(chooser.motion_due(0), None);
-    assert_eq!(chooser.motion_due(u64::MAX), None);
+    assert_eq!(chooser.motion_due(0, RATE), None);
+    assert_eq!(chooser.motion_due(u64::MAX, RATE), None);
 
     let mut lock = AuthSurface::new("ann", "ann");
-    assert_eq!(lock.motion_due(0), None);
+    assert_eq!(lock.motion_due(0, RATE), None);
     assert!(!lock.advance(1_000).redraw());
 }
 
@@ -108,14 +108,18 @@ fn a_chooserless_question_shakes_and_fades() {
     feed_at(&mut surface, &key(Key::Char('x')), &mut verifier, BOOT);
     feed_at(&mut surface, &named(NamedKey::Enter), &mut verifier, BOOT);
     let shake = span_of(MotionInteraction::AttemptRejected);
-    assert_eq!(surface.motion_due(BOOT), Some(Timeline::FRAME_NS));
+    assert_eq!(surface.motion_due(BOOT, RATE), Some(RATE.frame_ns()));
     assert!(surface.advance(BOOT + shake / 4).redraw(), "it shakes");
     surface.advance(BOOT + shake);
-    assert_eq!(surface.motion_due(BOOT + shake), None, "and comes to rest");
+    assert_eq!(
+        surface.motion_due(BOOT + shake, RATE),
+        None,
+        "and comes to rest"
+    );
 
     let fade = span_of(MotionInteraction::SessionFade);
     surface.begin_session_fade(BOOT, &theme);
-    assert_eq!(surface.motion_due(BOOT), Some(Timeline::FRAME_NS));
+    assert_eq!(surface.motion_due(BOOT, RATE), Some(RATE.frame_ns()));
     assert!(surface.advance(BOOT + fade / 4).redraw(), "it darkens");
     surface.advance(BOOT + fade);
     assert!(surface.session_fade_finished(), "and reaches black");
@@ -167,7 +171,7 @@ fn a_stage_transition_moves_no_pixel_outside_the_band_it_reports() {
             );
 
             let mut now = 0;
-            while let Some(due) = surface.motion_due(now) {
+            while let Some(due) = surface.motion_due(now, RATE) {
                 now += due.max(1);
                 let outcome = surface.advance(now);
                 if !outcome.redraw() {
@@ -214,7 +218,7 @@ fn picking_an_account_travels_the_disc_between_the_two_stages() {
     let chooser = render(&surface);
     feed_at(&mut surface, &named(NamedKey::Enter), &mut verifier, 0);
     assert!(
-        surface.motion_due(0).is_some(),
+        surface.motion_due(0, RATE).is_some(),
         "a started transition asks for frames"
     );
 
@@ -288,7 +292,11 @@ fn a_completed_travel_is_the_settled_prompt() {
     let mut animated = placed();
     feed_at(&mut animated, &named(NamedKey::Enter), &mut verifier, 0);
     animated.advance(span);
-    assert_eq!(animated.motion_due(span), None, "nothing is left running");
+    assert_eq!(
+        animated.motion_due(span, RATE),
+        None,
+        "nothing is left running"
+    );
 
     assert_eq!(render(&animated), render(&cut_to_prompt()));
 }
@@ -306,7 +314,10 @@ fn a_travel_that_ended_while_its_frame_was_presented_still_asks_for_the_last() {
     feed_at(&mut surface, &named(NamedKey::Enter), &mut verifier, BOOT);
     let stepped = BOOT + span - MS;
     surface.advance(stepped);
-    assert!(surface.motion_due(stepped).is_some(), "still travelling");
+    assert!(
+        surface.motion_due(stepped, RATE).is_some(),
+        "still travelling"
+    );
     assert_ne!(
         render(&surface),
         render(&cut_to_prompt()),
@@ -315,11 +326,19 @@ fn a_travel_that_ended_while_its_frame_was_presented_still_asks_for_the_last() {
 
     // Presenting that frame outlasted the millisecond the span had left.
     let asked = BOOT + span + MS;
-    assert_eq!(surface.motion_due(asked), Some(0), "the last frame is owed");
+    assert_eq!(
+        surface.motion_due(asked, RATE),
+        Some(0),
+        "the last frame is owed"
+    );
 
     surface.advance(asked);
     assert_eq!(render(&surface), render(&cut_to_prompt()));
-    assert_eq!(surface.motion_due(asked), None, "only then is it over");
+    assert_eq!(
+        surface.motion_due(asked, RATE),
+        None,
+        "only then is it over"
+    );
 }
 
 /// And the return runs the same travel backwards, ending on the settled
@@ -334,7 +353,7 @@ fn the_return_ends_on_the_settled_chooser() {
     surface.advance(span);
     feed_at(&mut surface, &named(NamedKey::Escape), &mut verifier, span);
     assert!(
-        surface.motion_due(span).is_some(),
+        surface.motion_due(span, RATE).is_some(),
         "stepping back animates too"
     );
 
@@ -347,7 +366,7 @@ fn the_return_ends_on_the_settled_chooser() {
     );
 
     surface.advance(span * 2);
-    assert_eq!(surface.motion_due(span * 2), None);
+    assert_eq!(surface.motion_due(span * 2, RATE), None);
     assert_eq!(surface.notice(), CHOOSE_HINT);
     assert_eq!(render(&surface), render(&placed()));
 }
@@ -369,7 +388,7 @@ fn reduced_motion_steps_straight_to_the_prompt() {
     );
 
     assert_eq!(surface.selected_account(), Some("ann"));
-    assert_eq!(surface.motion_due(0), None);
+    assert_eq!(surface.motion_due(0, RATE), None);
     assert!(!surface.advance(0).redraw());
     assert_eq!(render_in(&surface, &still), render(&surface));
 }
@@ -415,7 +434,7 @@ fn a_travel_interrupted_half_way_turns_round_where_it_is() {
     );
 
     surface.advance(BOOT + span * 2);
-    assert_eq!(surface.motion_due(BOOT + span * 2), None);
+    assert_eq!(surface.motion_due(BOOT + span * 2, RATE), None);
     assert_eq!(render(&surface), render(&placed()));
 }
 
@@ -432,14 +451,18 @@ fn an_overlapping_selection_fade_and_travel_both_settle() {
     let mut animated = placed();
     feed_at(&mut animated, &named(NamedKey::Tab), &mut verifier, 0);
     feed_at(&mut animated, &named(NamedKey::Enter), &mut verifier, MS);
-    assert!(animated.motion_due(MS).is_some());
+    assert!(animated.motion_due(MS, RATE).is_some());
 
     let end = MS + selection.max(stage) + 1;
     animated.advance(end);
-    assert_eq!(animated.motion_due(end), None, "nothing is left animating");
+    assert_eq!(
+        animated.motion_due(end, RATE),
+        None,
+        "nothing is left animating"
+    );
     feed_at(&mut animated, &named(NamedKey::Escape), &mut verifier, end);
     animated.advance(end + stage);
-    assert_eq!(animated.motion_due(end + stage), None);
+    assert_eq!(animated.motion_due(end + stage, RATE), None);
 
     let mut cut = placed();
     feed_in(&mut cut, &named(NamedKey::Tab), &mut verifier, 0, &still);
@@ -534,7 +557,7 @@ fn a_refusal_shakes_the_question_within_the_band_it_reports() {
     feed_at(&mut surface, &key(Key::Char('x')), &mut verifier, 0);
     feed_at(&mut surface, &named(NamedKey::Enter), &mut verifier, 0);
     assert_eq!(surface.notice(), REFUSED);
-    assert!(surface.motion_due(0).is_some(), "a refusal shakes");
+    assert!(surface.motion_due(0, RATE).is_some(), "a refusal shakes");
 
     let resting = render(&surface);
     let mut union: Option<Rect> = None;
@@ -570,7 +593,7 @@ fn a_refusal_shakes_the_question_within_the_band_it_reports() {
     assert!(band.height < SCREEN.height, "it is not the whole screen");
 
     surface.advance(span);
-    assert_eq!(surface.motion_due(span), None);
+    assert_eq!(surface.motion_due(span, RATE), None);
     assert_eq!(render(&surface), resting, "it comes to rest where it began");
 }
 
@@ -589,7 +612,11 @@ fn a_reduced_motion_refusal_says_so_without_moving() {
     }
 
     assert_eq!(quiet.notice(), REFUSED);
-    assert_eq!(quiet.motion_due(0), None, "reduced motion arms no timer");
+    assert_eq!(
+        quiet.motion_due(0, RATE),
+        None,
+        "reduced motion arms no timer"
+    );
     assert!(!quiet.advance(1_000).redraw());
     assert_eq!(
         render(&quiet),
@@ -630,7 +657,7 @@ fn the_veil_darkens_to_black() {
     }
 
     assert!(surface.session_fade_finished());
-    assert_eq!(surface.motion_due(span), None);
+    assert_eq!(surface.motion_due(span, RATE), None);
     assert_eq!(surface.reveal(), 0, "and it reaches full black");
 }
 
@@ -722,8 +749,8 @@ fn a_veil_at_full_black_asks_for_no_further_frame() {
     surface.advance(BOOT + fade);
 
     assert!(surface.session_fade_finished());
-    assert_eq!(surface.motion_due(BOOT + fade), None);
-    assert_eq!(surface.motion_due(BOOT + fade * 2), None, "nor later");
+    assert_eq!(surface.motion_due(BOOT + fade, RATE), None);
+    assert_eq!(surface.motion_due(BOOT + fade * 2, RATE), None, "nor later");
     assert!(!surface.advance(BOOT + fade * 2).redraw());
 }
 
@@ -735,7 +762,7 @@ fn a_reduced_motion_fade_is_finished_at_once() {
     surface.begin_session_fade(0, &still());
 
     assert!(surface.session_fade_finished());
-    assert_eq!(surface.motion_due(0), None);
+    assert_eq!(surface.motion_due(0, RATE), None);
 }
 
 /// The surface says it has begun leaving from the first veiled frame, which
@@ -817,11 +844,11 @@ fn a_finished_veil_of_either_direction_asks_for_no_further_frame() {
         Veil::arriving(BOOT, veil_ms()),
         Veil::leaving(0, BOOT, veil_ms()),
     ] {
-        assert!(veil.next_frame_in(BOOT).is_some(), "it is running");
+        assert!(veil.next_frame_in(BOOT, RATE).is_some(), "it is running");
         veil.advance(BOOT + span);
         assert!(veil.finished());
-        assert_eq!(veil.next_frame_in(BOOT + span), None);
-        assert_eq!(veil.next_frame_in(BOOT + span * 2), None, "nor later");
+        assert_eq!(veil.next_frame_in(BOOT + span, RATE), None);
+        assert_eq!(veil.next_frame_in(BOOT + span * 2, RATE), None, "nor later");
         assert!(!veil.advance(BOOT + span * 2), "and nothing moves");
     }
 }

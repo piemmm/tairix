@@ -16,7 +16,7 @@ use tairix_controls::{
     Keystroke, Toggle,
 };
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -1009,11 +1009,6 @@ fn whole((width, height): (u32, u32)) -> Rect {
 /// The height `group` takes in a plate `width` wide, in its own column.
 fn group_height(group: &FieldGroup, width: u32, scale: Scale, theme: &Theme) -> u32 {
     group.measured_height(width, group.slot_column(width, scale, theme), scale, theme)
-}
-
-/// `value` as a coordinate, saturating.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 #[cfg(test)]

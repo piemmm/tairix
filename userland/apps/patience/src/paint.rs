@@ -364,7 +364,7 @@ fn card_tile(
     let layout = view.layout;
     let rect = layout.card_at(at);
     let reach = layout.card_height / 10;
-    if !admits(surface, grown(rect, reach)) {
+    if !admits(surface, rect.outset(reach)) {
         return;
     }
     let (face_up, width) = match facing {
@@ -429,7 +429,7 @@ fn focus(surface: &mut Surface, view: &View<'_>, cursor: Cursor, palette: &Palet
     outline(
         surface,
         layout,
-        grown(rect, layout.hairline * 2),
+        rect.outset(layout.hairline * 2),
         palette.text,
         2,
     );
@@ -448,16 +448,6 @@ fn outline(surface: &mut Surface, layout: &Layout, rect: Rect, ink: Color, thick
         Ring::uniform(layout.radius + layout.hairline, layout.hairline * thickness),
         RingInk::Solid(ink),
     );
-}
-
-/// `rect` grown by `by` on every side.
-fn grown(rect: Rect, by: u32) -> Rect {
-    Rect::new(
-        rect.left() - to_i32(by),
-        rect.top() - to_i32(by),
-        rect.width.saturating_add(by * 2),
-        rect.height.saturating_add(by * 2),
-    )
 }
 
 /// Whether any pixel of `rect` is one `surface` would write.

@@ -433,7 +433,7 @@ fn a_carried_drag_is_the_drains_until_its_press_comes_up() {
 
     assert_eq!(
         desk.wake(&mut pointer, &mut keyboard(&[]), &mut program),
-        Ok(SeatWake::Served)
+        Ok(SeatWake::Served { carried: true })
     );
     assert_eq!(
         program.drags,
@@ -458,6 +458,28 @@ fn a_carried_drag_is_the_drains_until_its_press_comes_up() {
     );
 }
 
+/// A wake whose last event ends a move still reports the pointer carried: its
+/// motion moved the window, so the cursor plane goes with that frame. A wake of
+/// free motion carries nothing.
+#[test]
+fn a_wake_that_ends_a_move_reports_the_pointer_carried() {
+    let (mut desk, _) = pressed_desk();
+    assert!(desk.shell.begin_move(&desk.comp));
+    let mut pointer = MemoryInput::new(&[moved(160, 150), moved(170, 160), PRIMARY_RELEASE]);
+    let mut program = Program::new();
+    assert_eq!(
+        desk.wake(&mut pointer, &mut keyboard(&[]), &mut program),
+        Ok(SeatWake::Served { carried: true })
+    );
+    assert!(!desk.shell.pointer_carries(), "the release let it go");
+
+    let mut pointer = MemoryInput::new(&[moved(10, 10), moved(12, 12)]);
+    assert_eq!(
+        desk.wake(&mut pointer, &mut keyboard(&[]), &mut program),
+        Ok(SeatWake::Served { carried: false })
+    );
+}
+
 /// A burst of motion over one slot resolves what the slot does once, as the
 /// pointer arrives; only arriving somewhere else resolves again.
 #[test]
@@ -477,14 +499,14 @@ fn a_drag_resolves_a_place_once_as_the_pointer_arrives_on_it() {
     program.target = Some(editor());
     assert_eq!(
         desk.wake(&mut pointer, &mut keyboard(&[]), &mut program),
-        Ok(SeatWake::Served)
+        Ok(SeatWake::Served { carried: true })
     );
     assert_eq!(program.surfaces_built, 1);
 
     let mut pointer = MemoryInput::new(&[moved(1, 1), moved(2, 1), moved(slot.x, slot.y)]);
     assert_eq!(
         desk.wake(&mut pointer, &mut keyboard(&[]), &mut program),
-        Ok(SeatWake::Served)
+        Ok(SeatWake::Served { carried: true })
     );
     assert_eq!(
         program.surfaces_built, 3,
@@ -555,7 +577,7 @@ fn a_row_click_queued_behind_the_press_that_opens_a_bar_menu_is_the_chains() {
 
     let woke = desk.wake(&mut pointer, &mut keyboard(&[]), &mut program);
 
-    assert_eq!(woke, Ok(SeatWake::Served));
+    assert_eq!(woke, Ok(SeatWake::Served { carried: false }));
     assert_eq!(pointer.remaining(), 0);
     assert!(!desk.menu.is_open(), "the chosen row closed the chain");
     assert!(
@@ -593,7 +615,7 @@ fn input_behind_the_press_that_dismisses_a_chain_reaches_the_shell() {
 
     let woke = desk.wake(&mut pointer, &mut keyboard(&[]), &mut program);
 
-    assert_eq!(woke, Ok(SeatWake::Served));
+    assert_eq!(woke, Ok(SeatWake::Served { carried: false }));
     assert!(
         !desk.menu.is_open(),
         "the press outside dismissed the chain"
@@ -663,7 +685,7 @@ fn input_behind_the_event_that_locks_waits_for_the_lock() {
 
     let woke = desk.wake(&mut pointer, &mut keys, &mut program);
 
-    assert_eq!(woke, Ok(SeatWake::Served));
+    assert_eq!(woke, Ok(SeatWake::Served { carried: false }));
     assert!(desk.lock.is_locked());
     assert_eq!(pointer.remaining(), 1, "the release waits for the lock");
     assert_eq!(queued_keys(&keys), 1, "so does the key");
@@ -707,7 +729,7 @@ fn keys_after_the_key_that_closes_a_chain_reach_the_shell() {
     let mut keys = keyboard(&[named_key(NamedKeyCode::Escape), char_key('a')]);
     let woke = desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program);
 
-    assert_eq!(woke, Ok(SeatWake::Served));
+    assert_eq!(woke, Ok(SeatWake::Served { carried: false }));
     assert!(!desk.menu.is_open(), "Escape closed the chain");
     assert_eq!(queued_keys(&keys), 0);
     assert_eq!(program.routed.len(), 1, "{:?}", program.routed);
@@ -1030,7 +1052,7 @@ fn a_refused_switch_keeps_serving() {
 
     let woke = desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program);
 
-    assert_eq!(woke, Ok(SeatWake::Served));
+    assert_eq!(woke, Ok(SeatWake::Served { carried: false }));
     assert_eq!(program.routed.len(), 2);
     assert_eq!(queued_keys(&keys), 0);
 }

@@ -1,9 +1,9 @@
 //! Host tests of the minimal clock: what it tells, where its text sits and
 //! that it stays there, and the frames and minutes it wakes for.
 
+use crate::saver::{TEST_REFRESH, TEST_SCENE_FRAME_NS};
 use tairix_abi::time::{Time64, WallClockReading, WallTimeState};
 use tairix_taskbar::clock::UNSET_LABEL;
-use tairix_theme::motion::SceneClock;
 use tairix_theme::{Accessibility, Motion, Theme};
 use tairix_wallpaper::RibbonOptions;
 use tairix_wm::{Compositor, Point, Scale, Surface, WindowId};
@@ -32,7 +32,7 @@ fn face_on(
     let calm = motion == Motion::Reduced;
     Ribbon::new(
         &theme(motion),
-        (Scale::ONE, screen),
+        (Scale::ONE, screen, TEST_REFRESH),
         (wall, tairix_tz::CivilClock::UTC, 0),
         (calm, options),
     )
@@ -123,8 +123,8 @@ fn the_text_holds_still_as_the_minute_turns() {
     let (at, tick) = (face.at, face.telling.tick_ns());
     assert_eq!(tick, 53 * SEC, "the next minute boundary");
     let mut now = 0;
-    while now < tick + 3 * SceneClock::FRAME_NS {
-        now += SceneClock::FRAME_NS;
+    while now < tick + 3 * TEST_SCENE_FRAME_NS {
+        now += TEST_SCENE_FRAME_NS;
         let secs = i64::try_from(now / SEC).expect("small");
         face.advance(now, wm, &mut comp, &mut || Some(after(secs)));
     }
@@ -141,17 +141,17 @@ fn the_face_wakes_for_frames_while_it_moves_and_for_the_minute_alone_when_still(
     let wm = canvas(&mut comp, &mut moving);
     assert_eq!(
         moving.due_ns(),
-        SceneClock::FRAME_NS,
+        TEST_SCENE_FRAME_NS,
         "painted at once, then a frame on"
     );
-    moving.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut || Some(after(0)));
-    assert_eq!(moving.due_ns(), 2 * SceneClock::FRAME_NS);
-    moving.advance(SceneClock::FRAME_NS + 1, wm, &mut comp, &mut || {
+    moving.advance(TEST_SCENE_FRAME_NS, wm, &mut comp, &mut || Some(after(0)));
+    assert_eq!(moving.due_ns(), 2 * TEST_SCENE_FRAME_NS);
+    moving.advance(TEST_SCENE_FRAME_NS + 1, wm, &mut comp, &mut || {
         Some(after(0))
     });
     assert_eq!(
         moving.due_ns(),
-        2 * SceneClock::FRAME_NS,
+        2 * TEST_SCENE_FRAME_NS,
         "an early wake draws nothing"
     );
 
@@ -171,9 +171,9 @@ fn a_late_wake_draws_one_frame_and_asks_for_the_next_a_frame_on() {
     let mut comp = compositor();
     let mut moving = face(Motion::Full, Some(after(0)), RibbonOptions::default());
     let wm = canvas(&mut comp, &mut moving);
-    moving.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut || Some(after(0)));
+    moving.advance(TEST_SCENE_FRAME_NS, wm, &mut comp, &mut || Some(after(0)));
     moving.advance(50 * SEC, wm, &mut comp, &mut || Some(after(50)));
-    assert_eq!(moving.due_ns(), 50 * SEC + SceneClock::FRAME_NS);
+    assert_eq!(moving.due_ns(), 50 * SEC + TEST_SCENE_FRAME_NS);
 }
 
 /// A wall clock the face cannot read is asked again a minute later: a past

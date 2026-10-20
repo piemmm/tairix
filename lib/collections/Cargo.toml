@@ -24,9 +24,6 @@ tairix-hash = { path = "../hash", version = "=0.0.0" }
 # The inline half of `SmallVec`, and with it the shared `CapacityError`: the
 # fixed-capacity vector is defined once, in the crate that links no allocator.
 tairix-inline = { path = "../inline", version = "=0.0.0" }
-# The one-shot cell holding the resolved group scan, so this crate is not a
-# second hand-rolled atomic state machine.
-tairix-sync = { path = "../sync", version = "=0.0.0" }
 # The one exact byte-lane match the portable group scan is built on.
 tairix-util = { path = "../util", version = "=0.0.0" }
 # The audited optimisation-resistant wipe `ByteQueue` releases storage through:
@@ -35,6 +32,11 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 # Its `alloc` feature stays off: unified into one build with the
 # allocator-free bare-metal test binaries, it would link `alloc` into them.
 zeroize = { version = "1.8.1", default-features = false }
+
+[build-dependencies]
+# The one reading of which vector unit the target carries, shared by every
+# crate with packed candidates.
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }
 
 [dev-dependencies]
 # Shared per-run seed / budget seam for the fuzz harness (never in a shipping

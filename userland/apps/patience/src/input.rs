@@ -439,10 +439,10 @@ impl Game {
 
     fn light_cursor(&self, cursor: Option<Cursor>, damage: &mut Region) {
         if let (Some(cursor), Some(table)) = (cursor, self.table()) {
-            let area = grown(
-                self.layout.pile_area(table, cursor.pile),
-                self.layout.hairline * 4,
-            );
+            let area = self
+                .layout
+                .pile_area(table, cursor.pile)
+                .outset(self.layout.hairline * 4);
             damage.add(area.union(&lit(&self.layout, table, cursor.pile)));
         }
     }
@@ -846,17 +846,7 @@ fn overlap(a: Rect, b: Rect) -> u64 {
 
 /// What lighting `pile` as the hand's landing place repaints.
 fn lit(layout: &Layout, table: &Table, pile: PileId) -> Rect {
-    grown(layout.landing(table, pile), layout.hairline * 4)
-}
-
-/// `rect` grown by `by` on every side.
-fn grown(rect: Rect, by: u32) -> Rect {
-    Rect::new(
-        rect.left() - to_i32(by),
-        rect.top() - to_i32(by),
-        rect.width.saturating_add(by * 2),
-        rect.height.saturating_add(by * 2),
-    )
+    layout.landing(table, pile).outset(layout.hairline * 4)
 }
 
 #[cfg(test)]

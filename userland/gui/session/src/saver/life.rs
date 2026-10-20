@@ -20,6 +20,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::fallible;
 use tairix_wallpaper::LifeOptions;
@@ -109,26 +110,69 @@ pub(super) struct Life {
     settled: u32,
     rng: NonCryptoRng,
     damage: Region,
-    frames: u32,
-    /// Frames between generations.
-    pace: u32,
-    /// How much of its brightness a cell gains a frame while being born, and
-    /// loses while dying.
-    steps: (u8, u8),
+    /// When the next generation falls due, on the world's own clock rather
+    /// than a count of frames, so its speed is the same on every display.
+    next_generation_ns: u64,
+    cadence: Cadence,
     size: (u32, u32),
     due_ns: u64,
 }
 
+/// How the world is drawn in time: how long a generation and a frame stand,
+/// and how far a cell's brightness moves a frame.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Cadence {
+    generation_ns: u64,
+    calm: bool,
+    frame_ns: u64,
+    /// How much of its brightness a cell gains a frame while being born, and
+    /// loses while dying: a birth completes in the fewest frames that pass
+    /// between two generations.
+    steps: (u8, u8),
+}
+
+impl Cadence {
+    /// A generation every `generation_ns` drawn in frames of `frame_ns`, its
+    /// cells changing at once when `calm`.
+    fn new(generation_ns: u64, calm: bool, frame_ns: u64) -> Self {
+        let pace = u32::try_from(generation_ns / frame_ns.max(1))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let scaled = |step: u8| {
+            u8::try_from((u32::from(step) * PACE_OF_STEPS).div_ceil(pace)).unwrap_or(u8::MAX)
+        };
+        Self {
+            generation_ns,
+            calm,
+            frame_ns,
+            steps: if calm {
+                (u8::MAX, u8::MAX)
+            } else {
+                (scaled(BIRTH_STEP), scaled(DEATH_STEP))
+            },
+        }
+    }
+
+    /// The same world drawn in frames of `frame_ns`.
+    fn retimed(self, frame_ns: u64) -> Self {
+        if frame_ns == self.frame_ns {
+            self
+        } else {
+            Self::new(self.generation_ns, self.calm, frame_ns)
+        }
+    }
+}
+
 impl Life {
     /// A freshly seeded world for a `size` screen at `scale` as `options`
-    /// describe it, first drawn at `now_ns` and `calm` under reduced motion;
-    /// `None` when the screen holds no cell or the heap will not give the
-    /// board.
+    /// describe it, first drawn at `now_ns` on a display refreshing at
+    /// `refresh` and `calm` under reduced motion; `None` when the screen holds
+    /// no cell or the heap will not give the board.
     pub(super) fn new(
         size: (u32, u32),
         scale: Scale,
         (calm, options): (bool, LifeOptions),
-        now_ns: u64,
+        (now_ns, refresh): (u64, RefreshRate),
     ) -> Option<Self> {
         let (width, height) = size;
         let pixels = u64::from(width) * u64::from(height);
@@ -139,12 +183,6 @@ impl Life {
             .max(3);
         let generation_ns = 100 * 1_000_000_000
             / (GENERATIONS_PER_SECOND * u64::from(options.speed.percent())).max(1);
-        let pace = u32::try_from(generation_ns / SceneClock::FRAME_NS)
-            .unwrap_or(u32::MAX)
-            .max(1);
-        let scaled = |step: u8| {
-            u8::try_from((u32::from(step) * PACE_OF_STEPS).div_ceil(pace)).unwrap_or(u8::MAX)
-        };
         let cols = usize::try_from(width / cell).ok()?;
         let rows = usize::try_from(height / cell).ok()?;
         if cols < 3 || rows < 3 {
@@ -183,13 +221,8 @@ impl Life {
             settled: 0,
             rng: NonCryptoRng::seed_from_u64(seed_from(now_ns)),
             damage: Region::with_budget(DAMAGE_BUDGET),
-            frames: 0,
-            pace,
-            steps: if calm {
-                (u8::MAX, u8::MAX)
-            } else {
-                (scaled(BIRTH_STEP), scaled(DEATH_STEP))
-            },
+            next_generation_ns: now_ns.saturating_add(generation_ns),
+            cadence: Cadence::new(generation_ns, calm, SceneClock::frame_on(refresh)),
             size,
             due_ns: now_ns,
         };
@@ -211,10 +244,11 @@ impl Life {
         if now_ns < self.due_ns {
             return;
         }
-        self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
-        self.frames += 1;
-        if self.frames >= self.pace {
-            self.frames = 0;
+        self.cadence = self
+            .cadence
+            .retimed(SceneClock::frame_on(compositor.refresh_rate()));
+        self.due_ns = now_ns.saturating_add(self.cadence.frame_ns);
+        if self.generation_due(now_ns) {
             self.generation();
         }
         self.fade();
@@ -236,6 +270,22 @@ impl Life {
         });
         self.damage = damage;
         self.retire_settled();
+    }
+
+    /// Whether a generation falls due by `now_ns`, moving the deadline on if
+    /// so. One missed outright is dropped rather than run in a burst.
+    fn generation_due(&mut self, now_ns: u64) -> bool {
+        if now_ns < self.next_generation_ns {
+            return false;
+        }
+        let interval = self.cadence.generation_ns;
+        let next = self.next_generation_ns.saturating_add(interval);
+        self.next_generation_ns = if next > now_ns {
+            next
+        } else {
+            now_ns.saturating_add(interval)
+        };
+        true
     }
 
     /// Compute the next generation and mark every cell whose look it
@@ -443,9 +493,9 @@ impl Life {
             let (row, col) = (cell / self.cols, cell % self.cols);
             let level = self.level[cell];
             self.level[cell] = if self.alive(row, col) {
-                level.saturating_add(self.steps.0)
+                level.saturating_add(self.cadence.steps.0)
             } else {
-                level.saturating_sub(self.steps.1)
+                level.saturating_sub(self.cadence.steps.1)
             };
             self.damage.add(self.cell_rect(row, col));
         }

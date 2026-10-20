@@ -2,6 +2,7 @@
 //! on it, the duel's rules, that every duel is decided and plays the same
 //! however its frames fall, and how a bike is put together.
 
+use crate::saver::TEST_SCENE_FRAME_NS;
 use alloc::vec::Vec;
 
 use tairix_rng::NonCryptoRng;
@@ -23,7 +24,7 @@ fn view() -> View {
 }
 
 fn duel(seed: u64, start: f64) -> Duel {
-    let camera = Camera::at(&view(), Moment::at(start, SPEED));
+    let camera = Camera::at(&view(), Moment::at(start, SPEED, TEST_SCENE_FRAME_NS));
     Duel::new(NonCryptoRng::seed_from_u64(seed), start, &camera, SPEED)
 }
 
@@ -41,7 +42,7 @@ fn play(
     let (mut time, end) = (duel.start, duel.start + within);
     while time < end {
         time = (time + step).min(end);
-        let camera = Camera::at(&view, Moment::at(time, SPEED));
+        let camera = Camera::at(&view, Moment::at(time, SPEED, TEST_SCENE_FRAME_NS));
         duel.advance(time, &camera, &models, blasts);
         blasts.retire(time);
         each(duel, time);

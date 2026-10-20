@@ -3,10 +3,10 @@
 //! [`Desktop`] is what an application holds after asking the session
 //! ([`WindowClient::desktop`](crate::WindowClient::desktop)): the screen
 //! extent as geometry, the UI scale as a [`Scale`] rather than a bare
-//! percentage, and the active [`Appearance`]. Handing it each state the
-//! desktop notice publishes keeps it current, so an application that follows
-//! a screen-mode change or a light/dark switch does not repeat the same
-//! bookkeeping in its own source.
+//! percentage, the active [`Appearance`], and the [`RefreshRate`] it
+//! composes frames at. Handing it each state the desktop notice publishes
+//! keeps it current, so an application that follows a screen-mode change or a
+//! light/dark switch does not repeat the same bookkeeping in its own source.
 //!
 //! It holds only description — no capability, no handle, nothing another
 //! principal owns — and every value in it is already validated: a
@@ -14,6 +14,7 @@
 //! the range [`Scale`] admits.
 
 use tairix_abi::desktop::{Appearance, DesktopInfo};
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::Errno;
 use tairix_geometry::{Rect, Scale};
 
@@ -70,19 +71,28 @@ impl Desktop {
         self.info.appearance()
     }
 
+    /// The rate the desktop composes frames at, which an animation paces its
+    /// frames by.
+    #[must_use]
+    pub const fn refresh(&self) -> RefreshRate {
+        self.info.refresh()
+    }
+
     /// The record exactly as the session reported it.
     #[must_use]
     pub const fn info(&self) -> DesktopInfo {
         self.info
     }
 
-    /// Adopt `info` as the desktop's current state, answering whether
-    /// anything changed.
+    /// Adopt `info` as the desktop's current state, answering whether the
+    /// window must be redrawn.
     ///
     /// The record the session published, not an event: an application
     /// converges on the desktop notice, so this is what it hands the
-    /// value to. The state it holds is a whole record, so a value equal
-    /// to the one already held answers `false` and costs nothing.
+    /// value to. A record equal to the one held answers `false`, and so does
+    /// one differing in its frame rate alone, which is taken all the same:
+    /// nothing drawn depends on it, and an animation reads [`Self::refresh`]
+    /// as it paces each frame.
     ///
     /// # Errors
     ///
@@ -94,8 +104,9 @@ impl Desktop {
         if info == self.info {
             return Ok(false);
         }
+        let redraw = info.with_refresh(self.info.refresh()) != self.info;
         *self = Self::new(info)?;
-        Ok(true)
+        Ok(redraw)
     }
 
     /// The physical size to open a window of `logical_width` ×

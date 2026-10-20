@@ -72,10 +72,10 @@ pub fn arg_count() -> u32 {
 /// process — the intersection of the ISA extensions present on every core it
 /// may run on.
 ///
-/// A program resolves its self-optimising accelerated routines against this
-/// (for example `tairix_crc32c::resolve(tairix_rt::cpu_features())` once at
-/// start-up): because it is the intersection over all cores, any instruction
-/// it advertises is legal on every core the scheduler may migrate the task to.
+/// The runtime records it before `main` (`tairix_cpuops::deliver`), and every
+/// self-optimising routine resolves against it on first use: because it is the
+/// intersection over all cores, any instruction it advertises is legal on every
+/// core the scheduler may migrate the task to.
 /// It is the empty set when no validated startup vector is available, or before
 /// the kernel finalised the set — a program then uses the portable baseline
 /// everywhere, which is always correct (fail closed).

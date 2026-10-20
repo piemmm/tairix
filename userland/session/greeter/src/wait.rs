@@ -5,10 +5,10 @@
 //! and a lockout counting down repaint, and a screen left untouched long
 //! enough puts its display to sleep; this module times those three.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::Duration64;
 use tairix_abi::WAITSET_TIMEOUT_NONE;
 use tairix_greeter::Cooldown;
-use tairix_theme::Timeline;
 
 /// Nanoseconds in one second.
 const NANOS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
@@ -72,17 +72,17 @@ pub fn park_timeout(clock: Option<u64>, cooldown_remaining: Duration64) -> u64 {
     }
 }
 
-/// The most frames an animation of `duration_ms` can ever need, at the
-/// frame cadence every animation shares.
+/// The most frames an animation of `duration_ms` can ever need on a display
+/// refreshing at `refresh`.
 ///
 /// What bounds a loop that presents an animation to its end: a clock that
 /// stopped, or a seat that reads ready forever, cannot then hold a finished
 /// login screen on the display. One more than the span divides into, so the
 /// frame that lands exactly on the end is still drawn.
 #[must_use]
-pub fn frame_budget(duration_ms: u16) -> u32 {
+pub fn frame_budget(duration_ms: u16, refresh: RefreshRate) -> u32 {
     let span = u64::from(duration_ms).saturating_mul(NANOS_PER_SEC / MILLIS_PER_SEC);
-    u32::try_from(span / Timeline::FRAME_NS)
+    u32::try_from(span / refresh.frame_ns())
         .unwrap_or(u32::MAX)
         .saturating_add(1)
 }

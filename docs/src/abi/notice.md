@@ -43,7 +43,7 @@ blocking I/O an interactive surface may not perform.
 
 | Topic | Payload | Published by | Read by |
 |---|---|---|---|
-| `Desktop` | `DesktopInfo` (54 bytes) | the holder of a seat's live display lease | every windowed application |
+| `Desktop` | `DesktopInfo` (123 bytes) | the holder of a seat's live display lease | every windowed application |
 | `Mounts` | none — the generation *is* the news | the kernel, on every mount-table mutation and every change to the volume behind a mount | the file manager's places rail, PID 1, the device manager, and login's text prompt, which re-checks whether a graphical login can start |
 | `MemoryPressure` | the band depth (1 byte) | the kernel, from the pressure gauge | any process holding a reclaimable cache |
 | `DisplayLease` | the boot seat's lease word and its holder's login session (`DisplayLease`, 24 bytes) | the kernel, from its seat registry | the display and audio services and the cue authority alone |

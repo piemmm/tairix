@@ -45,6 +45,9 @@ tairix-hash = { path = "../hash", version = "=0.0.0" }
 # instead of spinning (`src/heap.rs`).
 tairix-sync = { path = "../sync", version = "=0.0.0" }
 
+# Where `_start` records the feature set the kernel delivered, so every
+# accelerated family a program uses resolves against it on first use.
+tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = false }
 
 # The structured `Event`/`Sink`/`Level` logging vocabulary the `LogSink`
 # implements: a first-party program builds `tairix_log::Event`s and the

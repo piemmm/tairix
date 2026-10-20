@@ -125,8 +125,9 @@ pub fn choose(transmitter: Transmitter, edid: Option<&Edid>, limits: PipeLimits)
     };
     let largest = |mode: &&tairix_edid::Mode| {
         let timing = mode.timing;
+        let (width, height) = timing.active_size();
         (
-            u32::from(timing.horizontal.active) * u32::from(timing.vertical.active),
+            width * height,
             timing.scan == Scan::Progressive,
             timing.refresh_mhz(),
         )

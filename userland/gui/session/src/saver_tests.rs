@@ -1,10 +1,10 @@
 //! Host tests of the screensaver: what covers the screen, the pointer it
 //! hides, the frames it asks for, and the display it switches off and wakes.
 
+use crate::saver::TEST_SCENE_FRAME_NS;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use tairix_theme::motion::SceneClock;
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, DisplayPower};
 use tairix_abi::time::Duration64;
@@ -299,13 +299,13 @@ fn an_animated_screensaver_asks_for_its_next_frame() {
         saver.advance(0, &mut comp, &mut || None, &mut || 0);
         assert_eq!(
             saver.park_deadline_ns(0, u64::MAX),
-            SceneClock::FRAME_NS,
+            TEST_SCENE_FRAME_NS,
             "{kind:?}"
         );
-        saver.advance(SceneClock::FRAME_NS / 2, &mut comp, &mut || None, &mut || 0);
+        saver.advance(TEST_SCENE_FRAME_NS / 2, &mut comp, &mut || None, &mut || 0);
         assert_eq!(
-            saver.park_deadline_ns(SceneClock::FRAME_NS / 2, u64::MAX),
-            SceneClock::FRAME_NS / 2,
+            saver.park_deadline_ns(TEST_SCENE_FRAME_NS / 2, u64::MAX),
+            TEST_SCENE_FRAME_NS / 2,
             "{kind:?}: an early wake draws nothing and moves nothing"
         );
     }
@@ -315,7 +315,7 @@ fn an_animated_screensaver_asks_for_its_next_frame() {
 /// at once, and no other screensaver forward.
 #[test]
 fn a_tracing_thread_readying_a_scene_brings_the_ray_tracer_back_at_once() {
-    let woken = SceneClock::FRAME_NS / 4;
+    let woken = TEST_SCENE_FRAME_NS / 4;
     for kind in [ScreensaverKind::Raytrace, ScreensaverKind::Starfield] {
         let mut comp = compositor();
         let mut saver = Screensaver::new();
@@ -343,11 +343,11 @@ fn the_retro_games_go_up_drawn_and_fly_on_a_saver_frame_later() {
     comp.composite();
     let sky = comp.frame()[..4].to_vec();
     assert_ne!(sky, [0, 0, 0, 255], "the night is painted, not black");
-    assert_eq!(saver.park_deadline_ns(0, u64::MAX), SceneClock::FRAME_NS);
-    saver.advance(SceneClock::FRAME_NS, &mut comp, &mut || None, &mut || 0);
+    assert_eq!(saver.park_deadline_ns(0, u64::MAX), TEST_SCENE_FRAME_NS);
+    saver.advance(TEST_SCENE_FRAME_NS, &mut comp, &mut || None, &mut || 0);
     assert_eq!(
-        saver.park_deadline_ns(SceneClock::FRAME_NS, u64::MAX),
-        SceneClock::FRAME_NS
+        saver.park_deadline_ns(TEST_SCENE_FRAME_NS, u64::MAX),
+        TEST_SCENE_FRAME_NS
     );
     assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
 

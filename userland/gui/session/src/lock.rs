@@ -52,6 +52,7 @@
 
 use alloc::string::{String, ToString};
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::Duration64;
 use tairix_controls::damage::{self, Repaint};
 use tairix_greeter::{
@@ -368,18 +369,19 @@ impl ScreenLock {
         self.draw(shell, compositor);
     }
 
-    /// `park_ns` shortened to the locked surface's next animation frame or
-    /// the next second of a lockout's countdown, or to now while an event's
-    /// change is still owed — the frame pacer then holds the wake to the next
-    /// frame — or left exactly as it is when the screen is unlocked and
-    /// nothing is in flight: an idle lock screen arms no timer.
+    /// `park_ns` shortened to the locked surface's next animation frame on a
+    /// display refreshing at `refresh` or the next second of a lockout's
+    /// countdown, or to now while an event's change is still owed — the frame
+    /// pacer then holds the wake to the next frame — or left exactly as it is
+    /// when the screen is unlocked and nothing is in flight: an idle lock
+    /// screen arms no timer.
     ///
     /// A frame the compositor refused to give back is owed too, but arms
     /// nothing: nothing is presented while it stands, so a wake of its own
     /// would spin the loop against an exhausted heap. The loop's next wake
     /// retries it.
     #[must_use]
-    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64, refresh: RefreshRate) -> u64 {
         park_within(
             park_ns,
             self.engaged.as_ref().and_then(|engaged| {
@@ -387,7 +389,7 @@ impl ScreenLock {
                     let tick = Cooldown::tick_of(engaged.lockout(now_ns));
                     engaged
                         .surface
-                        .motion_due(now_ns)
+                        .motion_due(now_ns, refresh)
                         .into_iter()
                         .chain(tick)
                         .min()

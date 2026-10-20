@@ -415,7 +415,7 @@ mod program {
         let mut next_frame = gallery.animate(
             tairix_rt::clock_get(),
             viewport,
-            desktop.scale(),
+            (desktop.scale(), desktop.refresh()),
             themes.active(),
             &mut damage,
         );
@@ -494,9 +494,10 @@ mod program {
                 damage.clear();
                 continue;
             }
+            let pace = (scale, desktop.refresh());
             next_frame = shown
                 .on_show
-                .then(|| gallery.animate(now_ns, viewport, scale, theme, &mut damage))
+                .then(|| gallery.animate(now_ns, viewport, pace, theme, &mut damage))
                 .flatten();
             let repaint = if whole {
                 Repaint::Whole

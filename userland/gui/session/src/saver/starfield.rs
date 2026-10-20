@@ -17,6 +17,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_raster::{Canvas, ScanScratch, SUBPIXEL};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::{fallible, mathf};
@@ -127,13 +128,13 @@ pub(super) struct Starfield {
 
 impl Starfield {
     /// A field for a `size` screen at `scale` as `options` describe it, first
-    /// drawn at `now_ns` and `calm` under reduced motion, or `None` when the
-    /// heap will not give it.
+    /// drawn at `now_ns` on a display refreshing at `refresh` and `calm` under
+    /// reduced motion, or `None` when the heap will not give it.
     pub(super) fn new(
         size: (u32, u32),
         scale: Scale,
         (calm, options): (bool, StarfieldOptions),
-        now_ns: u64,
+        (now_ns, refresh): (u64, RefreshRate),
     ) -> Option<Self> {
         let (width, height) = size;
         let pixels = u64::from(width) * u64::from(height);
@@ -159,7 +160,7 @@ impl Starfield {
             pixel: f64::from(scale.scale_length(1_000)) / 1_000.0,
             calm,
             warp: options.warp,
-            clock: SceneClock::new(now_ns, false),
+            clock: SceneClock::new(now_ns, false, refresh),
             opening_ns: Some(now_ns),
         };
         if !(fallible::reserve(&mut field.stars, count)
@@ -195,7 +196,7 @@ impl Starfield {
         }
         self.opening_ns = None;
         let before = self.clock.moved();
-        let flight = self.clock.advance(now_ns);
+        let flight = self.clock.advance(now_ns, compositor.refresh_rate());
         let (speed, roll) = match (self.calm, self.warp) {
             (true, _) => (CRUISE_SPEED, 0.0),
             (false, false) => (CRUISE_SPEED, ROLL_RATE * flight),

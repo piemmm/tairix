@@ -229,7 +229,13 @@ line, a port, a posted call's reply); the loop parks on them beside the
 endpoint, calls `Display::service_events` when one fires, and announces a
 move on the counted `NoticeTopic::DisplayOutput` before it serves another
 request — and once when it starts, so a client of an earlier instance
-converges onto this one. `Query` answers the output: a mode, or none. A
+converges onto this one. `Query` answers the output: a mode and the rate it
+scans at (`OutputMode`; `Display::refresh`, in millihertz, refused on the wire
+outside `RefreshRate::MIN_MHZ..=MAX_MHZ`), or none. The rate is not part of
+the mode — a mode is a frame layout, and a rate that changes alone rebuilds no
+buffer — but a change of either is a move the notice announces. A driver whose
+device states no timing, the framebuffers among them, answers no rate, and the
+desktop paces it at `RefreshRate::ASSUMED`. A
 `Configure` whose geometry is not the output's mode, and a `Present` of frames
 shaped for another, are refused `Stale`; the configuration is not dropped, so
 the frames serve again the moment the output runs their mode, and it still
@@ -403,7 +409,10 @@ device type 16 as a `Display` node, the first marked `ConsoleHost`.
 
 - **The output** is the first scanout the device reports enabled, at the size
   its display information states, else the preferred timing of the EDID it
-  offers. A `VIRTIO_GPU_EVENT_DISPLAY` configuration change re-reads it.
+  offers; its rate is the EDID's for a timing of the size it shows, the
+  preferred timing first, and none where the EDID has no such timing or the
+  device offers no EDID. A `VIRTIO_GPU_EVENT_DISPLAY` configuration change
+  re-reads both.
 - **Presents.** Each frame is the backing of a 2D resource made at its first
   present, which transfers it whole. A present is one batch on the control
   queue — a transfer per damage rectangle, the scan-out switch, a flush per
@@ -466,7 +475,8 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
   what its link set it up with — the encoder's connector counting a lost
   link — is brought down and up again, the surface and its frames kept.
 - **The surface.** The display takes the mode of the first output, in valve
-  order, with a sink it can drive. Another connected output shows the same
+  order, with a sink it can drive, and reports that output's timing as the
+  rate the desktop paces at. Another connected output shows the same
   surface scaled to its mode with its aspect kept — the polyphase filter
   enlarging or shrinking by up to a third, the trapezoidal one shrinking
   further, through the Mitchell–Netravali kernel in display-list memory.
@@ -491,6 +501,9 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
   own, and the pointer's position, size and image words are rewritten in the
   lists the channels read, so moving the pointer presents nothing; a changed
   size is narrowed first, so no state between the writes reads past an image.
+  While a present waits to be latched the pointer is rewritten in the list it
+  latches alone, so it reaches the screen with that frame rather than ahead of
+  it, and a present withdrawn instead leaves it moved in the list still shown.
   An image a list stopped naming is drawn into again only once two frames
   have ended on every running channel.
 - **Memory a list names is never given back.** A buffer freed while a list a

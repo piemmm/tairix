@@ -50,7 +50,7 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
-    use tairix_abi::driver::display::{DamageRect, DisplayMode};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode, OutputMode};
     use tairix_abi::input::{KeyInput, PointerInput};
     use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -492,7 +492,7 @@ mod program {
     /// read and the park.
     ///
     /// `Err` is the exit code the failure earns, its reason already stated.
-    fn first_output(set: u64) -> Result<(Ring, DisplayMode), i32> {
+    fn first_output(set: u64) -> Result<(Ring, OutputMode), i32> {
         let mut client = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY);
         let mut wait = false;
         loop {
@@ -511,11 +511,11 @@ mod program {
             // With no output, and when the output moved before frames reached
             // it, its announcement is what comes next.
             wait = true;
-            let Some(mode) = output else {
+            let Some(output) = output else {
                 continue;
             };
-            match frames_for(&mode) {
-                Ok(ring) => return Ok((ring, mode)),
+            match frames_for(&output.mode) {
+                Ok(ring) => return Ok((ring, output)),
                 Err(FramesRefused::Configure(Errno::Stale)) => {}
                 Err(refused) => return Err(fail(EXIT_NO_FRAMES, refused.reason())),
             }
@@ -531,9 +531,10 @@ mod program {
         let output = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query();
         let _ = hold_display(set, display, None);
         // A refused query is a lost seat, which the next drain observes.
-        let Ok(Some(mode)) = output else {
+        let Ok(Some(OutputMode { mode, refresh })) = output else {
             return Present::Nothing;
         };
+        screen.set_refresh_rate(refresh);
         let rebuilt = if &mode == screen.mode() {
             None
         } else {
@@ -596,7 +597,7 @@ mod program {
                 "the display's output could not be waited on",
             );
         }
-        let (ring, mode) = match first_output(set) {
+        let (ring, OutputMode { mode, refresh }) = match first_output(set) {
             Ok(first) => first,
             Err(code) => return code,
         };
@@ -654,6 +655,7 @@ mod program {
             tiles(),
             ToWorker(Arc::clone(&worker)),
         );
+        screen.set_refresh_rate(refresh);
         if !screen.raise_ribbon(tairix_rt::clock_get()) {
             record(
                 RIBBON_UNAVAILABLE,

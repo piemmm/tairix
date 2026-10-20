@@ -1645,3 +1645,47 @@ fn a_cast_of_no_radius_casts_no_shadow() {
     let picture = Surface::new(4, 4).expect("a picture");
     assert!(cast_shadow(&picture, ShadowCast::default()).is_none());
 }
+
+#[cfg(raster_lanes)]
+#[test]
+fn the_lane_divisor_is_exact_at_every_quotient_boundary_for_every_count() {
+    // `floor(n * m >> shift)` and `floor(n / d)` are both non-decreasing in
+    // `n`, so agreeing either side of every multiple of `d` agrees everywhere
+    // between: this is the whole domain, not a sample of it.
+    let step = if cfg!(miri) { 4099 } else { 1 };
+    for d in (1..=super::RECIPROCAL_MAX_COUNT).step_by(step) {
+        let lanes = super::Reciprocal::new(usize::try_from(d).expect("a count fits"))
+            .lanes()
+            .expect("every count up to the reciprocal's reach has a lane form");
+        let quotient = |n: u64| (n * u64::from(lanes.m)) >> lanes.shift;
+        let top = 256 * u64::from(d);
+        for k in 0..=256u64 {
+            let multiple = k * u64::from(d);
+            if multiple < top {
+                assert_eq!(quotient(multiple), k, "d {d} at {multiple}");
+            }
+            if let Some(below) = multiple.checked_sub(1).filter(|n| *n < top) {
+                assert_eq!(quotient(below), k.saturating_sub(1), "d {d} at {below}");
+            }
+        }
+        assert_eq!(u64::from(lanes.half), u64::from(d / 2));
+    }
+}
+
+#[cfg(raster_lanes)]
+#[test]
+fn a_lane_mean_is_the_scalar_mean_for_every_sum_a_window_holds() {
+    let step = if cfg!(miri) { 61 } else { 1 };
+    for radius in [1usize, 2, 7, 43, 127] {
+        let recip = super::Reciprocal::new(radius * 2 + 1);
+        let lanes = recip.lanes().expect("a lane form");
+        let most = 255 * u32::try_from(radius * 2 + 1).expect("a count fits");
+        for sum in (0..=most).step_by(step) {
+            assert_eq!(
+                lanes.apply(sum),
+                u32::from(recip.apply(sum)),
+                "radius {radius} sum {sum}"
+            );
+        }
+    }
+}

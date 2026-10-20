@@ -1,3 +1,4 @@
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_geometry::Point;
 use tairix_inline::ArrayVec;
@@ -32,7 +33,7 @@ fn ghosts(trail: &Trail, now_ns: u64, current: Point) -> ArrayVec<Ghost, MAX_GHO
 fn an_absent_trail_draws_nothing_and_keeps_no_path() {
     let trail = moving(PointerTrail::Off, 400 * MS);
     assert!(ghosts(&trail, 400 * MS, Point::new(400, 100)).is_empty());
-    assert_eq!(trail.next_frame_in(400 * MS), None);
+    assert_eq!(trail.next_frame_in(400 * MS, RefreshRate::ASSUMED), None);
     assert!(trail.path.is_empty());
 }
 
@@ -69,12 +70,12 @@ fn copies_draw_back_into_a_pointer_that_stops() {
     let trail = moving(PointerTrail::Long, stopped);
     let (count, spacing) = shape(PointerTrail::Long).expect("a trail");
     let span = u64::try_from(count).expect("small") * spacing;
-    assert!(trail.next_frame_in(stopped).is_some());
+    assert!(trail.next_frame_in(stopped, RefreshRate::ASSUMED).is_some());
     let mid = ghosts(&trail, stopped + span / 2, Point::new(400, 100));
     assert!(!mid.is_empty() && mid.len() < count, "some have caught up");
     assert!(ghosts(&trail, stopped + span, Point::new(400, 100)).is_empty());
     assert_eq!(
-        trail.next_frame_in(stopped + span),
+        trail.next_frame_in(stopped + span, RefreshRate::ASSUMED),
         None,
         "nothing more is owed"
     );
@@ -134,7 +135,7 @@ fn a_pointer_that_has_not_moved_owes_no_frame() {
     trail.set_length(PointerTrail::Long);
     trail.observe(0, Point::new(10, 10));
     trail.observe(50 * MS, Point::new(10, 10));
-    assert_eq!(trail.next_frame_in(50 * MS), None);
+    assert_eq!(trail.next_frame_in(50 * MS, RefreshRate::ASSUMED), None);
     assert!(ghosts(&trail, 50 * MS, Point::new(10, 10)).is_empty());
 }
 

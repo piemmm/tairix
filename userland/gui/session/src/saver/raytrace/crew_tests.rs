@@ -5,9 +5,11 @@
 
 extern crate std;
 
+use crate::saver::TEST_REFRESH;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use tairix_theme::motion::work_slice_ns;
 
 use tairix_raster::Pixel;
 use tairix_raytrace::Step;
@@ -330,7 +332,8 @@ fn paint(steps: &[Traced], picture: &mut [Pixel]) {
 /// The pictures of the first `scenes` reveals of an engine seeded `seed`,
 /// traced alone on this thread.
 fn traced_alone(seed: u64, scenes: usize) -> Vec<Vec<Pixel>> {
-    let mut engine = Engine::new(SIZE, seed, PLAIN).expect("an engine");
+    let mut engine =
+        Engine::new(SIZE, seed, PLAIN, work_slice_ns(TEST_REFRESH)).expect("an engine");
     let clock = Ticking::default();
     let mut pictures = Vec::new();
     for _ in 0..scenes {
@@ -366,7 +369,7 @@ fn passed_through_the_desk(
     };
     let link = DeskLink::hand_over(
         Arc::clone(&desk),
-        Engine::new(SIZE, seed, PLAIN).expect("an engine"),
+        Engine::new(SIZE, seed, PLAIN, work_slice_ns(TEST_REFRESH)).expect("an engine"),
     );
     let mut scenes = Vec::new();
     let mut drawn = Vec::new();
@@ -459,7 +462,8 @@ fn a_tracing_thread_hands_each_whole_picture_to_its_keeper_once() {
             );
         })
     };
-    let mut engine = Engine::new(SIZE, seed, PLAIN).expect("an engine");
+    let mut engine =
+        Engine::new(SIZE, seed, PLAIN, work_slice_ns(TEST_REFRESH)).expect("an engine");
     engine.keep_pictures();
     let link = DeskLink::hand_over(Arc::clone(&desk), engine);
     let mut drawn = Vec::new();

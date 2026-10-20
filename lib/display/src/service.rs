@@ -21,7 +21,7 @@
 //! it.
 
 use tairix_abi::display_ipc::{DisplayEvent, DISPLAY_ENDPOINT, DISPLAY_MAX_REQUEST};
-use tairix_abi::driver::display::{Display, DisplayMode};
+use tairix_abi::driver::display::{Display, OutputMode, RefreshRate};
 use tairix_abi::driver::{sole_framebuffer, DeviceWake};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::time::MonotonicClock;
@@ -106,7 +106,7 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
     // Announced once the rendezvous is bound, which is the authority, and
     // before the first request is served: a client of an earlier instance
     // converges onto this one.
-    let mut output = Announced::resume(display.output());
+    let mut output = Announced::resume(crate::server::output_mode(display));
 
     let Ok(grantor) = tairix_rt::self_origin().map(|origin| origin.proc_id()) else {
         return end(
@@ -199,7 +199,7 @@ fn service_events(
             }],
         ),
     }
-    output.follow(display.output());
+    output.follow(crate::server::output_mode(display));
 }
 
 /// Bind the display endpoint and the wait set the service parks on: the
@@ -263,12 +263,12 @@ fn bind(wakes: &[DeviceWake]) -> Result<u64, i32> {
 struct Announced {
     notice: ChangeNotice,
     changes: u64,
-    output: Option<DisplayMode>,
+    output: Option<OutputMode>,
 }
 
 impl Announced {
     /// Take the topic up for `output`, announcing it at once.
-    fn resume(output: Option<DisplayMode>) -> Self {
+    fn resume(output: Option<OutputMode>) -> Self {
         let (notice, changes) = ChangeNotice::resume(NoticeTopic::DisplayOutput);
         let mut announced = Self {
             notice,
@@ -279,14 +279,20 @@ impl Announced {
         announced
     }
 
-    /// Announce `output` if it is not the output last announced.
-    fn follow(&mut self, output: Option<DisplayMode>) {
+    /// Announce `output` if it is not the output last announced: a new mode,
+    /// or the same mode at a new rate.
+    fn follow(&mut self, output: Option<OutputMode>) {
         if output == self.output {
             return;
         }
         self.output = output;
         self.changes = self.changes.wrapping_add(1);
-        let (width, height) = output.map_or((0, 0), |mode| (mode.width_px, mode.height_px));
+        let (width, height) = output.map_or((0, 0), |output| {
+            (output.mode.width_px, output.mode.height_px)
+        });
+        let refresh = output
+            .and_then(|output| output.refresh)
+            .map_or(0, RefreshRate::mhz);
         record(
             Level::Info,
             OUTPUT_MOVED,
@@ -299,6 +305,10 @@ impl Announced {
                 Field {
                     key: "height",
                     value: FieldValue::UnsignedInt(u64::from(height)),
+                },
+                Field {
+                    key: "refresh_mhz",
+                    value: FieldValue::UnsignedInt(u64::from(refresh)),
                 },
             ],
         );

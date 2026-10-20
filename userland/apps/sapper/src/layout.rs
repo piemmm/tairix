@@ -158,13 +158,7 @@ impl Layout {
         if rect.is_empty() {
             return rect;
         }
-        let bleed = self.gap.max(1).saturating_add(reach);
-        Rect::new(
-            rect.left() - to_i32(bleed),
-            rect.top() - to_i32(bleed),
-            rect.width.saturating_add(bleed.saturating_mul(2)),
-            rect.height.saturating_add(bleed.saturating_mul(2)),
-        )
+        rect.outset(self.gap.max(1).saturating_add(reach))
     }
 
     /// The cell under `point`, or `None` when the point is outside the grid.

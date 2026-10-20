@@ -18,6 +18,8 @@ tairix-raster = { path = "../raster", version = "=0.0.0" }
 tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
+# The display rate a scene clock's frame is drawn against.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The scene clock the tests pace frames with, as the ribbon's hosts do.
 tairix-theme = { path = "../theme", version = "=0.0.0" }
 

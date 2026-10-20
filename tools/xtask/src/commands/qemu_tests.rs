@@ -2227,6 +2227,34 @@ static TESTS: &[QemuTest] = &[
             "boot_stack_guard=intact",
         ]),
     },
+    // The compositor's per-pixel kernels on aarch64 (`plans/FIX-DESKTOP-SPEEDUP.md`
+    // F.2). The host cannot execute their NEON candidates, so the guest
+    // resolves them, requires each family to have chosen its candidate — it
+    // passed its self-verify — and folds the fixed workload to the digest the
+    // host suite pins for the portable path and SSE2. Pure computation, one
+    // CPU, no device.
+    QemuTest {
+        package: "tairix-test-raster-kernels-qemu-aarch64",
+        binary: "tairix-test-raster-kernels-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(90),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     QemuTest {
         package: "tairix-test-figure-determinism-qemu-aarch64",
         binary: "tairix-test-figure-determinism-qemu-aarch64",

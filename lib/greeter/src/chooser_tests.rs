@@ -16,7 +16,7 @@ use crate::surface::{
 };
 use crate::testkit::{
     centre, darkest_in, feed, key, key_with, named, painted, render, render_over_light, submit,
-    theme, Scripted, PRESS, RELEASE, SCREEN,
+    theme, Scripted, PRESS, RATE, RELEASE, SCREEN,
 };
 
 fn accounts(names: &[&str]) -> Vec<AccountTile> {
@@ -590,7 +590,7 @@ fn a_fresh_chooser_is_settled() {
     assert_eq!(chooser.focus(), 0);
     assert_eq!(chooser.selection_fade(0), u8::MAX);
     assert_eq!(chooser.selection_fade(1), 0);
-    assert_eq!(chooser.next_frame_in(0), None);
+    assert_eq!(chooser.next_frame_in(0, RATE), None);
 }
 
 /// Moving the focus starts a cross-fade: leaving full, arriving empty at the
@@ -605,15 +605,12 @@ fn moving_focus_cross_fades_the_selection_mark() {
     let span_ns = u64::from(millis) * 1_000_000;
 
     assert!(chooser.focus_on(1, 1_000, millis));
-    assert!(chooser.next_frame_in(1_000).is_some());
+    assert!(chooser.next_frame_in(1_000, RATE).is_some());
     assert_eq!(chooser.selection_fade(0), u8::MAX);
     assert_eq!(chooser.selection_fade(1), 0);
     // The one frame cadence every animation shares, not a step this fade
     // works out for itself.
-    assert_eq!(
-        chooser.next_frame_in(1_000),
-        Some(tairix_theme::Timeline::FRAME_NS)
-    );
+    assert_eq!(chooser.next_frame_in(1_000, RATE), Some(RATE.frame_ns()));
 
     let mid = 1_000 + span_ns / 2;
     assert!(chooser.advance(mid));
@@ -631,10 +628,10 @@ fn moving_focus_cross_fades_the_selection_mark() {
     assert_eq!(chooser.selection_fade(2), 0);
 
     assert!(chooser.advance(1_000 + span_ns));
-    assert_eq!(chooser.next_frame_in(0), None);
+    assert_eq!(chooser.next_frame_in(0, RATE), None);
     assert_eq!(chooser.selection_fade(1), u8::MAX);
     assert_eq!(chooser.selection_fade(0), 0);
-    assert_eq!(chooser.next_frame_in(1_000 + span_ns), None);
+    assert_eq!(chooser.next_frame_in(1_000 + span_ns, RATE), None);
 }
 
 /// A zero duration (reduced motion) settles instantly and never asks for a frame.
@@ -642,10 +639,10 @@ fn moving_focus_cross_fades_the_selection_mark() {
 fn a_zero_duration_settles_instantly() {
     let mut chooser = grid(&["ann", "bob"]);
     assert!(chooser.focus_on(1, 50, 0));
-    assert_eq!(chooser.next_frame_in(0), None);
+    assert_eq!(chooser.next_frame_in(0, RATE), None);
     assert_eq!(chooser.selection_fade(1), u8::MAX);
     assert_eq!(chooser.selection_fade(0), 0);
-    assert_eq!(chooser.next_frame_in(50), None);
+    assert_eq!(chooser.next_frame_in(50, RATE), None);
     assert!(!chooser.advance(100));
 }
 
@@ -672,7 +669,7 @@ fn a_second_focus_change_does_not_strand_a_mark() {
     assert_eq!(chooser.selection_fade(2), 0);
 
     assert!(chooser.advance(span_ns / 2 + span_ns));
-    assert_eq!(chooser.next_frame_in(0), None);
+    assert_eq!(chooser.next_frame_in(0, RATE), None);
     assert_eq!(chooser.selection_fade(2), u8::MAX);
     assert_eq!(chooser.selection_fade(0), 0);
     assert_eq!(chooser.selection_fade(1), 0);
@@ -684,7 +681,7 @@ fn a_backwards_clock_settles_the_fade() {
     let mut chooser = grid(&["ann", "bob"]);
     assert!(chooser.focus_on(1, 1_000, 100));
     assert!(chooser.advance(500));
-    assert_eq!(chooser.next_frame_in(0), None);
+    assert_eq!(chooser.next_frame_in(0, RATE), None);
     assert_eq!(chooser.selection_fade(1), u8::MAX);
     assert_eq!(chooser.selection_fade(0), 0);
 }

@@ -21,16 +21,10 @@ use tairix_raytrace::{Detail, Draft, Encoder, Quality, Reveal, Scene, Setting, S
 use tairix_reclaim::pressure::{PressureGauge, PressureThresholds};
 use tairix_reclaim::{CacheBudget, ReclaimClass};
 use tairix_rng::{NonCryptoRng, RandU64};
-use tairix_theme::Timeline;
 use tairix_util::fallible;
 
 use super::album::{Picture, Unkept};
 use super::crew::Status;
-
-/// How much work a slice may be: half of one desktop frame, so a serve loop
-/// tracing slices itself still answers input and every client within the
-/// frame, and a tracing thread notices the loop has gone within one.
-pub(super) const SLICE_NS: u64 = Timeline::FRAME_NS / 2;
 
 /// How every pixel is traced: the best the tracer has.
 const QUALITY: Quality = Quality::Fine;
@@ -258,6 +252,8 @@ pub struct Engine {
     shown: u32,
     /// How much the next slice does.
     batch: u32,
+    /// How long a slice may take.
+    slice_ns: u64,
     album: Album,
     /// A whole picture, or the reason it is not, for the keeper to collect.
     finished: Option<Result<Picture, Unkept>>,
@@ -268,10 +264,12 @@ pub struct Engine {
 
 impl Engine {
     /// The reveals of a `size` screen, their scenes drawn from `seed` and set
-    /// out as `detailing` has them; `None` when the screen has no pixels or
-    /// the heap will not hold the encoder.
+    /// out as `detailing` has them, traced in slices of `slice_ns` — a
+    /// serve loop's own slice, so a tracing thread also notices within one
+    /// that the loop has gone; `None` when the screen has no pixels or the
+    /// heap will not hold the encoder.
     #[must_use]
-    pub fn new(size: (u32, u32), seed: u64, detailing: Detailing) -> Option<Self> {
+    pub fn new(size: (u32, u32), seed: u64, detailing: Detailing, slice_ns: u64) -> Option<Self> {
         let mut dice = NonCryptoRng::seed_from_u64(seed);
         let plan = Plan::draw(&mut dice, None);
         Some(Self {
@@ -283,6 +281,7 @@ impl Engine {
             stage: Stage::Composing,
             shown: 0,
             batch: MIN_BATCH,
+            slice_ns,
             album: Album::Off,
             finished: None,
             detailing,
@@ -462,7 +461,7 @@ impl Engine {
         runner: &dyn JobRunner,
         clock: &mut dyn FnMut() -> u64,
     ) -> Stage {
-        let until = clock().saturating_add(SLICE_NS);
+        let until = clock().saturating_add(self.slice_ns);
         match draft.prepare(runner, &mut || clock() >= until) {
             Some(false) => Stage::Preparing(draft),
             Some(true) => match draft.finish() {
@@ -499,7 +498,7 @@ impl Engine {
             self.trace_into(&scene, runner, slots);
             self.copy_into_album(slots);
         }
-        self.batch = pace(batch, clock().saturating_sub(started), total);
+        self.batch = pace(batch, clock().saturating_sub(started), self.slice_ns, total);
         self.shown = self.shown.saturating_add(batch);
         if self.shown >= total {
             self.finish_album();
@@ -635,12 +634,12 @@ fn draw_setting(dice: &mut NonCryptoRng, last: Option<Setting>) -> Setting {
     Setting::ALL[0]
 }
 
-/// How much the next slice does, the last having done `done` in `spent_ns`:
-/// as much as fits a slice at that pace, but at most twice as much, so one
-/// quick slice cannot commit the next to far more than it proved the machine
-/// can do, and never more than `most`.
-fn pace(done: u32, spent_ns: u64, most: u32) -> u32 {
-    let fits = u64::from(done) * SLICE_NS / spent_ns.max(1);
+/// How much the next slice of `slice_ns` does, the last having done `done`
+/// in `spent_ns`: as much as fits a slice at that pace, but at most twice as
+/// much, so one quick slice cannot commit the next to far more than it proved
+/// the machine can do, and never more than `most`.
+fn pace(done: u32, spent_ns: u64, slice_ns: u64, most: u32) -> u32 {
+    let fits = u64::from(done) * slice_ns / spent_ns.max(1);
     let grown = u64::from(done.max(MIN_BATCH)).saturating_mul(2);
     u32::try_from(fits.min(grown)).map_or(most, |fits| fits.clamp(MIN_BATCH, most.max(MIN_BATCH)))
 }

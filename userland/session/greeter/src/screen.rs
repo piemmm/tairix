@@ -10,7 +10,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::driver::display::{DamageRect, DisplayMode, RefreshRate};
 use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::time::Time64;
 use tairix_abi::touch::TouchFrame;
@@ -124,6 +124,8 @@ pub struct LoginScreen<C: Courier<Answer = Checked>> {
     /// What the seat's touch frames mean. No user is signed in to have chosen
     /// otherwise, so a touch means what it means by default.
     touch: Recogniser,
+    /// The rate the display scans at, which every animation is paced by.
+    refresh: RefreshRate,
 }
 
 /// One pointing action, from a mouse report or a touch gesture.
@@ -231,7 +233,14 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
             sleep: DisplaySleep::new(),
             asleep_owes: AsleepOwes::Nothing,
             touch,
+            refresh: RefreshRate::ASSUMED,
         }
+    }
+
+    /// Pace every animation by a display scanning at `rate`, or at
+    /// [`RefreshRate::ASSUMED`] for one that states none.
+    pub fn set_refresh_rate(&mut self, rate: Option<RefreshRate>) {
+        self.refresh = RefreshRate::or_assumed(rate);
     }
 
     /// Draw the ribbon of light behind the column from `now_ns`, kept clear of
@@ -243,7 +252,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         let screen = self.scanout.screen();
         let clear = self.surface.column_rect(screen, self.scale);
         let still = self.theme.motion().reduced_motion();
-        self.scene = Scene::new(screen, clear, now_ns, still);
+        self.scene = Scene::new(screen, clear, (now_ns, self.refresh), still);
         self.paint_owed = true;
         self.scene.is_some()
     }
@@ -555,7 +564,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         let moved = self
             .scene
             .as_mut()
-            .is_some_and(|scene| scene.advance(now_ns));
+            .is_some_and(|scene| scene.advance(now_ns, self.refresh));
         self.owe(clock.merged(cooldown).merged(motion));
         self.ribbon_owed |= moved;
     }
@@ -582,7 +591,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
             )
         });
         [
-            self.surface.motion_due(now_ns),
+            self.surface.motion_due(now_ns, self.refresh),
             self.scene.as_ref().and_then(|scene| scene.due_in(now_ns)),
             Some(self.idle.timeout(now_ns)),
             self.touch
@@ -706,7 +715,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         if self.surface.session_fade_finished() {
             return None;
         }
-        self.surface.motion_due(now_ns)
+        self.surface.motion_due(now_ns, self.refresh)
     }
 
     /// Darken the fade to `now_ns` and present what changed.
@@ -726,8 +735,11 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
     /// not cut the fade short.
     #[must_use]
     pub fn session_fade_budget(&self) -> u32 {
-        frame_budget(self.theme.motion().duration(MotionInteraction::SessionFade))
-            .saturating_mul(WAKES_PER_FADE_FRAME)
+        frame_budget(
+            self.theme.motion().duration(MotionInteraction::SessionFade),
+            self.refresh,
+        )
+        .saturating_mul(WAKES_PER_FADE_FRAME)
     }
 
     /// Return the screen to rest as it first came up: the chooser with nothing

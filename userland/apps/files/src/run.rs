@@ -117,7 +117,7 @@ mod program {
     use tairix_abi::time::Duration64;
 
     use crate::route;
-    use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
+    use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode, RefreshRate};
     use tairix_abi::fs::{FileKind, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX};
     use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
@@ -181,7 +181,8 @@ mod program {
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
-    use tairix_theme::{Grounds, MotionTheme, Theme, ThemeRegistry, Timeline};
+    use tairix_theme::motion::work_slice_ns;
+    use tairix_theme::{Grounds, MotionTheme, Theme, ThemeRegistry};
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::notices::Raised;
     use tairix_window::{
@@ -829,9 +830,14 @@ mod program {
                 || matches!(self.overlays.sweep, Some(Sweep::Live(_)))
         }
 
-        /// Step the listing under a held band if a step is due, answering what
-        /// it repainted.
-        fn step_band(&mut self, canvas: Canvas<'_>, now: u64, damage: &mut Region) -> Repaint {
+        /// Step the listing under a held band if a step is due on a desktop
+        /// refreshing at `refresh`, answering what it repainted.
+        fn step_band(
+            &mut self,
+            canvas: Canvas<'_>,
+            (now, refresh): (u64, RefreshRate),
+            damage: &mut Region,
+        ) -> Repaint {
             let Some(Sweep::Live(band)) = self.overlays.sweep.as_mut() else {
                 return Repaint::Nothing;
             };
@@ -842,7 +848,7 @@ mod program {
                 toolbar: canvas.chrome.toolbar,
             };
             let mark = ViewMark::of(&self.browser, frame);
-            let moved = band.step(&mut self.browser, frame, now);
+            let moved = band.step(&mut self.browser, frame, (now, refresh));
             Repaint::reported_if(moved && mark.report(&self.browser, frame, damage))
         }
 
@@ -859,11 +865,12 @@ mod program {
         }
 
         /// When this window next needs the loop with no event to bring it, now
-        /// it is `now`: the band held over it steps the listing, a clicked
-        /// name opens, or a held scrollbar press steps its column.
-        fn due(&mut self, now: u64) -> Option<u64> {
+        /// it is `now` on a desktop refreshing at `refresh`: the band held over
+        /// it steps the listing, a clicked name opens, or a held scrollbar
+        /// press steps its column.
+        fn due(&mut self, now: u64, refresh: RefreshRate) -> Option<u64> {
             let band = match &self.overlays.sweep {
-                Some(Sweep::Live(band)) => band.due(),
+                Some(Sweep::Live(band)) => band.due(refresh),
                 _ => None,
             };
             let rename = self.overlays.rename_arm.and_then(|arm| arm.due());
@@ -1970,7 +1977,7 @@ mod program {
         windows: &mut alloc::vec::Vec<OpenWindow>,
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &Reads,
-        motion: MotionTheme,
+        (motion, refresh): (MotionTheme, RefreshRate),
     ) {
         let now = tairix_rt::clock_get();
         let mut asked = false;
@@ -2027,7 +2034,7 @@ mod program {
                     operation.due_ns = None;
                     continue;
                 }
-                if progress_due(now, operation.shown_ns) {
+                if progress_due(now, operation.shown_ns, refresh) {
                     moved.push((
                         id,
                         Moved::Shown {
@@ -2038,7 +2045,7 @@ mod program {
                         },
                     ));
                 } else {
-                    operation.due_ns = Some(operation.shown_ns.saturating_add(Timeline::FRAME_NS));
+                    operation.due_ns = Some(operation.shown_ns.saturating_add(refresh.frame_ns()));
                 }
                 holding = true;
             }
@@ -2053,7 +2060,14 @@ mod program {
         }
         for (id, change) in moved {
             if let Some(index) = windows.iter().position(|win| win.pane.id() == id) {
-                apply_moved(windows, index, client, reads, change, (now, motion));
+                apply_moved(
+                    windows,
+                    index,
+                    client,
+                    reads,
+                    change,
+                    (now, motion, refresh),
+                );
             }
         }
     }
@@ -2066,7 +2080,7 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &Reads,
         change: Moved,
-        (now_ns, motion): (u64, MotionTheme),
+        (now_ns, motion, refresh): (u64, MotionTheme, RefreshRate),
     ) {
         match change {
             Moved::Ended(finished) => {
@@ -2090,7 +2104,7 @@ mod program {
                     operation.progress.request_cancel();
                 }
                 operation.shown_ns = now_ns;
-                operation.due_ns = Some(now_ns.saturating_add(Timeline::FRAME_NS));
+                operation.due_ns = Some(now_ns.saturating_add(refresh.frame_ns()));
                 win.owed.owe_whole();
             }
         }
@@ -2261,7 +2275,12 @@ mod program {
     /// on a chosen name whose double-click interval has run out opens the
     /// rename it armed, a held scrollbar press steps its column, and a drive
     /// window on show asks for its next reading.
-    fn serve_due(windows: &mut [OpenWindow], reads: &Reads, theme: &Theme, scale: Scale) -> bool {
+    fn serve_due(
+        windows: &mut [OpenWindow],
+        reads: &Reads,
+        theme: &Theme,
+        (scale, refresh): (Scale, RefreshRate),
+    ) -> bool {
         let now = tairix_rt::clock_get();
         let mut moved = false;
         for win in windows {
@@ -2276,7 +2295,7 @@ mod program {
                         scale,
                         chrome: state.chrome,
                     };
-                    let stepped = state.step_band(canvas, now, &mut damage);
+                    let stepped = state.step_band(canvas, (now, refresh), &mut damage);
                     stepped
                         .merged(state.open_due_rename(canvas, now, &mut damage))
                         .merged(state.step_scrollbars(canvas, now, &mut damage))
@@ -2297,7 +2316,7 @@ mod program {
                 WindowKind::Progress(progress) => {
                     let operation = &mut progress.operation;
                     if operation.bar.due(now) {
-                        operation.trace.set_clock(now, theme.motion());
+                        operation.trace.set_clock(now, theme.motion(), refresh);
                         operation.bar.drawn(now, operation.trace.next_frame_in());
                         let client = Rect::new(0, 0, mode.width_px, mode.height_px);
                         damage.add(progress_bar_rect(client, scale, theme));
@@ -5666,9 +5685,6 @@ mod program {
         Live(Box<Band>),
     }
 
-    /// How often the listing steps under a held band: a frame at sixty hertz.
-    const BAND_STEP_NS: u64 = 16_666_667;
-
     /// A band, and the clock pacing the listing as it scrolls under it.
     struct Band {
         marquee: Marquee,
@@ -5691,9 +5707,11 @@ mod program {
             }
         }
 
-        /// When the next step is due, while the listing scrolls.
-        fn due(&self) -> Option<u64> {
-            self.stepped_at.map(|at| at.saturating_add(BAND_STEP_NS))
+        /// When the next step is due, a frame of `refresh` on, while the
+        /// listing scrolls.
+        fn due(&self, refresh: RefreshRate) -> Option<u64> {
+            self.stepped_at
+                .map(|at| at.saturating_add(refresh.frame_ns()))
         }
 
         /// Scroll the listing by the travel `now` owes and grow the band to
@@ -5703,11 +5721,11 @@ mod program {
             &mut self,
             browser: &mut Browser<S>,
             frame: Frame<'_>,
-            now: u64,
+            (now, refresh): (u64, RefreshRate),
         ) -> bool {
             let Some(since) = self
                 .stepped_at
-                .filter(|at| now >= at.saturating_add(BAND_STEP_NS))
+                .filter(|at| now >= at.saturating_add(refresh.frame_ns()))
             else {
                 return false;
             };
@@ -7372,15 +7390,16 @@ mod program {
         }
     }
 
-    /// Carry each operation no worker took a slice further on this loop: half
-    /// a desktop frame's worth of units, so input is served between slices and
-    /// Cancel still stops it at a unit's end. Answers whether one is still
-    /// working, which keeps the loop turning.
+    /// Carry each operation no worker took a slice further on this loop: a
+    /// serve loop's slice of units on a desktop refreshing at `refresh`, so
+    /// input is served between slices and Cancel still stops it at a unit's
+    /// end. Answers whether one is still working, which keeps the loop
+    /// turning.
     fn step_here_operations(
         windows: &mut alloc::vec::Vec<OpenWindow>,
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &Reads,
-        motion: MotionTheme,
+        (motion, refresh): (MotionTheme, RefreshRate),
     ) -> bool {
         let mut working = false;
         let mut ended = alloc::vec::Vec::new();
@@ -7393,7 +7412,7 @@ mod program {
             let Some(mut job) = operation.here.take() else {
                 continue;
             };
-            let until = tairix_rt::clock_get().saturating_add(Timeline::FRAME_NS / 2);
+            let until = tairix_rt::clock_get().saturating_add(work_slice_ns(refresh));
             let cancelled = operation.progress.is_cancel_requested();
             let ending = run_slice(
                 || job.step(),
@@ -11217,7 +11236,12 @@ mod program {
                 owe_desktop(&mut windows, &mut client, (&desktop, &icons), grounds);
                 moved = true;
             }
-            moved |= serve_due(&mut windows, &reads, themes.active(), desktop.scale());
+            moved |= serve_due(
+                &mut windows,
+                &reads,
+                themes.active(),
+                (desktop.scale(), desktop.refresh()),
+            );
             moved |= collect_writes(&mut windows, &reads, themes.active(), desktop.scale());
             submit_writes(&mut windows, &reads, themes.active(), desktop.scale());
             state_rename_refusals(&mut windows);
@@ -11227,9 +11251,9 @@ mod program {
                 (&desktop, themes.grounds(MANAGER_WINDOW_GROUND), &icons),
                 event_endpoint,
             );
-            let motion = themes.active().motion();
-            adopt_operations(&mut windows, &mut client, &reads, motion);
-            moved |= step_here_operations(&mut windows, &mut client, &reads, motion);
+            let pacing = (themes.active().motion(), desktop.refresh());
+            adopt_operations(&mut windows, &mut client, &reads, pacing);
+            moved |= step_here_operations(&mut windows, &mut client, &reads, pacing);
             if let Some(code) = open_landed_windows(
                 &mut windows,
                 &opening,
@@ -11468,7 +11492,7 @@ mod program {
                 windows
                     .iter_mut()
                     .filter_map(|win| match &mut win.kind {
-                        WindowKind::Browser(state) => state.due(now),
+                        WindowKind::Browser(state) => state.due(now, desktop.refresh()),
                         WindowKind::Properties(props) => props.due(now),
                         WindowKind::Progress(progress) => progress.operation.due(),
                     })

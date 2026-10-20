@@ -526,6 +526,15 @@ pub struct Timing {
 }
 
 impl Timing {
+    /// The active pixels across and lines down: the size the timing shows.
+    #[must_use]
+    pub fn active_size(&self) -> (u32, u32) {
+        (
+            u32::from(self.horizontal.active),
+            u32::from(self.vertical.active),
+        )
+    }
+
     /// The frame rate, in millihertz; `0` for a timing with no blanking or
     /// clock to divide.
     #[must_use]
@@ -662,6 +671,79 @@ impl DisplayMode {
     pub const fn len_bytes(&self) -> u64 {
         self.stride_bytes as u64 * self.height_px as u64
     }
+}
+
+/// The rate an output scans out at, in millihertz.
+///
+/// Not part of [`DisplayMode`]: a mode is a frame's layout and is compared
+/// whole to decide whether every buffer must be rebuilt, and a rate that
+/// changes alone rebuilds nothing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct RefreshRate(u32);
+
+impl RefreshRate {
+    /// The slowest rate an output may state: one frame a second.
+    ///
+    /// A format bound, not a capacity: a rate outside
+    /// `MIN_MHZ..=MAX_MHZ` is refused, so a broken or hostile driver cannot
+    /// set a desktop waking at a nanosecond period or stalling for a minute.
+    pub const MIN_MHZ: u32 = 1_000;
+
+    /// The fastest rate an output may state: a thousand frames a second.
+    pub const MAX_MHZ: u32 = 1_000_000;
+
+    /// The rate the desktop paces an output at that states none: the
+    /// firmware framebuffers, which are handed no timing.
+    pub const ASSUMED: Self = Self(60_000);
+
+    /// The rate an output `stated`, or [`Self::ASSUMED`] for one that states
+    /// none.
+    #[must_use]
+    pub const fn or_assumed(stated: Option<Self>) -> Self {
+        match stated {
+            Some(rate) => rate,
+            None => Self::ASSUMED,
+        }
+    }
+
+    /// The rate of `millihertz`, or `None` outside the bound.
+    #[must_use]
+    pub const fn from_mhz(millihertz: u32) -> Option<Self> {
+        if millihertz >= Self::MIN_MHZ && millihertz <= Self::MAX_MHZ {
+            Some(Self(millihertz))
+        } else {
+            None
+        }
+    }
+
+    /// The rate a `timing` scans at, or `None` where it states none inside
+    /// the bound.
+    #[must_use]
+    pub fn of(timing: &Timing) -> Option<Self> {
+        Self::from_mhz(timing.refresh_mhz())
+    }
+
+    /// The rate, in millihertz.
+    #[must_use]
+    pub const fn mhz(self) -> u32 {
+        self.0
+    }
+
+    /// One frame's period at this rate, in nanoseconds.
+    #[must_use]
+    pub const fn frame_ns(self) -> u64 {
+        1_000_000_000_000 / self.0 as u64
+    }
+}
+
+/// What an output runs: its mode, and the rate it scans at where its device
+/// states one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OutputMode {
+    /// The frame layout.
+    pub mode: DisplayMode,
+    /// The scan-out rate, or `None` where the device states none.
+    pub refresh: Option<RefreshRate>,
 }
 
 /// What a display device is, beyond the mode it scans out: the memory it
@@ -860,6 +942,14 @@ pub trait Display {
     /// across [`Self::service_events`], so a caller that read it before a
     /// call it then makes on the display has read the state that call meets.
     fn output(&self) -> Option<DisplayMode>;
+
+    /// The rate the output scans at, or `None` where the device states none.
+    ///
+    /// It moves across [`Self::service_events`] exactly as [`Self::output`]
+    /// does. The default states none, the truth for a device handed no timing.
+    fn refresh(&self) -> Option<RefreshRate> {
+        None
+    }
 
     /// Collect what woke the display's event sources — a sink arriving or
     /// leaving, a mode set completing, a queued present latching — and move
@@ -1380,6 +1470,11 @@ mod tests {
         scan: Scan::Interlaced,
         repetition: 1,
     };
+
+    #[test]
+    fn a_timing_shows_its_active_pixels_and_lines() {
+        assert_eq!(INTERLACED_1080.active_size(), (1920, 1080));
+    }
 
     #[test]
     fn a_timing_round_trips_through_its_wire_form() {

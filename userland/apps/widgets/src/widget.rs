@@ -13,6 +13,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_controls::{
     BandCorner, Button, Card, Checkbox, ComboBox, Dialog, FieldAction, FieldControl, FieldGroup,
     FieldGroupAction, FieldRow, HelpTip, IconButton, Keystroke, ListRow, Menu, Panel, Progress,
@@ -391,13 +392,13 @@ impl DemoWidget {
         }
     }
 
-    /// Step the widget's own motion to `now_ns`, answering whether it draws
-    /// differently for it.
-    pub fn animate(&mut self, now_ns: u64, motion: MotionTheme) -> bool {
+    /// Step the widget's own motion to `now_ns` on a display refreshing at
+    /// `refresh`, answering whether it draws differently for it.
+    pub fn animate(&mut self, now_ns: u64, motion: MotionTheme, refresh: RefreshRate) -> bool {
         match self {
             DemoWidget::Progress(w) => {
                 let moving = w.next_frame_in().is_some();
-                w.set_clock(now_ns, motion);
+                w.set_clock(now_ns, motion, refresh);
                 moving || w.next_frame_in().is_some()
             }
             _ => false,

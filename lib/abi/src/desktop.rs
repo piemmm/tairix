@@ -1,7 +1,8 @@
 //! The desktop a window is displayed on, as its session reports it: the
 //! screen extent, the UI scale, the four axes of how its theme is drawn —
 //! light or dark, contrast, density, and motion — the one double-click
-//! interval every surface pairs presses under, and the text the user chose.
+//! interval every surface pairs presses under, the text the user chose, and
+//! the rate the desktop composes frames at.
 //!
 //! These are the facts an application needs before it can lay itself out
 //! honestly — how large the screen it will be shown on is, how many
@@ -31,6 +32,7 @@
 //! appearance code, or a dirty reserved byte is refused rather than
 //! guessed at.
 
+use crate::driver::display::RefreshRate;
 use crate::font_ipc::{FamilyKey, FONT_FAMILY_KEY_LEN};
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::time::Duration64;
@@ -540,6 +542,7 @@ pub struct DesktopInfo {
     double_click: Duration64,
     text: Option<DesktopText>,
     machine_zone: Option<ZoneName>,
+    refresh: RefreshRate,
 }
 
 /// Byte offset of the double-click interval in an encoded [`DesktopInfo`].
@@ -557,21 +560,26 @@ const OUTPUT_OFFSET: usize = TEXT_OFFSET + 2 + FONT_FAMILY_KEY_LEN;
 /// [`DesktopInfo`]; the name follows it.
 const ZONE_OFFSET: usize = OUTPUT_OFFSET + 8;
 
+/// Byte offset of the frame rate in an encoded [`DesktopInfo`].
+const REFRESH_OFFSET: usize = ZONE_OFFSET + 1 + ZONE_NAME_MAX;
+
 impl DesktopInfo {
     /// Encoded size on the wire: screen width (4), screen height (4),
     /// scale percentage (2), appearance (1), one reserved byte that must be
     /// zero, contrast (1), density (1), motion (1), a second reserved byte
     /// that must be zero, the double-click interval (12), the text size (2)
     /// and the text family (16) — a zero size and an all-zero family where
-    /// the user chose none — then the output's width (4) and height (4), and
+    /// the user chose none — then the output's width (4) and height (4),
     /// the machine zone's name: its length (1) and [`ZONE_NAME_MAX`] bytes,
-    /// zero past it, and all zero where the machine keeps none.
-    pub const WIRE_LEN: usize = ZONE_OFFSET + 1 + ZONE_NAME_MAX;
+    /// zero past it, and all zero where the machine keeps none, and the frame
+    /// rate in millihertz (4).
+    pub const WIRE_LEN: usize = REFRESH_OFFSET + 4;
 
     /// The desktop with a `screen_width_px` × `screen_height_px` screen at
     /// its output's own size, drawn at `scale_percent` of the reference
     /// density in `appearance`, on the theme's own contrast, density and
-    /// motion, pairing presses under [`DOUBLE_CLICK_DEFAULT`].
+    /// motion, pairing presses under [`DOUBLE_CLICK_DEFAULT`] and composing
+    /// at [`RefreshRate::ASSUMED`].
     ///
     /// [`with_axes`](Self::with_axes) derives the same desktop on other
     /// axes, so a caller that only knows the extent and the appearance —
@@ -604,6 +612,7 @@ impl DesktopInfo {
             double_click: DOUBLE_CLICK_DEFAULT,
             text: None,
             machine_zone: None,
+            refresh: RefreshRate::ASSUMED,
         })
     }
 
@@ -643,6 +652,12 @@ impl DesktopInfo {
             machine_zone: zone,
             ..self
         }
+    }
+
+    /// The same desktop composing a frame each period of `refresh`.
+    #[must_use]
+    pub const fn with_refresh(self, refresh: RefreshRate) -> Self {
+        Self { refresh, ..self }
     }
 
     /// The same desktop pairing presses under `interval`.
@@ -747,6 +762,14 @@ impl DesktopInfo {
         self.machine_zone
     }
 
+    /// The rate the desktop composes frames at: its output's own, or
+    /// [`RefreshRate::ASSUMED`] where the output states none. A frame
+    /// presented faster than this is one the user never sees.
+    #[must_use]
+    pub const fn refresh(&self) -> RefreshRate {
+        self.refresh
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -762,7 +785,10 @@ impl DesktopInfo {
     /// Writes nothing if `out` is too short for the record at `at`; the
     /// callers in this crate are fixed-width frames sized to hold it.
     pub fn write_to_at(&self, out: &mut [u8], at: usize) {
-        let Some(slot) = out.get_mut(at..at + Self::WIRE_LEN) else {
+        let Some(slot) = at
+            .checked_add(Self::WIRE_LEN)
+            .and_then(|end| out.get_mut(at..end))
+        else {
             return;
         };
         let mut record = [0u8; Self::WIRE_LEN];
@@ -789,8 +815,9 @@ impl DesktopInfo {
         if let Some(zone) = self.machine_zone {
             let (len, name) = zone.wire();
             out[ZONE_OFFSET] = len;
-            out[ZONE_OFFSET + 1..].copy_from_slice(name);
+            out[ZONE_OFFSET + 1..REFRESH_OFFSET].copy_from_slice(name);
         }
+        put_u32(out, REFRESH_OFFSET, self.refresh.mhz());
     }
 
     /// Decode the record occupying the `WIRE_LEN` bytes of `bytes` from
@@ -802,7 +829,8 @@ impl DesktopInfo {
     ///   at `at`.
     /// * [`Errno::OutOfRange`] — a zero extent, a zero scale, an
     ///   appearance code this version does not define, a double-click
-    ///   interval outside its bounds, or an output smaller than the screen.
+    ///   interval outside its bounds, an output smaller than the screen, or a
+    ///   frame rate outside [`RefreshRate::MIN_MHZ`]`..=`[`RefreshRate::MAX_MHZ`].
     /// * [`Errno::TimestampOutOfRange`] — a double-click interval whose
     ///   nanosecond field is not canonical.
     /// * [`Errno::BadMagic`] — either reserved byte is not zero, a family is
@@ -810,7 +838,10 @@ impl DesktopInfo {
     ///   (wire corruption or a smuggled field, never silently ignored).
     /// * [`Errno::OutOfRange`] also for a zone name without one's shape.
     pub fn from_bytes_at(bytes: &[u8], at: usize) -> Result<Self, Errno> {
-        let Some(record) = bytes.get(at..at + Self::WIRE_LEN) else {
+        let Some(record) = at
+            .checked_add(Self::WIRE_LEN)
+            .and_then(|end| bytes.get(at..end))
+        else {
             return Err(Errno::BufferTooSmall);
         };
         if record[11] != 0 || record[15] != 0 {
@@ -834,12 +865,15 @@ impl DesktopInfo {
             read_u32(record, OUTPUT_OFFSET),
             read_u32(record, OUTPUT_OFFSET + 4),
         )?;
+        let refresh =
+            RefreshRate::from_mhz(read_u32(record, REFRESH_OFFSET)).ok_or(Errno::OutOfRange)?;
         Ok(desktop
             .with_text(decode_text(&record[TEXT_OFFSET..OUTPUT_OFFSET])?)
             .with_machine_zone(ZoneName::from_wire(
                 record[ZONE_OFFSET],
-                &record[ZONE_OFFSET + 1..],
-            )?))
+                &record[ZONE_OFFSET + 1..REFRESH_OFFSET],
+            )?)
+            .with_refresh(refresh))
     }
 
     /// Decode a record that occupies the whole of `bytes`.
@@ -872,8 +906,9 @@ mod tests {
     use super::{
         Appearance, Contrast, Density, DesktopInfo, DesktopText, Motion, ScreensaverKind,
         DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET,
-        OUTPUT_OFFSET, TEXT_OFFSET, ZONE_OFFSET,
+        OUTPUT_OFFSET, REFRESH_OFFSET, TEXT_OFFSET, ZONE_OFFSET,
     };
+    use crate::driver::display::RefreshRate;
     use crate::font_ipc::FamilyKey;
     use crate::time::Duration64;
     use crate::zone::ZoneName;
@@ -985,7 +1020,7 @@ mod tests {
     #[test]
     fn the_machine_zone_round_trips_and_its_absence_is_all_zero() {
         assert_eq!(desktop().machine_zone(), None);
-        assert!(desktop().to_le_bytes()[ZONE_OFFSET..]
+        assert!(desktop().to_le_bytes()[ZONE_OFFSET..REFRESH_OFFSET]
             .iter()
             .all(|&byte| byte == 0));
         let paris = ZoneName::new("Europe/Paris").expect("a zone name");
@@ -1000,7 +1035,7 @@ mod tests {
         let paris = ZoneName::new("Europe/Paris").expect("a zone name");
         let bytes = desktop().with_machine_zone(Some(paris)).to_le_bytes();
         let mut trailing = bytes;
-        trailing[DesktopInfo::WIRE_LEN - 1] = b'x';
+        trailing[REFRESH_OFFSET - 1] = b'x';
         assert_eq!(DesktopInfo::from_bytes(&trailing), Err(Errno::BadMagic));
         let mut misshapen = bytes;
         misshapen[ZONE_OFFSET + 1] = b' ';
@@ -1039,6 +1074,35 @@ mod tests {
     }
 
     #[test]
+    fn the_frame_rate_round_trips_and_is_assumed_until_stated() {
+        assert_eq!(desktop().refresh(), RefreshRate::ASSUMED);
+        for mhz in [RefreshRate::MIN_MHZ, 59_940, 144_000, RefreshRate::MAX_MHZ] {
+            let rate = RefreshRate::from_mhz(mhz).expect("in bounds");
+            let info = desktop().with_refresh(rate);
+            assert_eq!(info.refresh(), rate);
+            assert_eq!(DesktopInfo::from_bytes(&info.to_le_bytes()), Ok(info));
+        }
+    }
+
+    #[test]
+    fn a_frame_rate_outside_its_bounds_is_refused_on_decode() {
+        for mhz in [
+            0,
+            RefreshRate::MIN_MHZ - 1,
+            RefreshRate::MAX_MHZ + 1,
+            u32::MAX,
+        ] {
+            let mut bytes = desktop().to_le_bytes();
+            bytes[REFRESH_OFFSET..].copy_from_slice(&mhz.to_le_bytes());
+            assert_eq!(
+                DesktopInfo::from_bytes(&bytes),
+                Err(Errno::OutOfRange),
+                "{mhz}"
+            );
+        }
+    }
+
+    #[test]
     fn a_record_round_trips_inside_a_larger_frame() {
         let info = desktop();
         let mut frame = [0xAAu8; DesktopInfo::WIRE_LEN + 8];
@@ -1055,6 +1119,19 @@ mod tests {
         let mut frame = [0xAAu8; DesktopInfo::WIRE_LEN];
         desktop().write_to_at(&mut frame, 1);
         assert_eq!(frame, [0xAA; DesktopInfo::WIRE_LEN]);
+    }
+
+    /// An offset at the end of the address space is short of a record rather
+    /// than an overflow.
+    #[test]
+    fn an_offset_past_every_frame_reads_and_writes_nothing() {
+        let mut frame = [0xAAu8; DesktopInfo::WIRE_LEN];
+        desktop().write_to_at(&mut frame, usize::MAX);
+        assert_eq!(frame, [0xAA; DesktopInfo::WIRE_LEN]);
+        assert_eq!(
+            DesktopInfo::from_bytes_at(&frame, usize::MAX),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]

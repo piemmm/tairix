@@ -7,11 +7,12 @@
 //! trace's known/working/indeterminate/complete/failed rendering including the
 //! reduced-motion static trace.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{MotionInteraction, TextRole, Theme, Timeline};
+use tairix_theme::{MotionInteraction, TextRole, Theme};
 
 use crate::damage::sink;
 use crate::paint::{measured_thickness, progress_thickness};
@@ -21,6 +22,9 @@ use crate::state::{
 };
 use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul, region_has};
 use crate::value::{Progress, Slider, SliderAction};
+
+/// The display the traces are clocked against.
+const RATE: RefreshRate = RefreshRate::ASSUMED;
 
 const W: u32 = 200;
 const H: u32 = 28;
@@ -895,11 +899,11 @@ fn sweep_at(theme: &Theme, share: u64) -> u64 {
 fn a_busy_trace_sweeps_while_its_owner_reports_the_clock() {
     let theme = Theme::dark();
     let mut trace = progress_with(ActivityState::Indeterminate);
-    trace.set_clock(0, theme.motion());
-    assert_eq!(trace.next_frame_in(), Some(Timeline::FRAME_NS));
-    trace.set_clock(sweep_at(&theme, 300), theme.motion());
+    trace.set_clock(0, theme.motion(), RATE);
+    assert_eq!(trace.next_frame_in(), Some(RATE.frame_ns()));
+    trace.set_clock(sweep_at(&theme, 300), theme.motion(), RATE);
     let early = progress_surface(&trace, &theme);
-    trace.set_clock(sweep_at(&theme, 700), theme.motion());
+    trace.set_clock(sweep_at(&theme, 700), theme.motion(), RATE);
     let late = progress_surface(&trace, &theme);
     assert_ne!(early.pixels(), late.pixels());
     assert!(
@@ -907,6 +911,22 @@ fn a_busy_trace_sweeps_while_its_owner_reports_the_clock() {
         "early on it is near the start"
     );
     assert!(column_inked(&late, &theme, W - W / 5), "later near the end");
+}
+
+#[test]
+fn a_moving_trace_wakes_on_its_own_display_s_frames() {
+    let theme = Theme::dark();
+    let fast = RefreshRate::from_mhz(144_000).expect("in bounds");
+    let mut busy = progress_with(ActivityState::Indeterminate);
+    busy.set_clock(0, theme.motion(), fast);
+    assert_eq!(busy.next_frame_in(), Some(fast.frame_ns()));
+    let mut filling = progress_with(ActivityState::Progress(ProgressValue::new(100)));
+    filling.set_clock(0, theme.motion(), fast);
+    filling.set_state(
+        ControlState::idle().with_activity(ActivityState::Progress(ProgressValue::new(900))),
+    );
+    filling.set_clock(1, theme.motion(), fast);
+    assert_eq!(filling.next_frame_in(), Some(fast.frame_ns()));
 }
 
 /// Nothing still about a busy trace may read as an amount: without a clock,
@@ -928,10 +948,10 @@ fn a_busy_trace_that_cannot_move_is_centred_and_asks_for_no_frame() {
 
     let reduced = reduced_motion();
     let mut trace = progress_with(ActivityState::Indeterminate);
-    trace.set_clock(0, reduced.motion());
+    trace.set_clock(0, reduced.motion(), RATE);
     assert_eq!(trace.next_frame_in(), None);
     let first = progress_surface(&trace, &reduced);
-    trace.set_clock(sweep_at(&theme, 500), reduced.motion());
+    trace.set_clock(sweep_at(&theme, 500), reduced.motion(), RATE);
     assert_eq!(first.pixels(), progress_surface(&trace, &reduced).pixels());
 }
 
@@ -945,7 +965,7 @@ fn a_rising_amount_eases_to_its_value_and_a_new_run_is_shown_at_once() {
     let row = top + (bottom - top) / 2;
     let ease = u64::from(theme.motion().duration(MotionInteraction::JobProgressPulse)) * 1_000_000;
     let mut trace = progress_with(ActivityState::Progress(ProgressValue::new(200)));
-    trace.set_clock(0, theme.motion());
+    trace.set_clock(0, theme.motion(), RATE);
     let start = active_extent(&progress_surface(&trace, &theme), accent, row).expect("a fill");
 
     trace.set_state(
@@ -960,15 +980,15 @@ fn a_rising_amount_eases_to_its_value_and_a_new_run_is_shown_at_once() {
     // It stood still, so it sets off at the next frame rather than from the
     // instant it was last clocked at.
     let set_off = 10 * ease;
-    trace.set_clock(set_off, theme.motion());
+    trace.set_clock(set_off, theme.motion(), RATE);
     assert_eq!(
         active_extent(&progress_surface(&trace, &theme), accent, row),
         Some(start),
         "set off, not jumped to its end"
     );
-    trace.set_clock(set_off + ease / 2, theme.motion());
+    trace.set_clock(set_off + ease / 2, theme.motion(), RATE);
     let halfway = active_extent(&progress_surface(&trace, &theme), accent, row).expect("a fill");
-    trace.set_clock(set_off + ease, theme.motion());
+    trace.set_clock(set_off + ease, theme.motion(), RATE);
     let end = active_extent(&progress_surface(&trace, &theme), accent, row).expect("a fill");
     assert!(
         start < halfway && halfway < end,
@@ -1013,15 +1033,15 @@ fn a_run_of_rising_readings_is_followed_closely() {
     let mut trace = progress_with(ActivityState::Progress(ProgressValue::new(0)));
     let mut repeated = trace.clone();
     let mut now = 0;
-    trace.set_clock(now, theme.motion());
-    repeated.set_clock(now, theme.motion());
+    trace.set_clock(now, theme.motion(), RATE);
+    repeated.set_clock(now, theme.motion(), RATE);
     for step in 1..=60u16 {
-        now += Timeline::FRAME_NS;
+        now += RATE.frame_ns();
         trace.set_state(state(step * 1000 / 60));
         repeated.set_state(state(step * 1000 / 60));
         repeated.set_state(state(step * 1000 / 60));
-        trace.set_clock(now, theme.motion());
-        repeated.set_clock(now, theme.motion());
+        trace.set_clock(now, theme.motion(), RATE);
+        repeated.set_clock(now, theme.motion(), RATE);
     }
     let shown = active_extent(&progress_surface(&trace, &theme), accent, row).expect("a fill");
     assert!(
@@ -1056,7 +1076,7 @@ fn a_failed_trace_keeps_its_amount_in_the_recovery_colour_and_stops() {
     assert!(!has_pixel(&surface, accent));
 
     let mut stopped = Progress::new().with_label("Disk full");
-    stopped.set_clock(0, theme.motion());
+    stopped.set_clock(0, theme.motion(), RATE);
     stopped.set_state(
         ControlState::idle().with_activity(ActivityState::Progress(ProgressValue::new(200))),
     );
@@ -1077,7 +1097,7 @@ fn a_failed_trace_keeps_its_amount_in_the_recovery_colour_and_stops() {
     );
 
     let mut busy = Progress::new().with_label("Failed");
-    busy.set_clock(0, theme.motion());
+    busy.set_clock(0, theme.motion(), RATE);
     busy.set_state(
         ControlState::idle()
             .with_activity(ActivityState::Working)

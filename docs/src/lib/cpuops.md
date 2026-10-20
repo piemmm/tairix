@@ -50,6 +50,16 @@ and consumed on the hot path. Each choice is a typed `Decision` the caller
 records through a `DecisionSink` for the audit log; the crate itself performs
 no I/O.
 
+## Resolution in a process
+
+A user process holds each family's implementation in a `Resolved` cell. The
+runtime records the feature set the kernel delivered before `main`
+(`tairix_cpuops::deliver`), and a family selects against it the first time it
+is used, then keeps that choice for the life of the process — so no program has
+to resolve anything, and none can forget to. With nothing delivered (a host
+test) a family runs its baseline and installs nothing; the kernel installs its
+own choices explicitly (`kernel/core`'s `resolve_accelerated_ops`).
+
 ## The crypto carve-out
 
 A family that touches a secret is `ByPriority` on **availability only** — the

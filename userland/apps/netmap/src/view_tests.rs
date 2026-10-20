@@ -2,9 +2,10 @@ use super::*;
 use alloc::string::ToString;
 use core::net::{IpAddr, Ipv4Addr};
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::window_ipc::AppMenuRowView;
 use tairix_input::Modifiers;
-use tairix_theme::{ThemeRegistry, Timeline};
+use tairix_theme::ThemeRegistry;
 
 use crate::layout;
 use crate::menu::Command;
@@ -431,8 +432,10 @@ fn a_spread_comes_out_over_the_panels_duration_and_then_owes_no_frame() {
     let mut view = printing_view(paced());
     let printer = window_point(&view, &host(2));
     click_at(&mut view, printer, NOW);
-    let first = view.next_frame_in(NOW).expect("a frame is owed");
-    assert!(first <= Timeline::FRAME_NS);
+    let first = view
+        .next_frame_in(NOW, RefreshRate::ASSUMED)
+        .expect("a frame is owed");
+    assert!(first <= RefreshRate::ASSUMED.frame_ns());
 
     let span = panel_open_ns();
     let halfway = services_out(&mut view, NOW + span / 2);
@@ -448,7 +451,7 @@ fn a_spread_comes_out_over_the_panels_duration_and_then_owes_no_frame() {
 
     render(&mut view, NOW + span);
     assert_eq!(
-        view.next_frame_in(NOW + span),
+        view.next_frame_in(NOW + span, RefreshRate::ASSUMED),
         None,
         "the finished frame was drawn, so nothing more is owed"
     );
@@ -480,7 +483,7 @@ fn a_fold_that_interrupts_a_spread_reverses_from_where_it_stands() {
         services_out(&mut view, end).is_empty(),
         "folded all the way"
     );
-    assert_eq!(view.next_frame_in(end), None);
+    assert_eq!(view.next_frame_in(end, RefreshRate::ASSUMED), None);
 }
 
 #[test]
@@ -488,7 +491,7 @@ fn reduced_motion_lands_a_spread_at_once_and_arms_nothing() {
     let mut view = printing_view(instant());
     let at = window_point(&view, &host(2));
     click(&mut view, at);
-    assert_eq!(view.next_frame_in(NOW), None);
+    assert_eq!(view.next_frame_in(NOW, RefreshRate::ASSUMED), None);
     assert_eq!(services_out(&mut view, NOW).len(), 3);
 }
 

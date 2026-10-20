@@ -5,6 +5,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_controls::{
     ControlState, FocusState, IconTile, PointerState, SelectionState, TileLayout,
 };
@@ -200,8 +201,8 @@ impl SelectionFade {
 
     /// Nanoseconds until the next fade frame, or `None` when nothing is
     /// animating.
-    fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
-        self.timeline.next_frame_in(now_ns)
+    fn next_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        self.timeline.next_frame_in(now_ns, refresh)
     }
 }
 
@@ -301,8 +302,8 @@ impl Chooser {
     /// Nanoseconds until the next fade frame, or `None` when nothing is
     /// animating.
     #[must_use]
-    pub(crate) fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
-        self.fade.next_frame_in(now_ns)
+    pub(crate) fn next_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        self.fade.next_frame_in(now_ns, refresh)
     }
 
     /// Put the mark on the focused slot at once.

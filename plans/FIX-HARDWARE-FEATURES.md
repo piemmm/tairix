@@ -1,47 +1,16 @@
 # FIX-HARDWARE-FEATURES — Boot-time CPU feature detection and self-optimising routine selection
 
-Status: **in progress** — P0 (build-time floor), P1 (the `cpufeatures`
-/`cpucycles` Arch HAL slices), the P2 **framework crate** (`lib/cpuops`,
-foundational-complete), and the P2 **first consumer + delivery** done: the
-`lib/crc32c` CRC-32C family (portable baseline + per-arch `crc32c*`/SSE4.2
-candidates, `lib/cpuops`-selected + self-verified + host-fuzzed), the
-migration-safe common-`CpuFeatureSet` delivery (kernel folds each core's set
-into an intersection, stamps it into every `ProcessStart`, exposes it via
-`lib/rt::cpu_features`), the `kernel/core` bring-up resolve+audit
-(`AuditEvent::CpuOpsRoutineSelected`), and the ARXFS `physical_checksum`
-consumer (FNV-1a → CRC-32C, on-disk trailer 8→4). The P2 **crypto-availability
-consumer** is also done: `lib/crypto::backend` is the authoritative SHA-256
-backend-availability decision routed through `lib/cpuops` as an
-availability-only (`ByPriority`, never benchmarked) family, whose mandatory
-self-verify is a boot-time FIPS-180-4 known-answer self-test (POST) of the live
-SHA-256 path; `kernel/core` records the decision and **halts** on a POST failure
-(`AuditEvent::CryptoSelfTestFailed`), the FIPS discipline. It does not fork the
-crypto computation (§2.12 forbids hand-rolling; the audited `sha2` crate owns
-backend selection): the crate detects through `cpufeatures`, which answers
-nothing on `target_os = "none"`, so no TAIRiX target reaches a hardware SHA-256
-path and the honest software answer is recorded everywhere
-(`plans/OPEN-DEFECTS.md` D361). Recovering hardware crypto awaits a **vetted,
-driveable audited backend** — a supply-chain decision, deliberately not faked
-(D363).
-
-The P3 **page-zero** consumer is also done: `lib/pagezero` is a capability-gated
-(`ByPriority`) family — portable byte-fill baseline + per-arch hardware
-candidates (aarch64 `DC ZVA` cache-block zero, x86_64 ERMS `rep stosb`), gated
-on the new `DcZva`/`Erms` `CpuFeatureSet` bits, `lib/cpuops`-selected +
-self-verified + host-fuzzed. The `kernel/mem` frame scrub (`zero_frame` /
-`fill_frame`: zero-before-map and the zero-on-free secret scrub) routes through
-it, and `kernel/core::cpuops::resolve_accelerated_ops` resolves it once against
-the finalised common set and audits the choice (`CpuOpsRoutineSelected`).
-
-**A design correction landed with it (§2.13, no staged migration):** page-zero
-was listed below under `ByBenchmark`; that is wrong. A block-zero primitive is
-unconditionally better when present and bit-identical, so it is chosen by
-*capability* (`ByPriority`), never a benchmark — exactly as Linux selects
-`DC ZVA`/ERMS by feature. `memcpy`/`memset` fall in the same bucket where a
-hardware fill/copy dominates. The plan is corrected accordingly below.
-
-Remaining: that aarch64 hardware-crypto backend; the genuine **`ByBenchmark`**
-demonstration (below); and P4 (matrix + burn-down). Design fixed below.
+| # | Item | Status |
+|---|---|---|
+| P0 | The build-time target-cpu/feature floor | done |
+| P1 | The `cpufeatures` and `cpucycles` Arch HAL slices | done |
+| P2 | `lib/cpuops`; the CRC-32C family; the common feature set folded across cores and delivered in every `ProcessStart`; the kernel's bring-up resolve and audit; the ARXFS CRC-32C checksum; the SHA-256 backend-availability family and its known-answer self-test | done |
+| P2c | A hardware SHA-256 backend on aarch64 | blocked: no vetted, driveable audited backend (`plans/OPEN-DEFECTS.md` D361, D363) |
+| P2d | Every process resolves its families from the set it was delivered | done |
+| P3a | Capability-gated page zero | done |
+| P3b | The `ByBenchmark` axis, for the RFC-1071 checksum | blocked: the userland-measurement design below |
+| P3c | Capability-gated raster kernels (`plans/FIX-DESKTOP-SPEEDUP.md` Stage F) | done |
+| P4 | Fuzzing, docs, the support matrix, burn-down | planned |
 
 **Open design question for the `ByBenchmark` axis (must be resolved before its
 consumers land, §15.7).** The family where a benchmark genuinely decides (the
@@ -268,7 +237,7 @@ consumers P2/P3 landed. Each phase ends only when the whole-project §7 gate
 is green (§2.15); the per-phase **Acceptance** blocks state the phase-local
 bar on top of that.
 
-### P0 — Build-time floor (the layer under everything) — **done**
+### P0 — Build-time floor (the layer under everything)
 
 The per-image CPU floor lives in `tools/xtask/src/floor.rs` (declared
 `mod floor;` in `tools/xtask/src/main.rs`): the single source of truth for
@@ -333,7 +302,7 @@ per-board; hardware worked out at runtime via discovery (§18.1) and CPU
 extensions via P1–P3 dispatch. Per-board images are a rare boot-layer escape
 hatch owned by `plans/BOOTLOADER.md`, never the default.
 
-### P1 — The `cpufeatures` Arch HAL slice (deterministic capability layer) — **done**
+### P1 — The `cpufeatures` Arch HAL slice (deterministic capability layer)
 
 **Delivered.** Two closed HAL slices landed, modelled slot-for-slot on the
 `memtag`/`sidechannel` slices, each with a `kernel/arch/api` conformance
@@ -615,7 +584,34 @@ family's fn pointer from the per-CPU/per-core-type `OpsTable`.
 route through it; `kernel/core` builds per-core-type tables; whole-project
 gate green; coverage ≥ 85% for the new `lib/*` crate (§7).
 
-### P3a — Capability-gated fill/zero (`ByPriority`) — **done**
+### P2d — Every process resolves its families
+
+**Generic rather than per-program.** The kernel stamps the common feature set
+into every `ProcessStart`, and a family resolves itself against it, so no
+userland consumer — the hash table's group scan, CRC-32C outside the kernel,
+the Stage F raster kernels — depends on a program remembering to resolve:
+
+- `lib/cpuops` keeps the process's delivered set in one set-once cell
+  (`deliver` / `delivered`), and `lib/rt`'s `_start` delivers
+  `cpu_features()` there before `main` runs.
+- A family's hot-path entry reads its own resolved cell; empty, it resolves
+  against the delivered set on that first call and installs the winner. With
+  nothing delivered — a host test, the kernel before its bring-up resolve — it
+  runs the baseline and installs nothing, so a later explicit resolve still
+  wins (the kernel's resolve masks the extended register state; user space
+  resolves against the full set it was given).
+- The one lazily-resolving cell type lives in `lib/cpuops`
+  (`Resolved<T>`), so no family carries a second copy of the rule.
+- User-space decisions are deterministic functions of the delivered set,
+  which the kernel already records at boot, so a process does not write its
+  own decisions to the system log at first use.
+
+**Acceptance:** with a delivered set, a family's first call installs the
+priority winner; with none it runs the baseline and leaves the cell empty; the
+kernel's explicit resolve still governs kernel context; whole-project gate
+green.
+
+### P3a — Capability-gated fill/zero (`ByPriority`)
 
 **Delivered.** The page-zero family (`lib/pagezero`) is a capability-gated
 (`ByPriority`) consumer, resolved once at bring-up against the migration-safe
@@ -731,26 +727,21 @@ pure capability question, exactly as P3a argued for page-zero. Classifying
 these families as `ByBenchmark` made them wait on a userland-measurement
 mechanism they never needed.
 
-**Why it works today, with no new mechanism.** `lib/rt`'s startup already
-delivers the kernel-folded common `CpuFeatureSet` to user space
-(`cpu_features()`), and `lib/cpuops` is a plain `lib/*` crate with no kernel
-edge, so `ByPriority` selection inside `lib/raster` needs no kernel work, no
-ABI change, and no new capability — the existing self-verify, fail-closed
-baseline, pin and audit machinery applies unchanged.
+**Why it needs no kernel mechanism.** `lib/rt`'s startup delivers the
+kernel-folded common `CpuFeatureSet` to user space, and P2d resolves each
+family against it on first use, so `ByPriority` selection inside `lib/raster`
+needs no kernel work, no ABI change, and no new capability — the existing
+self-verify and fail-closed baseline apply unchanged.
 
 **Deliverables.** The families, their order, and their per-target availability
-are `plans/FIX-DESKTOP-SPEEDUP.md` Stage F, which owns the implementation. Its
-F.1 has landed the source-level half and narrowed what a *candidate* is still
-owed to two families — the blur's sliding-window add/sub/mean and `resample`'s
-row filter, both of which need an instruction the portable form cannot express
-— while `encode_run` is closed by measurement and `blend_span` /
-`Surface::blit` / the compositor run loop already reached their portable
-ceiling there. Each candidate follows the `lib/pagezero` shape P3a
+are `plans/FIX-DESKTOP-SPEEDUP.md` Stage F, which owns the implementation:
+`raster-blend`, `raster-blur` and `raster-scan`, each with an SSE2 and a NEON
+candidate, while `encode_run` is closed by measurement and `resample`'s
+candidate waits on that plan's decision 2. Each candidate follows the `lib/pagezero` shape P3a
 established — a `build.rs`-emitted per-ISA cfg (never `cfg(target_arch)` in
 source, so `cargo xtask cfg-check` stays green), a portable baseline registered
 last and always feature-legal, the mandatory self-verify against that baseline
-over a fixed size/alignment/alpha vector, host fuzzing, and the pin for
-determinism.
+over a fixed size/alignment/alpha vector, and host fuzzing.
 
 **Per-target state.** aarch64 and x86_64 are unblocked: NEON is baseline on
 `aarch64-unknown-none`, and x86_64 switches its whole FP/SSE/AVX state per task
@@ -761,7 +752,9 @@ vector candidates wait on that plan's G.2. wasm32 stays baseline-only
 
 **Acceptance:** the raster families route through `ByPriority`; every candidate
 is bit-identical to the baseline; the baseline is chosen when the feature bits
-are masked off; the improvement is quoted from `cargo xtask bench`.
+are masked off; the improvement is quoted from `cargo xtask bench` — measured
+in `plans/FIX-DESKTOP-SPEEDUP.md` F.5: a translucent window stack three times
+as fast on SSE2 as on the portable kernels, a frosted one 2.2 times.
 
 ### P4 — Fuzzing, docs, and burn-down
 

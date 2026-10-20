@@ -9,16 +9,34 @@ screen effects. The emulator itself — the VT parser, the grid, the pty seam �
 belongs to `plans/APPWIN.md` AW4, `plans/PTY.md`, and `plans/CURSES.md`;
 nothing here restates them.
 
+| # | Item | Status |
+|---|---|---|
+| T1 | The size the terminal opens at (§1) | done |
+| T2 | The user profile (§2) | done |
+| T3 | Colour schemes (§3) | done |
+| T4 | Screen effects: the strengths and the passes they resolve to (§4) | done |
+| T4.1 | The effect pipeline: retained stages redrawn only over what changed, the phosphor stepped by the clock and settling, a divide-free fuzz, rows spread across a pool started on first use (§4) | done |
+| T4.2 | Scan lines dim a row's colour and leave its coverage (§4) | done |
+| T5 | The window menu (§5) | done |
+| T6 | The settings sheet (§6) | done |
+| T7 | Compositor backdrop blur (§7) | done |
+| T8 | The window fills its frame (§8) | done |
+| T9 | The settings sheet is its own surface (§9) | done |
+| T10 | Command output reaches the screen (§10) | done |
+| T11 | Screen semantics (§11) | done |
+| T12 | A repaint costs what changed (§12) | done |
+| T13 | A closed window's shell is reaped (§13) | done |
+| T14 | One process, many windows (§14) | done |
+| T15 | Its icon-bar presence (§15) | done |
+
 Read alongside: `plans/GUI-CONTROLS-DESIGN.md` (the Reactive Alloy control
 language every surface here is built from), `plans/APPWIN.md` (the window
-channel), `plans/FIX-DISPLAY-ACCELERATION.md` (the accelerated layer path the
-effect pipeline is shaped for).
+channel), `plans/GPU.md` (the programmable path the effect passes would need to
+leave the CPU).
 
 ---
 
 ## 1. Why the terminal opens at the size it does
-
-**Status: done.**
 
 A terminal's natural size is a character count, not a pixel count. The window
 is therefore whatever the conventional 80×25 screen measures in the face
@@ -53,8 +71,6 @@ them — reads `chrome_insets` rather than predicting an extent.
 ---
 
 ## 2. The user profile
-
-**Status: done.**
 
 One [`Profile`](../userland/apps/terminal/src/profile.rs) holds everything a
 user can change: the colour scheme, their own custom scheme's colours, the
@@ -120,8 +136,6 @@ repainting it cheap.
 
 ## 3. Colour schemes
 
-**Status: done.**
-
 `userland/apps/terminal/src/scheme.rs` is the one place a terminal colour comes
 from. A `ColorScheme` is the sixteen ANSI slots plus background, foreground,
 cursor, and cursor text. `Painted` resolves the scheme in force once per
@@ -140,8 +154,6 @@ default scheme's palette — one definition.
 
 ## 4. Screen effects
 
-**Status: done.**
-
 `userland/apps/terminal/src/effects.rs` carries one strength per effect, each a
 permille `0..=1000` a slider sets directly, and turns them into the ordered
 `Pass` list a frame goes through. A zero-strength effect contributes no pass,
@@ -151,10 +163,10 @@ so a terminal with the effects off pays nothing.
 |---|---|---|
 | Translucency | While the cells are painted | The default background is filled at `background_alpha`, so the compositor's own premultiplied blend does the work and a glyph stays opaque over it. Never below `MIN_OPACITY`. |
 | Backdrop blur | The compositor | Only the compositor can see behind a window, so the strength becomes a logical radius (`blur_radius_px`, capped at `MAX_BLUR_RADIUS_PX`) and is handed to the window channel's `set_backdrop_blur`. Zero when the window is opaque — a blur nobody can see is wasted work. The compositor rations how many stacked windows it frosts, so a deeply buried terminal shows the translucency without the frost. |
-| Scan lines | `Pass::ScanLines` | Dims alternate physical rows. Static. |
+| Scan lines | `Pass::ScanLines` | Dims the colour of alternate physical rows and leaves their coverage, so an opaque terminal stays opaque. Static. |
 | Glow | `Pass::Glow` | Halation: the light of brightly-driven pixels spread into their neighbourhood and added back. Static. |
-| Fuzz | `Pass::Fuzz` | Per-pixel luminance jitter from a cheap reproducible mixer, moving each animation step. |
-| Phosphor | `Pass::Phosphor` | A decaying `Persistence` trail of what was lit recently, added back in the pixel's own hue. |
+| Fuzz | `Pass::Fuzz` | Per-pixel luminance jitter, one 64-bit draw per eight pixels scaled by a multiply and a shift, moving each animation step. |
+| Phosphor | `Pass::Phosphor` | A trail of what was lit recently, decaying once per animation step and added back in the pixel's own hue. |
 | Wobble | `Pass::Wobble` | Per-row horizontal displacement along a travelling integer sine. |
 
 **The glow is the spatial half of a tube's light, phosphor the temporal
@@ -185,38 +197,54 @@ noise rather than being smeared into the halo. Three decisions carry it:
 The spread is the workspace's one separable box blur (`tairix_raster::box_blur`)
 run twice, at radii summing to the reach, so the falloff is a tent rather than
 a box with a visible edge — there is no second blur implementation. Both
-working buffers are grown once and reused.
+working buffers are held at the window's size while the glow is on, so a frame
+allocates nothing; a window that cannot afford them is drawn without effects.
 
-**The stateful passes share one `EffectState`.** Phosphor keeps a persistence
-trail and the glow keeps its working buffers; a caller has no business knowing
-which, so one object carries both and one `clear()` forgets everything held
-under a screen that has stopped existing — a resize, a profile change, or
-memory pressure, which is what releases the buffers.
+**The passes are drawn by a retained pipeline, redrawn over what changed.**
+`pipeline::Pipeline` holds three stages by what an output pixel depends on:
+`pre` (wobble, phosphor, scan lines — one screen pixel and its row), `lit`
+(glow — the neighbourhood of `pre` its reach spans) and `out` (fuzz — one pixel
+of `lit` and the step). A stage exists only while one of its passes is on, and
+a render redraws each only where its input changed: the screen's damage carried
+along by each row's wobble, the rows a wobble step moved, the pixels whose
+trail moved, then the glow's reach around all of that. A keystroke under glow
+costs its cells and the glow's reach round them (five pixels at the reference
+density), never two whole-window blurs and a whole-window present; an
+unchanging screen costs nothing. The retained screen
+stays clean, so the next cell diff still describes the text.
 
-**The pipeline is a description, not a pile of flags.** `Pass` carries the
-*resolved physical* parameters, so a display that can composite hardware layers
-can programme its own engine from the same list, with the software passes here
-staying the conformance oracle for what the result must look like. That is why
-the effects are a typed ordered list rather than code inlined into the
-renderer.
+- **Exact, and proven so.** A pixel's glow depends on `pre` within the reach of
+  it and nowhere else, so a rectangle blurred from its reach-grown
+  neighbourhood — clipped where the whole-screen blur also replicates its edge —
+  writes exactly what the whole-screen blur would. The tests drive a scripted
+  session through one pipeline told only what changed and one told everything
+  did, and require the pictures byte-identical after every step and every
+  changed pixel reported.
+- **The phosphor decays in time, not per present, and settles.** The trail
+  steps once per animation step; a present between steps shows the screen's
+  new light against the trail as it stands. A pixel whose trail is the level
+  its own light holds it at is settled, and once every pixel is, the pipeline
+  stops asking for steps: a static screen with phosphor on parks.
+- **Moving passes move; the rest do not.** Wobble and fuzz draw differently at
+  every step whatever the screen shows; the window asks for a timed step only
+  while one is on or a trail has not settled (`Pipeline::animated`).
+- **Turning the last pass off presents the plain screen whole**
+  (`Pipeline::retire`): the effected picture stands on screen until it is
+  replaced, and the cell diff alone would leave it there.
+- **Rows spread across a pool started on first use.** The `pre` and `out`
+  stages split their rows across `lib/parallel` bands; the pool is created the
+  first time a pass draws, so a terminal with the effects off holds no worker
+  threads, and the CPU count it is sized from is asked once at start-up, never
+  from the loop that owes the windows their frames.
+- **One `clear()` forgets everything** held under a screen that has stopped
+  existing — a resize, new colours or a new face, memory pressure — which is
+  what releases the stages' buffers.
 
-**Animation is a clock, never a spin.** Every animated pass is a pure function
+**Animation is a clock, never a spin.** Every moving pass is a pure function
 of a monotonically increasing `Phase`. The program's wait-set park carries a
-one-shot frame deadline (`FRAME_INTERVAL_NS`, 20 fps) only while an animated
-effect is in force; otherwise it parks indefinitely. There is no poll loop and
-no periodic tick.
-
-**A pass runs over a copy, never into the retained screen.** `render::Screen`
-keeps the painted picture between frames so a repaint costs the cells that
-changed (§12); a pass is a whole-frame post-process by nature — wobble
-displaces rows, phosphor decays every pixel — so an active pass copies the
-finished screen into a buffer, runs there, and presents whole. The retained
-screen therefore stays clean and the next frame's cell diff still describes
-the *text* rather than the effect's own churn, so an animated terminal
-re-runs its passes without re-rendering the grid. The buffer is reused
-between frames and exists only while an effect is on. Translucency and
-backdrop blur are not passes, so a see-through, frosted terminal keeps the
-cell-diff repaint cost.
+one-shot frame deadline (`frame_interval_ns`: whole frames of the desktop's
+rate, at most 20 a second) only while some window
+animates; otherwise it parks indefinitely.
 
 The settings sheet is drawn **after** the effects: a
 settings sheet that wobbled with the screen behind it would be unusable, and
@@ -226,7 +254,7 @@ its controls must read exactly as they do everywhere else on the desktop.
 
 ## 5. The window menu
 
-**Status: done.** The terminal is a client of the desktop's one menu service
+The terminal is a client of the desktop's one menu service
 (`plans/NEW-MENUS.md` M3.1); it keeps no menu shell of its own.
 
 `userland/apps/terminal/src/menu.rs` builds the **row model** and reads a
@@ -271,8 +299,6 @@ accept no typeface from the app.
 
 ## 6. The settings sheet
 
-**Status: done.**
-
 `userland/apps/terminal/src/settings.rs` — a modal sheet composed from the
 shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`, `Button`,
 `SwatchGrid`, `ColourPicker`), on its own popup surface.
@@ -311,8 +337,6 @@ grid (the pty follows), and writes the document once it settles.
 
 ## 7. Compositor backdrop blur
 
-**Status: done.**
-
 Translucency alone composites a window straight over whatever is behind it.
 Backdrop blur makes a translucent terminal read as frosted glass, and only the
 compositor can do it.
@@ -345,8 +369,6 @@ compositor can do it.
 
 ## 8. The window fills its frame
 
-**Status: done.**
-
 Two separate things used to leave dead space around the screen, and both are
 gone.
 
@@ -371,8 +393,6 @@ gone.
 
 ## 9. The settings sheet is its own surface
 
-**Status: done.**
-
 The settings sheet is a **popup window**, not pixels drawn inside the
 terminal's own surface, so shrinking the terminal no longer clips it: it opens
 at its own preferred size. The window menu is not a popup at all — it is the
@@ -392,8 +412,6 @@ draw.
 
 ## 10. Why command output used to be invisible
 
-**Status: fixed (kernel).**
-
 Worth recording because the symptom pointed away from the cause: the terminal
 opened, the prompt appeared and typing echoed, but a command's output never
 arrived. Nothing was wrong with the terminal, the pty readiness, or the wake
@@ -411,8 +429,6 @@ cannot reach the parent's pty, so no authority is widened.
 ---
 
 ## 11. Screen semantics
-
-**Status: done.**
 
 Two screens in the tree apply the one `tairix_vt::Op` vocabulary to a
 character grid — the emulator's `Grid` and the framebuffer boot console
@@ -438,8 +454,6 @@ altering one screen's semantics fails the other's test too. What it guarantees:
 ---
 
 ## 12. A repaint costs what changed, not a window
-
-**Status: done.**
 
 `render::Screen` owns the window-sized premultiplied surface the grid is
 drawn into and **keeps it, and the cells it was painted from, between
@@ -536,10 +550,10 @@ that gesture left — the one property that catches a change nothing named.
 
 Nothing in the other sections. Recognised later work, none of it blocking:
 
-- **Accelerated effects.** The `Pass` list is already the description an
-  accelerated display would programme from; wiring it to `AccelLayer`
-  (`plans/FIX-DISPLAY-ACCELERATION.md`) would move the per-pixel work off the
-  CPU. The software path stays the oracle.
+- **Effects off the CPU.** Every pass is a per-pixel program, which no
+  scan-out engine runs: hardware layers place and blend finished pictures.
+  Moving them off the CPU is a compute pipeline over `lib/gpu`
+  (`plans/GPU.md` GP3/GP4), with the passes here as its conformance oracle.
 - **Scrollback.** The emulator keeps none and reports no mouse input to the
   program, so the wheel over the screen has nothing to move — a correct,
   complete answer today, but a scrollback buffer would give the wheel and a
@@ -551,28 +565,16 @@ Nothing in the other sections. Recognised later work, none of it blocking:
   *user's* profile. Named profiles a user could switch a single window to
   would be a registry of documents under the same store directory.
 
-**Open defect — a user-closed window leaves its shell unreaped.** Closing a
-window drops the pty master (so the shell sees end-of-file and exits) and
-deletes the window's child wait-set member in the same step, so nothing is
-left watching for that exit and nothing reaps it. The kernel holds a zombie
-row and withholds the PID number until this process exits, so a session that
-opens and closes many windows accumulates one per closed window. The
-shell-*exited* path is unaffected: it reaps before closing.
-
-The fix is to keep the child member armed across the close instead: `close`
-hands back the `(pid, child_token)` of a shell still running, the loop holds
-those in a small list, and the child wake that follows reaps and deletes the
-member — event-driven, with no poll and no wait on the close path. It touches
-teardown at every `close` call site, and its regression test is a QEMU
-vertical asserting through the System Information API that a closed window
-leaves no zombie, which is why it is staged here rather than folded into an
-unrelated change.
+**A closed window's shell is reaped.** Closing a window drops the pty master,
+so the shell sees end-of-file and exits; `close` hands back the running shell's
+`(pid, child_token)` as an `EndingShell`, the loop keeps it in `EndingShells`,
+and the child wake that follows reaps it and deletes the member — event-driven,
+with no poll and no wait on the close path, so opening and closing windows
+leaves no zombie behind.
 
 ---
 
 ## 14. One process, many windows
-
-**Status: done.**
 
 A terminal window is not an application: the application is the emulator, and
 each window is one hosted shell. `terminal.app` is therefore **one process
@@ -612,8 +614,6 @@ one window's sheet re-derives every window's look and reshapes every grid; the
 sheet that made the change is the only surface re-presented on top of that.
 
 ## 15. Its icon-bar presence
-
-**Status: done.**
 
 The terminal declares one presence on the desktop's icon bar
 (`tairix_terminal::appbar`, `plans/NEW-TASKBAR.md` T7) whose slot stands for

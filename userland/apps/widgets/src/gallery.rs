@@ -14,6 +14,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_controls::{
     damage, Keystroke, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, Tab,
     Tabs, TabsAction,
@@ -542,13 +543,14 @@ impl Gallery {
     }
 
     /// Step the motion of every widget the shown panel has in view to
-    /// `now_ns`, reporting where those that moved are drawn, and answer when
-    /// the next of them moves on, or `None` while none does.
+    /// `now_ns` on a display refreshing at `refresh`, reporting where those
+    /// that moved are drawn, and answer when the next of them moves on, or
+    /// `None` while none does.
     pub fn animate(
         &mut self,
         now_ns: u64,
         viewport: Rect,
-        scale: Scale,
+        (scale, refresh): (Scale, RefreshRate),
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<u64> {
@@ -561,7 +563,7 @@ impl Gallery {
             let Some(shown) = frame.view.to_window(*rect) else {
                 continue;
             };
-            if item.widget.animate(now_ns, theme.motion()) {
+            if item.widget.animate(now_ns, theme.motion(), refresh) {
                 damage.add(shown);
             }
             if let Some(wait) = item.widget.next_frame_in() {

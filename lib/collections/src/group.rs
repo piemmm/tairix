@@ -11,16 +11,19 @@
 //!
 //! Two candidates answer it in a handful of vector instructions where the
 //! silicon has them; [`scan_portable`] answers it with word-at-a-time bit
-//! tricks everywhere else. Which one runs is decided once, by [`resolve`],
-//! through the `lib/cpuops` capability gate and its mandatory self-verify — so
+//! tricks everywhere else. Which one runs is decided once per process, the
+//! first time a table scans (or by [`resolve`], against a set of the caller's
+//! own), through the `lib/cpuops` capability gate and its mandatory
+//! self-verify — so
 //! a vector instruction is never reached on a core that lacks it, and a
 //! candidate that disagrees with the portable reference on any vector is
 //! structurally unpickable. A build with no candidate at all (every target
 //! whose vector unit is off) calls the baseline directly, paying neither the
 //! resolved-cell load nor the indirect call.
 
-use tairix_cpuops::{Candidate, CoreKey, Decision, Family, FamilyId, Selection, Selector};
-use tairix_sync::OnceCell;
+use tairix_cpuops::{
+    Candidate, CoreKey, Decision, Family, FamilyId, Resolved, Selected, Selection, Selector,
+};
 use tairix_util::lanes::{equal_lanes, HIGH};
 
 #[cfg(any(swiss_neon, swiss_sse2))]
@@ -140,9 +143,9 @@ pub fn scan_portable(group: &Group, tag: u8) -> GroupMatch {
     }
 }
 
-/// The resolved scan, once [`resolve`] has run on a build that has a
-/// candidate to choose.
-static RESOLVED: OnceCell<GroupScanFn> = OnceCell::new();
+/// The scan in force: resolved by [`resolve`], or on first use against the
+/// set this process was delivered.
+static RESOLVED: Resolved<GroupScanFn> = Resolved::new();
 
 /// The accelerated candidates available on this build, in descending declared
 /// priority. A target whose vector unit is off has none.
@@ -265,14 +268,16 @@ fn family() -> Family<'static, GroupScanFn, ScanVector, GroupMatch> {
 ///
 /// Idempotent: the winner is installed once; a later call re-selects and
 /// returns a fresh [`Decision`] without disturbing the installed
-/// implementation. Never panics and falls closed to the portable baseline, so
-/// a table that hashes before this runs is correct — only slower.
+/// implementation. Never panics, and falls closed to the portable baseline.
 #[must_use = "record the Decision through the audit log, or bind it to `_`"]
 pub fn resolve(features: CpuFeatureSet) -> Decision {
-    let family = family();
-    let selected = Selector::new().select(&family, features, CoreKey(features.bits()), None);
-    let _ = RESOLVED.set(selected.impl_);
+    let selected = select(features);
+    let _ = RESOLVED.install(selected.impl_);
     selected.decision
+}
+
+fn select(features: CpuFeatureSet) -> Selected<GroupScanFn> {
+    Selector::new().select(&family(), features, CoreKey(features.bits()), None)
 }
 
 /// Scan one control group — the hot-path entry the table probes through.
@@ -285,10 +290,7 @@ pub fn scan(group: &Group, tag: u8) -> GroupMatch {
     if CANDIDATES.is_empty() {
         return scan_portable(group, tag);
     }
-    match RESOLVED.get() {
-        Ok(Some(resolved)) => resolved(group, tag),
-        _ => scan_portable(group, tag),
-    }
+    RESOLVED.get(|features| select(features).impl_, scan_portable)(group, tag)
 }
 
 #[cfg(test)]

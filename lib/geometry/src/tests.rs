@@ -191,6 +191,23 @@ fn inset_takes_the_margin_off_every_side() {
 }
 
 #[test]
+fn outset_adds_the_margin_to_every_side_and_undoes_an_inset() {
+    let rect = Rect::new(10, 20, 30, 40);
+    assert_eq!(rect.outset(4), Rect::new(6, 16, 38, 48));
+    assert_eq!(rect.outset(4).inset(4), rect);
+    assert_eq!(rect.outset(0), rect);
+}
+
+#[test]
+fn outset_saturates_and_leaves_nothing_as_nothing() {
+    assert_eq!(
+        Rect::new(i32::MIN + 1, 0, u32::MAX - 1, 1).outset(8),
+        Rect::new(i32::MIN, -8, u32::MAX, 17)
+    );
+    assert_eq!(Rect::new(5, 5, 0, 9).outset(3), Rect::EMPTY);
+}
+
+#[test]
 fn inset_past_the_middle_leaves_nothing() {
     assert_eq!(Rect::new(10, 20, 8, 40).inset(4), Rect::EMPTY);
     assert_eq!(Rect::new(10, 20, 40, 7).inset(4), Rect::EMPTY);

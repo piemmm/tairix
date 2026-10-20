@@ -26,8 +26,8 @@
 
 use crate::driver::display::{
     AccelCaps, AccelLayer, BufferId, CursorCaps, DamageList, DamageRect, DisplayDeviceReport,
-    DisplayFormat, DisplayMode, DisplayPower, Presented, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
-    NO_RECT,
+    DisplayFormat, DisplayMode, DisplayPower, OutputMode, Presented, RefreshRate, MAX_ACCEL_LAYERS,
+    MAX_DAMAGE_RECTS, NO_RECT,
 };
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
 use crate::origin::{ProcId, PROC_ID_LEN};
@@ -595,24 +595,15 @@ fn put_status(out: &mut [u8], result: Result<(), Errno>) {
     out[..4].copy_from_slice(&crate::reply::encode_status_reply(result));
 }
 
-/// Check a reply frame's length and status word, and that its bytes from
-/// `tail` to `len` are zero.
-fn read_status(bytes: &[u8], len: usize, tail: usize) -> Result<(), Errno> {
-    if bytes.len() < len {
-        return Err(Errno::BufferTooSmall);
-    }
-    crate::reply::decode_status_reply(&bytes[..4])?;
-    if bytes[tail..len].iter().any(|&b| b != 0) {
-        return Err(Errno::BadMagic);
-    }
-    Ok(())
-}
-
 /// Reply length, in bytes, of a `Query`: the status word followed by the
 /// output record — width (4), height (4), stride (4), format (1), whether an
-/// output runs that mode (1), and a reserved tail (2) that must be zero. With
-/// no output the whole record is zero.
-pub const DISPLAY_MODE_REPLY_LEN: usize = 20;
+/// output runs that mode (1), a reserved pair (2) that must be zero, and the
+/// rate in millihertz (4), zero where the device states none. With no output
+/// the whole record is zero.
+pub const DISPLAY_MODE_REPLY_LEN: usize = 24;
+
+/// Offset of a `Query` reply's rate.
+const QUERY_REFRESH_AT: usize = 20;
 
 /// The byte of a `Query` reply that is `1` when an output runs the mode the
 /// reply carries and `0` when there is none.
@@ -622,16 +613,21 @@ const QUERY_OUTPUT_AT: usize = 17;
 /// same length, so a client always issues one fixed-size receive.
 #[must_use]
 pub fn encode_mode_reply(
-    result: Result<Option<DisplayMode>, Errno>,
+    result: Result<Option<OutputMode>, Errno>,
 ) -> [u8; DISPLAY_MODE_REPLY_LEN] {
     let mut out = [0u8; DISPLAY_MODE_REPLY_LEN];
     match result {
-        Ok(Some(mode)) => {
+        Ok(Some(OutputMode { mode, refresh })) => {
             put_u32(&mut out, 4, mode.width_px);
             put_u32(&mut out, 8, mode.height_px);
             put_u32(&mut out, 12, mode.stride_bytes);
             out[16] = mode.format.as_u8();
             out[QUERY_OUTPUT_AT] = 1;
+            put_u32(
+                &mut out,
+                QUERY_REFRESH_AT,
+                refresh.map_or(0, RefreshRate::mhz),
+            );
         }
         Ok(None) => {}
         Err(err) => put_status(&mut out, Err(err)),
@@ -639,24 +635,40 @@ pub fn encode_mode_reply(
     out
 }
 
-/// Decode a `Query` reply frame: the mode the output runs, or [`None`]
-/// while there is no output.
+/// Decode a `Query` reply frame: the mode the output runs and its rate, or
+/// [`None`] while there is no output.
 ///
 /// # Errors
 ///
 /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
-/// * [`Errno::OutOfRange`] — a corrupt status word or an unknown pixel
-///   format.
-/// * [`Errno::BadMagic`] — a dirty reserved tail, an output byte other than
-///   `0` or `1`, or a mode carried beside a cleared one.
+/// * [`Errno::OutOfRange`] — a corrupt status word, an unknown pixel format,
+///   or a rate outside [`RefreshRate::MIN_MHZ`]`..=`[`RefreshRate::MAX_MHZ`].
+/// * [`Errno::BadMagic`] — a dirty reserved pair, an output byte other than
+///   `0` or `1`, or a mode or rate carried beside a cleared one.
 /// * [`Errno::LengthOutOfRange`] — a mode with a zero extent or a stride
 ///   too small for one scanline.
 /// * The decoded [`Errno`] itself, when the service refused the query.
-pub fn decode_mode_reply(bytes: &[u8]) -> Result<Option<DisplayMode>, Errno> {
-    read_status(bytes, DISPLAY_MODE_REPLY_LEN, QUERY_OUTPUT_AT + 1)?;
+pub fn decode_mode_reply(bytes: &[u8]) -> Result<Option<OutputMode>, Errno> {
+    if bytes.len() < DISPLAY_MODE_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    if bytes[QUERY_OUTPUT_AT + 1..QUERY_REFRESH_AT]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
     match bytes[QUERY_OUTPUT_AT] {
-        0 if bytes[4..QUERY_OUTPUT_AT].iter().all(|&b| b == 0) => Ok(None),
-        1 => read_mode(bytes, 4, DisplayFormat::from_u8(bytes[16])?).map(Some),
+        0 if bytes[4..DISPLAY_MODE_REPLY_LEN].iter().all(|&b| b == 0) => Ok(None),
+        1 => {
+            let mode = read_mode(bytes, 4, DisplayFormat::from_u8(bytes[16])?)?;
+            let refresh = match read_u32(bytes, QUERY_REFRESH_AT) {
+                0 => None,
+                rate => Some(RefreshRate::from_mhz(rate).ok_or(Errno::OutOfRange)?),
+            };
+            Ok(Some(OutputMode { mode, refresh }))
+        }
         _ => Err(Errno::BadMagic),
     }
 }

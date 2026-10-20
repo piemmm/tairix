@@ -229,13 +229,16 @@ spending the next second simulating the last one.
 
 A minimized window stops the clock and draws nothing until the compositor
 gives it focus or a size again; the frame on screen when it went is the frame
-that comes back.
-
-Frames fall due on a fixed beat of one baseline frame (`pacing::Cadence`),
-counted from when each was due rather than when the last one finished. A wake
-between frames — input, a worker's answer, the settings window — draws nothing,
-and the time a frame takes is not added to the wait for the next. The shell models losing the seat the same way, but no seat
+that comes back. The shell models losing the seat the same way, but no seat
 notice reaches a window application yet (`plans/WINTERSUN.md` WS6).
+
+Frames fall due on a fixed beat of one display frame (`pacing::Cadence`), at
+the rate the desktop composes at (`Desktop::refresh`), counted from when each
+was due rather than when the last one finished. A wake between frames — input,
+a worker's answer, the settings window — draws nothing, and the time a frame
+takes is not added to the wait for the next. The frame budget stays the
+baseline's, so a faster display is given more frames where the machine has
+them, never less detail.
 
 ## Detail
 

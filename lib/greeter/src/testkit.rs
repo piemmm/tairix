@@ -7,6 +7,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_colour::Rgba;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
@@ -16,6 +17,9 @@ use tairix_theme::Theme;
 use crate::surface::{
     AuthSurface, Backdrop, Chrome, EventContext, Outcome, Ticket, Tickets, Verdict, Verifier,
 };
+
+/// The display every surface under test animates on.
+pub(crate) const RATE: RefreshRate = RefreshRate::ASSUMED;
 
 pub(crate) const PRESS: InputEvent = InputEvent::PointerPressed {
     button: PointerButton::Primary,

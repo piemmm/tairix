@@ -1,5 +1,6 @@
 //! Windows: a placed surface with compositing attributes.
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_controls::{
     FrameInsets, FrameRim, TitleBarEvent, WindowActivationState, WindowFrame, WindowSizeState,
 };
@@ -661,10 +662,10 @@ impl Window {
         self.lift.still()
     }
 
-    /// Nanoseconds until this window's shadow owes its next step, or `None`
-    /// while it stands still.
-    pub(crate) fn shadow_frame_in(&self, now_ns: u64) -> Option<u64> {
-        self.lift.next_frame_in(now_ns)
+    /// Nanoseconds until this window's shadow owes its next step on a display
+    /// refreshing at `refresh`, or `None` while it stands still.
+    pub(crate) fn shadow_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        self.lift.next_frame_in(now_ns, refresh)
     }
 
     /// The parts of the screen a shadow of `reach` changes when this window's
@@ -2315,10 +2316,7 @@ impl WindowRow<'_> {
         let Some(span) = self.drawable().get(lx..).filter(|s| !s.is_empty()) else {
             return all;
         };
-        span.iter()
-            .take_while(|pixel| pixel.a != u8::MAX)
-            .count()
-            .clamp(1, all.max(1))
+        tairix_raster::leading_translucent(span).clamp(1, all.max(1))
     }
 
     /// The longest run of source pixels this row contributes from screen
@@ -2347,8 +2345,8 @@ impl WindowRow<'_> {
             .ok()?
             .min(drawable);
         let span = self.content.get(start..end)?;
-        let len = span.iter().take_while(|p| p.a == u8::MAX).count();
-        span.get(..len).filter(|run| !run.is_empty())
+        span.get(..tairix_raster::leading_opaque(span))
+            .filter(|run| !run.is_empty())
     }
 }
 

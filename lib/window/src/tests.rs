@@ -13,7 +13,9 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_abi::desktop::{Appearance, DesktopInfo, ScreensaverKind};
-use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{
+    DamageList, DamageRect, DisplayFormat, DisplayMode, RefreshRate,
+};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
@@ -33,9 +35,9 @@ use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
-    damage_in, pointer_point, present_damage, present_damage_list, retained_damage, DeclaredTip,
-    EventDrain, EventError, EventSource, Owed, Parked, PostedRequest, Refused, Repaint, Target,
-    WindowClient, WindowEvents, WindowTransport,
+    damage_in, pointer_point, present_damage, present_damage_list, presented_damage,
+    retained_damage, DeclaredTip, EventDrain, EventError, EventSource, Owed, Parked, PostedRequest,
+    Refused, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::server::{
@@ -1267,6 +1269,31 @@ fn adopting_a_published_desktop_is_news_only_once() {
     // it may return to the appearance it started in.
     assert_eq!(desktop.adopt(sample_desktop()), Ok(true));
     assert_eq!(desktop.appearance(), Appearance::Dark);
+}
+
+/// A display retimed at the same resolution changes no pixel the window
+/// draws: the new rate is taken for pacing, and no repaint is owed for it.
+#[test]
+fn a_new_frame_rate_alone_is_taken_without_a_redraw() {
+    let mut desktop = Desktop::new(sample_desktop()).expect("the sample scale is in range");
+    let retimed = RefreshRate::from_mhz(75_000).expect("in bounds");
+
+    assert_eq!(
+        desktop.adopt(sample_desktop().with_refresh(retimed)),
+        Ok(false)
+    );
+    assert_eq!(desktop.refresh(), retimed);
+    assert_eq!(desktop.info(), sample_desktop().with_refresh(retimed));
+
+    let relit = DesktopInfo::new(1024, 768, 100, Appearance::Light)
+        .expect("a 1024x768 screen at 100% is in range")
+        .with_refresh(RefreshRate::ASSUMED);
+    assert_eq!(
+        desktop.adopt(relit),
+        Ok(true),
+        "anything else still redraws"
+    );
+    assert_eq!(desktop.refresh(), RefreshRate::ASSUMED);
 }
 
 #[test]
@@ -5373,6 +5400,21 @@ fn rect(x: u32, y: u32, width_px: u32, height_px: u32) -> DamageRect {
         width_px,
         height_px,
     }
+}
+
+/// A present into a region the session released sends the whole window, and
+/// into a live one exactly the rectangles it was handed.
+#[test]
+fn a_present_after_a_release_sends_the_whole_window() {
+    let parts = DamageList::new(&[rect(2, 1, 1, 1), rect(0, 0, 1, 1)]).expect("two rectangles");
+    assert_eq!(
+        presented_damage(&SURFACE, false, parts).map(|list| list.rects().to_vec()),
+        Ok(parts.rects().to_vec())
+    );
+    assert_eq!(
+        presented_damage(&SURFACE, true, parts).map(|list| list.rects().to_vec()),
+        Ok(alloc::vec![DamageRect::full(&SURFACE)])
+    );
 }
 
 #[test]

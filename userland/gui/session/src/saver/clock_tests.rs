@@ -1,6 +1,7 @@
 //! Host tests of the clock screensaver: what it says, where it goes, and
 //! that a clock it cannot read waits rather than spins.
 
+use crate::saver::TEST_SCENE_FRAME_NS;
 use tairix_abi::time::{Time64, WallClockReading, WallTimeState};
 use tairix_theme::{Accessibility, Motion, Theme};
 use tairix_wallpaper::ClockOptions;
@@ -11,7 +12,6 @@ use crate::saver::telling::fixtures::{after, SCREEN, SEC};
 use crate::saver::telling::lettered_rect;
 use crate::tests::compositor;
 use tairix_taskbar::clock::UNSET_LABEL;
-use tairix_theme::motion::SceneClock;
 
 /// 2024-02-29 13:46:07 UTC.
 fn reading() -> WallClockReading {
@@ -127,12 +127,12 @@ fn the_face_moves_when_the_minute_turns() {
     assert!(face.moving.is_some());
     assert_eq!(
         face.due_ns(),
-        tick + SceneClock::FRAME_NS,
+        tick + TEST_SCENE_FRAME_NS,
         "frames while it moves"
     );
     let mut now = tick;
     while face.moving.is_some() {
-        now += SceneClock::FRAME_NS;
+        now += TEST_SCENE_FRAME_NS;
         face.advance(now, wm, &mut comp, &mut later);
         assert!(now < tick + 3 * face.fade_ns, "a move ends");
     }

@@ -3,6 +3,7 @@
 use alloc::string::String;
 
 use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::sysinfo::VolumeHealth;
 use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX;
@@ -449,7 +450,7 @@ fn a_settled_timeline_is_complete_and_asks_for_no_wake() {
         assert!(!timeline.running());
         assert_eq!(timeline.progress(0), u8::MAX);
         assert!(timeline.finished(0));
-        assert_eq!(timeline.next_frame_in(0), None);
+        assert_eq!(timeline.next_frame_in(0, RATE), None);
     }
 }
 
@@ -484,24 +485,79 @@ fn a_clock_that_jumped_backwards_settles_rather_than_stalling() {
     let timeline = Timeline::start(100 * MS, 100);
     assert_eq!(timeline.progress(40 * MS), u8::MAX);
     assert!(timeline.finished(40 * MS));
-    assert_eq!(timeline.next_frame_in(40 * MS), Some(0));
+    assert_eq!(timeline.next_frame_in(40 * MS, RATE), Some(0));
+}
+
+/// The display the timeline tests pace against.
+const RATE: RefreshRate = RefreshRate::ASSUMED;
+
+#[test]
+fn a_wake_follows_the_display_s_own_rate() {
+    let timeline = Timeline::start(0, 1000);
+    for mhz in [50_000, 60_000, 144_000, 240_000] {
+        let rate = RefreshRate::from_mhz(mhz).expect("in bounds");
+        assert_eq!(timeline.next_frame_in(0, rate), Some(rate.frame_ns()));
+    }
+}
+
+#[test]
+fn a_capped_animation_stands_whole_frames_of_its_display() {
+    use crate::motion::whole_frames_ns;
+    let fast = RefreshRate::from_mhz(144_000).expect("in bounds");
+    assert_eq!(whole_frames_ns(fast, 20_000), 8 * fast.frame_ns());
+    assert_eq!(
+        whole_frames_ns(fast, 144_000),
+        fast.frame_ns(),
+        "a cap at the rate is every frame"
+    );
+    assert_eq!(
+        whole_frames_ns(fast, 1_000_000),
+        fast.frame_ns(),
+        "never under one frame"
+    );
+    assert_eq!(
+        whole_frames_ns(fast, 0),
+        whole_frames_ns(fast, 1),
+        "a cap of nothing is the slowest there is"
+    );
+}
+
+#[test]
+fn a_work_slice_leaves_half_of_every_frame_to_the_loop() {
+    let ceiling = RefreshRate::ASSUMED.frame_ns();
+    for mhz in (RefreshRate::MIN_MHZ..=RefreshRate::MAX_MHZ).step_by(4_999) {
+        let rate = RefreshRate::from_mhz(mhz).expect("in bounds");
+        let slice = crate::motion::work_slice_ns(rate);
+        let frame = rate.frame_ns().min(ceiling);
+        assert!(slice > 0 && 2 * slice <= frame, "{mhz}");
+        assert!(
+            frame - 2 * slice <= 1,
+            "{mhz}: no more than rounding left over"
+        );
+    }
+    let slow = RefreshRate::from_mhz(RefreshRate::MIN_MHZ).expect("in bounds");
+    assert_eq!(
+        crate::motion::work_slice_ns(slow),
+        ceiling / 2,
+        "a slow display does not slow the answer"
+    );
 }
 
 #[test]
 fn a_wake_is_the_nearer_of_the_frame_cadence_and_what_is_left() {
     let timeline = Timeline::start(0, 1000);
     // Early on, the cadence is what limits it.
-    assert_eq!(timeline.next_frame_in(0), Some(Timeline::FRAME_NS));
+    assert_eq!(timeline.next_frame_in(0, RATE), Some(RATE.frame_ns()));
     // Near the end, the remainder is: the last wake lands on the end rather
     // than past it.
     let remaining = 4 * MS;
     assert_eq!(
-        timeline.next_frame_in(1000 * MS - remaining),
+        timeline.next_frame_in(1000 * MS - remaining, RATE),
         Some(remaining)
     );
     // On the end there is no span left, but the frame that draws the end state
     // still is: due now.
-    assert_eq!(timeline.next_frame_in(1000 * MS), Some(0));
+    assert_eq!(timeline.next_frame_in(1000 * MS, RATE), Some(0));
 }
 
 #[test]
@@ -514,14 +570,14 @@ fn a_span_that_ran_out_since_the_last_step_still_owes_its_terminal_frame() {
     let stepped = 99 * MS;
     assert!(timeline.progress(stepped) < u8::MAX, "a frame short");
 
-    let asked = stepped + Timeline::FRAME_NS;
+    let asked = stepped + RATE.frame_ns();
     assert!(asked > 100 * MS, "the span ran out between the two");
-    assert_eq!(timeline.next_frame_in(asked), Some(0));
+    assert_eq!(timeline.next_frame_in(asked, RATE), Some(0));
 
     // Drawing that frame is what ends it, and the owner says so by settling.
     let mut drawn = timeline;
     drawn.settle();
-    assert_eq!(drawn.next_frame_in(asked), None);
+    assert_eq!(drawn.next_frame_in(asked, RATE), None);
 }
 
 #[test]
@@ -530,7 +586,7 @@ fn settling_a_running_timeline_stops_it() {
     assert!(timeline.running());
     timeline.settle();
     assert_eq!(timeline, Timeline::SETTLED);
-    assert_eq!(timeline.next_frame_in(0), None);
+    assert_eq!(timeline.next_frame_in(0, RATE), None);
 }
 
 #[test]
@@ -567,7 +623,7 @@ fn a_reduced_motion_fade_is_at_its_end_from_the_first_read() {
     let instant = Fade::start(0, 0, 0, u8::MAX);
     assert_eq!(instant.strength(0), u8::MAX);
     assert!(!instant.running());
-    assert_eq!(instant.next_frame_in(0), None);
+    assert_eq!(instant.next_frame_in(0, RATE), None);
 }
 
 #[test]
@@ -575,13 +631,13 @@ fn settling_a_fade_lands_it_on_its_target_and_ends_the_asking() {
     let mut fade = Fade::start(0, 100, u8::MAX, 0);
     assert!(fade.running());
     // A span that ran out still owes the frame that draws the end state.
-    assert_eq!(fade.next_frame_in(200 * MS), Some(0));
+    assert_eq!(fade.next_frame_in(200 * MS, RATE), Some(0));
 
     fade.settle();
 
     assert_eq!(fade.strength(0), 0);
     assert!(!fade.running());
-    assert_eq!(fade.next_frame_in(0), None);
+    assert_eq!(fade.next_frame_in(0, RATE), None);
 }
 
 #[test]
@@ -1944,36 +2000,73 @@ fn syntax_role_indices_round_trip_and_close_the_set() {
 /// The clock an idle scene moves by: the frames it asks for, how far each
 /// moves it, and that a still scene asks for none.
 mod scene_clock {
-    use crate::motion::{seconds, SceneClock};
+    use tairix_abi::driver::display::RefreshRate;
+
+    use super::RATE;
+    use crate::motion::{seconds, SceneClock, CAP_SLACK_DIVISOR};
+
+    fn frame() -> u64 {
+        SceneClock::frame_on(RATE)
+    }
+
+    /// A scene frame is a whole number of display frames, the fewest that
+    /// keep the scene from drawing faster than its fastest.
+    #[test]
+    fn a_scene_frame_is_the_fewest_display_frames_that_reach_its_pace() {
+        for (mhz, frames) in [
+            (60_000, 2),
+            (59_940, 2),
+            // Real "60 Hz" timings: 1024x768 and 1280x1024 compute just over.
+            (60_003, 2),
+            (60_019, 2),
+            (50_000, 2),
+            (75_000, 3),
+            (144_000, 5),
+            (30_000, 1),
+            (24_000, 1),
+            (RefreshRate::MIN_MHZ, 1),
+            (RefreshRate::MAX_MHZ, 34),
+        ] {
+            let rate = RefreshRate::from_mhz(mhz).expect("in bounds");
+            assert_eq!(
+                SceneClock::frame_on(rate),
+                frames * rate.frame_ns(),
+                "{mhz}"
+            );
+        }
+        let fastest = u64::from(SceneClock::FASTEST_MHZ);
+        let cap = fastest + fastest / u64::from(CAP_SLACK_DIVISOR);
+        for mhz in (RefreshRate::MIN_MHZ..=RefreshRate::MAX_MHZ).step_by(997) {
+            let rate = RefreshRate::from_mhz(mhz).expect("in bounds");
+            let frames = SceneClock::frame_on(rate) / rate.frame_ns();
+            assert_eq!(SceneClock::frame_on(rate) % rate.frame_ns(), 0, "{mhz}");
+            assert!(u64::from(mhz) <= frames * cap, "{mhz}");
+            assert!(u64::from(mhz) > (frames - 1) * cap, "{mhz}");
+        }
+    }
 
     #[test]
     fn a_moving_scene_asks_for_a_frame_a_frame_on() {
-        let mut clock = SceneClock::new(0, false);
-        assert_eq!(clock.due_ns(), Some(SceneClock::FRAME_NS));
-        assert!(
-            !clock.frame_due(SceneClock::FRAME_NS - 1),
-            "an early wake draws nothing"
-        );
-        assert!(clock.frame_due(SceneClock::FRAME_NS));
+        let mut clock = SceneClock::new(0, false, RATE);
+        assert_eq!(clock.due_ns(), Some(frame()));
+        assert!(!clock.frame_due(frame() - 1), "an early wake draws nothing");
+        assert!(clock.frame_due(frame()));
 
-        let moved = clock.advance(SceneClock::FRAME_NS);
-        assert!(
-            (moved - seconds(SceneClock::FRAME_NS)).abs() < 1e-12,
-            "{moved} s moved"
-        );
+        let moved = clock.advance(frame(), RATE);
+        assert!((moved - seconds(frame())).abs() < 1e-12, "{moved} s moved");
         assert!(
             (clock.moved() - moved).abs() < f64::EPSILON,
             "it stands where it moved to"
         );
-        assert_eq!(clock.due_ns(), Some(2 * SceneClock::FRAME_NS));
+        assert_eq!(clock.due_ns(), Some(2 * frame()));
     }
 
     #[test]
     fn a_still_scene_asks_for_nothing_and_never_moves() {
-        let mut clock = SceneClock::new(0, true);
+        let mut clock = SceneClock::new(0, true, RATE);
         assert_eq!(clock.due_ns(), None);
         assert!(!clock.frame_due(u64::MAX));
-        assert!(clock.advance(u64::MAX).abs() < f64::EPSILON);
+        assert!(clock.advance(u64::MAX, RATE).abs() < f64::EPSILON);
         assert!(clock.moved().abs() < f64::EPSILON);
         assert_eq!(clock.due_ns(), None);
     }
@@ -1982,20 +2075,31 @@ mod scene_clock {
     /// sleep — moves the scene a few frames on, never all the way to the clock.
     #[test]
     fn a_late_wake_moves_the_scene_no_more_than_a_few_frames() {
-        let mut clock = SceneClock::new(0, false);
-        clock.advance(SceneClock::FRAME_NS);
+        let mut clock = SceneClock::new(0, false, RATE);
+        clock.advance(frame(), RATE);
         let late = 50 * 1_000_000_000;
-        let moved = clock.advance(late);
-        let most = seconds((1 + SceneClock::MOST_FRAMES) * SceneClock::FRAME_NS);
+        let moved = clock.advance(late, RATE);
+        let most = seconds((1 + SceneClock::MOST_FRAMES) * frame());
         assert!((moved - most).abs() < 1e-9, "{moved} s moved");
-        assert_eq!(clock.due_ns(), Some(late + SceneClock::FRAME_NS));
+        assert_eq!(clock.due_ns(), Some(late + frame()));
+    }
+
+    /// A display whose rate changes under a moving scene sets its next frame
+    /// on the new rate's cadence.
+    #[test]
+    fn a_scene_follows_a_display_whose_rate_changed() {
+        let mut clock = SceneClock::new(0, false, RATE);
+        let fast = RefreshRate::from_mhz(144_000).expect("in bounds");
+        clock.advance(frame(), fast);
+        assert_eq!(clock.frame_ns(), SceneClock::frame_on(fast));
+        assert_eq!(clock.due_ns(), Some(frame() + SceneClock::frame_on(fast)));
     }
 
     /// Time only ever runs forward: a clock that stepped back moves nothing.
     #[test]
     fn a_clock_that_ran_backwards_moves_nothing() {
-        let mut clock = SceneClock::new(10 * SceneClock::FRAME_NS, false);
-        let moved = clock.advance(SceneClock::FRAME_NS);
+        let mut clock = SceneClock::new(10 * frame(), false, RATE);
+        let moved = clock.advance(frame(), RATE);
         assert!(moved.abs() < f64::EPSILON, "{moved} s moved");
     }
 }

@@ -4,7 +4,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DisplayFormat, DisplayMode, OutputMode};
 use tairix_abi::origin::{CapabilitySummary, TrustDomain};
 use tairix_abi::session_ipc::{SessionVerdict, SessionWake, SESSION_WAKE_LEN};
 use tairix_abi::time::Duration64;
@@ -79,7 +79,7 @@ impl SessionAuthority for FakeAuthority {
 struct FakePresentation {
     log: Vec<Step>,
     acquire: Result<(), Errno>,
-    output: Result<Option<DisplayMode>, Errno>,
+    output: Result<Option<OutputMode>, Errno>,
     reconfigure: Result<(), Errno>,
     repaint: Result<(), Errno>,
 }
@@ -89,7 +89,10 @@ impl FakePresentation {
         Self {
             log: Vec::new(),
             acquire: Ok(()),
-            output: Ok(Some(mode)),
+            output: Ok(Some(OutputMode {
+                mode,
+                refresh: None,
+            })),
             reconfigure: Ok(()),
             repaint: Ok(()),
         }
@@ -120,14 +123,16 @@ impl SeatReturn for FakePresentation {
         self.acquire
     }
 
-    fn query_output(&mut self) -> Result<Option<DisplayMode>, Errno> {
+    fn query_output(&mut self) -> Result<Option<OutputMode>, Errno> {
         self.log.push(Step::QueryOutput);
         self.output
     }
 
-    fn reconfigure(&mut self, mode: DisplayMode) -> Result<(), Errno> {
-        self.log
-            .push(Step::Reconfigure(mode.width_px, mode.height_px));
+    fn reconfigure(&mut self, output: OutputMode) -> Result<(), Errno> {
+        self.log.push(Step::Reconfigure(
+            output.mode.width_px,
+            output.mode.height_px,
+        ));
         self.reconfigure
     }
 

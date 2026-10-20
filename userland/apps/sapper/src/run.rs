@@ -605,7 +605,11 @@ mod program {
         loop {
             // The deadline the *next* park carries: written before the wait,
             // read inside it.
-            deadline.set(round.game.deadline_ns(tairix_rt::clock_get()));
+            deadline.set(
+                round
+                    .game
+                    .deadline_ns(tairix_rt::clock_get(), round.desktop.refresh()),
+            );
             let waited = events.wait(surface.window.client());
             let now = tairix_rt::clock_get();
             let mut damage = tairix_controls::damage::sink();
