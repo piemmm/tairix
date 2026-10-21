@@ -11,8 +11,10 @@ files — browser grafico del filesystem
 Apre una finestra del desktop che elenca il file system, a partire dalla
 cartella indicata da `path` sulla riga di comando — o, se indica un file,
 dalla cartella che contiene quel file, con il file selezionato — o, se non
-ne è indicato alcuno, dalla cartella `Home` dell'utente che lo avvia (la
-sua directory home se quella non può essere elencata). Il titolo della
+ne è indicato alcuno, dalla cartella scelta nelle impostazioni: la
+cartella `Home` dell'utente che lo avvia, a meno che non abbia scelto la
+sua cartella `Desktop` o le unità di archiviazione collegate (la sua
+directory home se quella non può essere elencata). Il titolo della
 finestra indica la directory corrente; la finestra ne elenca le voci, ogni
 voce selezionata evidenziata con il colore d'accento del tema attivo. Ogni
 lettura di una directory è un normale elenco soggetto ai permessi, con
@@ -21,11 +23,11 @@ rifiutata, mai indovinata.
 
 Il desktop avvia il browser per voi e lo tiene sulla barra delle icone: il
 menu della sua posizione elenca i vostri luoghi e tutto ciò che è montato, e
-sceglierne uno vi apre una finestra. Un clic sulla posizione ne apre una
-nella cartella `Home`. Chiedere una cartella che ha già una finestra
-porta quella finestra in primo piano anziché aprirne un'altra. Questa
-istanza non ha la voce *Esci*: fa parte del desktop, e chiuderne le finestre
-semplicemente la mette via.
+sceglierne uno vi apre una finestra; *Impostazioni…* è l'ultima voce. Un
+clic sulla posizione ne apre una nella cartella scelta nelle impostazioni.
+Chiedere una cartella che ha già una finestra porta quella finestra in primo
+piano anziché aprirne un'altra. Questa istanza non ha la voce *Esci*: fa
+parte del desktop, e chiuderne le finestre semplicemente la mette via.
 
 Avviato per nome da una shell (o aperto su una cartella dal desktop) è
 invece una normale applicazione: una finestra, che termina quando la
@@ -55,15 +57,21 @@ contestuale.
 
 Il nome di una voce è mostrato per intero, su due righe quando servono; un
 nome troppo lungo anche per quelle conserva l'inizio e la fine, con `…` nel
-mezzo, così l'estensione resta sempre visibile.
+mezzo, così l'estensione resta sempre visibile. Un'applicazione è mostrata
+senza la sua estensione `.app`, e le impostazioni possono mostrarla, oppure
+nascondere anche le estensioni dei tipi di file che il sistema conosce. Le
+voci il cui nome inizia con un punto sono elencate solo quando le
+impostazioni lo chiedono.
 
 `F2` rinomina sul posto la voce selezionata, come fa un clic sul nome
 dell'unica voce selezionata seguito da una pausa: il nome si apre per la
 modifica non appena il clic non può più diventare un doppio clic. La parte
 prima dell'estensione è selezionata, quindi ciò che si digita sostituisce il
-nome e mantiene l'estensione. `Invio`, o un clic fuori dal nome, conferma il
-nuovo nome — un nome che il volume rifiuta resta aperto con il motivo — e
-`Escape` lo abbandona.
+nome e mantiene l'estensione; anche un'estensione che la finestra non mostra
+viene mantenuta. `Invio`, o un clic fuori dal nome, conferma il nuovo nome —
+un nome che il volume rifiuta resta aperto con il motivo — e `Escape` lo
+abbandona. Un clic che ha rinominato la voce non fa nient'altro, perché la
+cartella potrebbe essersi riordinata sotto il puntatore.
 
 Trascinare le voci selezionate su un'altra finestra del gestore di file, su
 una cartella in essa o sul desktop le copia lì; tenendo premuto `Shift`,
@@ -88,11 +96,27 @@ per la modifica.
 
 Il sottomenu *Visualizza* del menu contestuale mostra le voci come icone
 grandi, l'impostazione predefinita; come icone piccole, ogni nome su una
-riga accanto alla sua immagine; o come elenco, una riga per voce con la
-dimensione, la data dell'ultima modifica e il tipo. Un'unità elencata tra
-esse mostra invece lo spazio libero, il file system e quanto bene funziona.
-Un clic sul titolo di una colonna ordina l'elenco in base a essa, e un
-secondo clic inverte l'ordine.
+riga accanto alla sua immagine; o come elenco, una riga per voce con
+l'immagine, la dimensione, la data dell'ultima modifica e il tipo. Un'unità
+elencata tra esse mostra invece lo spazio libero, il file system e quanto
+bene funziona. Sotto le visualizzazioni, il sottomenu ordina la finestra
+per nome, tipo, dimensione o data dell'ultima modifica — oppure, per un
+elenco di unità, per nome, spazio libero, file system o stato — in ordine
+crescente o decrescente. Anche un clic sul titolo di una colonna ordina
+l'elenco in base a essa, e un secondo clic inverte l'ordine. Le cartelle
+restano in cima qualunque ordine si scelga, a meno che le impostazioni non
+le mettano tra i file.
+
+*Impostazioni…* nel menu della posizione sulla barra delle icone, o
+`Ctrl+,`, apre le impostazioni del browser: dove si apre una nuova
+finestra, come mostra e ordina le sue voci e se mostra la colonna dei
+luoghi e la barra degli strumenti; se le cartelle restano in cima; quali
+estensioni dei nomi e quali voci sono nascoste; se un'immagine mostra il
+proprio contenuto e una cartella ciò che contiene; e se spostare delle voci
+nel Cestino chiede prima conferma. *Ripristina impostazioni predefinite*
+riporta ogni impostazione al suo valore predefinito. Una modifica si
+applica a tutte le finestre insieme e viene ricordata; una finestra già
+aperta mantiene la visualizzazione e l'ordine che ha.
 
 `Alt+Enter` apre la finestra delle *informazioni* della voce selezionata, come
 fa *Ottieni informazioni…* nel suo sottomenu del menu contestuale. È una finestra a sé, per cui se ne

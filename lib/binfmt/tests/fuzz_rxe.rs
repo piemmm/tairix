@@ -1,28 +1,35 @@
 //! Deterministic fuzz harness for the `lib/binfmt` rxe inspection view and
-//! manifest summary (decoders of untrusted executable-file bytes).
+//! the report of every TAIRiX container (decoders of untrusted
+//! executable-file bytes).
 //!
 //! [`tairix_binfmt::rxe::RxeView::parse`] and
-//! [`tairix_binfmt::rxe::ManifestSummary::parse`] decode any file a viewer
-//! is pointed at. The harness invariants:
+//! [`tairix_binfmt::report::report`] decode any file a viewer is pointed at.
+//! The harness invariants:
 //!
 //! * parsing any byte string never panics — it returns a view or a typed
 //!   error (fail closed);
 //! * a successful parse yields a view whose every accessor (header,
-//!   segments, needed libraries, capabilities) can be walked without a
-//!   panic.
+//!   segments, needed libraries) can be walked without a panic;
+//! * a report of any program, driver image or manifest holds to the report's
+//!   bounds: no more lines than it may hold, none too long, none carrying a
+//!   control character.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` mutates a
-//! valid image/manifest built through the `lib/abi` encoders and mixes in
-//! pure noise. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep
+//! valid image, driver image, manifest and `AppInfo` built through the
+//! `lib/abi` encoders and mixes in pure noise. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep
 //! once from a fresh, logged seed; `cargo xtask fuzz` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
 
 use tairix_abi::{
-    CapabilityId, LoadHeader, ManifestHeader, NeededLibrary, RxePermission, Segment,
-    ABI_VERSION_CURRENT, LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
+    manifest_header, CapabilityId, DriverBindKey, DriverKind, DriverManifest, HwMatchKey,
+    LoadHeader, ManifestHeader, NeededLibrary, RxePermission, Segment, ABI_VERSION_CURRENT,
+    APPINFO_MAGIC, DRIVER_MANIFEST_MAGIC, LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC,
+    MIME_ENTRY_LEN, RXE_PAGE_SIZE,
 };
-use tairix_binfmt::rxe::{ManifestSummary, RxeView};
+use tairix_binfmt::report::report;
+use tairix_binfmt::rxe::RxeView;
 use tairix_fuzzseed::Prng;
+use tairix_util::report::{MAX_LINE_BYTES, MAX_REPORT_LINES};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -84,7 +91,42 @@ fn valid_manifest() -> Vec<u8> {
     bytes
 }
 
-/// Decode `bytes` both ways; a success must be walkable without a panic.
+/// A valid driver image: a manifest binding one virtio device and asking for
+/// IRQ binding, then the valid load image as its program.
+fn valid_driver() -> Vec<u8> {
+    let manifest = DriverManifest {
+        magic: DRIVER_MANIFEST_MAGIC,
+        abi_version: ABI_VERSION_CURRENT,
+        kind: DriverKind::UserSpace,
+        bind_key_count: 1,
+        capability_count: 1,
+        syscall_table_hash: [0x44; 32],
+        signer_pubkey: [0x55; 32],
+        signature: [0x66; 64],
+    };
+    let mut bytes = manifest.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&CapabilityId::IRQ_BIND.as_u16().to_le_bytes());
+    bytes.extend_from_slice(&DriverBindKey::new(1, HwMatchKey::virtio(2)).to_le_bytes());
+    bytes.extend_from_slice(&valid_image());
+    bytes
+}
+
+/// A valid `AppInfo` asking for one capability and claiming one file type.
+fn valid_appinfo() -> Vec<u8> {
+    let mut header = manifest_header("org.example.viewer", "viewer");
+    header.capability_count = 1;
+    header.mime_count = 1;
+    let mut bytes = header.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&CapabilityId::NET_RAW.as_u16().to_le_bytes());
+    let mut mime = [0u8; MIME_ENTRY_LEN];
+    mime[0] = 10;
+    mime[1..11].copy_from_slice(b"text/plain");
+    bytes.extend_from_slice(&mime);
+    bytes
+}
+
+/// Decode `bytes` every way; a success must be walkable without a panic and
+/// a report must hold to its bounds.
 fn exercise(bytes: &[u8]) {
     if let Ok(view) = RxeView::parse(bytes) {
         let _ = view.header();
@@ -97,10 +139,11 @@ fn exercise(bytes: &[u8]) {
             let _ = reference.len();
         }
     }
-    if let Ok(summary) = ManifestSummary::parse(bytes) {
-        let _ = summary.header();
-        for id in summary.capabilities() {
-            let _ = id.name();
+    if let Some(report) = report(bytes) {
+        assert!(report.lines().len() <= MAX_REPORT_LINES);
+        for line in report.lines() {
+            assert!(line.text.len() <= MAX_LINE_BYTES, "{:?}", line.text);
+            assert!(!line.text.chars().any(char::is_control), "{:?}", line.text);
         }
     }
 }
@@ -113,18 +156,23 @@ fn parse_never_panics_for_any_input() {
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
-    let image = valid_image();
-    let manifest = valid_manifest();
+    let templates = [
+        valid_image(),
+        valid_driver(),
+        valid_manifest(),
+        valid_appinfo(),
+    ];
+    let magics = [
+        LOAD_MAGIC,
+        DRIVER_MANIFEST_MAGIC,
+        MANIFEST_MAGIC,
+        APPINFO_MAGIC,
+    ];
 
     let mut iteration: u64 = 0;
     loop {
-        // 1. A valid image/manifest with a handful of bytes flipped.
-        let template = if rng.next_u64() & 1 == 0 {
-            &image
-        } else {
-            &manifest
-        };
-        let mut mutated = template.clone();
+        // 1. A valid file of each format with a handful of bytes flipped.
+        let mut mutated = rng.pick(&templates).clone();
         for _ in 0..rng.at_most(8) {
             let pos = rng.below(mutated.len());
             mutated[pos] ^= rng.next_u8();
@@ -141,12 +189,7 @@ fn parse_never_panics_for_any_input() {
         let mut noise = vec![0u8; rng.at_most(MAX_NOISE)];
         rng.fill(&mut noise);
         if noise.len() >= 4 && rng.next_u64() & 1 == 0 {
-            let magic = if rng.next_u64() & 2 == 0 {
-                LOAD_MAGIC.to_le_bytes()
-            } else {
-                MANIFEST_MAGIC.to_le_bytes()
-            };
-            noise[..4].copy_from_slice(&magic);
+            noise[..4].copy_from_slice(&rng.pick(&magics).to_le_bytes());
         }
         exercise(&noise);
 

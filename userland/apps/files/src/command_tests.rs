@@ -323,12 +323,45 @@ fn a_named_place_is_tried_first_then_the_bare_open_places_then_the_root() {
     assert_eq!(
         tried(Ladder::new(
             Some(place(&["Storage", "Backup"])),
-            Some(&home)
+            Some(&home),
+            None
         )),
         vec![
             place(&["Storage", "Backup"]),
             place(&["Users", "ada", "Home"]),
             home.clone(),
+            Vec::new(),
+        ]
+    );
+}
+
+/// A window asked for no folder opens where the settings say, and falls back
+/// down the same ladder when that place is refused; one asked for a folder
+/// falls back to it after the folder.
+#[test]
+fn the_start_place_is_tried_before_the_bare_open_places() {
+    let home = place(&["Users", "ada"]);
+    let desktop = place(&["Users", "ada", "Desktop"]);
+    assert_eq!(
+        tried(Ladder::new(None, Some(&home), Some(desktop.clone()))),
+        vec![
+            desktop.clone(),
+            place(&["Users", "ada", "Home"]),
+            home.clone(),
+            Vec::new(),
+        ]
+    );
+    assert_eq!(
+        tried(Ladder::new(
+            Some(place(&["System"])),
+            Some(&home),
+            Some(desktop.clone())
+        )),
+        vec![
+            place(&["System"]),
+            desktop,
+            place(&["Users", "ada", "Home"]),
+            home,
             Vec::new(),
         ]
     );
@@ -342,15 +375,15 @@ fn a_place_reached_twice_is_tried_once() {
     let home = place(&["Users", "ada"]);
     let files = place(&["Users", "ada", "Home"]);
     assert_eq!(
-        tried(Ladder::new(Some(home.clone()), Some(&home))),
+        tried(Ladder::new(Some(home.clone()), Some(&home), None)),
         vec![home.clone(), files.clone(), Vec::new()]
     );
     assert_eq!(
-        tried(Ladder::new(Some(Vec::new()), Some(&home))),
+        tried(Ladder::new(Some(Vec::new()), Some(&home), None)),
         vec![Vec::new(), files.clone(), home.clone()]
     );
     assert_eq!(
-        tried(Ladder::new(Some(files.clone()), Some(&home))),
+        tried(Ladder::new(Some(files.clone()), Some(&home), None)),
         vec![files, home, Vec::new()]
     );
 }
@@ -358,9 +391,12 @@ fn a_place_reached_twice_is_tried_once() {
 /// With no home to fall back to, the root view is all a bare open has.
 #[test]
 fn without_a_home_the_ladder_ends_at_the_root() {
-    assert_eq!(tried(Ladder::new(None, None)), vec![Vec::<String>::new()]);
     assert_eq!(
-        tried(Ladder::new(Some(place(&["System"])), None)),
+        tried(Ladder::new(None, None, None)),
+        vec![Vec::<String>::new()]
+    );
+    assert_eq!(
+        tried(Ladder::new(Some(place(&["System"])), None, None)),
         vec![place(&["System"]), Vec::new()]
     );
 }
@@ -370,7 +406,7 @@ fn without_a_home_the_ladder_ends_at_the_root() {
 #[test]
 fn a_step_states_its_hop_and_the_window_states_the_whole_move() {
     let home = place(&["Users", "ada"]);
-    let mut ladder = Ladder::new(Some(place(&["Storage", "Backup"])), Some(&home));
+    let mut ladder = Ladder::new(Some(place(&["Storage", "Backup"])), Some(&home), None);
     assert_eq!(ladder.moved(), None, "still where it was asked to open");
 
     assert_eq!(
@@ -399,7 +435,7 @@ fn a_file_asked_for_is_shown_selected_in_its_own_folder() {
     let home = place(&["Users", "ada"]);
     let folder = place(&["Users", "ada", "Home"]);
     let note = place(&["Users", "ada", "Home", "notes.txt"]);
-    let mut ladder = Ladder::new(Some(note), Some(&home));
+    let mut ladder = Ladder::new(Some(note), Some(&home), None);
     assert!(
         !ladder.show_instead(BrowseError::Source(Errno::PermissionDenied)),
         "a refusal is no file"
@@ -432,7 +468,7 @@ fn a_file_asked_for_is_shown_selected_in_its_own_folder() {
         "the move names the folder the file was to be shown in"
     );
 
-    let mut fallen = Ladder::new(Some(place(&["Storage", "Backup"])), Some(&home));
+    let mut fallen = Ladder::new(Some(place(&["Storage", "Backup"])), Some(&home), None);
     assert!(fallen.step("its device was removed").is_some());
     assert!(
         !fallen.show_instead(BrowseError::Source(Errno::NotADirectory)),

@@ -176,7 +176,7 @@ still shows a meaningful icon.
 
 A kind ships **one** class master, in whichever format suits the artwork: the
 folders are vector (`folder.svg`, `folder-filled.svg`, `folder-back.svg`,
-`folder-front.svg`), the illustrative
+`folder-front.svg`, `home.svg`), the illustrative
 file-class, application and disk pictures are raster masters. Shipping one id in both formats is a packaging defect the
 image build refuses, since the raster tier would always win and the vector
 could never be selected.

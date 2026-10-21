@@ -753,8 +753,9 @@ its value means beside the value itself. A TIFF's own directories read
 through the same tables.
 
 The file is hostile, so the report is built in a parser sandbox
-(`tairix_sandbox::imageinspect`) and is bounded: at most `MAX_REPORT_LINES`
-lines of at most `MAX_LINE_BYTES` bytes, its last saying where it stopped
+(`tairix_sandbox::imageinspect`) and is bounded by the shared builder
+(`tairix_util::report`): at most `MAX_REPORT_LINES` lines of at most
+`MAX_LINE_BYTES` bytes, its last saying where it stopped
 should it fill. A record that will not read ends the walk with where and why,
 an EXIF entry list cut short is read as far as it goes, a value outside its
 block is said to be, a directory is never visited twice, and text the file

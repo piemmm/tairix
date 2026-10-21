@@ -11,9 +11,11 @@ files — navegador gráfico do sistema de ficheiros
 Abre uma janela do ambiente de trabalho que lista o sistema de ficheiros,
 a começar pela pasta que `path` indica na linha de comandos — ou, se
 indicar um ficheiro, pela pasta que contém esse ficheiro, com o ficheiro
-selecionado — ou, se nenhum for indicado, pela pasta `Home` do utilizador
-que o inicia (o seu diretório pessoal, se essa pasta não puder ser
-listada). O título da janela indica o diretório atual; a janela lista as
+selecionado — ou, se nenhum for indicado, pela pasta que as definições
+escolherem: a pasta `Home` do utilizador que o inicia, a menos que este
+tenha escolhido a sua pasta `Desktop` ou o armazenamento ligado (o seu
+diretório pessoal, se essa pasta não puder ser listada). O título da
+janela indica o diretório atual; a janela lista as
 suas entradas, cada entrada selecionada realçada com a cor de destaque do
 tema ativo. Cada leitura de um diretório é uma listagem normal, sujeita a
 permissões, com a identidade do utilizador que o inicia: um diretório
@@ -21,8 +23,9 @@ ilegível é recusado, nunca adivinhado.
 
 O ambiente de trabalho inicia o explorador por si e mantém-no na barra de
 ícones: o menu do seu lugar lista os seus próprios locais e tudo o que
-estiver montado, e escolher um abre lá uma janela. Um clique no lugar abre
-uma na sua pasta `Home`. Pedir uma pasta que já tem uma janela traz
+estiver montado, e escolher um abre lá uma janela; *Definições…* é a
+última linha. Um clique no lugar abre uma na pasta que as definições
+escolherem. Pedir uma pasta que já tem uma janela traz
 essa janela para a frente, em vez de abrir outra. Esta instância não tem a
 linha *Sair* — faz parte do ambiente de trabalho, e fechar as suas janelas
 apenas a arruma.
@@ -55,14 +58,20 @@ contexto.
 
 O nome de um item é mostrado por inteiro, em duas linhas quando delas
 precisa; um nome demasiado longo mesmo para elas mantém o início e o fim,
-com `…` no meio, para que a extensão esteja sempre à vista.
+com `…` no meio, para que a extensão esteja sempre à vista. Uma aplicação
+é mostrada sem a sua extensão `.app`, e as definições podem mostrá-la, ou
+ocultar também as extensões dos tipos de ficheiro que o sistema conhece.
+Os itens cujo nome começa por um ponto só são listados quando as
+definições o pedem.
 
 `F2` muda o nome do item selecionado no próprio lugar, tal como clicar no
 nome do único item selecionado e esperar: o nome abre-se para edição assim
 que o clique já não pode ser um duplo clique. Fica selecionada a parte antes
-da extensão, por isso o que se escreve substitui o nome e mantém a extensão.
-`Enter`, ou um clique fora do nome, mantém o nome novo — um nome que o
-volume recusa fica aberto com o motivo — e `Escape` abandona-o.
+da extensão, por isso o que se escreve substitui o nome e mantém a extensão;
+uma extensão que a janela não mostra também se mantém. `Enter`, ou um clique
+fora do nome, mantém o nome novo — um nome que o volume recusa fica aberto
+com o motivo — e `Escape` abandona-o. Um clique que mudou o nome do item não
+faz mais nada, já que a pasta pode ter sido reordenada debaixo do ponteiro.
 
 Arrastar os itens selecionados para outra janela do gestor de ficheiros,
 para uma pasta nela ou para o ambiente de trabalho copia-os para lá;
@@ -86,11 +95,26 @@ de cada tipo que um editor instalado escreve, e abre o seu nome para edição.
 
 O submenu *Visualização* do menu de contexto mostra os itens como ícones
 grandes, a predefinição; como ícones pequenos, cada nome numa linha ao lado
-da sua imagem; ou como lista, uma linha por item com o tamanho, a data da
-última alteração e o tipo. Uma unidade listada entre eles mostra, em vez
-disso, o espaço livre, o sistema de ficheiros e o estado do seu
-funcionamento. Um clique no título de uma coluna ordena a lista por ela, e
-um segundo clique inverte a ordem.
+da sua imagem; ou como lista, uma linha por item com a sua imagem, o
+tamanho, a data da última alteração e o tipo. Uma unidade listada entre
+eles mostra, em vez disso, o espaço livre, o sistema de ficheiros e o
+estado do seu funcionamento. Por baixo das visualizações, o submenu ordena
+a janela por nome, tipo, tamanho ou data da última alteração — ou, numa
+lista de unidades, por nome, espaço livre, sistema de ficheiros ou estado —
+por ordem crescente ou decrescente. Um clique no título de uma coluna
+também ordena a lista por ela, e um segundo clique inverte a ordem. As
+pastas ficam no topo seja qual for a ordem escolhida, a menos que as
+definições as coloquem entre os ficheiros.
+
+*Definições…* no menu do lugar na barra de ícones, ou `Ctrl+,`, abre as
+definições do explorador: onde se abre uma janela nova, como mostra e
+ordena os seus itens e se mostra a coluna de locais e a barra de
+ferramentas; se as pastas ficam no topo; que extensões de nomes e que itens
+ficam ocultos; se uma imagem mostra o seu próprio conteúdo e uma pasta o
+que contém; e se mover itens para o Lixo pergunta primeiro. *Restaurar
+predefinições* repõe todas as definições. Uma alteração aplica-se a todas
+as janelas de uma vez e fica memorizada; uma janela já aberta mantém a
+visualização e a ordem que tem.
 
 `Alt+Enter` abre a janela de *informações* do item selecionado, tal como
 *Obter informações…* no seu submenu do menu de contexto. É uma janela própria, pelo que

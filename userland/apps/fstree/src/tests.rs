@@ -3093,7 +3093,7 @@ fn a_standalone_manifest_shows_its_requested_capabilities() {
     let mut m = model(&mut fs);
     open_file(&mut m, &mut fs, "prog.manifest");
     let rows = disasm_view(&m).summary_rows();
-    assert_eq!(rows[0].0, "signed manifest (RXM1)");
+    assert_eq!(rows[0].0, "TAIRiX program manifest, ABI 1");
     assert!(
         rows.iter().any(|(t, _)| t.contains("CAP_FS_ACCESS")),
         "got {rows:?}"

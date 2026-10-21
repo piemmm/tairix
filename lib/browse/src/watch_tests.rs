@@ -493,7 +493,7 @@ fn merging_into_a_bare_listing_answers_where_each_entry_went() {
 /// rebuild alike.
 #[test]
 fn a_merge_lands_what_a_fresh_sort_would() {
-    use crate::sort::{sort_entries, SortDirection, SortKey, SortMode};
+    use crate::sort::{sort_entries, Folders, SortDirection, SortKey, SortMode};
     let sized = |name: &str, size: u64| {
         Entry::new(
             name,
@@ -503,9 +503,17 @@ fn a_merge_lands_what_a_fresh_sort_would() {
         )
     };
     let remove = |name: &str| EntryChange::Remove(String::from(name));
+    // Every fifth entry a folder, so where folders stand is part of the order.
     let listing = || -> Vec<Entry> {
         (0..40u64)
-            .map(|i| sized(&alloc::format!("n{i:02}"), i % 7))
+            .map(|i| {
+                let name = alloc::format!("n{i:02}");
+                if i % 5 == 0 {
+                    Entry::directory(&name)
+                } else {
+                    sized(&name, i % 7)
+                }
+            })
             .collect()
     };
     let flood: Vec<EntryChange> = (0..12u64)
@@ -536,39 +544,48 @@ fn a_merge_lands_what_a_fresh_sort_would() {
             .collect(),
         flood,
     ];
-    for key in [SortKey::Name, SortKey::Size] {
-        for direction in [SortDirection::Ascending, SortDirection::Descending] {
-            let mode = SortMode { key, direction };
-            for changes in &cases {
-                let mut before = listing();
-                sort_entries(&mut before, mode);
-                let mut wanted: BTreeMap<String, Entry> = before
-                    .iter()
-                    .map(|entry| (String::from(entry.name()), entry.clone()))
-                    .collect();
-                for change in changes {
-                    match change.clone() {
-                        EntryChange::Upsert(entry) => {
-                            wanted.insert(String::from(entry.name()), entry);
-                        }
-                        EntryChange::Remove(name) => {
-                            wanted.remove(&name);
-                        }
+    let modes = [SortKey::Name, SortKey::Size].into_iter().flat_map(|key| {
+        [SortDirection::Ascending, SortDirection::Descending]
+            .into_iter()
+            .flat_map(move |direction| {
+                [Folders::First, Folders::Among]
+                    .into_iter()
+                    .map(move |folders| SortMode {
+                        key,
+                        direction,
+                        folders,
+                    })
+            })
+    });
+    for mode in modes {
+        for changes in &cases {
+            let mut before = listing();
+            sort_entries(&mut before, mode);
+            let mut wanted: BTreeMap<String, Entry> = before
+                .iter()
+                .map(|entry| (String::from(entry.name()), entry.clone()))
+                .collect();
+            for change in changes {
+                match change.clone() {
+                    EntryChange::Upsert(entry) => {
+                        wanted.insert(String::from(entry.name()), entry);
+                    }
+                    EntryChange::Remove(name) => {
+                        wanted.remove(&name);
                     }
                 }
-                let mut wanted: Vec<Entry> = wanted.into_values().collect();
-                sort_entries(&mut wanted, mode);
-
-                let mut merged = before.clone();
-                let (placed, _) =
-                    merge_changes(&mut merged, changes.clone(), mode).expect("merged");
-                assert_eq!(merged, wanted, "{mode:?} {changes:?}");
-                for (at, was) in before.iter().enumerate() {
-                    let now = merged.iter().position(|entry| entry.name() == was.name());
-                    assert_eq!(placed.place(at), now, "{mode:?} {changes:?} at {at}");
-                }
-                assert_eq!(placed.place(before.len()), None);
             }
+            let mut wanted: Vec<Entry> = wanted.into_values().collect();
+            sort_entries(&mut wanted, mode);
+
+            let mut merged = before.clone();
+            let (placed, _) = merge_changes(&mut merged, changes.clone(), mode).expect("merged");
+            assert_eq!(merged, wanted, "{mode:?} {changes:?}");
+            for (at, was) in before.iter().enumerate() {
+                let now = merged.iter().position(|entry| entry.name() == was.name());
+                assert_eq!(placed.place(at), now, "{mode:?} {changes:?} at {at}");
+            }
+            assert_eq!(placed.place(before.len()), None);
         }
     }
 }

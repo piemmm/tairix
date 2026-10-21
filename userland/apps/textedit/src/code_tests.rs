@@ -103,16 +103,14 @@ fn an_executable_is_listed_as_its_own_instruction_set() {
     let listing = listing_of(&elf(&[0x90, 0xc3]), None, Some(Isa::Aarch64)).expect("a listing");
     assert_eq!(listing.isa, Isa::X86_64, "the container names its own set");
     assert!(listing.lines[0].is_label);
-    assert!(
-        listing.lines[0].text.starts_with("ELF64 \u{b7} x86-64"),
-        "{}",
-        listing.lines[0].text
-    );
+    assert_eq!(listing.lines[0].text, "ELF64 executable for x86_64");
     let text = texts(&listing);
     assert!(
-        text.iter().any(|line| line.contains("code ")),
-        "a region line"
+        text.iter()
+            .any(|line| line.contains("LOAD r-x at 0x400000")),
+        "the headers are reported: {text:?}"
     );
+    assert!(text.contains(&"Instructions, read as x86-64"), "{text:?}");
     assert!(text.iter().any(|line| line.contains(" nop")), "{text:?}");
     assert!(text.iter().any(|line| line.contains(" ret")), "{text:?}");
     let widest = text.iter().map(|line| line.chars().count()).max();
@@ -124,7 +122,7 @@ fn a_chosen_instruction_set_overrides_the_containers() {
     let listing =
         listing_of(&elf(&[0x1f, 0x20, 0x03, 0xd5]), Some(Isa::Aarch64), None).expect("a listing");
     assert_eq!(listing.isa, Isa::Aarch64);
-    assert!(listing.lines[0].text.contains("aarch64"));
+    assert!(texts(&listing).contains(&"Instructions, read as aarch64"));
 }
 
 #[test]
@@ -141,6 +139,7 @@ fn only_a_want_of_memory_or_of_a_worker_passes() {
     let passing = [
         DecodeFailure::Sandbox(SandboxError::WorkerUnavailable(Errno::PermissionDenied)),
         DecodeFailure::Sandbox(SandboxError::WorkerFailed(WorkerEnd::OutOfMemory)),
+        DecodeFailure::NoMemory,
     ];
     let lasting = [
         DecodeFailure::Sandbox(SandboxError::WorkerFailed(WorkerEnd::Crashed)),
@@ -229,9 +228,18 @@ fn a_listing_says_when_not_every_symbol_is_named() {
 }
 
 #[test]
-fn a_document_is_offered_as_code_only_when_its_head_names_a_container() {
+fn a_document_is_offered_as_code_only_when_its_head_names_a_container_of_code() {
     assert!(CodeDisplay::of(&elf(&[])).is_some_and(|display| display.showing()));
     assert!(CodeDisplay::of(b"\0asm\x01\0\0\0").is_some());
+    assert!(
+        CodeDisplay::of(b"DRV1\x01\0\0\0").is_some(),
+        "a driver runs code"
+    );
+    assert!(
+        CodeDisplay::of(b"RAI1\x01\0\0\0").is_none(),
+        "a manifest runs none"
+    );
+    assert!(CodeDisplay::of(b"RXM1\x01\0\0\0").is_none());
     assert!(CodeDisplay::of(b"fn main() {}").is_none());
     assert!(CodeDisplay::of(&[]).is_none());
 }

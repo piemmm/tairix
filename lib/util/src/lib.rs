@@ -75,6 +75,10 @@
 //! * [`output`] — the byte stream a command engine writes through, consumed
 //!   by the command apps' engines and implemented for the standard streams
 //!   by `lib/rt`.
+//! * [`report`] — a file's structure as a person reads it, bounded against the
+//!   untrusted bytes it is built from, consumed by the picture reports
+//!   (`lib/image`) and the executable reports (`lib/binfmt`), so every report a
+//!   viewer shows is cut, escaped and capped by one rule.
 //! * [`utf8`] — which bytes begin a UTF-8 sequence and its length, consumed
 //!   by `lib/syntax`, `wc`, and the text editor, so a hand-written decoder never
 //!   admits a lead the standard rejects; and which characters hide or reorder
@@ -122,6 +126,7 @@ pub mod join;
 pub mod lanes;
 pub mod mathf;
 pub mod output;
+pub mod report;
 pub mod retry;
 pub mod seconds;
 pub mod secret;

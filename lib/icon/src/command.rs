@@ -99,8 +99,11 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::List => IconKind::ListView,
         S::Refresh => IconKind::Refresh,
         S::SortByName => IconKind::SortByName,
-        S::SortByKind => IconKind::SortByKind,
-        S::SortBySize => IconKind::SortBySize,
+        S::SortByKind | S::SortByFilesystem => IconKind::SortByKind,
+        S::SortBySize | S::SortByFree => IconKind::SortBySize,
+        S::SortByHealth => IconKind::SortByHealth,
+        S::SortAscending => IconKind::SortAscending,
+        S::SortDescending => IconKind::SortDescending,
         S::SortByDate | S::SetDateTime => IconKind::Calendar,
         S::ArrangeLeft => IconKind::ArrangeLeft,
         S::ArrangeRight => IconKind::ArrangeRight,
@@ -272,6 +275,9 @@ pub(crate) const fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::SortByName => SORT_BY_NAME,
         IconKind::SortByKind => SHAPES,
         IconKind::SortBySize => SORT_BY_SIZE,
+        IconKind::SortByHealth => SORT_BY_HEALTH,
+        IconKind::SortAscending => CARET_UP,
+        IconKind::SortDescending => CARET_DOWN,
         IconKind::Calendar => CALENDAR,
         IconKind::ArrangeLeft => ARRANGE_LEFT,
         IconKind::ArrangeRight => ARRANGE_RIGHT,
@@ -825,6 +831,18 @@ const SORT_BY_SIZE: &[Mark] = &[line(&[
     ORDER_ARROW,
     Outline::Path("M12 6H21M12 11H18.5M12 16H16"),
 ])];
+
+/// A pulse beside a down arrow.
+const SORT_BY_HEALTH: &[Mark] = &[line(&[
+    ORDER_ARROW,
+    Outline::Path("M11 12H13.5L15.5 7L18 17L19.5 12H21.5"),
+])];
+
+/// The caret a list's header marks an ascending order with.
+const CARET_UP: &[Mark] = &[line(&[Outline::Path("M12 6.5L19 16.5H5Z")])];
+
+/// The caret a list's header marks a descending order with.
+const CARET_DOWN: &[Mark] = &[line(&[Outline::Path("M12 17.5L19 7.5H5Z")])];
 
 /// A calendar page with its two rings.
 const CALENDAR: &[Mark] = &[

@@ -2,8 +2,8 @@
 //! disassembly, decoded **only** behind the parser sandbox.
 //!
 //! The viewer never parses a container or instruction stream in its own
-//! address space: every container summary, manifest summary, and
-//! disassembly window is produced by the sandboxed decode service
+//! address space: every container summary, file report, and disassembly
+//! window is produced by the sandboxed decode service
 //! (`tairix_sandbox::decode`) through the [`Decode`] seam, and every reply
 //! is already validated fail-closed by the caller-side helpers there. The
 //! only in-process inspection is the magic-prefix recognition
@@ -23,14 +23,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::Errno;
 use tairix_log::Sink;
 use tairix_sandbox::decode::{
     self, CodeWindow, ContainerFormat, ContainerSummary, DecodeFailure, DisasmWindow, InsnRecord,
-    Isa, ManifestInfo, Region, RegionKind, SymbolRecord, MAX_WINDOW_INSNS,
+    Isa, Region, RegionKind, Summarise, SymbolRecord, MAX_WINDOW_INSNS,
 };
 use tairix_sandbox::listing::{code_lines, failure_reason, region_line, CodeLine};
 use tairix_sandbox::{Launcher, ParserSandbox};
+use tairix_util::report::ReportLine;
 
 use crate::fs::Fs;
 use crate::view_text::JobOutcome;
@@ -74,12 +75,12 @@ pub trait Decode {
     /// The [`DecodeFailure`] the caller-side helper reports.
     fn container_summary(&mut self, image: &[u8]) -> Result<ContainerSummary, DecodeFailure>;
 
-    /// The manifest summary of `manifest` (see [`decode::manifest_summary`]).
+    /// The report of `file` (see [`decode::file_report`]).
     ///
     /// # Errors
     ///
     /// The [`DecodeFailure`] the caller-side helper reports.
-    fn manifest_summary(&mut self, manifest: &[u8]) -> Result<ManifestInfo, DecodeFailure>;
+    fn file_report(&mut self, file: &[u8]) -> Result<Vec<ReportLine>, DecodeFailure>;
 
     /// Up to `max_insns` instructions of `window` (see
     /// [`decode::disassemble`]).
@@ -97,11 +98,11 @@ pub trait Decode {
 
 impl<L: Launcher, S: Sink> Decode for ParserSandbox<L, S> {
     fn container_summary(&mut self, image: &[u8]) -> Result<ContainerSummary, DecodeFailure> {
-        decode::container_summary(self, image)
+        decode::container_summary(self, image, Summarise::Regions)
     }
 
-    fn manifest_summary(&mut self, manifest: &[u8]) -> Result<ManifestInfo, DecodeFailure> {
-        decode::manifest_summary(self, manifest)
+    fn file_report(&mut self, file: &[u8]) -> Result<Vec<ReportLine>, DecodeFailure> {
+        decode::file_report(self, file)
     }
 
     fn disassemble(
@@ -142,11 +143,9 @@ pub enum DisasmBody {
     /// A container `lib/binfmt` recognises; the summary page lists its
     /// regions and the code pane disassembles them.
     Container(ContainerSummary),
-    /// A standalone signed manifest (`RXM1`); the summary page lists what
-    /// it requests. The manifest travels beside an `rxe` image (a spawn
-    /// argument), never inside it, so it is only ever viewed as its own
-    /// file.
-    Manifest(ManifestInfo),
+    /// A signed manifest — a program's (`RXM1`) or a bundle's `AppInfo` —
+    /// which holds no code; the summary page is its report.
+    Manifest(Vec<ReportLine>),
     /// An unrecognised file force-opened as code at a user-chosen ISA.
     Raw,
 }
@@ -268,11 +267,10 @@ impl DisasmView {
         size: u64,
         bytes: &[u8],
     ) -> Result<Self, DisasmError> {
-        let (body, regions, symbols) = if is_manifest_head(bytes) {
-            let info = decode
-                .manifest_summary(bytes)
-                .map_err(DisasmError::Decode)?;
-            (DisasmBody::Manifest(info), Vec::new(), Vec::new())
+        let manifest = tairix_binfmt::detect(bytes).is_some_and(|format| !format.holds_code());
+        let (body, regions, symbols) = if manifest {
+            let report = decode.file_report(bytes).map_err(DisasmError::Decode)?;
+            (DisasmBody::Manifest(report), Vec::new(), Vec::new())
         } else {
             let summary = decode
                 .container_summary(bytes)
@@ -424,20 +422,8 @@ impl DisasmView {
                     None,
                 ));
             }
-            DisasmBody::Manifest(info) => {
-                rows.push((String::from("signed manifest (RXM1)"), None));
-                rows.push((format!("abi version {}", info.abi_version), None));
-                rows.push((
-                    format!("requested capabilities: {}", info.capabilities.len()),
-                    None,
-                ));
-                for &raw in &info.capabilities {
-                    let text = CapabilityId::from_raw(raw)
-                        .ok()
-                        .and_then(CapabilityId::name)
-                        .map_or_else(|| format!("  capability #{raw}"), |n| format!("  {n}"));
-                    rows.push((text, None));
-                }
+            DisasmBody::Manifest(report) => {
+                rows.extend(report.iter().map(|line| (line.text.clone(), None)));
             }
             DisasmBody::Raw => {
                 // Raw mode opens straight into the code pane; the summary
@@ -1129,12 +1115,4 @@ impl DisasmView {
 /// Whether `insn`'s encoding covers `target`.
 fn covers(insn: &InsnRecord, target: u64) -> bool {
     target >= insn.address && target - insn.address < u64::from(insn.length)
-}
-
-/// Whether a file head is a standalone signed manifest (`RXM1`): the
-/// same shallow magic recognition `tairix_binfmt::detect` performs for
-/// the containers — routing only, never a parse.
-#[must_use]
-pub fn is_manifest_head(head: &[u8]) -> bool {
-    head.len() >= 4 && head[0..4] == tairix_abi::MANIFEST_MAGIC.to_le_bytes()
 }

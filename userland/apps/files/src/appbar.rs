@@ -15,8 +15,8 @@
 //!
 //! In the ordinary [`Role::Window`](crate::command::Role::Window) role the app
 //! is an application like any other and makes the shared declaration — the
-//! information row and *Quit*, with the session raising a window it has and
-//! asking for one when it has none ([`WINDOW_SLOT_CLICK`]).
+//! information row, *Settings…* and *Quit*, with the session raising a window
+//! it has and asking for one when it has none ([`WINDOW_SLOT_CLICK`]).
 //!
 //! In the [`Role::Desktop`](crate::command::Role::Desktop) role it is a
 //! component of the desktop, and the slot is the user's way *into* the
@@ -27,7 +27,7 @@
 //! attached right now, each beside the picture the rail draws it with — the
 //! house, a folder, or the drive a volume is on. Choosing one opens a window
 //! there, and a primary click on the slot opens one among the user's own files
-//! ([`DESKTOP_SLOT_CLICK`]).
+//! ([`DESKTOP_SLOT_CLICK`]). *Settings…* comes last, beneath a rule.
 //!
 //! # The row cap is a display cap, and it is stated
 //!
@@ -43,6 +43,7 @@ use tairix_abi::window_ipc::{
 };
 use tairix_abi::Errno;
 use tairix_browse::{PlaceKind, Places};
+use tairix_window::QUIT_ROW;
 
 /// What a primary click on the component's slot does.
 ///
@@ -59,12 +60,48 @@ pub const DESKTOP_SLOT_CLICK: AppBarClick = AppBarClick::Open;
 /// then the same click asks it for a window instead.
 pub const WINDOW_SLOT_CLICK: AppBarClick = AppBarClick::RaiseOrOpen;
 
+/// The id the *Settings…* row answers with in either role: past every place a
+/// component's menu can number, and clear of the convention's *Quit*.
+pub const SETTINGS_ROW: u16 = u16::MAX;
+
+const _: () = assert!(SETTINGS_ROW as usize > APP_MENU_MAX_ROWS && SETTINGS_ROW != QUIT_ROW);
+
+/// The *Settings…* row's label.
+const SETTINGS_LABEL: &str = "Settings\u{2026}";
+
+/// Whether the chosen row `item` is *Settings…*.
+#[must_use]
+pub fn is_settings(item: AppMenuItemId) -> bool {
+    item.get() == SETTINGS_ROW
+}
+
+/// The *Settings…* row.
+fn settings_row() -> Result<AppMenuRow, Errno> {
+    Ok(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(SETTINGS_ROW)?,
+        AppMenuLabel::new(SETTINGS_LABEL)?,
+        AppMenuSymbol::Settings,
+    )))
+}
+
+/// The ordinary file manager's declaration, addressed to its own `endpoint`:
+/// the shared convention with *Settings…* between its ends.
+///
+/// # Errors
+///
+/// Any [`Errno`] the bounded menu builder refuses; the rows are fixed, so a
+/// refusal can only mean the shared bounds changed under this declaration.
+pub fn window_declaration(endpoint: u64) -> Result<AppBar, Errno> {
+    tairix_window::declaration(endpoint, WINDOW_SLOT_CLICK, &[settings_row()?])
+}
+
 /// The component's declaration for `places`, addressed to its own `endpoint`,
 /// together with the number of places that did not fit the row cap.
 ///
 /// One row per place in rail order, each with the class picture the rail draws
 /// it with, and a rule where the user's own places give way to the mounted
-/// volumes, so the menu reads as two groups rather than one long list. A row
+/// volumes, so the menu reads as two groups rather than one long list; then a
+/// rule and *Settings…*, whose two rows the cap always leaves room for. A row
 /// carries the place's own index as its id, so a place that had to be skipped
 /// shifts nothing: the caller resolves a chosen row through [`place_of`] and
 /// lands on exactly the place the user saw.
@@ -100,7 +137,7 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
         // never ends on a dangling divider. It costs a row of the cap, so the
         // pair is admitted together or not at all.
         let rule = !ruled && shown > 0 && place.kind() == PlaceKind::Volume;
-        if menu.len() + 1 + usize::from(rule) > APP_MENU_MAX_ROWS {
+        if menu.len() + 1 + usize::from(rule) > APP_MENU_MAX_ROWS - SETTINGS_ROWS {
             skipped += 1;
             continue;
         }
@@ -119,6 +156,10 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
         }))?;
         shown += 1;
     }
+    if shown > 0 {
+        menu.push(AppMenuRow::Separator)?;
+    }
+    menu.push(settings_row()?)?;
     Ok((
         AppBar {
             event_endpoint: endpoint,
@@ -128,6 +169,9 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
         skipped,
     ))
 }
+
+/// The rows the component's *Settings…* takes: its rule, and itself.
+const SETTINGS_ROWS: usize = 2;
 
 /// What a row opening a place of `kind` does.
 const fn place_symbol(kind: PlaceKind) -> AppMenuSymbol {

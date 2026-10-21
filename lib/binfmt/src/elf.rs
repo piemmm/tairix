@@ -566,4 +566,4 @@ impl<'a> SymbolTable<'a> {
 
 #[cfg(test)]
 #[path = "elf_tests.rs"]
-mod tests;
+pub(crate) mod tests;

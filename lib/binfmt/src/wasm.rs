@@ -24,6 +24,9 @@ pub const SECTION_TYPE: u8 = 1;
 /// Section id of the function section.
 pub const SECTION_FUNCTION: u8 = 3;
 
+/// Section id of the start section.
+pub const SECTION_START: u8 = 8;
+
 /// Section id of the code section.
 pub const SECTION_CODE: u8 = 10;
 
@@ -71,6 +74,47 @@ impl core::fmt::Display for WasmError {
             Self::TrailingBytes => f.write_str("payload length and framing disagree"),
         }
     }
+}
+
+/// The core specification's name for section `id`.
+#[must_use]
+pub const fn section_name(id: u8) -> &'static str {
+    match id {
+        0 => "custom",
+        1 => "type",
+        2 => "import",
+        3 => "function",
+        4 => "table",
+        5 => "memory",
+        6 => "global",
+        7 => "export",
+        8 => "start",
+        9 => "element",
+        10 => "code",
+        11 => "data",
+        12 => "data count",
+        _ => "unknown",
+    }
+}
+
+/// The LEB128 `u32` a section's payload opens with: a vector section's
+/// entry count, or the start section's function index.
+///
+/// # Errors
+///
+/// [`WasmError::TooSmall`] for a payload that ends inside it, or
+/// [`WasmError::BadLeb`] for one that is not a strict encoding.
+pub fn leading_u32(payload: &[u8]) -> Result<u32, WasmError> {
+    leb_u32(payload, 0).map(|(value, _)| value)
+}
+
+/// The name a custom section's payload opens with, or `None` when its length
+/// runs past the payload.
+#[must_use]
+pub fn custom_name(payload: &[u8]) -> Option<&[u8]> {
+    let (len, after) = leb_u32(payload, 0).ok()?;
+    let end = after.checked_add(usize::try_from(len).ok()?)?;
+    payload.get(after..end)
 }
 
 /// One entry in the module's section directory.
@@ -202,12 +246,9 @@ impl<'a> WasmView<'a> {
     /// [`WasmError::BadLeb`] or [`WasmError::TooSmall`] for a malformed
     /// count.
     pub fn entry_count(&self, id: u8) -> Result<Option<u32>, WasmError> {
-        let Some(entry) = self.section(id) else {
-            return Ok(None);
-        };
-        let payload = self.section_bytes(entry);
-        let (count, _) = leb_u32(payload, 0)?;
-        Ok(Some(count))
+        self.section(id)
+            .map(|entry| leading_u32(self.section_bytes(entry)))
+            .transpose()
     }
 
     /// Walk the code section's function bodies.
@@ -318,4 +359,4 @@ impl Iterator for FunctionBodies<'_> {
 
 #[cfg(test)]
 #[path = "wasm_tests.rs"]
-mod tests;
+pub(crate) mod tests;

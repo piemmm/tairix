@@ -9,7 +9,8 @@ use super::{
     LCS_SRGB, LCS_WINDOWS_COLOR_SPACE, MAGIC, MASK_AT, V2_HEADER_LEN, V3_HEADER_LEN, V4_HEADER_LEN,
     V5_HEADER_LEN,
 };
-use crate::inspect::{dpi_of_ppm, Builder};
+use crate::inspect::dpi_of_ppm;
+use tairix_util::report::Builder;
 
 /// Report `bytes`, a BMP file.
 pub(crate) fn report(bytes: &[u8], out: &mut Builder) {

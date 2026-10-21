@@ -21,7 +21,7 @@ use crate::Errno;
 
 /// The entries of the default root view `/`, and the machine aliases of the
 /// same names (`System:`, …): every top-level directory the OS lays out.
-pub const ROOT_VIEW: [&str; 3] = ["System", "Users", STORAGE_CATALOG];
+pub const ROOT_VIEW: [&str; 3] = ["System", crate::home::USERS_DIR, STORAGE_CATALOG];
 
 /// The root-view entry that is the catalog of attached volumes: it lists the
 /// volumes attached beneath it and is stored on none of them.

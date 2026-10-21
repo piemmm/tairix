@@ -67,7 +67,7 @@ mod program {
     use tairix_rt::io::Read;
     use tairix_sandbox::decode::{
         container_summary, disassemble, CodeWindow, ContainerFormat, DecodeFailure, DecodeRefusal,
-        DecodeService, Isa,
+        DecodeService, Isa, Summarise,
     };
     use tairix_sandbox::host::{
         log_unavailable, ParserSandbox, SandboxError, WorkerEnd, EVENT_WORKER_CRASHED,
@@ -523,7 +523,7 @@ mod program {
         );
 
         // 1. A valid container decodes through the real sandbox path.
-        match container_summary(&mut good, WASM_FIXTURE) {
+        match container_summary(&mut good, WASM_FIXTURE, Summarise::Regions) {
             Ok(summary) => {
                 if summary.format != ContainerFormat::Wasm {
                     return 12;
@@ -537,7 +537,7 @@ mod program {
         }
 
         // 2. A malformed input is a typed refusal, not a crash.
-        match container_summary(&mut good, b"not an executable image") {
+        match container_summary(&mut good, b"not an executable image", Summarise::Regions) {
             Err(DecodeFailure::Refused(DecodeRefusal::UnrecognisedContainer)) => {}
             _ => return 14,
         }
@@ -577,7 +577,7 @@ mod program {
         // Reap the dying seam's replacement worker eagerly.
         drop(dying);
         // The caller survived: the healthy worker still answers.
-        if container_summary(&mut good, WASM_FIXTURE).is_err() {
+        if container_summary(&mut good, WASM_FIXTURE, Summarise::Regions).is_err() {
             return 23;
         }
 

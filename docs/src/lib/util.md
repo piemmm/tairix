@@ -220,6 +220,15 @@ and panic-free throughout.
   keeping the kernel's reason for a refused write and routing either stream's
   advisory to fd 3, so a `Run` binary hands its engine the standard streams
   themselves. `lib/procinfo` reads every byte stream as a line sink.
+* `report` — a file's structure as a person reads it: `Builder` writes heading
+  lines and records (offset, name, length, what it declares) with facts
+  beneath them, and holds a report to `MAX_REPORT_LINES` lines of at most
+  `MAX_LINE_BYTES` bytes, saying once that it stops when it fills; `clean`
+  shows text a file carries with its control bytes escaped, and `digest` a key
+  or hash as one run of hex. The picture reports (`lib/image`) and the
+  executable and manifest reports (`lib/binfmt`) build with it, and
+  `lib/sandbox` carries every report over its one reply, so each is cut,
+  escaped and capped by the same rule.
 * `utf8` — `sequence_len`, the length of the UTF-8 sequence a byte begins,
   or `None` for a byte no well-formed sequence begins with (Unicode Table
   3-7: a continuation byte, the always-overlong `0xC0`/`0xC1`, or a lead

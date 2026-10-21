@@ -16416,12 +16416,23 @@ fn planted_home_browser(what: &str) -> Result<tairix_browse::Browser<PlantedHome
         .map_err(|e| format!("{what}: the planted home does not open: {e:?}"))
 }
 
+/// The planted home as a file-manager window holds it: in the view and the
+/// presentation a manager window opens with, so a hidden item or a hidden
+/// ending moves no tile the guest draws.
+fn planted_manager_browser(what: &str) -> Result<tairix_browse::Browser<PlantedHome>, String> {
+    let mut browser = planted_home_browser(what)?;
+    browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+    browser
+        .set_presentation(tairix_browse::MANAGER_PRESENTATION)
+        .map_err(|e| format!("{what}: the planted home does not list as a manager: {e:?}"))?;
+    Ok(browser)
+}
+
 /// The client extent the file manager opens a window at over the planted
 /// home: the app's own opening rule over the listing the guest holds, so a
 /// window shorter than the full browser height is judged where it really is.
 fn manager_window_size(theme: &tairix_theme::Theme, what: &str) -> Result<(u32, u32), String> {
-    let mut browser = planted_home_browser(what)?;
-    browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+    let browser = planted_manager_browser(what)?;
     let size = (tairix_browse::WIN_WIDTH, tairix_browse::WIN_HEIGHT);
     Ok(tairix_browse::manager_opening(&browser, size, RECONSTRUCTION_SCALE, theme).0)
 }
@@ -16576,8 +16587,7 @@ fn reconstruct_manager_item_click(
 
     let name = core::str::from_utf8(name)
         .map_err(|e| format!("{what}: the planted document's name is not UTF-8: {e}"))?;
-    let mut browser = planted_home_browser(what)?;
-    browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+    let browser = planted_manager_browser(what)?;
     let index = planted_entry_index(&browser, name, what)?;
 
     let toolbar = tairix_browse::MANAGER_TOOLBAR_BAND;
@@ -16638,8 +16648,7 @@ fn reconstruct_manager_item_menu(
     let press = reconstruct_manager_item_click(theme, slot, name, what)?;
     let name = core::str::from_utf8(name)
         .map_err(|e| format!("{what}: the planted document's name is not UTF-8: {e}"))?;
-    let mut browser = planted_home_browser(what)?;
-    browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+    let mut browser = planted_manager_browser(what)?;
     let index = planted_entry_index(&browser, name, what)?;
     browser
         .select(index)
@@ -19760,7 +19769,7 @@ mod tests {
     #[test]
     fn a_manager_window_gesture_lands_on_the_planted_picture() {
         use super::{
-            planted_entry_index, planted_home_browser, reconstruct_manager_item_click,
+            planted_entry_index, planted_manager_browser, reconstruct_manager_item_click,
             served_window_layout, HANDOVER_MANAGER_WINDOW, RECONSTRUCTION_SCALE,
         };
         use tairix_geometry::Rect;
@@ -19769,8 +19778,7 @@ mod tests {
         let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
         let name = core::str::from_utf8(picture).expect("a planted name is UTF-8");
 
-        let mut browser = planted_home_browser("test").expect("the planted home opens");
-        browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+        let browser = planted_manager_browser("test").expect("the planted home opens");
         let want = planted_entry_index(&browser, name, "test").expect("the picture is listed");
 
         let at = reconstruct_manager_item_click(&theme, HANDOVER_MANAGER_WINDOW, picture, "test")
@@ -19822,8 +19830,8 @@ mod tests {
     #[test]
     fn the_manager_item_menus_open_row_is_offered_and_reachable() {
         use super::{
-            planted_entry_index, planted_home_browser, ramfb_screen, reconstruct_manager_item_menu,
-            HANDOVER_MANAGER_WINDOW,
+            planted_entry_index, planted_manager_browser, ramfb_screen,
+            reconstruct_manager_item_menu, HANDOVER_MANAGER_WINDOW,
         };
 
         let theme = tairix_theme::Theme::dark();
@@ -19832,8 +19840,7 @@ mod tests {
 
         // The selection the manager makes for the entry under the pointer is
         // what offers the row; without it the menu draws `Open` disabled.
-        let mut browser = planted_home_browser("test").expect("the planted home opens");
-        browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+        let mut browser = planted_manager_browser("test").expect("the planted home opens");
         let index = planted_entry_index(&browser, name, "test").expect("the picture is listed");
         browser.select(index).expect("the picture selects");
         assert!(
@@ -19874,7 +19881,7 @@ mod tests {
     #[test]
     fn the_open_rows_aim_stays_inside_the_row_whatever_the_candidates_add() {
         use super::{
-            planted_entry_index, planted_home_browser, reconstruct_manager_item_menu,
+            planted_entry_index, planted_manager_browser, reconstruct_manager_item_menu,
             HANDOVER_MANAGER_WINDOW,
         };
         use tairix_geometry::Rect;
@@ -19896,8 +19903,7 @@ mod tests {
                 .expect("the manager window's menu reconstructs");
 
         // The same plate the guest draws once its scan has landed.
-        let mut browser = planted_home_browser("test").expect("the planted home opens");
-        browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+        let mut browser = planted_manager_browser("test").expect("the planted home opens");
         let index = planted_entry_index(&browser, name, "test").expect("the picture is listed");
         browser.select(index).expect("the picture selects");
         let candidates: [&tairix_browse::AppAssociation; 1] = [&viewer];

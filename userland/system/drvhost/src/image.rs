@@ -7,11 +7,11 @@
 //! ┌─────────────────────────────────┬───────────────────────┬────────────────────────┬─────────┐
 //! │ DriverManifest header (WIRE_LEN B) │ cap body (count·2 B)  │ bind table (count·80 B) │ payload …│
 //! └─────────────────────────────────┴───────────────────────┴────────────────────────┴─────────┘
-//!   covered by signature                 covered by signature    covered by signature       opaque
+//!   covered by signature                 covered by signature    covered by signature       program
 //! ```
 //!
-//! The header layout and signed range are pinned by
-//! [`tairix_abi::DriverManifest`]. The body that follows the header is a
+//! The split itself is [`tairix_abi::DriverImage`]'s; the header layout and
+//! signed range are pinned by [`tairix_abi::DriverManifest`]. The body that follows the header is a
 //! little-endian array of [`tairix_abi::CapabilityId`] u16 values whose
 //! length is the manifest's `capability_count` field, followed by the
 //! driver's bind table: `bind_key_count` consecutive
@@ -25,7 +25,7 @@
 //! sensitive buffer that backs it.
 
 use tairix_abi::{
-    decode_bind_keys, CapabilityId, DriverBindKey, DriverError, DriverManifest, Errno,
+    decode_bind_keys, CapabilityId, DriverBindKey, DriverError, DriverImage, DriverManifest, Errno,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN,
 };
 
@@ -80,36 +80,19 @@ impl<'a> ParsedImage<'a> {
     /// * [`HostError::ManifestInvalid`] if [`DriverManifest::from_bytes`]
     ///   rejects the header.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, HostError> {
-        if bytes.len() < Self::HEADER_LEN {
-            return Err(HostError::ImageTruncated);
-        }
-        let manifest =
-            DriverManifest::from_bytes(&bytes[..Self::HEADER_LEN]).map_err(map_manifest_err)?;
-        let body_len = usize::from(manifest.capability_count) * 2;
-        let body_end = Self::HEADER_LEN
-            .checked_add(body_len)
-            .ok_or(HostError::ImageTruncated)?;
-        let bind_len = usize::from(manifest.bind_key_count) * DriverBindKey::WIRE_LEN;
-        let bind_end = body_end
-            .checked_add(bind_len)
-            .ok_or(HostError::ImageTruncated)?;
-        if bytes.len() < bind_end {
-            return Err(HostError::ImageTruncated);
-        }
-        let signed_end = Self::HEADER_LEN - DRIVER_SIGNATURE_LEN;
-        // The signer's message is header[0..WIRE_LEN-SIG_LEN] followed
-        // by the capability body and the bind table. The halves are
-        // contiguous in the source slice so a single sub-slice of bytes
-        // covering [0..signed_end] would *not* be enough — we must hand
-        // the verifier the concatenation. Concatenation is performed
-        // once at verification time by the host (see
-        // `Host::verify_signature`) so the parser stays allocation-free.
+        let split = DriverImage::parse(bytes).map_err(|e| match e {
+            DriverError::BufferTooSmall => HostError::ImageTruncated,
+            other => HostError::ManifestInvalid(other),
+        })?;
+        // The signer's message is this header prefix followed by the
+        // capability body and the bind table; the host concatenates them
+        // once at verification time so the parser stays allocation-free.
         Ok(Self {
-            manifest,
-            signed_bytes: &bytes[..signed_end],
-            capability_body: &bytes[Self::HEADER_LEN..body_end],
-            bind_table: &bytes[body_end..bind_end],
-            payload: &bytes[bind_end..],
+            manifest: split.manifest,
+            signed_bytes: &bytes[..Self::HEADER_LEN - DRIVER_SIGNATURE_LEN],
+            capability_body: split.capability_body,
+            bind_table: split.bind_table,
+            payload: split.payload,
         })
     }
 
@@ -157,10 +140,6 @@ impl<'a> ParsedImage<'a> {
             other => HostError::BindKeyInvalid(other),
         })
     }
-}
-
-fn map_manifest_err(e: DriverError) -> HostError {
-    HostError::ManifestInvalid(e)
 }
 
 #[cfg(test)]

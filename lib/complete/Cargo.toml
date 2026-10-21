@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+tairix-path = { path = "../path", version = "=0.0.0" }

@@ -25,27 +25,38 @@ des données binaires s'ouvre dans la vue hexadécimale, qui montre chaque octet
 en deux chiffres hexadécimaux à côté de son caractère et modifie les mêmes
 octets que la vue texte.
 
-Un exécutable — une image de programme TAIRiX, un fichier ELF64 ou un module
-WebAssembly — s'ouvre plutôt dans la vue code : ses régions, puis les
-instructions de chaque région de code, une par ligne avec son adresse et ses
-octets d'encodage, étiquetées des symboles qu'elles commencent et des
-symboles que leurs branchements atteignent. La vue code est en lecture
-seule ; les vues texte et hexadécimale modifient le même fichier. Le code est
-décodé par un second processus de travail qui lui est propre, sans aucun
-accès lui non plus, et lu dans le jeu d'instructions que nomme le fichier,
-sinon dans celui de cette machine ; « Jeu d'instructions » dans le menu
-Affichage le lit dans un autre, et le champ de vue de la ligne d'état propose
-la vue code à côté du texte et de l'hexadécimal.
+Un exécutable — une image de programme TAIRiX, un pilote, un fichier ELF64
+ou un module WebAssembly — s'ouvre plutôt dans la vue code : ce que disent
+ses en-têtes, chaque partie à sa position avec sa longueur et ce qu'elle
+déclare — la version du système pour laquelle il a été construit, son point
+d'entrée, ses segments et les bibliothèques dont il a besoin, le manifeste
+signé d'un pilote avec les capacités qu'il demande et le matériel auquel il
+se lie, les en-têtes de programme et de section d'un fichier ELF, les
+sections d'un module —, puis les instructions de chaque région de code, une
+par ligne avec son adresse et ses octets d'encodage, étiquetées des symboles
+qu'elles commencent et des symboles que leurs branchements atteignent. Les
+clés et les signatures sont montrées telles qu'elles sont écrites, sans être
+vérifiées. La vue code est en lecture seule ; les vues texte et hexadécimale
+modifient le même fichier. Le code est décodé par un second processus de
+travail qui lui est propre, sans aucun accès lui non plus, et lu dans le jeu
+d'instructions que nomme le fichier, sinon dans celui de cette machine ;
+« Jeu d'instructions » dans le menu Affichage le lit dans un autre, et le
+champ de vue de la ligne d'état propose la vue code à côté du texte et de
+l'hexadécimal.
 
 Une image — PNG, JPEG, GIF, BMP, TIFF, WEBP, un fichier d'icône ou de
 pointeur, une zone de sprites RISC OS ou un document OpenRaster — s'ouvre à
 la place dans la vue des données : ce dont le fichier est fait, chaque
 enregistrement à sa position avec sa longueur et ce qu'il déclare, chaque
 balise EXIF par son nom avec sa valeur, puis chaque octet du fichier en
-hexadécimal à côté de son caractère. La vue des données est en lecture seule
-; la vue hexadécimale modifie les mêmes octets. L'image est lue par un
-troisième processus de travail qui lui est propre, sans aucun accès lui non
-plus, et le menu Affichage propose la vue des données à côté du texte et de
+hexadécimal à côté de son caractère. Un manifeste signé — l'`AppInfo` d'une
+application ou le manifeste d'un programme — s'y ouvre aussi : ce qu'il
+nomme, les capacités qu'il demande, les types de fichiers qu'il revendique
+et les services qu'il recherche, puis ses octets. La vue des données est en
+lecture seule ; la vue hexadécimale modifie les mêmes octets. Une image est
+lue par un troisième processus de travail qui lui est propre, un manifeste
+par celui de la vue code, aucun des deux n'ayant le moindre accès, et le
+menu Affichage propose la vue des données à côté du texte et de
 l'hexadécimal.
 
 Le code source est coloré : HTML, XML et SVG, CSS, JavaScript, JSON, YAML,

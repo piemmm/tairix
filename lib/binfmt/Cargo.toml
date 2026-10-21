@@ -1,6 +1,6 @@
 [package]
 name = "tairix-binfmt"
-description = "TAIRiX read-only executable-container decoder: typed, borrowed, fail-closed views of the rxe load image and signed-manifest summary (decoded through the lib/abi types, so the inspection view and the load path can never diverge), ELF64 (file header, program/section headers, section-name strings, symbol tables), and wasm module structure (section directory, type/function/code framing). no_std + alloc, forbids unsafe; it never executes, maps, or loads anything — every offset and count is bounds-checked against the input slice with fixed validation caps, and a malformed input is a typed error naming what failed."
+description = "TAIRiX read-only executable-container decoder: typed, borrowed, fail-closed views of the rxe load image (decoded through the lib/abi types, so the inspection view and the load path can never diverge), ELF64 (file header, program/section headers, section-name strings, symbol tables), and wasm module structure (section directory, type/function/code framing), and a bounded report of what any of those, a driver bundle's image or a signed manifest says. no_std + alloc, forbids unsafe; it never executes, maps, or loads anything — every offset and count is bounds-checked against the input slice with fixed validation caps, and a malformed input is a typed error naming what failed."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,8 @@ workspace = true
 # `decode_capability_ids`) so the inspection view and the kernel load path
 # share one definition and cannot drift.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The report builder every structure report is cut, escaped and capped by.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The in-tree fuzz harnesses draw their inputs through the shared
@@ -24,3 +26,5 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # of the test, and bounds the smoke/soak loop. Test scaffolding only; never
 # in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# The neutral `AppInfo` header the report tests set their own fields over.
+tairix-abi = { path = "../abi", version = "=0.0.0", features = ["test-util"] }

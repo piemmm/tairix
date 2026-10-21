@@ -99,8 +99,8 @@ fn reply(count: u32, lines: &[(u8, &[u8])]) -> Vec<u8> {
 
 #[test]
 fn a_reply_that_breaks_its_bounds_is_not_believed() {
-    let too_long = alloc::vec![b'x'; tairix_image::inspect::MAX_LINE_BYTES + 1];
-    let too_many = u32::try_from(tairix_image::inspect::MAX_REPORT_LINES + 1).expect("small");
+    let too_long = alloc::vec![b'x'; tairix_util::report::MAX_LINE_BYTES + 1];
+    let too_many = u32::try_from(tairix_util::report::MAX_REPORT_LINES + 1).expect("small");
     for hostile in [
         reply(1, &[(0, b"a \x1b[2Jcontrol")]),
         reply(1, &[(0, b"\xff\xfe")]),

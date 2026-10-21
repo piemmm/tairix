@@ -282,6 +282,7 @@ README requires this file to name them:
 | `lanes` | `lib/collections`, TextEdit |
 | `mathf` | `lib/audio`, `lib/colour`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, WinterSun, the desktop session's screensavers |
 | `output` | the command apps' engines (`cat`, `ls`, `ss`, `tail`, … — every one that writes through an injected stream), `lib/procinfo`'s line sink, and `lib/rt`'s standard streams |
+| `report` | `lib/image`'s picture reports, `lib/binfmt`'s executable and manifest reports, and `lib/sandbox`'s one report reply |
 | `retry` | `userland/system/timed`, `userland/system/init` |
 | `utf8` | `lib/syntax`, `wc`, TextEdit |
 | `seconds` | `ping`, `traceroute` |

@@ -1521,11 +1521,15 @@ fn a_picture_opens_as_data_and_its_menu_offers_data_beside_text_and_hex() {
 #[test]
 fn the_data_display_asks_once_and_shows_what_lands_before_the_bytes() {
     let mut harness = Harness::new(PNG_HEAD, Format::PlainText);
-    let (id, named) = harness.view.data_want().expect("a report is wanted");
-    assert_eq!(named, None);
+    assert_eq!(
+        harness.view.data_structure(),
+        Some(crate::data::Structure::Picture(None))
+    );
+    let (id, structure) = harness.view.data_want().expect("a report is wanted");
+    assert_eq!(structure, crate::data::Structure::Picture(None));
     assert_eq!(harness.view.data_want(), None, "asked once");
     assert_eq!(harness.view.code_want(), None, "a picture is no code");
-    let report = alloc::vec![tairix_image::inspect::ReportLine {
+    let report = alloc::vec![tairix_util::report::ReportLine {
         text: String::from("PNG image, 41 bytes"),
         heading: true,
     }];
@@ -1537,6 +1541,18 @@ fn the_data_display_asks_once_and_shows_what_lands_before_the_bytes() {
     let len = harness.view.editor().document().len();
     let data = harness.view.data_shown().expect("shown");
     assert_eq!(data.row_count(len), 1 + 1 + len.div_ceil(16));
+}
+
+#[test]
+fn a_manifest_opens_as_data_whose_report_the_decode_worker_reads() {
+    let mut harness = Harness::new(b"RAI1\x01\0\0\0 and the rest", Format::PlainText);
+    assert_eq!(
+        harness.view.data_structure(),
+        Some(crate::data::Structure::Manifest)
+    );
+    assert_eq!(harness.view.code_want(), None, "a manifest runs no code");
+    let (_, structure) = harness.view.data_want().expect("a report is wanted");
+    assert_eq!(structure, crate::data::Structure::Manifest);
 }
 
 #[test]

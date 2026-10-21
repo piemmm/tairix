@@ -71,8 +71,8 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   logged once as `EventId(6000)`; a refused launch is `EventId(6001)`.
   `discoveryd` is the first consumer.
 - **The decode service** (`decode`): the first consumers behind the seam —
-  executable-container summaries through `tairix-binfmt` and per-window
-  instruction disassembly through `tairix-disasm`, with a bounded,
+  executable-container summaries and file reports through `tairix-binfmt` and
+  per-window instruction disassembly through `tairix-disasm`, with a bounded,
   fail-closed reply vocabulary. The caller-side helpers decode every reply
   fail-closed: a compromised worker can lie about bytes, never break the
   caller.
@@ -181,8 +181,9 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   (`WorkerMemory::HeldDocument`), for an editor that wants nothing else of a
   picture. The caller holds the reply to the report's own bounds: no more
   than `MAX_REPORT_LINES` lines, none longer than `MAX_LINE_BYTES`, every one
-  printable UTF-8, or none of it is believed. `TextEdit.app`'s Data display is
-  the consumer.
+  printable UTF-8, or none of it is believed — the one report reply the decode
+  service's `file_report` shares. `TextEdit.app`'s Data display is the
+  consumer.
 - **The NTP-evaluation service** (`timesync`): a network time server's reply
   is evaluated in the worker (`tairix-net`'s RFC 5905 rules), because the
   `timed` service that acts on the verdict holds `CAP_TIME_SET` and must

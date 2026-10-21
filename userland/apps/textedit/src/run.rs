@@ -35,7 +35,6 @@ mod program {
     use tairix_controls::damage;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Region, Scale};
-    use tairix_image::inspect::ReportLine;
     use tairix_raster::Surface;
     use tairix_rt::sync::WorkerWake;
     use tairix_rt::work::{Worker, WorkerGuard};
@@ -53,7 +52,7 @@ mod program {
     use tairix_syntax::{Diagnostic, Format, Severity};
     use tairix_textedit::answer::Unlisted;
     use tairix_textedit::code::{list_code, CodeListing};
-    use tairix_textedit::data;
+    use tairix_textedit::data::{self, Structure};
     use tairix_textedit::detect::format_for_name;
     use tairix_textedit::document::{Document, OutOfMemory, Snapshot, STEP_BYTES};
     use tairix_textedit::editor::{Conversion, Converted, Editor, Mode};
@@ -64,6 +63,7 @@ mod program {
     use tairix_textedit::paint::render_into;
     use tairix_textedit::view::{Own, View};
     use tairix_theme::{TextRole, Theme};
+    use tairix_util::report::ReportLine;
     use tairix_window::docapp::{
         self, AnswerWake, DocWindow, DocumentApp, Handle, Host, NoAppView, Stamp, APP_TOKEN,
     };
@@ -232,12 +232,19 @@ mod program {
 
     type DataSandbox = ParserSandbox<RtLauncher, tairix_rt::LogSink>;
 
-    /// A structure report of the document `stamp` names, asked as `id`.
+    /// A picture's structure report of the document `stamp` names, asked as
+    /// `id`.
     struct DataJob {
         stamp: Stamp,
         id: u64,
         snapshot: Arc<Snapshot>,
         named: Option<ViewFormat>,
+    }
+
+    impl DataJob {
+        const fn structure(&self) -> Structure {
+            Structure::Picture(self.named)
+        }
     }
 
     struct DataReply {
@@ -257,12 +264,12 @@ mod program {
         });
         let report = match sent {
             Ok(()) => inspect_document(sandbox, job.named).map_err(data::unreported),
-            Err(failure) if failure.out_of_memory() => Err(data::no_memory()),
+            Err(failure) if failure.out_of_memory() => Err(job.structure().no_memory()),
             Err(UploadFailure::Document(failure)) => {
                 Err(data::unreported(InspectFailure::Document(failure)))
             }
             Err(UploadFailure::Shrank | UploadFailure::NoMemory | UploadFailure::Read(_)) => {
-                Err(data::no_memory())
+                Err(job.structure().no_memory())
             }
         };
         DataReply {
@@ -291,37 +298,55 @@ mod program {
         filled
     }
 
-    /// A listing of the document `stamp` names, asked as `id`.
+    /// What the decode worker is asked for a document: its code listed as
+    /// an instruction set, or a manifest's report.
+    #[derive(Copy, Clone)]
+    enum CodeWork {
+        List {
+            isa: Option<Isa>,
+            system: Option<Isa>,
+        },
+        Report,
+    }
+
+    /// The decode worker's work for the document `stamp` names, asked as
+    /// `id`.
     struct CodeJob {
         stamp: Stamp,
         id: u64,
         snapshot: Arc<Snapshot>,
-        isa: Option<Isa>,
-        system: Option<Isa>,
+        work: CodeWork,
+    }
+
+    enum CodeAnswer {
+        Listing(Result<CodeListing, Unlisted>),
+        Report(Result<Vec<ReportLine>, Unlisted>),
     }
 
     struct CodeReply {
         stamp: Stamp,
         id: u64,
-        listing: Result<CodeListing, Unlisted>,
+        answer: CodeAnswer,
     }
 
     type CodeWorker = Worker<CodeSandbox, CodeJob, CodeReply>;
 
     fn serve_code(sandbox: &mut CodeSandbox, job: &mut CodeJob) -> CodeReply {
-        let listing = match bytes_of(&job.snapshot) {
-            Some(image) => list_code(
-                sandbox,
-                &image,
-                (job.isa, job.system),
-                &mut tairix_rt::clock_get,
-            ),
-            None => Err(Unlisted::no_memory()),
+        let bytes = bytes_of(&job.snapshot);
+        let answer = match job.work {
+            CodeWork::List { isa, system } => CodeAnswer::Listing(match bytes {
+                Some(image) => list_code(sandbox, &image, (isa, system), &mut tairix_rt::clock_get),
+                None => Err(Unlisted::no_memory()),
+            }),
+            CodeWork::Report => CodeAnswer::Report(match bytes {
+                Some(manifest) => data::report_manifest(sandbox, &manifest),
+                None => Err(Structure::Manifest.no_memory()),
+            }),
         };
         CodeReply {
             stamp: job.stamp,
             id: job.id,
-            listing,
+            answer,
         }
     }
 
@@ -705,8 +730,8 @@ mod program {
         false
     }
 
-    /// Hand the decode worker the next listing any window wants, answering
-    /// whether the answer is already waiting.
+    /// Hand the decode worker the next listing or manifest report any window
+    /// wants, answering whether the answer is already waiting.
     ///
     /// A document past what one decode may carry is refused here rather than
     /// frozen for a worker that could only refuse it.
@@ -721,17 +746,31 @@ mod program {
             if window.loading() {
                 continue;
             }
-            let Some((id, isa)) = window.view.code_want() else {
+            let (id, work) = if let Some((id, isa)) = window.view.code_want() {
+                let system = host.app.system;
+                (id, CodeWork::List { isa, system })
+            } else if window.view.data_structure() == Some(Structure::Manifest) {
+                match window.view.data_want() {
+                    Some((id, _)) => (id, CodeWork::Report),
+                    None => continue,
+                }
+            } else {
                 continue;
             };
             let snapshot = if window.view.editor().document().len() > MAX_INPUT {
-                Err(Unlisted::too_large())
+                Err(match work {
+                    CodeWork::List { .. } => Unlisted::too_large(),
+                    CodeWork::Report => Structure::Manifest.too_large(),
+                })
             } else {
                 window
                     .view
                     .editor_mut()
                     .snapshot()
-                    .map_err(|OutOfMemory| Unlisted::no_memory())
+                    .map_err(|OutOfMemory| match work {
+                        CodeWork::List { .. } => Unlisted::no_memory(),
+                        CodeWork::Report => Structure::Manifest.no_memory(),
+                    })
             };
             let snapshot = match snapshot {
                 Ok((_, snapshot)) => snapshot,
@@ -746,8 +785,7 @@ mod program {
                 stamp: window.stamp(),
                 id,
                 snapshot,
-                isa,
-                system: host.app.system,
+                work,
             };
             host.app.next_code = (index + 1) % count;
             host.app.code_busy = true;
@@ -772,17 +810,20 @@ mod program {
             if window.loading() {
                 continue;
             }
-            let Some((id, named)) = window.view.data_want() else {
+            if !matches!(window.view.data_structure(), Some(Structure::Picture(_))) {
+                continue;
+            }
+            let Some((id, structure @ Structure::Picture(named))) = window.view.data_want() else {
                 continue;
             };
             let snapshot = if window.view.editor().document().len() > MAX_DOCUMENT_BYTES {
-                Err(data::too_large())
+                Err(structure.too_large())
             } else {
                 window
                     .view
                     .editor_mut()
                     .snapshot()
-                    .map_err(|OutOfMemory| data::no_memory())
+                    .map_err(|OutOfMemory| structure.no_memory())
             };
             let snapshot = match snapshot {
                 Ok((_, snapshot)) => snapshot,
@@ -823,7 +864,7 @@ mod program {
         window.owe_reported();
     }
 
-    /// Take in a listing the decode worker built, for the document that asked
+    /// Take in what the decode worker answered, for the document that asked
     /// for it: one for a document since gone is let go.
     fn adopt_code(host: &mut Host<TextEdit>, reply: CodeReply) {
         let Some(index) = host.showing(reply.stamp) else {
@@ -834,9 +875,14 @@ mod program {
             return;
         }
         let (layout, damage) = (&window.layout, &mut window.damage);
-        window
-            .view
-            .code_listed(reply.id, reply.listing, layout, damage);
+        match reply.answer {
+            CodeAnswer::Listing(listing) => {
+                window.view.code_listed(reply.id, listing, layout, damage);
+            }
+            CodeAnswer::Report(report) => {
+                window.view.data_reported(reply.id, report, layout, damage);
+            }
+        }
         window.owe_reported();
     }
 

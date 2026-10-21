@@ -1,20 +1,13 @@
-//! Inspection view of the TAIRiX `rxe` load image and signed manifest.
+//! Inspection view of the TAIRiX `rxe` load image.
 //!
-//! Both views decode *through* the `lib/abi` wire types — the load image
-//! via [`LoadImage::parse_for_inspection`] (every structural load-time
+//! The view decodes *through* the `lib/abi` wire types —
+//! [`LoadImage::parse_for_inspection`] checks every structural load-time
 //! invariant, with the CFI tag reported rather than compared, since an
-//! inspection tool has no kernel interface hash) and the manifest via
-//! [`ManifestHeader::from_bytes`] plus
-//! [`tairix_abi::decode_capability_ids`]. There is no second copy of
-//! either wire format here, so the view a user reads and the image the
-//! kernel loads can never disagree.
+//! inspection tool has no kernel interface hash. There is no second copy of
+//! the wire format here, so the view a user reads and the image the kernel
+//! loads can never disagree.
 
-use alloc::vec::Vec;
-
-use tairix_abi::{
-    decode_capability_ids, CapabilityId, Errno, LoadHeader, LoadImage, ManifestHeader, Segment,
-    LOAD_FLAG_PIE, MANIFEST_MAX_CAPABILITIES,
-};
+use tairix_abi::{LoadHeader, LoadImage, Segment, LOAD_FLAG_PIE};
 
 pub use tairix_abi::RxeError;
 
@@ -80,68 +73,18 @@ impl RxeView {
     }
 }
 
-/// A decoded signed-manifest summary: the header and the capability
-/// identifiers the binary requests.
-///
-/// This summarises what the manifest *says*; it does not verify the
-/// Ed25519 signature (verification needs the install's authority key and
-/// belongs to the bundle load gate, `lib/appload`). The signer public key and
-/// signature bytes are surfaced through [`ManifestSummary::header`] so a
-/// renderer can display them.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManifestSummary {
-    header: ManifestHeader,
-    capabilities: Vec<CapabilityId>,
-}
-
-impl ManifestSummary {
-    /// Decode `bytes` as a manifest (header plus capability body).
-    ///
-    /// # Errors
-    ///
-    /// The [`Errno`] the shared `lib/abi` decoders report: a malformed or
-    /// truncated header, a body shorter than the declared count, or an
-    /// out-of-range capability identifier. The input is rejected whole.
-    pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
-        let header = ManifestHeader::from_bytes(bytes)?;
-        let count = usize::from(header.capability_count);
-        let body = bytes
-            .get(ManifestHeader::WIRE_LEN..)
-            .ok_or(Errno::BufferTooSmall)?;
-        let mut ids = [CapabilityId::FS_MOUNT; MANIFEST_MAX_CAPABILITIES as usize];
-        let written = decode_capability_ids(body, count, &mut ids)?;
-        Ok(Self {
-            header,
-            capabilities: ids[..written].to_vec(),
-        })
-    }
-
-    /// The raw manifest header (ABI version, flags, syscall-table hash,
-    /// signer public key, signature bytes).
-    #[must_use]
-    pub fn header(&self) -> &ManifestHeader {
-        &self.header
-    }
-
-    /// The requested capability identifiers, in declaration order.
-    #[must_use]
-    pub fn capabilities(&self) -> &[CapabilityId] {
-        &self.capabilities
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::{ManifestSummary, RxeError, RxeView};
+pub(crate) mod tests {
+    use super::{RxeError, RxeView};
     use alloc::vec::Vec;
     use tairix_abi::{
-        CapabilityId, Errno, LoadHeader, ManifestHeader, NeededLibrary, Segment, LOAD_FLAG_PIE,
+        CapabilityId, LoadHeader, ManifestHeader, NeededLibrary, Segment, LOAD_FLAG_PIE,
         LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
     };
 
     /// Encode a minimal valid load image: one RX code segment holding the
     /// entry point, one RW data segment, one needed library.
-    fn valid_image() -> Vec<u8> {
+    pub(crate) fn valid_image() -> Vec<u8> {
         let code = Segment {
             vaddr: RXE_PAGE_SIZE,
             file_offset: 0,
@@ -176,7 +119,7 @@ mod tests {
     }
 
     /// Encode a manifest with the given capability ids in the body.
-    fn manifest_with(ids: &[CapabilityId]) -> Vec<u8> {
+    pub(crate) fn manifest_with(ids: &[CapabilityId]) -> Vec<u8> {
         let count = u16::try_from(ids.len()).expect("test counts fit");
         let header = ManifestHeader {
             magic: MANIFEST_MAGIC,
@@ -259,49 +202,5 @@ mod tests {
                 assert!(!view.segments().is_empty());
             }
         }
-    }
-
-    #[test]
-    fn parses_a_manifest_summary() {
-        let bytes = manifest_with(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
-        let summary = ManifestSummary::parse(&bytes).expect("valid manifest");
-        assert_eq!(summary.header().signer_pubkey, [0x22; 32]);
-        assert_eq!(
-            summary.capabilities(),
-            [CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]
-        );
-    }
-
-    #[test]
-    fn parses_an_empty_capability_list() {
-        let bytes = manifest_with(&[]);
-        let summary = ManifestSummary::parse(&bytes).expect("valid manifest");
-        assert!(summary.capabilities().is_empty());
-    }
-
-    #[test]
-    fn manifest_truncations_fail_closed() {
-        let bytes = manifest_with(&[CapabilityId::FS_MOUNT]);
-        for len in 0..bytes.len() {
-            assert!(
-                ManifestSummary::parse(&bytes[..len]).is_err(),
-                "truncation to {len} bytes must be refused"
-            );
-        }
-    }
-
-    #[test]
-    fn manifest_with_out_of_range_capability_is_refused() {
-        let mut bytes = manifest_with(&[CapabilityId::FS_MOUNT]);
-        let body = bytes.len() - 2;
-        bytes[body..].copy_from_slice(&u16::MAX.to_le_bytes());
-        assert_eq!(ManifestSummary::parse(&bytes), Err(Errno::OutOfRange));
-    }
-
-    #[test]
-    fn manifest_with_bad_magic_is_refused() {
-        let mut bytes = manifest_with(&[]);
-        bytes[0] ^= 0xFF;
-        assert_eq!(ManifestSummary::parse(&bytes), Err(Errno::BadMagic));
     }
 }

@@ -2,7 +2,7 @@
 //! them.
 
 use super::{read_area, read_header, word, MODE_AT, NAME_AT, NEXT_AT, SPRITE_HEADER_LEN};
-use crate::inspect::{clean, Builder};
+use tairix_util::report::{clean, Builder};
 
 /// Bytes a sprite's name field holds.
 const NAME_LEN: usize = 12;

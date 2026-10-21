@@ -6,7 +6,8 @@ use core::fmt::Write as _;
 use super::{
     chunk_crc, ColourType, IDAT, IEND, IHDR, PHYS, PHYS_ASPECT, PHYS_METRE, PLTE, SIGNATURE, TRNS,
 };
-use crate::inspect::{clean, dpi_of_ppm, Builder};
+use crate::inspect::dpi_of_ppm;
+use tairix_util::report::{clean, Builder};
 
 /// The chunk types an animated PNG's frames are carried in, and the image
 /// data they continue, which a report lists as one run each.
@@ -127,7 +128,7 @@ fn flush(run: &mut Option<Run>, out: &mut Builder) {
 /// List the chunk `kind` at `at`, `total` bytes long with its header and CRC.
 fn chunk(kind: [u8; 4], (at, total): (usize, usize), payload: &[u8], out: &mut Builder) {
     let mut name = String::new();
-    crate::inspect::push_clean(&mut name, &kind, 8);
+    tairix_util::report::push_clean(&mut name, &kind, 8);
     let mut detail = String::new();
     describe(kind, payload, &mut detail);
     out.record(at, &name, total, format_args!("{detail}"));
@@ -188,7 +189,7 @@ fn describe(kind: [u8; 4], payload: &[u8], detail: &mut String) {
             b"sBIT" => write!(
                 detail,
                 "significant bits {}",
-                crate::inspect::hex(payload, 4)
+                tairix_util::report::hex(payload, 4)
             )
             .is_ok(),
             b"tIME" => time(payload, detail),

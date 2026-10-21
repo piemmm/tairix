@@ -33,7 +33,7 @@ use crate::render::{panes_layout, render};
 use crate::search::{ContentScan, Needle};
 use crate::settings::SettingKey;
 use crate::tag::{Batch, BatchProgress, TagEntry, TagRange};
-use crate::view_disasm::{describe, is_manifest_head, Decode, DisasmBody, DisasmPane, DisasmView};
+use crate::view_disasm::{describe, Decode, DisasmBody, DisasmPane, DisasmView};
 use crate::view_hex::{parse_offset, HexView};
 use crate::view_text::{JobOutcome, TextView};
 use crate::walk::{relative_to, FlatEntry, WalkPurpose, WalkState, Walker};
@@ -1797,7 +1797,7 @@ fn open_flat_delete(model: &mut Model, fs: &mut dyn Fs) {
 
 /// Open the viewer the head sample picks on the regular file at `path`:
 /// the disassembly viewer for a recognised executable container or a
-/// standalone signed manifest, the text pager for NUL-free, valid-UTF-8
+/// signed manifest, the text pager for NUL-free, valid-UTF-8
 /// heads, the hex dump for everything else. A refused read reports and
 /// opens nothing.
 fn open_viewer(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, path: &str, size: u64) {
@@ -1810,7 +1810,7 @@ fn open_viewer(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, path
         }
     };
     let head = &buf[..read];
-    if tairix_binfmt::detect(head).is_some() || is_manifest_head(head) {
+    if tairix_binfmt::detect(head).is_some() {
         open_disasm(model, fs, decode, path, size);
         return;
     }
@@ -1935,7 +1935,7 @@ fn force_disasm(
         }
     };
     let head = &buf[..read];
-    if tairix_binfmt::detect(head).is_some() || is_manifest_head(head) {
+    if tairix_binfmt::detect(head).is_some() {
         open_disasm(model, fs, decode, path, size);
         return;
     }

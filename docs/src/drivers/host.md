@@ -186,7 +186,9 @@ header, capability body and bind table the decode admits can take, so
 none of the program behind them — parses it with the same `ParsedImage`
 splitter the load gate uses (so the match data can never drift from the
 gate's view of the bytes, `AGENTS.md` §2.2), and decodes its bind table
-fail-closed.
+fail-closed. `ParsedImage` splits through `tairix_abi::DriverImage`, the one
+definition of where a bundle's parts lie, which the executable report
+(`lib/binfmt`) reads a driver through too.
 Each accepted bundle becomes an owned `ScannedDriver`, and
 `DriverStore::candidates()` lends the borrowed `DriverCandidate` slice
 that `tairix_devmgr::DeviceManager::autoload` matches against the

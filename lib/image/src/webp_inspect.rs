@@ -7,7 +7,7 @@ use super::{
     le_u24, Chunk, Chunks, ALPHA, ANIMATION, ANIMATION_FRAME, CHUNK_HEADER, EXTENDED, VP8_LOSSLESS,
     VP8_LOSSY,
 };
-use crate::inspect::{push_clean, Builder};
+use tairix_util::report::{push_clean, Builder};
 
 /// Report `bytes`, a WEBP file.
 pub(crate) fn report(bytes: &[u8], out: &mut Builder) {

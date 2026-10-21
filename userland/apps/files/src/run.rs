@@ -94,8 +94,10 @@ pub mod location;
 pub mod notice;
 pub mod operation;
 pub mod operations;
+pub mod preferences;
 pub mod rename;
 pub mod route;
+pub mod settings;
 pub mod sidebar;
 
 #[cfg(test)]
@@ -156,13 +158,13 @@ mod program {
         Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard, ClipboardOp,
         ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor,
         CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteTarget, DeleteWalk,
-        DirectorySource, Drive, DriveChange, DriveSample, Entry, EntryKind, Listing, ListingDesk,
-        ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NewEntry,
+        DirectorySource, Drive, DriveChange, DriveSample, Entry, EntryKind, HiddenEndings, Listing,
+        ListingDesk, ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NewEntry,
         OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, PendingEntry,
         PendingRename, Places, Probe, Probes, ProgressModel, ProgressOp, Properties, RenameError,
-        RowList, RtLinkReader, ScrollColumn, Subject, Survey, SurveyStep, Tally, Took, ToolbarBand,
-        ToolbarCommand, TrashError, TrashStrategy, Volume, VolumeId, WatchUpdate, WatchedDirectory,
-        Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND,
+        RowList, RtLinkReader, ScrollColumn, SortMode, Subject, Survey, SurveyStep, Tally, Took,
+        ToolbarBand, ToolbarCommand, TrashError, TrashStrategy, Volume, VolumeId, WatchUpdate,
+        WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_WINDOW_GROUND,
         WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
@@ -212,8 +214,11 @@ mod program {
         ProgressControl,
     };
     use crate::operations::{run_slice, Ending, Finished, OperationDesk, Reading, Refusal, Step};
+    use crate::preferences::Preferences;
     use crate::rename::RenameEdit;
+    use crate::settings::{SettingsRequest, SettingsWindow, TITLE as SETTINGS_TITLE};
     use crate::sidebar::{self, press_point};
+    use tairix_appdata::{Publication, PublishWorker};
 
     /// Exit code when the initial directory listing was refused (no
     /// filesystem reach, or a corrupt stream). A reserved, fail-closed
@@ -241,9 +246,13 @@ mod program {
     /// attached or removed, which the places rail must re-read.
     const MOUNTS_TOKEN: u64 = READS_TOKEN + 1;
 
+    /// The wait-set token the settings writer wakes the loop under: a write it
+    /// carried out has an answer for the loop to adopt.
+    const SETTINGS_TOKEN: u64 = MOUNTS_TOKEN + 1;
+
     /// Each browser window's directory watch reports under this plus the
     /// number its listing consumer was minted as, so a wake names its window.
-    const WATCH_TOKEN_BASE: u64 = MOUNTS_TOKEN + 1;
+    const WATCH_TOKEN_BASE: u64 = SETTINGS_TOKEN + 1;
 
     /// The maximum digit count the owner/group id editor accepts — a `u32` id
     /// is at most ten decimal digits, so a longer entry cannot be a valid id.
@@ -291,8 +300,7 @@ mod program {
         places: &Places,
     ) {
         let declared = match role {
-            Role::Window => tairix_window::info_and_quit(endpoint, appbar::WINDOW_SLOT_CLICK)
-                .map(|bar| (bar, 0)),
+            Role::Window => appbar::window_declaration(endpoint).map(|bar| (bar, 0)),
             Role::Desktop => appbar::component_declaration(endpoint, places),
         };
         let declared = declared.map(|(bar, skipped)| {
@@ -369,7 +377,9 @@ mod program {
                     .open_with
                     .as_ref()
                     .map(|chooser| chooser.pane.id()),
-                WindowKind::Properties(_) | WindowKind::Progress(_) => None,
+                WindowKind::Properties(_) | WindowKind::Progress(_) | WindowKind::Settings(_) => {
+                    None
+                }
             }
         }
     }
@@ -381,8 +391,8 @@ mod program {
     /// routing scan, the resize, the frame release, the present and the close
     /// are each written once.
     ///
-    /// Both payloads are boxed: they differ by a kilobyte, so a list sized for
-    /// the larger would carry that per window of the other kind.
+    /// Every payload is boxed: they differ by a kilobyte, so a list sized for
+    /// the largest would carry that per window of another kind.
     enum WindowKind {
         /// A directory listing.
         Browser(Box<BrowserWindow>),
@@ -390,6 +400,22 @@ mod program {
         Properties(Box<PropertiesWindow>),
         /// One operation's own progress.
         Progress(Box<ProgressWindow>),
+        /// The file manager's own settings.
+        Settings(Box<SettingsWindow>),
+    }
+
+    /// The file manager's own settings: the record in force and on screen, and
+    /// the worker that writes it off the loop.
+    struct Kept {
+        publication: Publication<Preferences>,
+        writer: alloc::sync::Arc<PublishWorker<Preferences>>,
+    }
+
+    impl Kept {
+        /// The settings in force.
+        fn live(&self) -> &Preferences {
+            self.publication.live()
+        }
     }
 
     /// An operation's progress window: modeless, a dialog of the folder window
@@ -435,6 +461,11 @@ mod program {
         /// A file was asked to be shown in this window: its entry is brought
         /// into view at the next present, once the listing has it.
         reveal_chosen: bool,
+        /// Whether moving items to the Trash asks first, as the settings say.
+        confirm_trash: bool,
+        /// Settings that changed while a gesture held the listing, taken once
+        /// it lets go.
+        settings_owed: Option<Preferences>,
     }
 
     /// What a browser window's height was last fitted to: the window never
@@ -496,6 +527,10 @@ mod program {
         kind: EntryKind,
         /// The spelling a link stores, shown as the alias field.
         target: Option<String>,
+        /// The picture the identity band draws: the one the listing drew the
+        /// node with, so it is pictured alike in both and does not change
+        /// when the read lands.
+        art: IconKind,
         /// What the read answered, or why there is nothing to show yet.
         state: PropertiesState,
         /// The attribute list's cursor.
@@ -539,8 +574,6 @@ mod program {
         /// The reading the drive is asked for by: its mount point, parsed
         /// once, when the window opened.
         job: DriveJob,
-        /// The drive's own picture, which the identity band draws.
-        art: IconKind,
         /// When the next reading is asked for: only while the Drive section
         /// is on show and none is out.
         due: Option<u64>,
@@ -609,24 +642,12 @@ mod program {
         }
 
         /// What the identity band names and pictures: the node's own leaf
-        /// name, what it is, and the artwork its content type resolves to.
-        ///
-        /// The artwork comes from the same classifier the listing draws its
-        /// rows with, so a node is pictured identically in both places, and it
-        /// is resolved from the name alone — so the picture does not change
-        /// under the reader when the read lands.
+        /// name, what it is, and its picture.
         fn identity(&self) -> Identity<'_> {
-            let art = self.drive.as_ref().map_or_else(
-                || {
-                    tairix_browse::media::media_for_named(path_leaf(&self.path), self.kind, false)
-                        .icon()
-                },
-                |watch| watch.art,
-            );
             Identity {
                 name: path_leaf(&self.path),
                 detail: &self.detail,
-                art: IconRequest::kind(art),
+                art: IconRequest::kind(self.art),
             }
         }
 
@@ -743,14 +764,18 @@ mod program {
         fn browser(&mut self) -> Option<&mut BrowserWindow> {
             match &mut self.kind {
                 WindowKind::Browser(win) => Some(win),
-                WindowKind::Properties(_) | WindowKind::Progress(_) => None,
+                WindowKind::Properties(_) | WindowKind::Progress(_) | WindowKind::Settings(_) => {
+                    None
+                }
             }
         }
 
         fn progress(&mut self) -> Option<&mut ProgressWindow> {
             match &mut self.kind {
                 WindowKind::Progress(win) => Some(win),
-                WindowKind::Browser(_) | WindowKind::Properties(_) => None,
+                WindowKind::Browser(_) | WindowKind::Properties(_) | WindowKind::Settings(_) => {
+                    None
+                }
             }
         }
 
@@ -759,7 +784,9 @@ mod program {
         fn shows(&self, location: &[String]) -> bool {
             match &self.kind {
                 WindowKind::Browser(win) => lists(&win.browser, location),
-                WindowKind::Properties(_) | WindowKind::Progress(_) => false,
+                WindowKind::Properties(_) | WindowKind::Progress(_) | WindowKind::Settings(_) => {
+                    false
+                }
             }
         }
 
@@ -828,6 +855,27 @@ mod program {
                 || self.overlays.drag.is_some()
                 || self.overlays.carrying.is_some()
                 || matches!(self.overlays.sweep, Some(Sweep::Live(_)))
+        }
+
+        /// Take `settings` — whether the Trash asks, where folders stand, how
+        /// the listing names, lists and pictures its entries — answering
+        /// whether what the window shows changed. What would move the entries
+        /// waits while a gesture holds them, as a fresh listing does.
+        fn adopt_settings(&mut self, settings: &Preferences) -> bool {
+            self.confirm_trash = settings.confirm_trash;
+            if self.listing_is_held() {
+                self.settings_owed = Some(*settings);
+                return false;
+            }
+            self.settings_owed = None;
+            let order = settings.reorder(self.browser.sort_mode());
+            let changed = order != self.browser.sort_mode()
+                || settings.presentation != *self.browser.presentation();
+            self.browser.set_sort_mode(order);
+            if let Err(err) = self.browser.set_presentation(settings.presentation) {
+                report_error(&alloc::format!("listing refused ({err})"));
+            }
+            changed
         }
 
         /// Step the listing under a held band if a step is due on a desktop
@@ -1178,6 +1226,9 @@ mod program {
         candidates: Vec<OpenWithCandidate>,
         /// The documents New ▸ offered, in the order its ids number them.
         documents: Vec<BlankDocument>,
+        /// The endings the Rename row's field showed its name without, which
+        /// a commit restores.
+        endings: HiddenEndings,
     }
 
     /// Fold one round's conclusion about `win`, and the region it reported,
@@ -1255,7 +1306,33 @@ mod program {
             WindowKind::Progress(progress) => {
                 present_progress(progress, grounds.popups, &mut target, scale)
             }
+            WindowKind::Settings(page) => {
+                present_settings(page, grounds.popups, &mut target, scale)
+            }
         }
+    }
+
+    /// Paint the settings window's client and present it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the present refuses.
+    fn present_settings<T: WindowTransport>(
+        page: &SettingsWindow,
+        theme: &Theme,
+        target: &mut FrameTarget<'_, T>,
+        scale: Scale,
+    ) -> Result<(), Errno> {
+        let mode = *target.pane.mode();
+        let window = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let parts = target.parts;
+        let surface = &mut *target.surface;
+        for part in parts.rects() {
+            surface.with_clip(part.x, part.y, part.width_px, part.height_px, |surface| {
+                page.render(surface, window, scale, theme);
+            });
+        }
+        target.pane.present_list(target.client, surface, &parts)
     }
 
     /// Paint a progress window's client and present it, retitling it as the
@@ -1435,7 +1512,7 @@ mod program {
         places: &Places,
         grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
-        landed: PendingWindow,
+        (landed, settings): (PendingWindow, &Preferences),
     ) -> Result<OpenWindow, i32> {
         let PendingWindow {
             mut browser,
@@ -1485,7 +1562,7 @@ mod program {
                 listing,
                 overlays,
                 places: places.clone(),
-                chrome: Chrome::HIDDEN,
+                chrome: settings.chrome,
                 pointer: None,
                 keyboard: Keyboard::default(),
                 menu: None,
@@ -1498,6 +1575,8 @@ mod program {
                 },
                 lost: false,
                 reveal_chosen: shows.is_some(),
+                confirm_trash: settings.confirm_trash,
+                settings_owed: None,
             })),
         };
         if present_whole(&mut win, client, grounds, icons, desktop.scale()).is_err() {
@@ -1663,6 +1742,7 @@ mod program {
                 reads.forget_drive(id);
             }
             WindowKind::Progress(progress) => stop_operation(id, &mut progress.operation, reads),
+            WindowKind::Settings(_) => {}
         }
         let _ = closed.pane.close(client);
     }
@@ -1891,7 +1971,7 @@ mod program {
                 if !state.awaits_confirmation_of(&plan) {
                     return false;
                 }
-                ask_delete(&mut state.overlays, plan, moves);
+                ask_delete(&mut state.overlays, plan, moves, state.confirm_trash);
                 true
             }
             BrowserWrite::Entry(pending) => {
@@ -1903,7 +1983,7 @@ mod program {
                 };
                 match planned {
                     Ok(Some(plan)) if state.awaits_empty_confirmation_of(&trash) => {
-                        ask_delete(&mut state.overlays, plan, None);
+                        ask_delete(&mut state.overlays, plan, None, true);
                         true
                     }
                     Ok(_) => false,
@@ -2325,6 +2405,10 @@ mod program {
                         Repaint::Nothing
                     }
                 }
+                WindowKind::Settings(page) => {
+                    let window = Rect::new(0, 0, mode.width_px, mode.height_px);
+                    Repaint::reported_if(page.step_scroll(now, window, (scale, theme), &mut damage))
+                }
             };
             // The bar's next frame is its own deadline, so drawing one never
             // keeps the loop turning.
@@ -2396,20 +2480,21 @@ mod program {
     /// event belongs to.
     fn route_app_bar_event(
         windows: &mut alloc::vec::Vec<OpenWindow>,
-        opening: &Opening,
+        (opening, kept): (&Opening, &RefCell<Kept>),
         client: &mut WindowClient<app::RtWindowTransport>,
         places: &Places,
         reads: &alloc::sync::Arc<Reads>,
-        role: Role,
+        (role, event_endpoint, surround): (Role, u64, Surround<'_>),
         event: &WindowEvent,
     ) -> BarRouted {
+        let settings = *kept.borrow().live();
         match *event {
             WindowEvent::AppBarDefault => {
                 // A window at the user's home — the readiest thing a file
                 // manager can offer. A component takes every click; an
                 // ordinary one is told only when it has no window left, and
                 // this is the way back to one.
-                open_more(windows, opening, client, reads, None);
+                open_more(windows, opening, client, reads, (None, &settings));
                 BarRouted::Handled
             }
             WindowEvent::OpenRequested => {
@@ -2417,7 +2502,11 @@ mod program {
                 // for this instance, so drain until the queue answers empty.
                 // One event may cover several, and another may arrive while
                 // this drain is still running.
-                drain_open_targets(windows, opening, client, reads);
+                drain_open_targets(windows, opening, client, reads, &settings);
+                BarRouted::Handled
+            }
+            WindowEvent::AppBarMenu { item } if appbar::is_settings(item) => {
+                open_settings(windows, client, surround, event_endpoint, kept);
                 BarRouted::Handled
             }
             // A component's rows are its places: open a window at the one
@@ -2429,7 +2518,7 @@ mod program {
                     .and_then(|index| places.rows().get(index))
                     .map(|place| place.components().to_vec());
                 if location.is_some() {
-                    open_more(windows, opening, client, reads, location);
+                    open_more(windows, opening, client, reads, (location, &settings));
                 }
                 BarRouted::Handled
             }
@@ -2447,6 +2536,261 @@ mod program {
             }
             _ => BarRouted::NotMine,
         }
+    }
+
+    /// Serve `event` where it is no listing's: one addressed to a Properties,
+    /// progress or settings window, or `Ctrl+,` asking for the settings in a
+    /// listing's. Answers whether it was.
+    fn route_dialog(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        index: usize,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        (reads, kept, endpoint): (&Reads, &RefCell<Kept>, u64),
+        surround: Surround<'_>,
+        event: &WindowEvent,
+    ) -> bool {
+        let (desktop, grounds, _) = surround;
+        let (scale, theme) = (desktop.scale(), grounds.popups);
+        match windows.get(index).map(|win| &win.kind) {
+            Some(WindowKind::Properties(_)) => {
+                route_properties_event(windows, index, client, theme, reads, scale, event);
+                return true;
+            }
+            Some(WindowKind::Progress(_)) => {
+                serve_progress_event(windows, index, client, (theme, scale), reads, event);
+                return true;
+            }
+            Some(WindowKind::Settings(_)) => {
+                route_settings_event(windows, index, client, reads, kept, (scale, theme), event);
+                return true;
+            }
+            Some(WindowKind::Browser(_)) | None => {}
+        }
+        let WindowEvent::Key {
+            key: KeyInput::Pressed { key, modifiers },
+            ..
+        } = *event
+        else {
+            return false;
+        };
+        if !crate::chrome::opens_settings(key, modifiers) {
+            return false;
+        }
+        open_settings(windows, client, surround, endpoint, kept);
+        true
+    }
+
+    /// What a window is opened against: the desktop it appears on, the grounds
+    /// it is drawn over, and the artwork it draws through.
+    type Surround<'a> = (&'a Desktop, Grounds<'a>, &'a RefCell<IconPipeline>);
+
+    /// Open the settings window on the settings in force, or bring the one
+    /// already open forward: the settings are one record, so one window edits
+    /// them.
+    fn open_settings(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        (desktop, grounds, icons): Surround<'_>,
+        event_endpoint: u64,
+        kept: &RefCell<Kept>,
+    ) {
+        if let Some(open) = windows
+            .iter()
+            .find(|win| matches!(win.kind, WindowKind::Settings(_)))
+        {
+            raise_showing(client, open.pane.id());
+            return;
+        }
+        let editor = SettingsWindow::new(kept.borrow().live());
+        let scale = desktop.scale();
+        let screen = desktop.screen();
+        let (width, height) = editor.extent(scale, grounds.popups);
+        let (width, height) = (width.min(screen.width), height.min(screen.height));
+        let mode = app::mode_for(width, height);
+        let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
+            report_error("window surface refused; no settings window opened");
+            return;
+        };
+        // As tall as the page and no taller, so no blank band opens beneath
+        // it; shorter, and the page scrolls.
+        let sizing = WindowSizing::Resizable {
+            min_width_px: width,
+            min_height_px: height.min(scale.scale_length(SETTINGS_MIN_HEIGHT)),
+            max_width_px: 0,
+            max_height_px: height,
+        };
+        let pane = match WindowPane::open(client, event_endpoint, &mode, SETTINGS_TITLE, sizing) {
+            Ok((pane, _)) => pane,
+            Err(err) => {
+                report_error(&alloc::format!("{err}; no settings window opened"));
+                return;
+            }
+        };
+        let mut win = OpenWindow {
+            pane,
+            title: String::from(SETTINGS_TITLE),
+            surface,
+            owed: Owed::new(),
+            kind: WindowKind::Settings(Box::new(editor)),
+        };
+        if present_whole(&mut win, client, grounds, icons, scale).is_err() {
+            let _ = win.pane.close(client);
+            report_error("the settings window could not be painted; it was closed again");
+            return;
+        }
+        windows.push(win);
+    }
+
+    /// The least the settings window may be made, in logical pixels.
+    const SETTINGS_MIN_HEIGHT: u32 = 240;
+
+    /// Serve one event addressed to the settings window at `index`, carrying
+    /// out what it asks for.
+    fn route_settings_event(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        index: usize,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        reads: &Reads,
+        kept: &RefCell<Kept>,
+        place: (Scale, &Theme),
+        event: &WindowEvent,
+    ) {
+        let Some(win) = windows.get_mut(index) else {
+            return;
+        };
+        let mode = *win.pane.mode();
+        let window = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let mut damage = damage::sink();
+        let WindowKind::Settings(page) = &mut win.kind else {
+            return;
+        };
+        let asked = match event {
+            WindowEvent::CloseRequested { .. } => Some(SettingsRequest::Close),
+            WindowEvent::Key {
+                key: KeyInput::Pressed { key, modifiers },
+                ..
+            } => {
+                let (key, modifiers) = to_editor_key(*key, *modifiers);
+                let stroke = Keystroke {
+                    key,
+                    modifiers,
+                    at_ns: tairix_rt::clock_get(),
+                };
+                page.on_key(stroke, window, place, &mut damage)
+            }
+            WindowEvent::Pointer { x, y, action, .. } => {
+                let point = pointer_point(*x, *y);
+                let mut asked = None;
+                for input in pointer_input_events(*action, point) {
+                    asked = page
+                        .on_pointer((point, &input), window, place, &mut damage)
+                        .or(asked);
+                }
+                asked
+            }
+            WindowEvent::Scrolled { dx, dy, .. } => {
+                page.on_wheel((*dx, *dy), window, place, &mut damage);
+                None
+            }
+            _ => None,
+        };
+        owe(win, Repaint::Reported, &damage);
+        match asked {
+            Some(SettingsRequest::Close) => close_window(windows, index, client, reads),
+            Some(SettingsRequest::Edit { was, now }) => {
+                kept.borrow_mut().publication.edit(&was, &now);
+                settle_settings(windows, kept, false);
+            }
+            Some(SettingsRequest::Restore) => settle_settings(windows, kept, true),
+            None => {}
+        }
+    }
+
+    /// Ask for the settings edited to be written — or, `restoring`, for the
+    /// user's own to be removed — off the loop, and show every window what is
+    /// in force meanwhile.
+    fn settle_settings(windows: &mut [OpenWindow], kept: &RefCell<Kept>, restoring: bool) {
+        {
+            let mut kept = kept.borrow_mut();
+            let Kept {
+                publication,
+                writer,
+            } = &mut *kept;
+            let job = if restoring {
+                publication.restore()
+            } else {
+                publication.settle()
+            };
+            if let Some(job) = job {
+                // Carried out at once with no worker to take it: the answer is
+                // there to adopt below.
+                let _ = writer.submit(job);
+            }
+        }
+        adopt_settings(windows, kept);
+    }
+
+    /// Adopt what the settings store has answered, and show every window the
+    /// settings then in force, answering whether any window changed.
+    fn adopt_settings(windows: &mut [OpenWindow], kept: &RefCell<Kept>) -> bool {
+        let mut kept = kept.borrow_mut();
+        let Kept {
+            publication,
+            writer,
+        } = &mut *kept;
+        let mut refusals = Vec::new();
+        tairix_appdata::collect_published(&**writer, publication, &mut refusals);
+        for refusal in &refusals {
+            app::report(APP_NAME, refusal);
+        }
+        let said = refusals.last().map(|refusal| alloc::format!("{refusal}"));
+        let (was, now) = publication.take_pending(|was, now| (*was, *now));
+        if was == now && said.is_none() {
+            return false;
+        }
+        show_settings(windows, &now, said.as_deref());
+        true
+    }
+
+    /// Show every window `settings`: each listing as they present it, and the
+    /// settings window them with `said`, the store's last refusal.
+    fn show_settings(windows: &mut [OpenWindow], settings: &Preferences, said: Option<&str>) {
+        for win in windows {
+            let mode = *win.pane.mode();
+            let window = Rect::new(0, 0, mode.width_px, mode.height_px);
+            let mut damage = damage::sink();
+            let repaint = match &mut win.kind {
+                WindowKind::Browser(state) => whole_if(state.adopt_settings(settings)),
+                WindowKind::Settings(page) => {
+                    page.adopt(settings, window, &mut damage);
+                    page.state(said.map(String::from), window, &mut damage);
+                    Repaint::Reported
+                }
+                WindowKind::Properties(_) | WindowKind::Progress(_) => Repaint::Nothing,
+            };
+            owe(win, repaint, &damage);
+        }
+    }
+
+    /// See the settings' writes out before the program ends, so the last change
+    /// is never dropped with the worker.
+    fn see_out(kept: &RefCell<Kept>) {
+        let mut kept = kept.borrow_mut();
+        let Kept {
+            publication,
+            writer,
+        } = &mut *kept;
+        let mut refusals = Vec::new();
+        tairix_appdata::see_out_published(&**writer, publication, &mut refusals);
+        for refusal in refusals {
+            app::report(APP_NAME, refusal);
+        }
+    }
+
+    /// End the program with `code`, its settings' writes seen out first.
+    fn ended(kept: &RefCell<Kept>, code: i32) -> i32 {
+        see_out(kept);
+        code
     }
 
     /// Route one event to whatever it names, answering the exit code the
@@ -2477,9 +2821,11 @@ mod program {
         event_endpoint: u64,
         role: Role,
         can_chown: bool,
+        kept: &RefCell<Kept>,
         event: &WindowEvent,
     ) -> Option<i32> {
-        match route_app_bar_event(windows, opening, client, places, reads, role, event) {
+        let how = (role, event_endpoint, (&*desktop, grounds, icons));
+        match route_app_bar_event(windows, (opening, kept), client, places, reads, how, event) {
             BarRouted::Handled => return None,
             BarRouted::Ends(code) => return Some(code),
             BarRouted::NotMine => {}
@@ -2557,21 +2903,15 @@ mod program {
             return None;
         }
 
-        if matches!(windows[index].kind, WindowKind::Properties(_)) {
-            route_properties_event(
-                windows,
-                index,
-                client,
-                grounds.popups,
-                reads,
-                desktop.scale(),
-                event,
-            );
-            return None;
-        }
-        if matches!(windows[index].kind, WindowKind::Progress(_)) {
-            let place = (grounds.popups, desktop.scale());
-            serve_progress_event(windows, index, client, place, reads, event);
+        let surround = (&*desktop, grounds, icons);
+        if route_dialog(
+            windows,
+            index,
+            client,
+            (reads, kept, event_endpoint),
+            surround,
+            event,
+        ) {
             return None;
         }
         route_browser_event(
@@ -3104,11 +3444,10 @@ mod program {
     /// Apply the chrome toggle `event` names to `win`, answering whether a
     /// band moved.
     ///
-    /// `F9` shows or hides the places rail and `Ctrl+F9` the command toolbar.
-    /// A window opens with neither, so these are what reach every command the
+    /// `F9` shows or hides the places rail and `Ctrl+F9` the command toolbar,
+    /// whichever the settings opened the window with, so every command the
     /// toolbar carries — the view toggle, the sort cycle, the Trash tools —
-    /// until the desktop settings application sets the same two fields from
-    /// the user's stored preference.
+    /// stays reachable while it is hidden.
     fn chrome_toggle(win: &mut OpenWindow, event: &WindowEvent) -> bool {
         let WindowEvent::Key {
             key: KeyInput::Pressed { key, modifiers },
@@ -3145,9 +3484,9 @@ mod program {
         opening: &Opening,
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &alloc::sync::Arc<Reads>,
-        location: Option<alloc::vec::Vec<String>>,
+        (location, settings): (Option<alloc::vec::Vec<String>>, &Preferences),
     ) {
-        let ladder = Ladder::new(location, home_components().as_deref());
+        let ladder = ladder_for(location, settings);
         if let Some(wanted) = ladder.place() {
             if let Some(open) = windows.iter().find(|win| win.shows(wanted)) {
                 if raise_showing(client, open.pane.id()) {
@@ -3170,9 +3509,17 @@ mod program {
         // with a stated reason. A hand-picked ceiling in front of them would
         // only refuse windows the machine could have given. A ladder with no
         // listable place was stated as each was refused.
-        if let Some(asked) = open_browser(reads, ladder) {
+        if let Some(asked) = open_browser(reads, ladder, settings) {
             opening.borrow_mut().push(asked);
         }
+    }
+
+    /// The places a window asked for `location` — or for none — may open at,
+    /// as `settings` say a window asked for none opens.
+    fn ladder_for(location: Option<alloc::vec::Vec<String>>, settings: &Preferences) -> Ladder {
+        let home = home_components();
+        let start = settings.start.place(home.as_deref());
+        Ladder::new(location, home.as_deref(), start)
     }
 
     /// Show the file `path` names selected in a window already listing the
@@ -3238,6 +3585,7 @@ mod program {
         opening: &Opening,
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &alloc::sync::Arc<Reads>,
+        settings: &Preferences,
     ) {
         loop {
             let path = match client.take_open_target() {
@@ -3271,7 +3619,9 @@ mod program {
                 }
             };
             match crate::command::location_components(&path) {
-                Ok(location) => open_more(windows, opening, client, reads, Some(location)),
+                Ok(location) => {
+                    open_more(windows, opening, client, reads, (Some(location), settings));
+                }
                 // Stated and skipped: the *next* target may well be fine, so
                 // one bad spelling must not abandon the drain.
                 Err(reason) => {
@@ -5160,6 +5510,9 @@ mod program {
         /// Set when the park woke for a desktop change, cleared when the loop
         /// adopts it.
         desktop_moved: &'a Cell<bool>,
+        /// The settings writer, whose wake is drained on a [`SETTINGS_TOKEN`]
+        /// wake for the loop to adopt its answer.
+        settings: &'a PublishWorker<Preferences>,
         /// Where a places read the mount notice asked for lands when no worker
         /// was there to read it.
         places_read: &'a PlacesRead,
@@ -5207,6 +5560,12 @@ mod program {
                 // rather than parking again on a source that is still ready.
                 Wake::App(READS_TOKEN) => {
                     self.reads.wake.drain();
+                    return Ok(Parked::Interrupted);
+                }
+                // A settings write was carried out; its answer is the loop's to
+                // adopt.
+                Wake::App(SETTINGS_TOKEN) => {
+                    self.settings.wake().drain();
                     return Ok(Parked::Interrupted);
                 }
                 // A child-exit wake reaps the exited bundle(s) in place, so a
@@ -5567,8 +5926,10 @@ mod program {
         kind: EntryKind,
         /// The spelling a link stores, if it is one.
         target: Option<String>,
-        /// The drive it is the root of, by its picture, for a volume root.
-        drive: Option<IconKind>,
+        /// The picture the listing drew it with.
+        art: IconKind,
+        /// Whether it is a volume root, described as its drive.
+        drive: bool,
     }
 
     /// What a popup this app opens above one of its own windows is opened
@@ -5975,7 +6336,7 @@ mod program {
                         },
                     );
                 }
-                WindowKind::Progress(_) => {}
+                WindowKind::Progress(_) | WindowKind::Settings(_) => {}
             }
             if !damage.is_empty() {
                 owe(win, Repaint::Reported, &damage);
@@ -6983,8 +7344,19 @@ mod program {
     }
 
     /// Ask whether to remove `plan`, worded for the Trash moves it can be
-    /// carried out as, or for the irreversible unlink without them.
-    fn ask_delete(overlays: &mut Overlays, plan: DeletePlan, trash_moves: Option<TrashMoves>) {
+    /// carried out as, or for the irreversible unlink without them. A move to
+    /// the Trash is undone by taking the items back out, so it asks only when
+    /// `confirm_trash` says to; removing for good always asks.
+    fn ask_delete(
+        overlays: &mut Overlays,
+        plan: DeletePlan,
+        trash_moves: Option<TrashMoves>,
+        confirm_trash: bool,
+    ) {
+        if trash_moves.is_some() && !confirm_trash {
+            start_removal(overlays, &plan, trash_moves);
+            return;
+        }
         let disposition = if trash_moves.is_some() {
             DeleteDisposition::Trash
         } else {
@@ -7154,7 +7526,7 @@ mod program {
                     *full = raise_notice(&mut props.notices, client, endpoint, Some(window_id));
                 }
                 // A refusal that stops an operation is its folder's to state.
-                WindowKind::Progress(_) => {}
+                WindowKind::Progress(_) | WindowKind::Settings(_) => {}
             }
         }
     }
@@ -7202,7 +7574,7 @@ mod program {
                     }
                     false
                 }
-                WindowKind::Progress(_) => false,
+                WindowKind::Progress(_) | WindowKind::Settings(_) => false,
             };
             if removal {
                 win.owed.owe_whole();
@@ -7223,9 +7595,14 @@ mod program {
             outcome,
             AlertOutcome::Chosen { index } if usize::from(index) == DELETE_CONFIRM_INDEX
         );
-        if !chosen {
-            return;
+        if chosen {
+            start_removal(overlays, &confirm.plan, confirm.trash_moves);
         }
+    }
+
+    /// Start removing `plan`: as moves to the Trash where `trash_moves` carry
+    /// it, else for good.
+    fn start_removal(overlays: &mut Overlays, plan: &DeletePlan, trash_moves: Option<TrashMoves>) {
         if overlays.starting.is_some() {
             overlays.notices.refuse(
                 NoticeSource::Operation,
@@ -7234,14 +7611,14 @@ mod program {
             );
             return;
         }
-        let subject = subject_of(confirm.plan.targets().iter().map(DeleteTarget::path));
-        overlays.starting = Some(match confirm.trash_moves {
+        let subject = subject_of(plan.targets().iter().map(DeleteTarget::path));
+        overlays.starting = Some(match trash_moves {
             Some(moves) => Operation::new(
                 Job::trash(moves),
                 ProgressModel::new(ProgressOp::Trash, subject, None),
             ),
             None => Operation::new(
-                Job::delete(&confirm.plan),
+                Job::delete(plan),
                 ProgressModel::new(ProgressOp::Delete, subject, None),
             ),
         });
@@ -8428,9 +8805,7 @@ mod program {
             tairix_browse::render::header_sort_at(browser, scale, theme, viewport, toolbar, point)
         {
             overlays.double_click.reset();
-            browser.set_sort_mode(order);
-            tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
-            return whole((true, false));
+            return whole(reorder(browser, order, (scale, theme, viewport, toolbar)));
         }
         let frame = Frame {
             scale,
@@ -8694,6 +9069,7 @@ mod program {
                     target,
                     candidates,
                     documents,
+                    endings: browser.presentation().endings,
                 });
             }
             Err(err) => report_error(&alloc::format!("menu refused ({err}); not shown")),
@@ -8785,6 +9161,20 @@ mod program {
                     );
                     (true, false)
                 }
+                Some(ContextChoice::SortBy(key)) => {
+                    let order = SortMode {
+                        key,
+                        ..browser.sort_mode()
+                    };
+                    reorder(browser, order, (scale, theme, viewport, toolbar))
+                }
+                Some(ContextChoice::SortIn(direction)) => {
+                    let order = SortMode {
+                        direction,
+                        ..browser.sort_mode()
+                    };
+                    reorder(browser, order, (scale, theme, viewport, toolbar))
+                }
                 // A document the menu never offered makes nothing.
                 Some(ContextChoice::NewDocument(index)) => match gesture.documents.get(index) {
                     Some(document) => {
@@ -8830,6 +9220,17 @@ mod program {
         (whole_if(changed), close)
     }
 
+    /// Order `browser`'s listing by `order`, keeping the selection in view.
+    fn reorder<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        order: SortMode,
+        (scale, theme, viewport, toolbar): (Scale, &Theme, Rect, ToolbarBand),
+    ) -> (bool, bool) {
+        browser.set_sort_mode(order);
+        tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
+        (true, false)
+    }
+
     /// Pull the name the user typed into the context menu's Rename field and
     /// rename the selection to it.
     ///
@@ -8865,7 +9266,7 @@ mod program {
             edit.refuse(String::from("a rename is already being carried out"));
             return Repaint::Nothing;
         }
-        let pending = match browser.prepare_rename(&name) {
+        let pending = match browser.prepare_rename(&name, gesture.endings) {
             Ok(pending) => pending,
             Err(RenameError::Unchanged) => return close_editor(browser, edit, frame, damage),
             Err(err) => {
@@ -9493,11 +9894,10 @@ mod program {
         viewport: Rect,
         toolbar: ToolbarBand,
     ) -> (bool, bool) {
+        let endings = browser.presentation().endings;
         let Some((name, stem)) = browser.chosen_entry().map(|entry| {
-            (
-                entry.name().to_string(),
-                tairix_browse::rename_selection(entry),
-            )
+            let (shown, selected) = tairix_browse::rename_text(entry, endings);
+            (shown.to_string(), selected)
         }) else {
             return (false, false);
         };
@@ -9506,7 +9906,7 @@ mod program {
             .with_max_len(FS_NAME_MAX)
             .with_selection(stem);
         field.set_focused(true);
-        if !rename.open(field) {
+        if !rename.open(field, endings) {
             return (false, false);
         }
         tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
@@ -9529,7 +9929,8 @@ mod program {
         };
         let kind = entry.kind();
         let target = entry.target().map(String::from);
-        let drive = entry.drive();
+        let art = tairix_browse::icon_for_entry(entry, browser.components());
+        let drive = entry.drive().is_some();
         let Some(Ok(path)) = browser.chosen_target_path() else {
             report_error("that item's location could not be resolved; no window opened");
             return (false, false);
@@ -9538,6 +9939,7 @@ mod program {
             path,
             kind,
             target,
+            art,
             drive,
         });
         (false, false)
@@ -9572,6 +9974,7 @@ mod program {
             path,
             kind,
             target,
+            art,
             drive,
         } = request;
         let mut title = String::new();
@@ -9584,7 +9987,7 @@ mod program {
         );
         // A mount point that does not parse names no drive: it is described
         // as a node, never read as whatever volume an empty path would match.
-        let drive = drive.and_then(|art| Some((art, drive_job(&path)?)));
+        let drive = if drive { drive_job(&path) } else { None };
         let strip = match drive {
             Some(_) => PropertiesStrip::Drive,
             None => PropertiesStrip::Node,
@@ -9617,6 +10020,7 @@ mod program {
                 path,
                 kind,
                 target,
+                art,
                 state: PropertiesState::Reading,
                 rows: RowList::new(0),
                 scroll: ScrollColumn::new(),
@@ -9631,10 +10035,9 @@ mod program {
                 rereading: false,
                 notices: Notices::default(),
                 strip,
-                drive: drive.map(|(art, job)| DriveWatch {
+                drive: drive.map(|job| DriveWatch {
                     drive: Drive::new(),
                     job,
-                    art,
                     due: None,
                     asked: true,
                 }),
@@ -10428,7 +10831,7 @@ mod program {
         let Some(new_name) = edit.field().map(|field| field.text().to_string()) else {
             return (RenameCommit::Refused, Repaint::Nothing);
         };
-        match browser.prepare_rename(&new_name) {
+        match browser.prepare_rename(&new_name, edit.endings()) {
             Ok(pending) => (
                 RenameCommit::Submitted,
                 submit_rename(browser, edit, reads, pending, frame, damage),
@@ -10809,9 +11212,13 @@ mod program {
     /// Ask for a window at the first place on `ladder`. A place refused at
     /// once is stated and the next one tried; `None`, stated, when none is
     /// left.
-    fn open_browser(reads: &alloc::sync::Arc<Reads>, mut ladder: Ladder) -> Option<PendingWindow> {
+    fn open_browser(
+        reads: &alloc::sync::Arc<Reads>,
+        mut ladder: Ladder,
+        settings: &Preferences,
+    ) -> Option<PendingWindow> {
         let listing = reads.listing_client();
-        let Some(browser) = browse_ladder(reads, listing, &mut ladder) else {
+        let Some(browser) = browse_ladder(reads, listing, &mut ladder, settings) else {
             reads.forget_listing(listing);
             return None;
         };
@@ -10833,13 +11240,18 @@ mod program {
         reads: &alloc::sync::Arc<Reads>,
         listing: FilesClient,
         ladder: &mut Ladder,
+        settings: &Preferences,
     ) -> Option<Browser<DeferredSource>> {
         loop {
             let place = ladder.place()?.to_vec();
             let source = DeferredSource(alloc::sync::Arc::clone(reads), listing);
             match Browser::open_at(source, place) {
                 Ok(mut browser) => {
-                    browser.set_view_mode(MANAGER_VIEW_MODE);
+                    browser.set_view_mode(settings.view);
+                    browser.set_sort_mode(settings.sort);
+                    if let Err(err) = browser.set_presentation(settings.presentation) {
+                        report_error(&alloc::format!("listing refused ({err})"));
+                    }
                     return Some(browser);
                 }
                 Err(err) => {
@@ -10883,7 +11295,7 @@ mod program {
         grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         reads: &alloc::sync::Arc<Reads>,
-        event_endpoint: u64,
+        (event_endpoint, settings): (u64, &Preferences),
     ) -> Option<i32> {
         let mut opening = opening.borrow_mut();
         let mut at = 0;
@@ -10891,7 +11303,7 @@ mod program {
             let asked = &mut opening[at];
             if let Err(err) = asked.browser.resume() {
                 let next = step_down(&mut asked.ladder, err)
-                    .then(|| browse_ladder(reads, asked.listing, &mut asked.ladder))
+                    .then(|| browse_ladder(reads, asked.listing, &mut asked.ladder, settings))
                     .flatten();
                 if let Some(browser) = next {
                     // Looked at again at once: a place read on this thread has
@@ -10939,7 +11351,7 @@ mod program {
                 places,
                 grounds,
                 icons,
-                landed,
+                (landed, settings),
             ) {
                 Ok(win) => windows.push(win),
                 Err(code) => {
@@ -11016,6 +11428,24 @@ mod program {
             Ok(pair) => pair,
             Err(code) => return code,
         };
+
+        // --- The file manager's own settings, read before any window so the
+        // first opens as they say, and written from here on by a worker so no
+        // change waits on the store.
+        let (preferences, refusals) = tairix_appdata::loaded::<Preferences>(
+            &tairix_appdata::Settings::open_without_defaults(&mut tairix_appdata::RtHost),
+        );
+        for refusal in refusals {
+            app::report(APP_NAME, refusal);
+        }
+        let writer = alloc::sync::Arc::new(tairix_appdata::publish_worker::<Preferences>(
+            tairix_appdata::Opening::Bare,
+        ));
+        app::start_worker(APP_NAME, &writer, set, SETTINGS_TOKEN, "settings");
+        let kept = RefCell::new(Kept {
+            publication: Publication::new(preferences),
+            writer: alloc::sync::Arc::clone(&writer),
+        });
 
         // The places rail: the user's own shortcuts at once, and what is
         // mounted once the reader has asked the System Information service for
@@ -11117,9 +11547,9 @@ mod program {
         let mut windows: alloc::vec::Vec<OpenWindow> = alloc::vec::Vec::new();
         let opening: Opening = RefCell::new(alloc::vec::Vec::new());
         if start.role == Role::Window {
-            let ladder = Ladder::new(start.location, home_components().as_deref());
-            let Some(first) = open_browser(&reads, ladder) else {
-                return EXIT_NO_LISTING;
+            let ladder = ladder_for(start.location, &preferences);
+            let Some(first) = open_browser(&reads, ladder, &preferences) else {
+                return ended(&kept, EXIT_NO_LISTING);
             };
             opening.borrow_mut().push(PendingWindow {
                 vital: true,
@@ -11156,6 +11586,7 @@ mod program {
             icons: &icons,
             reads: &reads,
             desktop_moved: &desktop_moved,
+            settings: &writer,
             places_read: &places_read,
             due: &due,
         });
@@ -11195,7 +11626,9 @@ mod program {
                         continue;
                     }
                     Err(EventError::Mailbox(_)) => {
-                        return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
+                        let code =
+                            app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost");
+                        return ended(&kept, code);
                     }
                 };
                 // An answered alert frees one of the application's, so what
@@ -11221,9 +11654,10 @@ mod program {
                     event_endpoint,
                     start.role,
                     can_chown,
+                    &kept,
                     &event,
                 ) {
-                    return code;
+                    return ended(&kept, code);
                 }
             }
 
@@ -11243,6 +11677,7 @@ mod program {
                 (desktop.scale(), desktop.refresh()),
             );
             moved |= collect_writes(&mut windows, &reads, themes.active(), desktop.scale());
+            moved |= adopt_settings(&mut windows, &kept);
             submit_writes(&mut windows, &reads, themes.active(), desktop.scale());
             state_rename_refusals(&mut windows);
             open_started_operations(
@@ -11263,9 +11698,9 @@ mod program {
                 themes.grounds(MANAGER_WINDOW_GROUND),
                 &icons,
                 &reads,
-                event_endpoint,
+                (event_endpoint, kept.borrow().live()),
             ) {
-                return code;
+                return ended(&kept, code);
             }
             // A mount-table change the reader has answered: the rail is what
             // is mounted, so it is rebuilt and every window's copy with it.
@@ -11325,6 +11760,10 @@ mod program {
                 if state.listing_is_held() {
                     continue;
                 }
+                let restyled = state
+                    .settings_owed
+                    .take()
+                    .is_some_and(|settings| state.adopt_settings(&settings));
                 let replaced = match state.browser.resume() {
                     Ok(true) => {
                         state.lost = false;
@@ -11348,6 +11787,8 @@ mod program {
                     // A new listing is a new set of entries: no click armed on
                     // the old one names any of them.
                     state.overlays.rename_arm = None;
+                }
+                if replaced || restyled {
                     win.owed.owe_whole();
                     moved = true;
                 }
@@ -11477,7 +11918,8 @@ mod program {
             if present_owed_windows(&mut windows, &mut client, grounds, &icons, desktop.scale())
                 .is_err()
             {
-                return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
+                let code = app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
+                return ended(&kept, code);
             }
             // Every window asked after each picture it shows, drawn this pass
             // or not, so a thumbnail none of them asked for is off screen.
@@ -11495,6 +11937,7 @@ mod program {
                         WindowKind::Browser(state) => state.due(now, desktop.refresh()),
                         WindowKind::Properties(props) => props.due(now),
                         WindowKind::Progress(progress) => progress.operation.due(),
+                        WindowKind::Settings(page) => page.due(now),
                     })
                     .min(),
             );

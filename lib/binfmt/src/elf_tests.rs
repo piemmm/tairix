@@ -124,7 +124,7 @@ fn push_fixture_sections(out: &mut Vec<u8>, text_off: u64, strtab_off: u64, shst
 /// header, then `.text` bytes, `.strtab`, `.shstrtab`, a two-entry
 /// `.symtab` (null + `main`), and the section table last (so every
 /// truncation of the file breaks a validated extent).
-fn fixture() -> Vec<u8> {
+pub(crate) fn fixture() -> Vec<u8> {
     let phoff = ELF_HEADER_LEN as u64;
     let text_off = phoff + PROGRAM_HEADER_LEN as u64;
     let strtab_off = text_off + TEXT.len() as u64;

@@ -2,10 +2,11 @@
 
 `tairix_binfmt` (`lib/binfmt`) is TAIRiX's one definition of how an executable
 *file* is read without being loaded: a typed, borrowed, fail-closed view of the
-`rxe` load image and manifest, of ELF64, and of wasm module structure. The file
-manager's disassembly viewer consumes it first; an `objdump`/`readelf`-class
-command app consumes the same crate the moment it lands. Decoding an executable
-is reading bytes, not loading code — the crate needs and grants no authority.
+`rxe` load image, of ELF64, and of wasm module structure, and a report of what
+any of those, a driver bundle's image, or a signed manifest says. The `fstree`
+disassembly viewer and the text editor's Code and Data displays consume it.
+Decoding an executable is reading bytes, not loading code — the crate needs and
+grants no authority.
 
 Stability tier: **experimental** (the surface grows as callers need it).
 
@@ -18,11 +19,7 @@ Stability tier: **experimental** (the surface grows as callers need it).
   segment table, needed libraries, and CFI tag. The tag is **reported, never
   compared** — an inspection tool has no kernel interface hash, and admitting
   a binary to execution stays the kernel loader's job (`LoadImage::parse`).
-  `rxe::ManifestSummary` decodes a signed manifest's header and capability
-  request through `ManifestHeader::from_bytes` + `decode_capability_ids`; it
-  summarises what the manifest *says* and performs no signature verification
-  (that needs the install's authority key and belongs to the load gate).
-  Because the decoders *are* the ABI types, the inspection view and the load
+  Because the decoder *is* the ABI type, the inspection view and the load
   path can never drift.
 - **ELF64** — `elf::ElfView` decodes little-endian `EM_X86_64` /
   `EM_AARCH64` / `EM_RISCV` files: the file header, program headers, section
@@ -39,7 +36,40 @@ Stability tier: **experimental** (the surface grows as callers need it).
   bodies must fill the code payload exactly.
 
 `detect` answers "which decoder should look at this file?" from the magic
-prefix; the matching decoder still validates everything.
+prefix — an `rxe`, a driver image (`DRV1`), ELF64, wasm, a program manifest
+(`RXM1`) or a bundle's `AppInfo` (`RAI1`) — and `Format::holds_code` says
+whether there is code to disassemble; the matching decoder still validates
+everything.
+
+## The report
+
+`report::report` states what a recognised file says as a person reads it: a
+heading naming the format, then each part at its file offset and length with
+the facts it declares beneath it, built with the shared report builder
+(`tairix_util::report`), so it is bounded, cut and escaped like every report a
+viewer shows.
+
+- An `rxe`: its ABI, whether it is position-independent, the entry, the CFI
+  tag, each segment's permission, address, file extent and memory size, the
+  libraries it needs, and where each segment's bytes lie.
+- A driver image: its signed manifest — where it runs, the syscall-table
+  hash, signer and signature, the capabilities it asks for by name, each bind
+  key's priority and hardware (a `compatible` string, a PCI or USB
+  vendor:product and class, a virtio device) — then its program's report, at
+  the program's place in the whole file. The split is `lib/abi`'s
+  `DriverImage`, the one the driver host loads it through.
+- A program manifest and a bundle's `AppInfo`: what they name, request and
+  claim — for `AppInfo` the identifier, name, title, version, purpose, author,
+  icon, program-library folder, instance and icon-bar flags, publisher binding
+  and content hash, then its capabilities, file types and browsed services.
+- An ELF64 file: its type and machine, entry and flags, every program header
+  and every section header, with a symbol table's count.
+- A wasm module: every section with its entry count, a custom section's name
+  and the start function.
+
+Keys and signatures are shown, never checked: whether a program may run is the
+load gate's judgement, not a viewer's. A part that will not read ends the walk
+with where and why.
 
 ## Lazy, bounded, fail-closed
 
@@ -63,4 +93,5 @@ The decoders are parsers of untrusted input, so consumers run them inside the
 minimum-capability parser sandbox; they are written as pure, total, `no_std`
 slice decoders precisely so they link into that sandbox process unchanged.
 The three fuzz harnesses (`fuzz_rxe`, `fuzz_elf`, `fuzz_wasm`) are enrolled
-in `cargo xtask fuzz`.
+in `cargo xtask fuzz`; each reports what it decodes too, and `fuzz_rxe` holds
+the report of every TAIRiX program, driver image and manifest to its bounds.

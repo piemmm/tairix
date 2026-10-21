@@ -8,7 +8,7 @@ use super::{
     IMAGE_SEPARATOR, LABEL_APPLICATION, LABEL_GRAPHIC_CONTROL, LABEL_PLAIN_TEXT, MAGIC,
     NETSCAPE_ID, SCREEN_DESCRIPTOR_LEN, TRAILER, VERSIONS,
 };
-use crate::inspect::{clean, Builder};
+use tairix_util::report::{clean, Builder};
 
 /// The comment extension's label.
 const LABEL_COMMENT: u8 = 0xFE;
@@ -155,7 +155,7 @@ fn extension(bytes: &[u8], at: usize, out: &mut Builder) -> Option<usize> {
                 break;
             }
             let block = reader.take(usize::from(len)).ok()?;
-            if text.len() < crate::inspect::MAX_TEXT_SHOWN {
+            if text.len() < tairix_util::report::MAX_TEXT_SHOWN {
                 text.extend_from_slice(block);
             }
         }

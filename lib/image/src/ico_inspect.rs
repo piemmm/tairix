@@ -4,7 +4,7 @@
 use super::{
     field, CUR_SIGNATURE, DIRECTORY_LEN, ENTRY_BYTES_AT, ENTRY_LEN, ENTRY_OFFSET_AT, ICO_SIGNATURE,
 };
-use crate::inspect::Builder;
+use tairix_util::report::Builder;
 
 /// Report `bytes`, an icon or cursor file.
 pub(crate) fn report(bytes: &[u8], out: &mut Builder) {

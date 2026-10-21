@@ -24,27 +24,38 @@ Binärdaten aussieht, öffnet sich in der Hex-Ansicht, die jedes Byte als zwei
 Hex-Ziffern neben seinem Zeichen zeigt und dieselben Bytes bearbeitet wie die
 Textansicht.
 
-Ein ausführbares Programm — ein TAIRiX-Programmabbild, eine ELF64-Datei oder
-ein WebAssembly-Modul — öffnet sich stattdessen in der Code-Ansicht: zuerst
-seine Bereiche, dann die Befehle jedes Code-Bereichs, je einer pro Zeile mit
+Ein ausführbares Programm — ein TAIRiX-Programmabbild, ein Treiber, eine
+ELF64-Datei oder ein WebAssembly-Modul — öffnet sich stattdessen in der
+Code-Ansicht: zuerst, was seine Header besagen, jeder Teil an seiner
+Position mit seiner Länge und dem, was er angibt — die Systemversion, für
+die es gebaut wurde, sein Einsprungpunkt, seine Segmente und die
+Bibliotheken, die es braucht, das signierte Manifest eines Treibers mit den
+Berechtigungen, die er anfordert, und der Hardware, an die er sich bindet,
+die Programm- und Abschnittsheader einer ELF-Datei, die Abschnitte eines
+Moduls —, dann die Befehle jedes Code-Bereichs, je einer pro Zeile mit
 Adresse und Kodierungsbytes, beschriftet mit den Symbolen, an denen sie
-beginnen, und den Symbolen, zu denen ihre Sprünge führen. Die Code-Ansicht
-ist schreibgeschützt; Text- und Hex-Ansicht bearbeiten dieselbe Datei. Der
-Code wird von einem eigenen zweiten Arbeitsprozess ohne jeden Zugriff
-dekodiert und im Befehlssatz gelesen, den die Datei nennt, sonst in dem
-dieses Rechners; „Befehlssatz“ im Menü Ansicht liest ihn als einen anderen,
-und das Ansichtsfeld der Statuszeile bietet die Code-Ansicht neben Text und
-Hex an.
+beginnen, und den Symbolen, zu denen ihre Sprünge führen. Schlüssel und
+Signaturen werden so gezeigt, wie sie geschrieben sind, ohne geprüft zu
+werden. Die Code-Ansicht ist schreibgeschützt; Text- und Hex-Ansicht
+bearbeiten dieselbe Datei. Der Code wird von einem eigenen zweiten
+Arbeitsprozess ohne jeden Zugriff dekodiert und im Befehlssatz gelesen, den
+die Datei nennt, sonst in dem dieses Rechners; „Befehlssatz“ im Menü Ansicht
+liest ihn als einen anderen, und das Ansichtsfeld der Statuszeile bietet die
+Code-Ansicht neben Text und Hex an.
 
 Ein Bild — PNG, JPEG, GIF, BMP, TIFF, WEBP, eine Symbol- oder Zeigerdatei,
 ein RISC-OS-Sprite-Bereich oder ein OpenRaster-Dokument — öffnet sich
 stattdessen in der Datenansicht: woraus die Datei besteht, jeder Datensatz
 an seiner Position mit seiner Länge und dem, was er angibt, jedes EXIF-Tag
 mit Namen und Wert, danach jedes Byte der Datei als Hexwert neben seinem
-Zeichen. Die Datenansicht ist schreibgeschützt; die Hex-Ansicht bearbeitet
-dieselben Bytes. Das Bild liest ein dritter, eigener Arbeitsprozess,
-ebenfalls ohne jeden Zugriff, und das Menü Ansicht bietet die Datenansicht
-neben Text und Hex an.
+Zeichen. Ein signiertes Manifest — das `AppInfo` einer Anwendung oder das
+Manifest eines Programms — öffnet sich ebenfalls dort: was es nennt, die
+Berechtigungen, die es anfordert, die Dateitypen, die es beansprucht, und
+die Dienste, nach denen es sucht, danach seine Bytes. Die Datenansicht ist
+schreibgeschützt; die Hex-Ansicht bearbeitet dieselben Bytes. Ein Bild liest
+ein dritter, eigener Arbeitsprozess, ein Manifest der Arbeitsprozess der
+Code-Ansicht, beide ohne jeden Zugriff, und das Menü Ansicht bietet die
+Datenansicht neben Text und Hex an.
 
 Quelltexte werden eingefärbt: HTML, XML und SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python und Shell-Skripte. Die

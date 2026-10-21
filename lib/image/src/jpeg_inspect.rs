@@ -8,8 +8,9 @@ use super::{
     EXP, RST0, RST7, SOF0, SOF1, SOF10, SOF11, SOF13, SOF14, SOF15, SOF2, SOF3, SOF5, SOF6, SOF7,
     SOF9, SOI, SOS,
 };
-use crate::inspect::{clean, dpi_of_ppm, Builder};
+use crate::inspect::dpi_of_ppm;
 use crate::orientation::EXIF_IDENTIFIER;
+use tairix_util::report::{clean, Builder};
 
 /// The one marker besides the restarts that carries no length: temporary
 /// private use in arithmetic coding.

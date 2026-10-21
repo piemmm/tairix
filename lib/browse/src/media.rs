@@ -48,13 +48,16 @@
 
 use alloc::string::String;
 
+use tairix_abi::driver_store::DRIVER_STORE_PATH;
 use tairix_abi::fs::{DirEntry, FileKind};
-use tairix_abi::ProgramKind;
+use tairix_abi::home::USERS_DIR;
+use tairix_abi::{BundleEntry, ProgramKind, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR};
 use tairix_icon::{
     DocumentStamp, FolderSample, IconKind, IconRequest, Reading, SampleCard, Thumbnail,
 };
 
-use crate::entry::{Entry, EntryKind};
+use crate::entry::{is_bundle_name, Entry, EntryKind};
+use crate::presentation::Pictures;
 
 /// A content type TAIRiX recognises, named by its media type.
 ///
@@ -77,6 +80,12 @@ pub enum MediaType {
     Wasm,
     /// A raw ELF image (`application/x-elf`).
     Elf,
+    /// A signed driver bundle's image: the `Run` the driver store holds for
+    /// each driver (`application/x-tairix-driver`).
+    TairixDriver,
+    /// A bundle's signed manifest, its `AppInfo`
+    /// (`application/x-tairix-appinfo`).
+    TairixAppInfo,
     /// Plain text and the config formats with no type of their own
     /// (`text/plain`).
     TextPlain,
@@ -187,6 +196,8 @@ impl MediaType {
             Self::TairixRxe => "Program",
             Self::Wasm => "WebAssembly module",
             Self::Elf => "ELF program",
+            Self::TairixDriver => "Driver",
+            Self::TairixAppInfo => "Application manifest",
             Self::TextPlain => "Text",
             Self::TextMarkdown => "Markdown document",
             Self::TextCsv => "CSV table",
@@ -248,6 +259,8 @@ impl MediaType {
             Self::TairixRxe => "application/x-tairix-rxe",
             Self::Wasm => "application/wasm",
             Self::Elf => "application/x-elf",
+            Self::TairixDriver => "application/x-tairix-driver",
+            Self::TairixAppInfo => "application/x-tairix-appinfo",
             Self::TextPlain => "text/plain",
             Self::TextMarkdown => "text/markdown",
             Self::TextCsv => "text/csv",
@@ -358,6 +371,8 @@ impl MediaType {
             Self::TairixRxe
             | Self::Wasm
             | Self::Elf
+            | Self::TairixDriver
+            | Self::TairixAppInfo
             | Self::TextPlain
             | Self::Pdf
             | Self::ImagePng
@@ -431,7 +446,11 @@ impl MediaType {
             Self::InodeDirectory => IconKind::Folder,
             Self::TairixApp => IconKind::AppBundle,
             Self::TairixService => IconKind::ServiceBundle,
-            Self::TairixRxe | Self::Wasm | Self::Elf => IconKind::Executable,
+            Self::TairixRxe => IconKind::Executable,
+            Self::Wasm => IconKind::WasmModule,
+            Self::Elf => IconKind::ElfExecutable,
+            Self::TairixDriver => IconKind::Driver,
+            Self::TairixAppInfo => IconKind::Manifest,
             Self::TextPlain
             | Self::TextMarkdown
             | Self::TextCsv
@@ -512,6 +531,8 @@ impl MediaType {
             | Self::TairixRxe
             | Self::Wasm
             | Self::Elf
+            | Self::TairixDriver
+            | Self::TairixAppInfo
             | Self::Pdf
             | Self::ImagePng
             | Self::ImageJpeg
@@ -643,9 +664,13 @@ impl MediaType {
             | Self::ArchiveZstd
             | Self::Archive7z
             | Self::ArchiveRar => Some(Family::Archive),
-            Self::TairixApp | Self::TairixService | Self::TairixRxe | Self::Wasm | Self::Elf => {
-                Some(Family::Program)
-            }
+            Self::TairixApp
+            | Self::TairixService
+            | Self::TairixRxe
+            | Self::Wasm
+            | Self::Elf
+            | Self::TairixDriver
+            | Self::TairixAppInfo => Some(Family::Program),
             Self::InodeDirectory | Self::ApplicationOctetStream => None,
         }
     }
@@ -675,14 +700,10 @@ pub fn folder_sample<'n>(
         count: u32,
         first: u32,
     }
-    let service_store = is_system_started_store(folder);
+    let site = Site::of(folder);
     let classify = |record: &DirEntry<'n>| {
         let name = core::str::from_utf8(record.name).ok()?;
-        let media = media_for_named(
-            name,
-            EntryKind::for_listing(record.kind, name, None),
-            service_store,
-        );
+        let media = media_for_named(name, EntryKind::for_listing(record.kind, name, None), site);
         Some((media.family()?, media, name))
     };
     let mut families = [Seen::default(); Family::COUNT];
@@ -772,6 +793,8 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::TairixRxe,
     MediaType::Wasm,
     MediaType::Elf,
+    MediaType::TairixDriver,
+    MediaType::TairixAppInfo,
     MediaType::TextPlain,
     MediaType::TextMarkdown,
     MediaType::TextCsv,
@@ -1064,13 +1087,13 @@ impl BlankDocument {
 /// regardless of its name; a bundle classifies as
 /// [`TairixService`](MediaType::TairixService) when `parent` is a store of
 /// programs the system starts and [`TairixApp`](MediaType::TairixApp)
-/// otherwise; a regular
-/// file takes its extension's type, or
+/// otherwise; a regular file is what the layout it stands in names it
+/// ([`Site`]), else takes its extension's type, or
 /// [`ApplicationOctetStream`](MediaType::ApplicationOctetStream) when the
 /// extension is unrecognised (or absent) — fail closed to the generic type.
 #[must_use]
 pub fn media_for_entry(entry: &Entry, parent: &[String]) -> MediaType {
-    media_for_named(entry.name(), entry.kind(), is_system_started_store(parent))
+    media_for_named(entry.name(), entry.kind(), Site::of(parent))
 }
 
 /// The media type of a node known only by its `name` and `kind` — what a
@@ -1079,20 +1102,23 @@ pub fn media_for_entry(entry: &Entry, parent: &[String]) -> MediaType {
 ///
 /// The same classification [`media_for_entry`] applies, so a node is typed
 /// identically whether it is reached as a listed row or as the subject of its
-/// own window. `service_store` says whether a bundle was found in the system
-/// service store, which only a caller that knows the parent can answer; a
-/// caller that does not passes `false` and a bundle types as an application.
+/// own window. `site` is where it was found, which only a caller that knows
+/// the parent can answer; a caller that does not passes [`Site::Plain`], and
+/// a bundle types as an application and a file by its name alone.
 ///
 /// A link classifies as what it *names*: a shortcut to a folder is typed and
 /// opened as a folder. A link that resolves to nothing has no content type at
 /// all, so it falls closed to the generic one.
 #[must_use]
-pub fn media_for_named(name: &str, kind: EntryKind, service_store: bool) -> MediaType {
+pub fn media_for_named(name: &str, kind: EntryKind, site: Site) -> MediaType {
     match kind.resolved() {
         Some(EntryKind::Directory) => MediaType::InodeDirectory,
-        Some(EntryKind::Bundle) if service_store => MediaType::TairixService,
+        Some(EntryKind::Bundle) if site == Site::StartedStore => MediaType::TairixService,
         Some(EntryKind::Bundle) => MediaType::TairixApp,
-        Some(EntryKind::File) => media_for_name(name).unwrap_or(MediaType::ApplicationOctetStream),
+        Some(EntryKind::File) => site
+            .file_named(name)
+            .or_else(|| media_for_name(name))
+            .unwrap_or(MediaType::ApplicationOctetStream),
         // `resolved` never yields a link, and a dangling one yields nothing.
         Some(EntryKind::Link(_)) | None => MediaType::ApplicationOctetStream,
     }
@@ -1112,15 +1138,23 @@ pub fn media_for_named(name: &str, kind: EntryKind, service_store: bool) -> Medi
 /// and the desktop all reach it, so no two can picture one entry differently.
 #[must_use]
 pub fn icon_for_entry(entry: &Entry, parent: &[String]) -> IconKind {
-    entry
-        .drive()
-        .unwrap_or_else(|| icon_of(entry, media_for_entry(entry, parent)))
+    entry.drive().unwrap_or_else(|| {
+        let site = Site::of(parent);
+        icon_of(
+            entry,
+            media_for_named(entry.name(), entry.kind(), site),
+            site,
+        )
+    })
 }
 
-/// `media`'s glyph for `entry`, refined by a plain directory's occupancy.
-fn icon_of(entry: &Entry, media: MediaType) -> IconKind {
+/// `media`'s glyph for `entry` found at `site`, refined by a plain
+/// directory's occupancy and by the kind of bundle a program runs.
+fn icon_of(entry: &Entry, media: MediaType, site: Site) -> IconKind {
     if entry.is_directory() && entry.occupancy().pictured().is_some() {
         IconKind::FolderFilled
+    } else if media == MediaType::TairixRxe {
+        site.program_icon()
     } else {
         media.icon()
     }
@@ -1129,37 +1163,43 @@ fn icon_of(entry: &Entry, media: MediaType) -> IconKind {
 /// The icon one entry listed out of the directory `dir` (root-first `parent`)
 /// is drawn with, and the request its picture is asked for by.
 ///
-/// The request names the entry's own picture where it has one: an
-/// application bundle's own icon, an occupied folder's picture of what it
-/// holds, a picture file's own content — a bundle and a picture file each at
-/// the version the listing saw. Each falls back to the icon's class picture
-/// where it will not serve. `scratch` is a buffer the caller reuses
+/// The request names the entry's own picture where it has one and `pictures`
+/// asks for it: an application bundle's own icon, an occupied folder's
+/// picture of what it holds, a picture file's own content — a bundle and a
+/// picture file each at the version the listing saw. Each falls back to the
+/// icon's class picture where it will not serve. `scratch` is a buffer the caller reuses
 /// across the entries of one frame, so a grid spells its paths without
 /// allocating one per tile.
 ///
-/// Both surfaces that draw entries as tiles — the file manager's grid and the
-/// desktop — ask here, so an entry cannot be pictured one way on the desktop
-/// and another in the manager.
+/// Every surface that draws an entry's picture — the file manager's tiles and
+/// rows, and the desktop — asks here, so an entry cannot be pictured one way
+/// in one and another elsewhere.
 #[must_use]
 pub fn entry_icon<'a>(
     dir: &str,
     parent: &[String],
     entry: &'a Entry,
+    pictures: Pictures,
     scratch: &'a mut String,
 ) -> (IconKind, IconRequest<'a>) {
     if let Some(drive) = entry.drive() {
         return (drive, IconRequest::kind(drive));
     }
-    let media = media_for_entry(entry, parent);
-    let kind = icon_of(entry, media);
-    if let (true, Some(sample)) = (entry.is_directory(), entry.occupancy().pictured()) {
+    let site = Site::of(parent);
+    let media = media_for_named(entry.name(), entry.kind(), site);
+    let kind = icon_of(entry, media, site);
+    if let (true, true, Some(sample)) = (
+        pictures.folder_contents,
+        entry.is_directory(),
+        entry.occupancy().pictured(),
+    ) {
         return (kind, IconRequest::folder(sample));
     }
     // A link's listed size and time are its own, not its target's, so they
     // cannot key the picture of what it points at; a listing naming no file
     // gives an open nothing to be checked against.
     let thumbnail = match entry.kind() {
-        EntryKind::File if !entry.id().is_none() => media.thumbnail(),
+        EntryKind::File if pictures.thumbnails && !entry.id().is_none() => media.thumbnail(),
         _ => None,
     };
     if thumbnail.is_none() && !entry.is_bundle() {
@@ -1179,26 +1219,134 @@ pub fn entry_icon<'a>(
     (kind, request)
 }
 
-/// Whether `parent`'s root-first components are exactly the store of a kind
-/// of program the system starts — a service or a component — which no user
-/// launches.
+/// Where a listed folder stands, as far as what it holds is concerned: the
+/// layouts that name what a file is by where it is.
 ///
-/// The stores are spelled once in `lib/abi`; this compares against those
-/// definitions component-wise rather than carrying a second literal.
-fn is_system_started_store(parent: &[String]) -> bool {
-    [ProgramKind::Service, ProgramKind::Component]
-        .into_iter()
-        .any(|kind| {
-            let mut expected = kind.store().split('/').filter(|part| !part.is_empty());
-            let mut got = parent.iter();
-            loop {
-                match (expected.next(), got.next()) {
-                    (Some(want), Some(have)) if want == have => {}
-                    (None, None) => return true,
-                    _ => return false,
-                }
+/// Every store and layout is spelled once in `lib/abi`; a site is compared
+/// against those definitions component-wise rather than a second literal.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Site {
+    /// Somewhere no layout names what a file is.
+    Plain,
+    /// A store of programs the system starts — the service or the component
+    /// store — whose bundles no user launches.
+    StartedStore,
+    /// A bundle's own folder (`code` false) or its `Code/` folder, the bundle
+    /// filed in a store of `kind` — `None` for one outside every store, whose
+    /// kind its path cannot say.
+    Bundle {
+        /// The kind of program the store holding the bundle holds.
+        kind: Option<ProgramKind>,
+        /// Whether this is the bundle's `Code/` folder.
+        code: bool,
+    },
+    /// Somewhere in the driver store.
+    Drivers,
+}
+
+impl Site {
+    /// Where the folder of root-first `components` stands.
+    #[must_use]
+    pub fn of(components: &[String]) -> Self {
+        if starts_with(components, DRIVER_STORE_PATH) {
+            return Self::Drivers;
+        }
+        if [ProgramKind::Service, ProgramKind::Component]
+            .into_iter()
+            .any(|kind| is(components, kind.store()))
+        {
+            return Self::StartedStore;
+        }
+        // Bundles do not nest, so a folder is in the first bundle its path
+        // names.
+        let Some(at) = components.iter().position(|part| is_bundle_name(part)) else {
+            return Self::Plain;
+        };
+        let (store, within) = (&components[..at], &components[at + 1..]);
+        let code = match within {
+            [] => false,
+            [folder] if folder == BundleEntry::Code.as_str() => true,
+            _ => return Self::Plain,
+        };
+        Self::Bundle {
+            kind: store_kind(store),
+            code,
+        }
+    }
+
+    /// What a file named `name` here is by the layout it stands in, if the
+    /// layout says: a driver store's `Run` is a driver's image, and a
+    /// bundle's `Run` and every file in its `Code/` a program, its `AppInfo`
+    /// its signed manifest.
+    #[must_use]
+    pub fn file_named(self, name: &str) -> Option<MediaType> {
+        let entry = BundleEntry::from_name(name);
+        match (self, entry) {
+            (Self::Drivers, Some(BundleEntry::Run)) => Some(MediaType::TairixDriver),
+            (Self::Bundle { code: false, .. }, Some(BundleEntry::Run))
+            | (Self::Bundle { code: true, .. }, _) => Some(MediaType::TairixRxe),
+            (Self::Bundle { code: false, .. }, Some(BundleEntry::AppInfo)) => {
+                Some(MediaType::TairixAppInfo)
             }
-        })
+            _ => None,
+        }
+    }
+
+    /// The picture of a program found here: the one of the kind of bundle it
+    /// runs, where there is one.
+    const fn program_icon(self) -> IconKind {
+        match self {
+            Self::Bundle {
+                kind: Some(ProgramKind::Application),
+                ..
+            } => IconKind::ApplicationProgram,
+            Self::Bundle {
+                kind: Some(ProgramKind::Command),
+                ..
+            } => IconKind::CommandProgram,
+            Self::Plain | Self::StartedStore | Self::Drivers | Self::Bundle { .. } => {
+                IconKind::Executable
+            }
+        }
+    }
+}
+
+/// The kind of program the store of root-first `components` holds: a system
+/// store's own kind, or a command or an application for a user's own stores,
+/// which file bundles in folders of their own.
+fn store_kind(components: &[String]) -> Option<ProgramKind> {
+    if let Some(kind) = ProgramKind::ALL
+        .into_iter()
+        .find(|kind| is(components, kind.store()))
+    {
+        return Some(kind);
+    }
+    match components {
+        [users, _, store, ..] if users == USERS_DIR => {
+            if store == HOME_COMMAND_STORE_DIR {
+                Some(ProgramKind::Command)
+            } else if store == HOME_APPLICATION_STORE_DIR {
+                Some(ProgramKind::Application)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether root-first `components` begin with the absolute `path`'s.
+fn starts_with(components: &[String], path: &str) -> bool {
+    let mut got = components.iter();
+    path.split('/')
+        .filter(|part| !part.is_empty())
+        .all(|want| got.next().is_some_and(|have| have == want))
+}
+
+/// Whether root-first `components` are exactly the absolute `path`'s.
+fn is(components: &[String], path: &str) -> bool {
+    starts_with(components, path)
+        && components.len() == path.split('/').filter(|part| !part.is_empty()).count()
 }
 
 /// `media` followed by every broader type it is a subclass of, most specific

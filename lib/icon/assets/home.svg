@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Home folder</title>
+  <!-- The shipped folder with a house on its front: the folder of the user's
+       own files. -->
+
+  <!-- Back plate and tab -->
+  <polygon fill="#3A86E8" points="28,64 29,57 34,51 40,46 47,45 100,45 109,47 116,53 128,70 209,70 216,71 222,76 227,82 228,89 228,101 28,101"/>
+
+  <!-- Front body -->
+  <polygon fill="#4C9AF0" points="28,91 29,84 34,78 40,73 47,72 209,72 216,73 222,78 227,84 228,91 228,192 227,199 222,205 216,210 209,211 47,211 40,210 34,205 29,199 28,192"/>
+
+  <!-- Flat top accent -->
+  <polygon fill="#65AAF5" points="28,91 29,84 34,78 40,73 47,72 209,72 216,73 222,78 227,84 228,91 228,99 28,99"/>
+
+  <!-- The house's shade on the body -->
+  <polygon fill="#3A86E8" points="128,111 180,155 166,155 166,199 90,199 90,155 76,155"/>
+
+  <!-- Chimney, standing behind the roof -->
+  <polygon fill="#FFFFFF" points="146,113 158,113 158,132 146,122"/>
+
+  <!-- House -->
+  <polygon fill="#FFFFFF" points="128,106 180,150 166,150 166,194 90,194 90,150 76,150"/>
+
+  <!-- Door, cut through to the body -->
+  <polygon fill="#4C9AF0" points="117,166 118,163 121,162 135,162 138,163 139,166 139,194 117,194"/>
+</svg>

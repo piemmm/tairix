@@ -608,7 +608,7 @@ impl<'a> StartupConfig<'a> {
 #[must_use]
 pub fn service_name(path: &str) -> &str {
     for component in path.split('/') {
-        if let Some(stem) = component.strip_suffix(".app") {
+        if let Some(stem) = component.strip_suffix(tairix_abi::BUNDLE_SUFFIX) {
             if !stem.is_empty() {
                 return stem;
             }

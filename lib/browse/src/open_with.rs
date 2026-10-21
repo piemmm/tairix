@@ -189,7 +189,7 @@ pub fn applications_for<'a>(name: &str, bundles: &'a [AppAssociation]) -> Vec<&'
     if name.is_empty() {
         return Vec::new();
     }
-    let media = media_for_named(name, EntryKind::File, false);
+    let media = media_for_named(name, EntryKind::File, crate::media::Site::Plain);
     let mut ranked: Vec<(usize, &AppAssociation)> = bundles
         .iter()
         .filter_map(|bundle| {

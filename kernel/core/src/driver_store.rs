@@ -57,18 +57,11 @@ use tairix_util::fmt::format_usize;
 use crate::audit::{emit, AuditEvent};
 use crate::fs::{BoundedReadError, Credentials, DirPosition, FinalLink, Path, Vfs, VfsError};
 
-/// Canonical, global absolute path of the signed-driver store
-/// (drivers live under `/System/Drivers/`).
-///
-/// This is the store's address in the *whole* filesystem namespace, i.e.
-/// on a volume whose own root is the namespace root `/` (the legacy whole-
-/// root model the host tests model). The store path a scan walks is always
-/// taken **relative to the root of the volume being scanned**, so a
-/// dedicated `/System` volume — whose own root *is* `/System` (design B,
-/// `plans/PI.md`) — carries the store at [`SYSTEM_VOLUME_STORE_PATH`]
-/// instead. The scan APIs take that root explicitly rather than baking one
-/// path in (one definition, two mount models).
-pub const DRIVER_STORE_PATH: &str = "/System/Drivers";
+/// The store's address in the *whole* namespace, a volume whose own root is
+/// `/` (the whole-root model the host tests model). A scan walks the store
+/// relative to the root of the volume scanned, so a dedicated `/System`
+/// volume carries it at [`SYSTEM_VOLUME_STORE_PATH`] instead.
+pub use tairix_abi::driver_store::DRIVER_STORE_PATH;
 
 /// Path of the signed-driver store **relative to the root of a dedicated
 /// read-only `/System` volume** (design B, `plans/PI.md`).

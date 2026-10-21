@@ -11,21 +11,23 @@ files — porwr graffigol y system ffeiliau
 Yn agor ffenestr bwrdd gwaith sy'n rhestru'r system ffeiliau, gan ddechrau
 yn y ffolder y mae `path` yn ei henwi ar y llinell orchymyn — neu, pan
 fo'n enwi ffeil, yn y ffolder sy'n dal y ffeil honno, gyda'r ffeil wedi'i
-dewis — neu, os nad enwir un, yn ffolder `Home` y defnyddiwr sy'n ei
-lansio (ei gyfeiriadur cartref os na ellir rhestru hwnnw). Mae teitl y
-ffenestr yn enwi'r cyfeiriadur cyfredol; mae'r ffenestr yn rhestru ei
-gofnodion, a phob cofnod a ddewiswyd wedi'i amlygu â lliw acen y thema
-weithredol. Rhestriad cyffredin wedi'i wirio yn erbyn caniatâd, dan
-hunaniaeth y defnyddiwr sy'n ei lansio, yw pob darlleniad cyfeiriadur:
-gwrthodir cyfeiriadur na ellir ei ddarllen, a ni ddyfelir byth.
+dewis — neu, os nad enwir un, yn y ffolder y mae'r gosodiadau'n ei dewis:
+ffolder `Home` y defnyddiwr sy'n ei lansio, oni bai ei fod yn dewis ei
+ffolder `Desktop` neu'r cyfrolau sydd wedi'u cysylltu (ei gyfeiriadur
+cartref os na ellir rhestru hwnnw). Mae teitl y ffenestr yn enwi'r
+cyfeiriadur cyfredol; mae'r ffenestr yn rhestru ei gofnodion, a phob cofnod
+a ddewiswyd wedi'i amlygu â lliw acen y thema weithredol. Rhestriad
+cyffredin wedi'i wirio yn erbyn caniatâd, dan hunaniaeth y defnyddiwr sy'n
+ei lansio, yw pob darlleniad cyfeiriadur: gwrthodir cyfeiriadur na ellir ei
+ddarllen, ac ni ddyfelir byth.
 
 Mae'r bwrdd gwaith yn cychwyn y porwr i chi ac yn ei gadw ar y bar eiconau:
 mae dewislen ei slot yn rhestru eich lleoedd eich hun a phopeth sydd wedi'i
-osod, ac mae dewis un yn agor ffenestr yno. Mae clic ar y slot yn agor un yn
-eich ffolder `Home`. Mae gofyn am ffolder sydd eisoes â ffenestr yn dod
-â'r ffenestr honno i'r blaen yn hytrach nag agor un arall. Nid oes rhes
-*Gadael* gan y copi hwnnw — mae'n rhan o'r bwrdd gwaith, ac mae cau ei
-ffenestri yn ei gadw o'r neilltu.
+osod, ac mae dewis un yn agor ffenestr yno; daw *Gosodiadau…* yn olaf. Mae
+clic ar y slot yn agor un yn y man y mae'r gosodiadau'n ei ddewis. Mae gofyn
+am ffolder sydd eisoes â ffenestr yn dod â'r ffenestr honno i'r blaen yn
+hytrach nag agor un arall. Nid oes rhes *Gadael* gan y copi hwnnw — mae'n
+rhan o'r bwrdd gwaith, ac mae cau ei ffenestri yn ei gadw o'r neilltu.
 
 O'i redeg wrth ei enw o gragen (neu o'i agor ar ffolder o'r bwrdd gwaith)
 mae'n rhaglen gyffredin yn lle hynny: un ffenestr, ac mae'n dod i ben pan
@@ -56,14 +58,21 @@ ddewislen clic de hefyd.
 
 Dangosir enw eitem yn gyfan, dros ddwy linell pan fo angen; mae enw sy'n rhy
 hir hyd yn oed i'r rheini'n cadw ei ddechrau a'i ddiwedd, gyda `…` yn y
-canol, fel bod ei estyniad yn dangos bob amser.
+canol, fel bod ei estyniad yn dangos bob amser. Dangosir rhaglen heb ei
+hôl-ddodiad `.app`, a gall y gosodiadau ei ddangos, neu guddio ôl-ddodiaid y
+mathau o ffeil y mae'r system yn eu hadnabod hefyd. Dim ond pan fo'r
+gosodiadau'n gofyn amdanynt y rhestrir eitemau y mae eu henwau'n dechrau â
+dot.
 
 Mae `F2` yn ailenwi'r eitem a ddewiswyd yn ei lle, fel y mae clicio ar enw'r
 unig eitem a ddewiswyd ac aros: mae'r enw'n agor i'w olygu cyn gynted ag na
 all y clic fod yn glic dwbl mwyach. Dewisir y rhan cyn yr estyniad, felly
-mae teipio'n disodli'r enw ac yn cadw'r estyniad. Mae `Enter`, neu glic y tu
-allan i'r enw, yn cadw'r enw newydd — mae enw y mae'r gyfrol yn ei wrthod yn
-aros ar agor gyda'r rheswm — ac mae `Escape` yn ei adael.
+mae teipio'n disodli'r enw ac yn cadw'r estyniad; cedwir ôl-ddodiad nad yw'r
+ffenestr yn ei ddangos hefyd. Mae `Enter`, neu glic y tu allan i'r enw, yn
+cadw'r enw newydd — mae enw y mae'r gyfrol yn ei wrthod yn aros ar agor
+gyda'r rheswm — ac mae `Escape` yn ei adael. Nid yw clic a ailenwodd yr
+eitem yn gwneud dim byd arall, gan y gallai'r ffolder fod wedi'i haildrefnu
+o dan y pwyntydd.
 
 Mae llusgo eitemau a ddewiswyd ar ffenestr rheolwr ffeiliau arall, ar
 ffolder ynddi, neu ar y bwrdd gwaith yn eu copïo yno; o ddal `Shift`, cânt
@@ -88,19 +97,26 @@ henw i'w olygu.
 
 Mae is-ddewislen *Dangos* y ddewislen clic de yn dangos yr eitemau fel
 eiconau mawr, y rhagosodiad; fel eiconau bach, pob enw ar un llinell wrth
-ymyl ei lun; neu fel rhestr, un rhes ar gyfer pob eitem gyda'i maint, pryd y
-cafodd ei newid ddiwethaf a'i math. Mae gyriant a restrir yn eu plith yn
-dangos yn hytrach y lle sy'n rhydd arno, ei system ffeiliau a pha mor dda y
-mae'n gwasanaethu. Mae clicio ar deitl colofn yn trefnu'r rhestr yn ôl
-honno, ac mae ail glic yn gwrthdroi'r drefn.
+ymyl ei lun; neu fel rhestr, un rhes ar gyfer pob eitem gyda'i llun, ei
+maint, pryd y cafodd ei newid ddiwethaf a'i math. Mae gyriant a restrir yn
+eu plith yn dangos yn hytrach y lle sy'n rhydd arno, ei system ffeiliau a
+pha mor dda y mae'n gwasanaethu. O dan y dulliau dangos, mae'n trefnu'r
+ffenestr yn ôl enw, math, maint neu pryd y newidiwyd pob eitem ddiwethaf —
+neu, ar gyfer rhestr o yriannau, yn ôl enw, lle rhydd, system ffeiliau neu
+iechyd — yn esgynnol neu'n ddisgynnol. Mae clicio ar deitl colofn yn
+trefnu'r rhestr yn ôl honno hefyd, ac mae ail glic yn gwrthdroi'r drefn. Mae
+ffolderi'n aros ar y brig pa drefn bynnag a ddewisir, oni bai bod y
+gosodiadau'n eu gosod ymhlith y ffeiliau.
 
-Mae is-ddewislen *Dangos* y ddewislen clic de yn dangos yr eitemau fel
-eiconau mawr, y rhagosodiad; fel eiconau bach, pob enw ar un llinell wrth
-ymyl ei lun; neu fel rhestr, un rhes i bob un gyda'i maint, pryd y'i
-newidiwyd ddiwethaf a'i math. Mae gyriant a restrir yn eu plith yn dangos yn
-hytrach y gofod sydd ganddo'n rhydd, ei system ffeiliau a pha mor dda y mae'n
-gwasanaethu. Mae pwyso ar deitl colofn yn trefnu'r rhestr yn ôl honno, ac
-mae ail bwyso yn gwrthdroi'r drefn.
+Mae *Gosodiadau…* ar ddewislen slot y bar eiconau, neu `Ctrl+,`, yn agor
+gosodiadau'r porwr: ble mae ffenestr newydd yn agor, sut mae'n dangos ac yn
+trefnu ei heitemau, ac a yw'n dangos colofn y lleoedd a'r bar offer; a yw
+ffolderi'n aros ar y brig; pa ôl-ddodiaid enwau a pha eitemau a guddir; a yw
+llun yn dangos ei gynnwys ei hun a ffolder yr hyn sydd ynddi; ac a yw symud
+eitemau i'r Sbwriel yn gofyn yn gyntaf. Mae *Adfer rhagosodiadau* yn rhoi
+pob gosodiad yn ôl. Mae newid yn berthnasol i bob ffenestr ar unwaith ac yn
+cael ei gofio; mae ffenestr sydd eisoes ar agor yn cadw'r dull dangos a'r
+drefn sydd ganddi.
 
 Mae `Alt+Enter` yn agor ffenestr *Gwybodaeth* yr eitem a ddewiswyd, fel y
 mae *Cael gwybodaeth…* yn ei his-ddewislen yn y ddewislen clic de. Ffenestr ar ei phen ei hun yw

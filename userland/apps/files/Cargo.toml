@@ -82,6 +82,10 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # grid resolves each tile through, and the empty lookup the host tests paint a
 # listing with.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The one closed-registry settings engine the file manager's own settings
+# (`src/preferences.rs`) are read, spelled and compared through; they are
+# host-tested.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared reclaimable-memory model: the icon pipeline's host tests build its

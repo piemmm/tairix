@@ -18,20 +18,19 @@ use tairix_controls::{
     ScrollOrientation, ScrollRange, SearchField, SelectionState, TextAction, TextField,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_image::inspect::ReportLine;
 use tairix_input::{ClickRun, InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_sandbox::decode::Isa;
-use tairix_sandbox::imagerender::ViewFormat;
 use tairix_sandbox::textsyntax::LexedBatch;
 use tairix_syntax::{Diagnostic, Format};
 use tairix_theme::Theme;
+use tairix_util::report::ReportLine;
 use tairix_window::docapp::{DialogWindow, DocumentView};
 use tairix_window::document::{Access, SavedDocument};
 use tairix_window::menu::{MenuBuilder, Plate};
 
 use crate::answer::Unlisted;
 use crate::code::{CodeDisplay, CodeListing};
-use crate::data::DataDisplay;
+use crate::data::{DataDisplay, Structure};
 use crate::detect::{Indent, LineEnding};
 use crate::display::{Display, HEAD_LEN};
 use crate::document::Snapshot;
@@ -628,12 +627,22 @@ impl View {
         }
     }
 
-    /// The report the window wants of its document now: its id and the
-    /// format its name gives it, if its content gives none.
-    pub fn data_want(&mut self) -> Option<(u64, Option<ViewFormat>)> {
+    /// What the window's Data display reads its document's structure as, so
+    /// the run hands its report to the worker that reads that.
+    #[must_use]
+    pub fn data_structure(&self) -> Option<Structure> {
+        match self.display.as_ref()? {
+            Display::Data(data) => Some(data.structure()),
+            Display::Code(_) => None,
+        }
+    }
+
+    /// The report the window wants of its document now: its id and what the
+    /// document's structure is read as.
+    pub fn data_want(&mut self) -> Option<(u64, Structure)> {
         let generation = self.editor.generation();
         match self.display.as_mut()? {
-            Display::Data(data) => data.want(generation).map(|id| (id, data.named())),
+            Display::Data(data) => data.want(generation).map(|id| (id, data.structure())),
             Display::Code(_) => None,
         }
     }

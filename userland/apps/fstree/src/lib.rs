@@ -20,7 +20,7 @@
 //! pager and an offset/hex/ASCII dump, auto-picked from a head sample,
 //! each with paging, goto, and background literal search over the same
 //! seams. The S9 disassembly viewer opens a recognised executable
-//! container (or a standalone signed manifest) into a summary page and
+//! container (or a signed manifest) into a summary page and
 //! per-region paged disassembly, every decode running behind the parser
 //! sandbox through the [`view_disasm::Decode`] seam; `o` force-picks a
 //! viewer, and an unrecognised file falls back to hex with a notice.

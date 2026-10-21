@@ -17,7 +17,7 @@ use crate::ifd::{
     self, Endian, Entry, ASCII, BYTE, DOUBLE, ENTRY_LEN, FLOAT, LONG, MAGIC, RATIONAL, SBYTE,
     SHORT, SLONG, SRATIONAL, SSHORT, UNDEFINED,
 };
-use crate::inspect::{clean, hex, Builder};
+use tairix_util::report::{clean, hex, Builder};
 
 /// Which directory a tag is read in: the same number names different tags in
 /// each.

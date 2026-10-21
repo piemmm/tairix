@@ -34,8 +34,10 @@ use crate::execute::{
 };
 use crate::media::MediaType;
 use crate::places::{PlaceKind, Places, Volume, VolumeFacts};
+use crate::presentation::{HiddenEndings, Pictures, Presentation};
 use crate::select::Selection;
 use crate::source::{DirectorySource, Listing, Probe};
+use crate::watch::EntryChange;
 
 /// The chrome these tests measure against unless they say otherwise: the
 /// command band shown, so the listing has a header to be offset by. The
@@ -1611,7 +1613,7 @@ fn a_tile_cuts_a_name_in_its_middle_keeping_its_ending() {
 /// keeping what ends it; a folder's name is selected whole.
 #[test]
 fn a_rename_selects_the_stem_and_keeps_the_ending() {
-    use crate::rename_selection;
+    use crate::rename_text;
 
     for (entry, range) in [
         (Entry::file("holiday.jpeg"), 0..7),
@@ -1625,8 +1627,73 @@ fn a_rename_selects_the_stem_and_keeps_the_ending() {
         ),
         (Entry::directory("v1.2"), 0..4),
     ] {
-        assert_eq!(rename_selection(&entry), range, "{}", entry.name());
+        let (text, selected) = rename_text(&entry, crate::HiddenEndings::NONE);
+        assert_eq!((text, selected), (entry.name(), range), "{}", entry.name());
     }
+}
+
+/// With its ending hidden a name opens for renaming as it is shown, selected
+/// whole; what is typed keeps the hidden ending unless it says it again, and
+/// typing nothing names nothing.
+#[test]
+fn a_rename_of_a_name_shown_without_its_ending_keeps_the_ending() {
+    use crate::{rename_text, renamed};
+
+    let hiding = HiddenEndings {
+        applications: true,
+        known_types: true,
+    };
+    let bundle = Entry::new("Editor.app", EntryKind::Bundle, 0, Time64::UNIX_EPOCH);
+    assert_eq!(rename_text(&bundle, hiding), ("Editor", 0..6));
+    assert_eq!(renamed(&bundle, hiding, "Writer"), "Writer.app");
+    assert_eq!(renamed(&bundle, hiding, "Writer.APP"), "Writer.APP");
+    assert_eq!(renamed(&bundle, hiding, ""), "");
+    let notes = Entry::file("my.notes.txt");
+    assert_eq!(rename_text(&notes, hiding), ("my.notes", 0..8));
+    assert_eq!(renamed(&notes, hiding, "todo"), "todo.txt");
+    assert_eq!(renamed(&notes, crate::HiddenEndings::NONE, "todo"), "todo");
+}
+
+/// A rename prepared in a window hiding endings is to the name the entry would
+/// have, the hidden ending restored.
+#[test]
+fn a_rename_prepared_where_endings_are_hidden_restores_them() {
+    use crate::RenameError;
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser
+        .set_presentation(Presentation {
+            endings: HiddenEndings {
+                applications: true,
+                known_types: false,
+            },
+            ..Presentation::EXACT
+        })
+        .expect("presented");
+    let editor = browser
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == "Editor.app")
+        .expect("listed");
+    browser.select(editor).expect("select Editor.app");
+    let shown = browser.presentation().endings;
+    let pending = browser.prepare_rename("Writer", shown).expect("a new name");
+    assert_eq!(pending.to(), "/Writer.app");
+    assert_eq!(
+        browser.prepare_rename("Editor", shown).map(|_| ()),
+        Err(RenameError::Unchanged)
+    );
+    assert_eq!(
+        browser.prepare_rename("", shown).map(|_| ()),
+        Err(RenameError::Empty)
+    );
+    // A field opened hiding the ending keeps it however the window has been
+    // presented since.
+    browser
+        .set_presentation(Presentation::EXACT)
+        .expect("presented");
+    let pending = browser.prepare_rename("Writer", shown).expect("a new name");
+    assert_eq!(pending.to(), "/Writer.app");
 }
 
 /// Every chrome length tracks the desktop's density, not just the glyphs.
@@ -2200,6 +2267,7 @@ fn sort_by_size_descending_keeps_directories_first() {
         SortMode {
             key: SortKey::Size,
             direction: SortDirection::Descending,
+            ..SortMode::default_order()
         },
     );
     let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
@@ -2226,6 +2294,7 @@ fn sort_by_modified_orders_within_the_file_group() {
         SortMode {
             key: SortKey::Modified,
             direction: SortDirection::Ascending,
+            ..SortMode::default_order()
         },
     );
     let files: Vec<&str> = entries
@@ -2252,6 +2321,7 @@ fn sort_by_kind_clusters_a_typed_name_by_its_extension() {
         SortMode {
             key: SortKey::Kind,
             direction: SortDirection::Ascending,
+            ..SortMode::default_order()
         },
     );
     let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
@@ -2266,6 +2336,7 @@ fn sort_by_kind_clusters_bundles_ahead_of_files_within_the_non_directory_group()
         SortMode {
             key: SortKey::Kind,
             direction: SortDirection::Ascending,
+            ..SortMode::default_order()
         },
     );
     let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
@@ -2313,6 +2384,7 @@ fn set_sort_mode_keeps_the_selection_on_the_same_entry() {
     browser.set_sort_mode(SortMode {
         key: SortKey::Size,
         direction: SortDirection::Ascending,
+        ..SortMode::default_order()
     });
     // Now [b(100), c(200), a(300)]; the selection followed "b" to index 0.
     let names: Vec<&str> = browser.entries().iter().map(Entry::name).collect();
@@ -3852,7 +3924,9 @@ mod rename_model {
         browser.select(0).expect("select Archive");
         assert_eq!(focused(&browser).map(Entry::name), Some("Archive"));
 
-        let pending = browser.prepare_rename("Downloads").expect("a valid rename");
+        let pending = browser
+            .prepare_rename("Downloads", crate::HiddenEndings::NONE)
+            .expect("a valid rename");
         assert_eq!((pending.from(), pending.to()), ("/Archive", "/Downloads"));
         assert_eq!(browser.finish_rename(&pending, Ok(())), Ok(true));
         // The listing refreshed and the selection followed the entry.
@@ -3867,7 +3941,9 @@ mod rename_model {
     fn a_rename_answered_elsewhere_follows_nothing() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(0).expect("select Archive");
-        let pending = browser.prepare_rename("Downloads").expect("a valid rename");
+        let pending = browser
+            .prepare_rename("Downloads", crate::HiddenEndings::NONE)
+            .expect("a valid rename");
         browser.open_index(2).expect("enter System");
         let before = focused(&browser).map(|entry| alloc::string::String::from(entry.name()));
         assert_eq!(browser.finish_rename(&pending, Ok(())), Ok(false));
@@ -3889,7 +3965,10 @@ mod rename_model {
             ("a/b", RenameError::Separator),
             ("bad:name", RenameError::Invalid),
         ] {
-            assert_eq!(browser.prepare_rename(name), Err(expected));
+            assert_eq!(
+                browser.prepare_rename(name, crate::HiddenEndings::NONE),
+                Err(expected)
+            );
         }
         // The listing is untouched.
         assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
@@ -3900,7 +3979,10 @@ mod rename_model {
     fn a_clash_with_an_existing_sibling_is_refused_before_any_syscall() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(0).expect("select Archive");
-        assert_eq!(browser.prepare_rename("System"), Err(RenameError::Clash));
+        assert_eq!(
+            browser.prepare_rename("System", crate::HiddenEndings::NONE),
+            Err(RenameError::Clash)
+        );
         assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     }
 
@@ -3909,7 +3991,7 @@ mod rename_model {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(0).expect("select Archive");
         assert_eq!(
-            browser.prepare_rename("Archive"),
+            browser.prepare_rename("Archive", crate::HiddenEndings::NONE),
             Err(RenameError::Unchanged)
         );
         assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
@@ -3919,7 +4001,9 @@ mod rename_model {
     fn a_vfs_refusal_is_surfaced_and_leaves_the_listing_unchanged() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(0).expect("select Archive");
-        let pending = browser.prepare_rename("Downloads").expect("a valid rename");
+        let pending = browser
+            .prepare_rename("Downloads", crate::HiddenEndings::NONE)
+            .expect("a valid rename");
         assert_eq!(
             browser.finish_rename(&pending, Err(Errno::PermissionDenied)),
             Err(RenameError::Refused(Errno::PermissionDenied))
@@ -3936,7 +4020,9 @@ mod rename_model {
     fn a_name_the_volume_finds_taken_is_a_clash() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(0).expect("select Archive");
-        let pending = browser.prepare_rename("STORAGE").expect("no exact clash");
+        let pending = browser
+            .prepare_rename("STORAGE", crate::HiddenEndings::NONE)
+            .expect("no exact clash");
         assert_eq!(
             browser.finish_rename(&pending, Err(Errno::AlreadyExists)),
             Err(RenameError::Clash)
@@ -3951,7 +4037,7 @@ mod rename_model {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(0).expect("select Archive");
         let pending = browser
-            .prepare_rename("APPS")
+            .prepare_rename("APPS", crate::HiddenEndings::NONE)
             .expect("a case change is a change");
         assert!(pending.to().ends_with("/APPS"));
     }
@@ -3965,7 +4051,10 @@ mod rename_model {
             .open_index(0)
             .expect("enter the empty Fonts directory");
         assert_eq!(focused(&browser).map(Entry::name), None);
-        assert_eq!(browser.prepare_rename("x"), Err(RenameError::NoSelection));
+        assert_eq!(
+            browser.prepare_rename("x", crate::HiddenEndings::NONE),
+            Err(RenameError::NoSelection)
+        );
     }
 
     #[test]
@@ -5403,6 +5492,7 @@ fn a_reorder_keeps_the_selection_on_its_entries() {
     browser.set_sort_mode(SortMode {
         key: SortKey::Name,
         direction: SortDirection::Descending,
+        ..SortMode::default_order()
     });
     let after: BTreeSet<String> = browser
         .selection()
@@ -6383,6 +6473,7 @@ fn the_toolbar_reports_the_active_view_and_sort() {
     let by_size_desc = SortMode {
         key: SortKey::Size,
         direction: SortDirection::Descending,
+        ..SortMode::default_order()
     };
     browser.set_sort_mode(by_size_desc);
     let toolbar = ToolbarModel::for_browser(&browser);
@@ -6622,9 +6713,9 @@ fn the_context_menu_row_ids_are_the_inverse_of_the_command_list() {
 
     // The numbering runs: the commands in CONTEXT_COMMANDS order, the Rename
     // row's quick-entry field, a block as long as a plate offers candidates,
-    // New ▸ Folder, Display ▸'s displays, then the New ▸ documents. Reading a
-    // chosen row back is the exact inverse of numbering it, so no kind of
-    // answer can be mistaken for another.
+    // New ▸ Folder, Display ▸'s displays, every sort key and both directions,
+    // then the New ▸ documents. Reading a chosen row back is the exact inverse
+    // of numbering it, so no kind of answer can be mistaken for another.
     let id = |index: usize| {
         AppMenuItemId::new(u16::try_from(index + 1).expect("a small index")).expect("non-zero")
     };
@@ -6655,7 +6746,21 @@ fn the_context_menu_row_ids_are_the_inverse_of_the_command_list() {
             Some(ContextChoice::Display(mode))
         );
     }
-    let first_document = new_folder + 1 + ViewMode::ALL.len();
+    let first_key = new_folder + 1 + ViewMode::ALL.len();
+    for (offset, &key) in SortKey::ALL.iter().enumerate() {
+        assert_eq!(
+            context_choice_from_item(id(first_key + offset)),
+            Some(ContextChoice::SortBy(key))
+        );
+    }
+    let first_direction = first_key + SortKey::ALL.len();
+    for (offset, &direction) in SortDirection::ALL.iter().enumerate() {
+        assert_eq!(
+            context_choice_from_item(id(first_direction + offset)),
+            Some(ContextChoice::SortIn(direction))
+        );
+    }
+    let first_document = first_direction + SortDirection::ALL.len();
     for document in 0..4 {
         assert_eq!(
             context_choice_from_item(id(first_document + document)),
@@ -6901,23 +7006,19 @@ fn the_rename_rows_field_opens_with_the_names_stem_selected() {
     }
 }
 
-/// Display ▸ offers every view, the one the window shows marked as the
-/// group's choice and refused with its reason, and each row reads back as
-/// its view.
-#[test]
-fn display_offers_every_view_and_marks_the_one_in_force() {
-    use crate::chrome::{
-        context_choice_from_item, context_menu, ContextChoice, ContextMenuModel, ContextQuick,
-    };
-    use crate::layout::ViewMode;
-    use tairix_abi::window_ipc::{AppMenuMark, AppMenuRowView};
+/// `look` at Display ▸'s items, in plate order.
+fn with_display_items<S: DirectorySource, R>(
+    browser: &Browser<S>,
+    quick: crate::chrome::ContextQuick<'_>,
+    look: impl FnOnce(&[tairix_abi::window_ipc::AppMenuItemView<'_>]) -> R,
+) -> R {
+    use crate::chrome::{context_menu, ContextMenuModel};
+    use tairix_abi::window_ipc::AppMenuRowView;
 
-    let mut browser = Browser::open_root(activation_source()).expect("root");
-    browser.set_view_mode(ViewMode::SmallIcons);
     let menu = context_menu(
-        ContextMenuModel::for_browser(&browser, false),
+        ContextMenuModel::for_browser(browser, false),
         "Files",
-        ContextQuick::default(),
+        quick,
     )
     .expect("the rows fit the bounds");
     let rows: alloc::vec::Vec<_> = menu.rows().collect();
@@ -6933,7 +7034,7 @@ fn display_offers_every_view_and_marks_the_one_in_force() {
             )
         })
         .expect("Display is declared");
-    let children: alloc::vec::Vec<_> = rows
+    let items: alloc::vec::Vec<_> = rows
         .iter()
         .filter(|(_, parent)| *parent == Some(display_at))
         .filter_map(|(row, _)| match row {
@@ -6941,19 +7042,163 @@ fn display_offers_every_view_and_marks_the_one_in_force() {
             _ => None,
         })
         .collect();
-    let labels: alloc::vec::Vec<_> = children.iter().map(|item| item.label).collect();
-    assert_eq!(labels, ["Large icons", "Small icons", "List"]);
-    for (item, mode) in children.iter().zip(ViewMode::ALL) {
+    look(&items)
+}
+
+/// Display ▸ offers every view, the one the window shows marked as the
+/// group's choice and refused with its reason, and each row reads back as
+/// its view.
+#[test]
+fn display_offers_every_view_and_marks_the_one_in_force() {
+    use crate::chrome::{context_choice_from_item, ContextChoice, ContextQuick};
+    use crate::layout::ViewMode;
+    use tairix_abi::window_ipc::AppMenuMark;
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.set_view_mode(ViewMode::SmallIcons);
+    with_display_items(&browser, ContextQuick::default(), |items| {
+        let views = &items[..ViewMode::ALL.len()];
+        let labels: alloc::vec::Vec<_> = views.iter().map(|item| item.label).collect();
+        assert_eq!(labels, ["Large icons", "Small icons", "List"]);
+        for (item, mode) in views.iter().zip(ViewMode::ALL) {
+            assert_eq!(
+                context_choice_from_item(item.id),
+                Some(ContextChoice::Display(mode))
+            );
+            assert_eq!(item.symbol, mode.symbol());
+            let shown = mode == ViewMode::SmallIcons;
+            assert_eq!(item.mark == AppMenuMark::Radio, shown, "{mode:?}");
+            assert_eq!(item.enabled, !shown, "{mode:?}");
+            assert_eq!(item.reason.is_empty(), !shown, "{mode:?}");
+        }
+    });
+}
+
+/// After the views Display ▸ offers the listing's own orders, the keys its
+/// columns sort by and both directions, the order in force marked in each
+/// group and refused with its reason; each row reads back as its order.
+#[test]
+fn display_offers_the_listing_s_orders_and_marks_the_one_in_force() {
+    use crate::chrome::{context_choice_from_item, ContextChoice, ContextQuick};
+    use crate::layout::ViewMode;
+    use tairix_abi::window_ipc::AppMenuMark;
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.set_sort_mode(SortMode {
+        key: SortKey::Size,
+        direction: SortDirection::Descending,
+        ..SortMode::default_order()
+    });
+    with_display_items(&browser, ContextQuick::default(), |items| {
+        let orders = &items[ViewMode::ALL.len()..];
+        let labels: alloc::vec::Vec<_> = orders.iter().map(|item| item.label).collect();
         assert_eq!(
-            context_choice_from_item(item.id),
-            Some(ContextChoice::Display(mode))
+            labels,
+            [
+                "Sort by Name",
+                "Sort by Size",
+                "Sort by Date Modified",
+                "Sort by Type",
+                "Ascending",
+                "Descending",
+            ],
+            "the listing's columns, in their order, then the directions"
         );
-        assert_eq!(item.symbol, mode.symbol());
-        let shown = mode == ViewMode::SmallIcons;
-        assert_eq!(item.mark == AppMenuMark::Radio, shown, "{mode:?}");
-        assert_eq!(item.enabled, !shown, "{mode:?}");
-        assert_eq!(item.reason.is_empty(), !shown, "{mode:?}");
-    }
+        let chosen: alloc::vec::Vec<_> = orders
+            .iter()
+            .map(|item| context_choice_from_item(item.id))
+            .collect();
+        assert_eq!(
+            chosen,
+            [
+                Some(ContextChoice::SortBy(SortKey::Name)),
+                Some(ContextChoice::SortBy(SortKey::Size)),
+                Some(ContextChoice::SortBy(SortKey::Modified)),
+                Some(ContextChoice::SortBy(SortKey::Kind)),
+                Some(ContextChoice::SortIn(SortDirection::Ascending)),
+                Some(ContextChoice::SortIn(SortDirection::Descending)),
+            ]
+        );
+        for item in orders {
+            let in_force = matches!(item.label, "Sort by Size" | "Descending");
+            assert_eq!(item.mark == AppMenuMark::Radio, in_force, "{}", item.label);
+            assert_eq!(item.enabled, !in_force, "{}", item.label);
+            assert_eq!(item.reason.is_empty(), !in_force, "{}", item.label);
+        }
+        assert_eq!(orders[1].symbol, SortKey::Size.symbol());
+        assert_eq!(orders[5].symbol, SortDirection::Descending.symbol());
+    });
+}
+
+/// A listing of drives alone offers the orders its own columns sort by.
+#[test]
+fn display_offers_a_listing_of_drives_its_own_orders() {
+    use crate::chrome::{context_choice_from_item, ContextChoice, ContextQuick};
+    use crate::layout::ViewMode;
+
+    let mut fs = MockFs::fixture();
+    fs.dirs.insert(
+        "/Storage".to_string(),
+        vec![Entry::directory("Backup"), Entry::directory("Camera")],
+    );
+    let places = Places::new(&home(), &storage_volumes());
+    let mut browser = Browser::open_at(fs, components("/Storage")).expect("Storage");
+    assert!(browser.mark_volume_roots(&places));
+    let keys: alloc::vec::Vec<_> = with_display_items(&browser, ContextQuick::default(), |items| {
+        items[ViewMode::ALL.len()..]
+            .iter()
+            .filter_map(|item| match context_choice_from_item(item.id) {
+                Some(ContextChoice::SortBy(key)) => Some(key),
+                _ => None,
+            })
+            .collect()
+    });
+    assert_eq!(
+        keys,
+        [
+            SortKey::Name,
+            SortKey::Free,
+            SortKey::Filesystem,
+            SortKey::Health
+        ]
+    );
+}
+
+/// Display ▸'s rows are fixed, so they are seated before what grows with the
+/// machine: a menu whose New ▸ documents and candidates fill the text budget
+/// still offers every view and order.
+#[test]
+fn a_full_menu_still_offers_every_view_and_order() {
+    use crate::chrome::ContextQuick;
+    use crate::layout::ViewMode;
+    use crate::media::{BlankDocument, ALL as MEDIA};
+    use crate::open_with::OPEN_WITH_QUICK_MAX;
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    let documents: alloc::vec::Vec<_> = MEDIA
+        .iter()
+        .filter_map(|&media| BlankDocument::of(media))
+        .collect();
+    let long = "x".repeat(200);
+    let apps: alloc::vec::Vec<_> = (0..OPEN_WITH_QUICK_MAX)
+        .map(|n| {
+            AppAssociation::new(
+                alloc::format!("app{n}"),
+                alloc::format!("/System/Applications/{long}{n}.app"),
+                vec!["text/plain".to_string()],
+            )
+        })
+        .collect();
+    let candidates: alloc::vec::Vec<_> = apps.iter().collect();
+    let chosen = browser.chosen_entry().cloned();
+    let quick = ContextQuick {
+        chosen: chosen.as_ref(),
+        candidates: &candidates,
+        documents: &documents,
+    };
+    let shown = with_display_items(&browser, quick, |items| items.len());
+    assert_eq!(shown, ViewMode::ALL.len() + 4 + SortDirection::ALL.len());
 }
 
 #[test]
@@ -11979,15 +12224,24 @@ mod entry_labels {
 
     #[test]
     fn a_label_is_the_bare_name_whatever_the_entry_is() {
-        assert_eq!(entry_label(&Entry::directory("thing")), "thing");
-        assert_eq!(entry_label(&Entry::file("thing")), "thing");
         assert_eq!(
-            entry_label(&Entry::new(
-                "Thing.app",
-                crate::entry::EntryKind::Bundle,
-                0,
-                tairix_abi::time::Time64::UNIX_EPOCH,
-            )),
+            entry_label(&Entry::directory("thing"), crate::HiddenEndings::NONE),
+            "thing"
+        );
+        assert_eq!(
+            entry_label(&Entry::file("thing"), crate::HiddenEndings::NONE),
+            "thing"
+        );
+        assert_eq!(
+            entry_label(
+                &Entry::new(
+                    "Thing.app",
+                    crate::entry::EntryKind::Bundle,
+                    0,
+                    tairix_abi::time::Time64::UNIX_EPOCH,
+                ),
+                crate::HiddenEndings::NONE
+            ),
             "Thing.app"
         );
     }
@@ -11997,12 +12251,15 @@ mod entry_labels {
     #[test]
     fn a_label_shows_what_would_hide_in_its_name() {
         assert_eq!(
-            entry_label(&Entry::file("report\u{200b}.pdf")),
+            entry_label(
+                &Entry::file("report\u{200b}.pdf"),
+                crate::HiddenEndings::NONE
+            ),
             "report\u{fffd}.pdf"
         );
         assert_ne!(
-            entry_label(&Entry::file("ab")),
-            entry_label(&Entry::file("a\u{202e}b"))
+            entry_label(&Entry::file("ab"), crate::HiddenEndings::NONE),
+            entry_label(&Entry::file("a\u{202e}b"), crate::HiddenEndings::NONE)
         );
     }
 
@@ -12770,6 +13027,7 @@ fn a_link_sorts_and_classifies_as_what_it_names() {
         SortMode {
             key: SortKey::Kind,
             direction: SortDirection::Ascending,
+            ..SortMode::default_order()
         },
     );
     // Directories first, then bundles, then the leaves: a shortcut sorts
@@ -13345,4 +13603,98 @@ fn a_drive_whose_root_cannot_be_read_still_shows_its_drive_section() {
             "{tab:?}: the ring is drawn on the Drive tab alone"
         );
     }
+}
+
+// --- Presentation ---------------------------------------------------------
+
+/// A root holding two hidden items among two others, and a folder holding one
+/// of each.
+fn with_hidden_items() -> MockFs {
+    let mut fs = MockFs::fixture();
+    fs.dirs.insert(
+        "/".to_string(),
+        vec![
+            Entry::file(".profile"),
+            Entry::file("a.txt"),
+            Entry::directory(".cache"),
+            Entry::directory("b"),
+        ],
+    );
+    fs.dirs.insert(
+        "/b".to_string(),
+        vec![Entry::file(".secret"), Entry::file("c.txt")],
+    );
+    fs
+}
+
+fn listed_names<S: DirectorySource>(browser: &Browser<S>) -> Vec<&str> {
+    browser.entries().iter().map(Entry::name).collect()
+}
+
+const LEAVING_HIDDEN_OUT: Presentation = Presentation {
+    hidden_items: false,
+    ..Presentation::EXACT
+};
+
+#[test]
+fn leaving_hidden_items_out_takes_them_from_the_listing_and_keeps_the_selection() {
+    let mut browser = Browser::open_root(with_hidden_items()).expect("root");
+    assert_eq!(listed_names(&browser), [".cache", "b", ".profile", "a.txt"]);
+    browser.select(3).expect("select a.txt");
+
+    assert_eq!(browser.set_presentation(LEAVING_HIDDEN_OUT), Ok(true));
+    assert_eq!(listed_names(&browser), ["b", "a.txt"]);
+    assert_eq!(browser.chosen_name(), Some("a.txt"));
+    assert_eq!(browser.presentation(), &LEAVING_HIDDEN_OUT);
+}
+
+#[test]
+fn listing_hidden_items_again_reads_the_folder_afresh() {
+    let mut browser = Browser::open_root(with_hidden_items()).expect("root");
+    browser
+        .set_presentation(LEAVING_HIDDEN_OUT)
+        .expect("presented");
+    browser.select(1).expect("select a.txt");
+
+    assert_eq!(browser.set_presentation(Presentation::EXACT), Ok(true));
+    assert_eq!(listed_names(&browser), [".cache", "b", ".profile", "a.txt"]);
+    assert_eq!(browser.chosen_name(), Some("a.txt"));
+}
+
+#[test]
+fn every_listing_and_change_adopted_leaves_hidden_items_out() {
+    let mut browser = Browser::open_root(with_hidden_items()).expect("root");
+    browser
+        .set_presentation(LEAVING_HIDDEN_OUT)
+        .expect("presented");
+    browser.select(0).expect("select b");
+    browser.open_selected().expect("into b");
+    assert_eq!(listed_names(&browser), ["c.txt"]);
+
+    let changes = vec![
+        EntryChange::Upsert(Entry::file(".swap")),
+        EntryChange::Upsert(Entry::file("d.txt")),
+    ];
+    browser.apply_changes(changes).expect("merged");
+    assert_eq!(listed_names(&browser), ["c.txt", "d.txt"]);
+}
+
+#[test]
+fn a_presentation_listing_the_same_names_leaves_the_listing_alone() {
+    let mut browser = Browser::open_root(with_hidden_items()).expect("root");
+    browser.select(3).expect("select a.txt");
+    let shown = Presentation {
+        endings: HiddenEndings {
+            applications: true,
+            known_types: true,
+        },
+        pictures: Pictures {
+            thumbnails: false,
+            folder_contents: false,
+        },
+        ..Presentation::EXACT
+    };
+    assert_eq!(browser.set_presentation(shown), Ok(false));
+    assert_eq!(listed_names(&browser), [".cache", "b", ".profile", "a.txt"]);
+    assert_eq!(browser.chosen_name(), Some("a.txt"));
 }

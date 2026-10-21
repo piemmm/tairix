@@ -9,7 +9,7 @@
 //! did not commit.
 
 use alloc::string::String;
-use tairix_browse::PendingRename;
+use tairix_browse::{HiddenEndings, PendingRename};
 use tairix_controls::text::{TextAction, TextField};
 use tairix_geometry::{Rect, Region};
 use tairix_input::{Key, Modifiers};
@@ -19,6 +19,9 @@ use tairix_input::{Key, Modifiers};
 #[derive(Debug, Default)]
 pub struct RenameEdit {
     field: Option<TextField>,
+    /// The endings the open editor shows its name without, which a commit
+    /// restores.
+    endings: HiddenEndings,
     in_flight: Option<(u64, PendingRename)>,
     /// Why the last name was refused, until the window states it. The editor
     /// is one row tall, which leaves no room to draw a reason beneath it.
@@ -26,14 +29,21 @@ pub struct RenameEdit {
 }
 
 impl RenameEdit {
-    /// Open the editor on `field`, answering whether it opened: never while a
-    /// rename is with the volume.
-    pub fn open(&mut self, field: TextField) -> bool {
+    /// Open the editor on `field`, its name shown without `endings`,
+    /// answering whether it opened: never while a rename is with the volume.
+    pub fn open(&mut self, field: TextField, endings: HiddenEndings) -> bool {
         if self.in_flight.is_some() {
             return false;
         }
         self.field = Some(field);
+        self.endings = endings;
         true
+    }
+
+    /// The endings the open editor shows its name without.
+    #[must_use]
+    pub const fn endings(&self) -> HiddenEndings {
+        self.endings
     }
 
     /// The open editor, to draw.
@@ -124,7 +134,7 @@ impl RenameEdit {
 mod tests {
     use super::RenameEdit;
     use crate::test_fs::filled;
-    use tairix_browse::PendingRename;
+    use tairix_browse::{HiddenEndings, PendingRename};
     use tairix_controls::damage;
     use tairix_controls::text::{TextAction, TextField};
     use tairix_geometry::Rect;
@@ -136,7 +146,7 @@ mod tests {
         let mut browser = filled(3);
         browser.select(0).expect("the listing holds a first file");
         browser
-            .prepare_rename("renamed")
+            .prepare_rename("renamed", HiddenEndings::NONE)
             .expect("a fresh name for the chosen file prepares")
     }
 
@@ -144,7 +154,7 @@ mod tests {
         let mut field = TextField::new().with_text(text);
         field.set_focused(true);
         let mut edit = RenameEdit::default();
-        assert!(edit.open(field));
+        assert!(edit.open(field, HiddenEndings::NONE));
         edit
     }
 
@@ -196,10 +206,21 @@ mod tests {
     fn no_editor_opens_while_a_rename_is_with_the_volume() {
         let mut edit = RenameEdit::default();
         edit.submitted(3, pending());
-        assert!(!edit.open(TextField::new()));
+        assert!(!edit.open(TextField::new(), HiddenEndings::NONE));
         assert!(!edit.is_open());
         assert!(edit.answered(3).is_some());
-        assert!(edit.open(TextField::new()));
+        assert!(edit.open(TextField::new(), HiddenEndings::NONE));
+    }
+
+    #[test]
+    fn an_editor_keeps_the_endings_it_opened_without() {
+        let hiding = HiddenEndings {
+            applications: true,
+            known_types: false,
+        };
+        let mut edit = RenameEdit::default();
+        assert!(edit.open(TextField::new().with_text("Paint"), hiding));
+        assert_eq!(edit.endings(), hiding);
     }
 
     #[test]

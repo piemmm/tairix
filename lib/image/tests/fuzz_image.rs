@@ -50,7 +50,7 @@
 
 use tairix_fuzzseed::meter::{metered, refusing_above, Metered};
 use tairix_fuzzseed::Prng;
-use tairix_image::inspect::{inspect, MAX_LINE_BYTES, MAX_REPORT_LINES};
+use tairix_image::inspect::inspect;
 use tairix_image::{
     decode, decode_as, decode_fitted, decode_fitted_as, decode_peak_bytes, decode_peak_bytes_as,
     encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png, encode_sprite_area, encode_tiff,
@@ -60,6 +60,7 @@ use tairix_image::{
     SpriteEntry, SpriteInput, SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions,
     MOST_ORA_LAYERS,
 };
+use tairix_util::report::{MAX_LINE_BYTES, MAX_REPORT_LINES};
 
 #[global_allocator]
 static ALLOC: Metered = Metered;

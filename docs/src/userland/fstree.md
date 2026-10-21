@@ -159,8 +159,8 @@ what is built.
   view.
 - **The file viewers (Enter on a file).** A regular file opens read-only
   in a full-screen viewer: the **disassembly viewer** when
-  `tairix_binfmt::detect` (or the `RXM1` manifest magic) recognises the
-  head sample, the streaming **text pager** when the head sample (the
+  `tairix_binfmt::detect` recognises the head sample — an executable, a
+  driver image or a signed manifest — the streaming **text pager** when the head sample (the
   first 4 KiB) is NUL-free, valid UTF-8, the **hex dump** otherwise; `o`
   asks instead of auto-picking. `x`/`t`/`d` switch the open viewer at
   the same place, `q`/`Esc` return to the panes. All page through the
@@ -186,14 +186,16 @@ what is built.
 - **The disassembly viewer (`src/view_disasm.rs`).** A recognised
   container opens on a summary page — format, ISA, entry, the region
   table (address, file extent, memory size, permissions), the symbol
-  count — and a standalone signed manifest lists its ABI version and
-  requested capabilities by their `CAP_*` names (an rxe image's summary
-  states the manifest travels beside the image, never inside it). Enter
+  count; a driver image's regions are its program's, at their place in the
+  whole file — and a signed manifest (a program's, or a bundle's
+  `AppInfo`) shows its report: what it names, requests and claims, its
+  capabilities by their `CAP_*` names (an rxe image's summary states the
+  manifest travels beside the image, never inside it). Enter
   on a code region opens the paged code pane: one instruction per row
   (address, encoding bytes, mnemonic, operands), `<symbol>:` label
   lines, and branch targets symbolised against the address-sorted symbol
   table; a data region hex-switches to its file bytes. Every container
-  summary, manifest summary, and instruction window is decoded by the
+  summary, file report, and instruction window is decoded by the
   sandboxed `lib/sandbox` decode service through the object-safe
   `Decode` seam — the app's only in-process inspection is the bounded
   magic-prefix routing. Windows are decoded per screenful from a bounded
@@ -361,7 +363,7 @@ disassembly viewer runs over the same in-process loopback worker the
 kernel — covering: the rxe summary page (region rows, the
 manifest-beside-the-image note, the ISA chooser on Enter, a golden
 aarch64 `nop` window), the wasm module page (ISA known, golden op
-rows), the standalone-manifest capability listing, malformed and
+rows), the signed-manifest report, malformed and
 oversize containers falling back to hex with their notices, per-ISA raw
 fragments through the `o`/`d` choosers with `I` re-decode, paging and
 resynchronising scroll-back at region bounds with `End`'s background

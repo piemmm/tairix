@@ -944,6 +944,57 @@ pub fn decode_bind_keys(
     Ok(count)
 }
 
+/// A driver bundle's image split into its parts, structurally decoded but
+/// **not verified**: the manifest header, the capability body and the bind
+/// table it covers with its signature, and the program payload after them.
+///
+/// Borrow-only, so the caller keeps the lifetime (and the wipe) of the
+/// buffer. This is the one definition of where each part lies; checking the
+/// signature, the syscall hash and the capability gate is the load gate's.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DriverImage<'a> {
+    /// The decoded manifest header.
+    pub manifest: DriverManifest,
+    /// The capability ids as raw little-endian `u16`s
+    /// (`manifest.capability_count` of them).
+    pub capability_body: &'a [u8],
+    /// The bind table as raw [`DriverBindKey`] records
+    /// (`manifest.bind_key_count` of them).
+    pub bind_table: &'a [u8],
+    /// The program the driver runs, from [`Self::payload_offset`] to the end.
+    pub payload: &'a [u8],
+}
+
+impl<'a> DriverImage<'a> {
+    /// Split `bytes` into its parts.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::BufferTooSmall`] for an image shorter than its header,
+    /// capability body and bind table, else whatever
+    /// [`DriverManifest::from_bytes`] refuses the header for.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, DriverError> {
+        let manifest = DriverManifest::from_bytes(bytes)?;
+        let body_end = DriverManifest::WIRE_LEN + usize::from(manifest.capability_count) * 2;
+        let bind_end = body_end + usize::from(manifest.bind_key_count) * DriverBindKey::WIRE_LEN;
+        if bytes.len() < bind_end {
+            return Err(DriverError::BufferTooSmall);
+        }
+        Ok(Self {
+            manifest,
+            capability_body: &bytes[DriverManifest::WIRE_LEN..body_end],
+            bind_table: &bytes[body_end..bind_end],
+            payload: &bytes[bind_end..],
+        })
+    }
+
+    /// Where the payload starts in the image.
+    #[must_use]
+    pub const fn payload_offset(&self) -> usize {
+        DriverManifest::WIRE_LEN + self.capability_body.len() + self.bind_table.len()
+    }
+}
+
 /// Resolve the *single* mappable register window from a driver's
 /// kernel-issued device-resource grants.
 ///
@@ -1986,6 +2037,40 @@ mod tests {
             decode_bind_keys(&bad, 1, &mut out),
             Err(DriverError::BadMagic)
         );
+    }
+
+    #[test]
+    fn a_driver_image_splits_at_its_counts_and_refuses_a_cut_one() {
+        let manifest = DriverManifest {
+            bind_key_count: 1,
+            capability_count: 2,
+            ..sample()
+        };
+        let mut image = manifest.to_le_bytes().to_vec();
+        image.extend_from_slice(&[1, 0, 2, 0]);
+        image.extend_from_slice(&sample_bind_key().to_le_bytes());
+        image.extend_from_slice(b"RXEL program");
+        let Ok(split) = DriverImage::parse(&image) else {
+            unreachable!("a whole image splits")
+        };
+        assert_eq!(split.manifest, manifest);
+        assert_eq!(split.capability_body, &[1, 0, 2, 0]);
+        assert_eq!(split.bind_table, &sample_bind_key().to_le_bytes()[..]);
+        assert_eq!(split.payload, b"RXEL program");
+        assert_eq!(
+            split.payload_offset(),
+            DriverManifest::WIRE_LEN + 4 + DriverBindKey::WIRE_LEN
+        );
+
+        let cut = &image[..DriverManifest::WIRE_LEN + 4 + DriverBindKey::WIRE_LEN - 1];
+        assert_eq!(DriverImage::parse(cut), Err(DriverError::BufferTooSmall));
+        assert_eq!(
+            DriverImage::parse(&image[..10]),
+            Err(DriverError::BufferTooSmall)
+        );
+        let mut wrong = image.clone();
+        wrong[0] ^= 0xFF;
+        assert_eq!(DriverImage::parse(&wrong), Err(DriverError::BadMagic));
     }
 
     #[test]

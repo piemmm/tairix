@@ -832,11 +832,11 @@ fn layers_painted(icon: &crate::vector::VectorIcon, color: tairix_raster::Color)
         .count()
 }
 
-/// The folder masters are the designer's own drawings rather than traced
-/// approximations, and with the back and front a folder's picture of what it
-/// holds is composed from, they are the vector class tier's whole shipped set.
-/// Pinning what they decode to is what would catch the decoder quietly
-/// dropping a shape and leaving a wrong picture on every folder on screen.
+/// The vector class tier's whole shipped set: the folder masters, the back
+/// and front a folder's picture of what it holds is composed from, and the
+/// Home folder. Pinning what they decode to is what would catch the decoder
+/// quietly dropping a shape and leaving a wrong picture on every folder on
+/// screen.
 ///
 /// The illustrative class masters beside them are raster, so nothing here
 /// decodes those; the image build proves each is artwork the desktop will draw.
@@ -873,9 +873,24 @@ fn the_folder_icons_draw_the_artwork_they_were_authored_with() {
         assert_eq!(layers_painted(&front, ink), 1);
     }
 
+    // The folder again with a house on its body: the house's shade in the
+    // plate's blue, a chimney and a house in white, and a door cut through to
+    // the body's blue.
+    assert_eq!(artwork_kind_for_file("home.svg"), Some(IconKind::Home));
+    let home = shipped_vector("home.svg");
+    assert_eq!(crate::tests::fills(&home).len(), 7);
+    assert_eq!(layers_painted(&home, plate), 2);
+    assert_eq!(layers_painted(&home, body), 2);
+    assert_eq!(layers_painted(&home, accent), 1);
+    assert_eq!(layers_painted(&home, paper), 2);
+
     // Each covers a substantial part of its slot: a silhouette that decoded
     // but drew almost nothing would still pass a "not empty" check.
-    for (name, icon) in [("folder", &folder), ("folder-filled", &filled)] {
+    for (name, icon) in [
+        ("folder", &folder),
+        ("folder-filled", &filled),
+        ("home", &home),
+    ] {
         let image = icon.rasterise(64).expect("renderable");
         let drawn = image.pixels().iter().filter(|pixel| pixel.a > 0).count();
         assert!(

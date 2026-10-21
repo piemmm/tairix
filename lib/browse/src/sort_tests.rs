@@ -5,7 +5,7 @@ use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::time::Time64;
 use tairix_icon::IconKind;
 
-use super::{entry_cmp, sort_entries, SortDirection, SortKey, SortMode};
+use super::{entry_cmp, sort_entries, Folders, SortDirection, SortKey, SortMode};
 use crate::entry::{DriveMark, Entry, EntryKind};
 use crate::places::VolumeFacts;
 
@@ -47,7 +47,47 @@ fn ascending(key: SortKey) -> SortMode {
     SortMode {
         key,
         direction: SortDirection::Ascending,
+        ..SortMode::default_order()
     }
+}
+
+#[test]
+fn folders_stand_first_unless_the_order_places_them_among_the_files() {
+    let listed = || {
+        alloc::vec![
+            Entry::directory("b"),
+            Entry::file("c"),
+            Entry::directory("d"),
+            Entry::file("a"),
+        ]
+    };
+    let mut first = listed();
+    sort_entries(&mut first, ascending(SortKey::Name));
+    assert_eq!(names(&first), ["b", "d", "a", "c"]);
+    let among = SortMode {
+        folders: Folders::Among,
+        ..ascending(SortKey::Name)
+    };
+    let mut mixed = listed();
+    sort_entries(&mut mixed, among);
+    assert_eq!(names(&mixed), ["a", "b", "c", "d"]);
+    let reversed = SortMode {
+        direction: SortDirection::Descending,
+        ..among
+    };
+    sort_entries(&mut mixed, reversed);
+    assert_eq!(names(&mixed), ["d", "c", "b", "a"]);
+}
+
+#[test]
+fn a_header_press_and_the_sort_cycle_keep_where_folders_stand() {
+    let among = SortMode {
+        folders: Folders::Among,
+        ..SortMode::default_order()
+    };
+    assert_eq!(among.pressed(SortKey::Size).folders, Folders::Among);
+    assert_eq!(among.next().folders, Folders::Among);
+    assert_eq!(SortMode::default_order().folders, Folders::First);
 }
 
 #[test]
@@ -122,6 +162,7 @@ fn a_kind_sort_lands_every_entry_where_its_comparison_puts_it() {
     let mode = SortMode {
         key: SortKey::Kind,
         direction: SortDirection::Descending,
+        ..SortMode::default_order()
     };
     expected.sort_by(|a, b| entry_cmp(a, b, mode));
     sort_entries(&mut entries, mode);

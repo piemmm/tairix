@@ -585,6 +585,24 @@ pub enum IconKind {
     Star,
     /// A shield, for running a program as an account that may do more.
     Shield,
+    /// An upward caret, for ordering smallest or earliest first.
+    SortAscending,
+    /// A downward caret, for ordering largest or latest first.
+    SortDescending,
+    /// A pulse beside a down arrow, for ordering by health.
+    SortByHealth,
+    /// A microchip, for a driver.
+    Driver,
+    /// A sealed page, for a bundle's signed manifest.
+    Manifest,
+    /// An application's own program, the `Run` in its bundle.
+    ApplicationProgram,
+    /// A command's own program, the `Run` in its bundle.
+    CommandProgram,
+    /// A program in the ELF format.
+    ElfExecutable,
+    /// A WebAssembly module.
+    WasmModule,
 }
 
 impl IconKind {
@@ -848,6 +866,15 @@ impl IconKind {
             "door-open" => Self::DoorOpen,
             "star" => Self::Star,
             "shield" => Self::Shield,
+            "sort-ascending" => Self::SortAscending,
+            "sort-descending" => Self::SortDescending,
+            "sort-by-health" => Self::SortByHealth,
+            "driver" => Self::Driver,
+            "manifest" => Self::Manifest,
+            "executable-application" => Self::ApplicationProgram,
+            "executable-command" => Self::CommandProgram,
+            "executable-elf" => Self::ElfExecutable,
+            "executable-wasm" => Self::WasmModule,
             _ => Self::Generic,
         }
     }
@@ -1117,6 +1144,15 @@ impl IconKind {
             Self::DoorOpen => 248,
             Self::Star => 249,
             Self::Shield => 250,
+            Self::SortAscending => 251,
+            Self::SortDescending => 252,
+            Self::SortByHealth => 253,
+            Self::Driver => 254,
+            Self::Manifest => 255,
+            Self::ApplicationProgram => 256,
+            Self::CommandProgram => 257,
+            Self::ElfExecutable => 258,
+            Self::WasmModule => 259,
         }
     }
 
@@ -1385,6 +1421,15 @@ impl IconKind {
             Self::DoorOpen => "door-open",
             Self::Star => "star",
             Self::Shield => "shield",
+            Self::SortAscending => "sort-ascending",
+            Self::SortDescending => "sort-descending",
+            Self::SortByHealth => "sort-by-health",
+            Self::Driver => "driver",
+            Self::Manifest => "manifest",
+            Self::ApplicationProgram => "executable-application",
+            Self::CommandProgram => "executable-command",
+            Self::ElfExecutable => "executable-elf",
+            Self::WasmModule => "executable-wasm",
         }
     }
 }
@@ -1497,7 +1542,7 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         IconKind::FolderFilled => folder_filled(color),
         IconKind::FolderBack => folder_back(color),
         IconKind::FolderFront => folder_front(color),
-        IconKind::File => file(color),
+        IconKind::File | IconKind::Manifest => file(color),
         // The app-bundle, text, and image families each share one built-in
         // glyph: the fine-grained kinds differ only in their shipped raster
         // artwork, so a system without it still shows the broad family glyph.
@@ -1525,7 +1570,12 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         IconKind::Microphone => microphone(color),
         IconKind::VolumeMuted => volume_muted(color),
         IconKind::NetworkOffline => network_offline(color),
-        IconKind::Executable => executable(color),
+        IconKind::Executable
+        | IconKind::ApplicationProgram
+        | IconKind::CommandProgram
+        | IconKind::ElfExecutable
+        | IconKind::WasmModule => executable(color),
+        IconKind::Driver => driver(color),
         IconKind::ViewToggle => view_toggle(color),
         IconKind::Sort => sort(color),
         IconKind::NewFolder => new_folder(color),
@@ -1677,6 +1727,9 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::SortByName
         | IconKind::SortByKind
         | IconKind::SortBySize
+        | IconKind::SortAscending
+        | IconKind::SortDescending
+        | IconKind::SortByHealth
         | IconKind::Calendar
         | IconKind::ArrangeLeft
         | IconKind::ArrangeRight
@@ -2035,6 +2088,25 @@ fn video(color: Color) -> alloc::vec::Vec<IconLayer> {
 fn executable(color: Color) -> alloc::vec::Vec<IconLayer> {
     const BOLT: &[(i32, i32)] = &[(13, 3), (7, 13), (11, 13), (9, 21), (17, 10), (12, 10)];
     vec![IconLayer::from_points(color, BOLT)]
+}
+
+/// A chip: its body, and three pins down each side.
+fn driver(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BODY: &[(i32, i32)] = &[(7, 7), (17, 7), (17, 17), (7, 17)];
+    const ACROSS: [i32; 3] = [8, 11, 14];
+    let mut layers = alloc::vec::Vec::with_capacity(13);
+    layers.push(IconLayer::from_points(color, BODY));
+    for at in ACROSS {
+        for pin in [
+            [(at, 3), (at + 2, 3), (at + 2, 6), (at, 6)],
+            [(at, 18), (at + 2, 18), (at + 2, 21), (at, 21)],
+            [(3, at), (6, at), (6, at + 2), (3, at + 2)],
+            [(18, at), (21, at), (21, at + 2), (18, at + 2)],
+        ] {
+            layers.push(IconLayer::from_points(color, &pin));
+        }
+    }
+    layers
 }
 
 /// A two-by-two grid of tiles, for the list/grid view toggle.

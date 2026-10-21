@@ -1,7 +1,8 @@
-use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{inspect, push_clean, Builder, Report, MAX_LINE_BYTES, MAX_REPORT_LINES};
+use tairix_util::report::{Report, MAX_LINE_BYTES, MAX_REPORT_LINES};
+
+use super::inspect;
 use crate::encode_fixture::rgba;
 use crate::{
     encode_bmp, encode_gif, encode_jpeg, encode_png, encode_tiff, GifOptions, ImageFormat,
@@ -251,36 +252,4 @@ fn within_bounds(report: &Report) {
         assert!(line.text.len() <= MAX_LINE_BYTES, "{:?}", line.text);
         assert!(!line.text.chars().any(char::is_control), "{:?}", line.text);
     }
-}
-
-#[test]
-fn a_report_that_fills_says_it_stops_and_takes_no_more() {
-    let mut out = Builder::default();
-    let mut taken = 0;
-    while out.fact(0, format_args!("line {taken}")) {
-        taken += 1;
-    }
-    assert_eq!(taken, MAX_REPORT_LINES - 1);
-    assert!(out.full());
-    assert!(!out.heading(format_args!("after")));
-    let last = out.lines.last().expect("lines");
-    assert!(last.heading && last.text.contains("stops here"), "{last:?}");
-    assert_eq!(out.lines.len(), MAX_REPORT_LINES);
-}
-
-#[test]
-fn a_long_line_is_cut_at_a_character_and_text_from_the_file_is_escaped() {
-    let mut out = Builder::default();
-    let long: String = core::iter::repeat_n('\u{e9}', MAX_LINE_BYTES).collect();
-    out.fact(0, format_args!("{long}"));
-    let line = &out.lines[0].text;
-    assert!(line.len() <= MAX_LINE_BYTES);
-    assert!(line.ends_with('\u{2026}'));
-
-    let mut shown = String::new();
-    push_clean(&mut shown, b"a\x07b\xffc\n", 64);
-    assert_eq!(shown, "a\\x07b\\xffc\\x0a");
-    let mut cut = String::new();
-    push_clean(&mut cut, &[b'x'; 40], 8);
-    assert_eq!(cut, "xxxxxxxx\u{2026}");
 }

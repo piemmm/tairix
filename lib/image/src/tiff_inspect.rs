@@ -3,7 +3,7 @@
 //! point to after them.
 
 use crate::exif::{self, ChainNames, Directory};
-use crate::inspect::Builder;
+use tairix_util::report::Builder;
 
 /// Report `bytes`, a TIFF file.
 pub(crate) fn report(bytes: &[u8], out: &mut Builder) {

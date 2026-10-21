@@ -80,6 +80,10 @@ pub fn manager_art<S: DirectorySource>(
     let content = content_viewport(area, scale, theme);
     let offset = browser.scroll_offset();
     let (parent, entries) = (browser.components(), browser.entries());
+    let pictures = browser.presentation().pictures;
+    // Spelled once for the walk, as the paint spells it once for the frame.
+    let dir = crate::vfs::spell_absolute_path(parent);
+    let mut scratch = String::new();
     match Tiles::of(browser.view_mode()) {
         None => {
             let view = list_view(browser, scale, theme, content, chrome.toolbar);
@@ -90,18 +94,18 @@ pub fn manager_art<S: DirectorySource>(
                 let Some(at) = view.shown_rect(offset, index) else {
                     continue;
                 };
-                let (kind, side) = row_art(entry, parent, bounds, scale, theme);
-                visit(ShownArt {
-                    request: IconRequest::kind(kind),
-                    side,
-                    at,
-                });
+                let (_, request, side) = row_art(
+                    (&dir, parent),
+                    entry,
+                    bounds,
+                    (scale, theme, pictures),
+                    &mut scratch,
+                );
+                visit(ShownArt { request, side, at });
             }
         }
         Some(tiles) => {
             let view = grid_view(browser, tiles, scale, theme, content, chrome.toolbar);
-            let dir = crate::vfs::spell_absolute_path(parent);
-            let mut scratch = String::new();
             for index in view.visible_range(offset) {
                 let (Some(entry), Some(bounds)) = (entries.get(index), view.cell_rect(index))
                 else {
@@ -115,7 +119,7 @@ pub fn manager_art<S: DirectorySource>(
                     (&dir, parent),
                     entry,
                     bounds,
-                    (scale, theme),
+                    (scale, theme, pictures),
                     &mut scratch,
                 );
                 visit(ShownArt { request, side, at });

@@ -1,9 +1,9 @@
 //! The executable-inspection decode service — the seam's first consumers.
 //!
-//! This module wires `tairix-binfmt` (container summaries) and
-//! `tairix-disasm` (instruction windows) behind the sandbox seam: the
+//! This module wires `tairix-binfmt` (container summaries and file reports)
+//! and `tairix-disasm` (instruction windows) behind the sandbox seam: the
 //! [`DecodeService`] runs *inside* the sandboxed worker, and the client
-//! helpers ([`container_summary`], [`manifest_summary`], [`disassemble`])
+//! helpers ([`container_summary`], [`file_report`], [`disassemble`])
 //! run in the calling program, marshalling typed requests and validating
 //! typed replies **fail-closed** — the worker has parsed hostile bytes and
 //! may be compromised, so nothing it replies is trusted beyond these
@@ -17,15 +17,18 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::DriverImage;
 use tairix_binfmt::{elf, wasm, Format};
 use tairix_disasm::{aarch64, riscv64, wasm as wasm_isa, x86_64, Insn, MAX_INSN_BYTES};
+use tairix_util::report::ReportLine;
 
 use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 use crate::memory::WorkerMemory;
+use crate::report::{read_lines, write_lines, LinesFault};
 use crate::wire::{Reader, Writer};
 use crate::worker::Service;
 
-/// Largest input (container image, manifest, or code window) a decode
+/// Largest input (container image, file to report on, or code window) a decode
 /// request may carry. A fixed validation bound: a caller with a larger
 /// file sends a prefix or a window, never the whole image.
 pub const MAX_INPUT: usize = 4 << 20;
@@ -126,6 +129,8 @@ impl Isa {
 pub enum ContainerFormat {
     /// A TAIRiX `rxe` load image.
     Rxe,
+    /// A driver bundle's image, whose regions are its program's.
+    Driver,
     /// A 64-bit little-endian ELF file.
     Elf64,
     /// A WebAssembly module.
@@ -138,9 +143,29 @@ impl ContainerFormat {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Rxe => "rxe",
+            Self::Driver => "driver",
             Self::Elf64 => "ELF64",
             Self::Wasm => "wasm",
         }
+    }
+
+    const fn to_wire(self) -> u8 {
+        match self {
+            Self::Rxe => 1,
+            Self::Elf64 => 2,
+            Self::Wasm => 3,
+            Self::Driver => 4,
+        }
+    }
+
+    const fn from_wire(raw: u8) -> Option<Self> {
+        Some(match raw {
+            1 => Self::Rxe,
+            2 => Self::Elf64,
+            3 => Self::Wasm,
+            4 => Self::Driver,
+            _ => return None,
+        })
     }
 }
 
@@ -203,7 +228,8 @@ pub struct ContainerSummary {
     /// The recognised container format.
     pub format: ContainerFormat,
     /// The instruction set the container's code targets, when the format
-    /// names one (`None` for `rxe`, whose ISA is the installed system's).
+    /// names one (`None` for `rxe` and a driver, whose ISA is the installed
+    /// system's).
     pub isa: Option<Isa>,
     /// Entry-point virtual address (0 where the format has none).
     pub entry: u64,
@@ -216,15 +242,18 @@ pub struct ContainerSummary {
     /// True when not every symbol made the list (cap reached, or an
     /// entry's name did not resolve and was omitted).
     pub symbols_truncated: bool,
+    /// The file's report, when [`Summarise::WithReport`] asked for it.
+    pub report: Vec<ReportLine>,
 }
 
-/// The typed rxe-manifest summary a sandboxed decode returns.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManifestInfo {
-    /// The ABI version the manifest targets.
-    pub abi_version: u32,
-    /// The requested capability identifiers, in declaration order.
-    pub capabilities: Vec<u16>,
+/// What a container summary is asked to carry.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Summarise {
+    /// The regions and symbols a viewer walks the code by.
+    Regions,
+    /// Those and the file's report, so a viewer showing both sends the file
+    /// once.
+    WithReport,
 }
 
 /// One decoded instruction of a disassembly window.
@@ -294,6 +323,8 @@ pub enum DecodeFailure {
     /// The worker's reply violated the reply grammar: it cannot be
     /// believed, so the caller gets nothing (fail closed).
     ReplyMalformed,
+    /// There was no memory to hold the reply.
+    NoMemory,
 }
 
 impl Unbelieved for DecodeFailure {
@@ -304,13 +335,13 @@ impl Unbelieved for DecodeFailure {
 
 /// Request opcodes.
 const OP_SUMMARY: u8 = 1;
-const OP_MANIFEST: u8 = 2;
+const OP_REPORT: u8 = 2;
 const OP_DISASSEMBLE: u8 = 3;
 
 /// Reply tags.
 const REPLY_ERROR: u8 = 0;
 const REPLY_SUMMARY: u8 = 1;
-const REPLY_MANIFEST: u8 = 2;
+const REPLY_REPORT: u8 = 2;
 const REPLY_DISASM: u8 = 3;
 
 /// Refusal wire codes.
@@ -363,25 +394,38 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, DecodeRefusal> {
     let op = r.u8().map_err(|_| DecodeRefusal::MalformedRequest)?;
     match op {
         OP_SUMMARY => {
+            let reported = match r.u8().map_err(|_| DecodeRefusal::MalformedRequest)? {
+                0 => false,
+                1 => true,
+                _ => return Err(DecodeRefusal::MalformedRequest),
+            };
             let image = r
                 .bytes(MAX_INPUT)
                 .map_err(|_| DecodeRefusal::MalformedRequest)?;
             if !r.is_exhausted() {
                 return Err(DecodeRefusal::MalformedRequest);
             }
-            let summary = summarise(image)?;
+            let mut summary = summarise(image)?;
+            if reported {
+                summary.report = tairix_binfmt::report::report(image)
+                    .ok_or(DecodeRefusal::UnrecognisedContainer)?
+                    .into_lines();
+            }
             Ok(encode_summary(&summary))
         }
-        OP_MANIFEST => {
-            let manifest = r
+        OP_REPORT => {
+            let file = r
                 .bytes(MAX_INPUT)
                 .map_err(|_| DecodeRefusal::MalformedRequest)?;
             if !r.is_exhausted() {
                 return Err(DecodeRefusal::MalformedRequest);
             }
-            let info = tairix_binfmt::rxe::ManifestSummary::parse(manifest)
-                .map_err(|_| DecodeRefusal::MalformedContainer)?;
-            Ok(encode_manifest(&info))
+            let report =
+                tairix_binfmt::report::report(file).ok_or(DecodeRefusal::UnrecognisedContainer)?;
+            let mut w = Writer::new();
+            w.u8(REPLY_REPORT);
+            write_lines(&mut w, report.lines());
+            Ok(w.finish())
         }
         OP_DISASSEMBLE => {
             let isa = Isa::from_wire(r.u8().map_err(|_| DecodeRefusal::MalformedRequest)?)
@@ -412,14 +456,26 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, DecodeRefusal> {
     }
 }
 
-/// Build the container summary for `image`.
+/// Build the container summary for `image`: a format that holds no code has
+/// none.
 fn summarise(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
     match tairix_binfmt::detect(image) {
-        Some(Format::Rxe) => summarise_rxe(image),
+        Some(Format::Rxe) => summarise_rxe(image, 0, ContainerFormat::Rxe),
+        Some(Format::Driver) => summarise_driver(image),
         Some(Format::Elf64) => summarise_elf(image),
         Some(Format::Wasm) => summarise_wasm(image),
-        None => Err(DecodeRefusal::UnrecognisedContainer),
+        Some(Format::Manifest | Format::AppInfo) | None => {
+            Err(DecodeRefusal::UnrecognisedContainer)
+        }
     }
+}
+
+/// A driver's program, its regions placed where they lie in the whole file.
+fn summarise_driver(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
+    let split = DriverImage::parse(image).map_err(|_| DecodeRefusal::MalformedContainer)?;
+    let base =
+        u64::try_from(split.payload_offset()).map_err(|_| DecodeRefusal::MalformedContainer)?;
+    summarise_rxe(split.payload, base, ContainerFormat::Driver)
 }
 
 /// Accumulates regions under the fixed cap, recording overflow honestly.
@@ -444,7 +500,12 @@ fn bounded_name(name: &str) -> String {
     String::from(&name[..name.floor_char_boundary(MAX_NAME)])
 }
 
-fn summarise_rxe(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
+/// The `rxe` `image` found at `base` in the file, reported as `format`.
+fn summarise_rxe(
+    image: &[u8],
+    base: u64,
+    format: ContainerFormat,
+) -> Result<ContainerSummary, DecodeRefusal> {
     let view =
         tairix_binfmt::rxe::RxeView::parse(image).map_err(|_| DecodeRefusal::MalformedContainer)?;
     let mut list = RegionList::default();
@@ -458,7 +519,9 @@ fn summarise_rxe(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
                 RegionKind::Data
             },
             addr: segment.vaddr,
-            file_offset: segment.file_offset,
+            file_offset: base
+                .checked_add(segment.file_offset)
+                .ok_or(DecodeRefusal::MalformedContainer)?,
             file_size: segment.file_size,
             mem_size: segment.mem_size,
             read: true,
@@ -467,13 +530,14 @@ fn summarise_rxe(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
         });
     }
     Ok(ContainerSummary {
-        format: ContainerFormat::Rxe,
+        format,
         isa: None,
         entry: view.entry(),
         regions: list.regions,
         symbols: Vec::new(),
         regions_truncated: list.truncated,
         symbols_truncated: false,
+        report: Vec::new(),
     })
 }
 
@@ -556,6 +620,7 @@ fn summarise_elf(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
         symbols,
         regions_truncated: list.truncated,
         symbols_truncated,
+        report: Vec::new(),
     })
 }
 
@@ -611,32 +676,12 @@ fn elf_symbols(view: &elf::ElfView<'_>, shnum: u16) -> (Vec<SymbolRecord>, bool)
     (symbols, truncated)
 }
 
-/// Human name for a wasm section id, matching the spec's section names.
-fn wasm_section_name(id: u8) -> &'static str {
-    match id {
-        0 => "custom",
-        1 => "type",
-        2 => "import",
-        3 => "function",
-        4 => "table",
-        5 => "memory",
-        6 => "global",
-        7 => "export",
-        8 => "start",
-        9 => "element",
-        10 => "code",
-        11 => "data",
-        12 => "data count",
-        _ => "unknown",
-    }
-}
-
 fn summarise_wasm(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
     let view = wasm::WasmView::parse(image).map_err(|_| DecodeRefusal::MalformedContainer)?;
     let mut list = RegionList::default();
     for entry in view.sections() {
         list.push(Region {
-            name: String::from(wasm_section_name(entry.id)),
+            name: String::from(wasm::section_name(entry.id)),
             kind: RegionKind::Data,
             addr: 0,
             file_offset: entry.offset as u64,
@@ -681,6 +726,7 @@ fn summarise_wasm(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
         symbols: Vec::new(),
         regions_truncated: list.truncated,
         symbols_truncated: false,
+        report: Vec::new(),
     })
 }
 
@@ -768,11 +814,7 @@ fn record_from(insn: Insn) -> InsnRecord {
 fn encode_summary(summary: &ContainerSummary) -> Vec<u8> {
     let mut w = Writer::new();
     w.u8(REPLY_SUMMARY);
-    w.u8(match summary.format {
-        ContainerFormat::Rxe => 1,
-        ContainerFormat::Elf64 => 2,
-        ContainerFormat::Wasm => 3,
-    });
+    w.u8(summary.format.to_wire());
     w.u8(summary.isa.map_or(0, Isa::to_wire));
     w.u64(summary.entry);
     let mut flags = 0u8;
@@ -812,17 +854,7 @@ fn encode_summary(summary: &ContainerSummary) -> Vec<u8> {
         w.u64(symbol.addr);
         w.u64(symbol.size);
     }
-    w.finish()
-}
-
-fn encode_manifest(info: &tairix_binfmt::rxe::ManifestSummary) -> Vec<u8> {
-    let mut w = Writer::new();
-    w.u8(REPLY_MANIFEST);
-    w.u32(info.header().abi_version);
-    w.u32(u32::try_from(info.capabilities().len()).unwrap_or(0));
-    for id in info.capabilities() {
-        w.u32(u32::from(id.as_u16()));
-    }
+    write_lines(&mut w, &summary.report);
     w.finish()
 }
 
@@ -849,7 +881,8 @@ fn encode_disasm(window: &DisasmWindow) -> Vec<u8> {
     w.finish()
 }
 
-/// Ask the sandboxed worker for the container summary of `image`.
+/// Ask the sandboxed worker for the container summary of `image`, carrying
+/// what `carry` asks for.
 ///
 /// # Errors
 ///
@@ -858,39 +891,43 @@ fn encode_disasm(window: &DisasmWindow) -> Vec<u8> {
 pub fn container_summary<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     image: &[u8],
+    carry: Summarise,
 ) -> Result<ContainerSummary, DecodeFailure> {
     if image.len() > MAX_INPUT {
         return Err(DecodeFailure::Sandbox(SandboxError::RequestTooLarge));
     }
-    let mut w = Writer::with_capacity(5 + image.len());
+    let mut w = Writer::with_capacity(6 + image.len());
     w.u8(OP_SUMMARY);
+    w.u8(u8::from(carry == Summarise::WithReport));
     w.bytes(image);
     let request = w.finish();
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(DecodeFailure::Sandbox)?;
-        decode_summary_reply(&reply)
+        decode_summary_reply(&reply, carry)
     })
 }
 
-/// Ask the sandboxed worker for the manifest summary of `manifest`.
+/// Ask the sandboxed worker for the report of `file`: what an executable or
+/// a signed manifest says, as a person reads it.
 ///
 /// # Errors
 ///
-/// As [`container_summary`].
-pub fn manifest_summary<L: Launcher, S: tairix_log::Sink>(
+/// As [`container_summary`]; a file no format recognises is refused as
+/// [`DecodeRefusal::UnrecognisedContainer`].
+pub fn file_report<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
-    manifest: &[u8],
-) -> Result<ManifestInfo, DecodeFailure> {
-    if manifest.len() > MAX_INPUT {
+    file: &[u8],
+) -> Result<Vec<ReportLine>, DecodeFailure> {
+    if file.len() > MAX_INPUT {
         return Err(DecodeFailure::Sandbox(SandboxError::RequestTooLarge));
     }
-    let mut w = Writer::with_capacity(5 + manifest.len());
-    w.u8(OP_MANIFEST);
-    w.bytes(manifest);
+    let mut w = Writer::with_capacity(5 + file.len());
+    w.u8(OP_REPORT);
+    w.bytes(file);
     let request = w.finish();
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(DecodeFailure::Sandbox)?;
-        decode_manifest_reply(&reply)
+        decode_report_reply(&reply)
     })
 }
 
@@ -969,16 +1006,13 @@ fn reply_body(reply: &[u8], expected_tag: u8) -> Result<Reader<'_>, DecodeFailur
     Ok(r)
 }
 
-/// Decode a summary reply fail-closed (the worker is untrusted).
-fn decode_summary_reply(reply: &[u8]) -> Result<ContainerSummary, DecodeFailure> {
+/// Decode a summary reply fail-closed (the worker is untrusted): a report
+/// nobody asked for is a lie, as is one missing when asked.
+fn decode_summary_reply(reply: &[u8], carry: Summarise) -> Result<ContainerSummary, DecodeFailure> {
     let mut r = reply_body(reply, REPLY_SUMMARY)?;
     let step = |_: crate::wire::WireError| DecodeFailure::ReplyMalformed;
-    let format = match r.u8().map_err(step)? {
-        1 => ContainerFormat::Rxe,
-        2 => ContainerFormat::Elf64,
-        3 => ContainerFormat::Wasm,
-        _ => return Err(DecodeFailure::ReplyMalformed),
-    };
+    let format =
+        ContainerFormat::from_wire(r.u8().map_err(step)?).ok_or(DecodeFailure::ReplyMalformed)?;
     let isa = match r.u8().map_err(step)? {
         0 => None,
         raw => Some(Isa::from_wire(raw).ok_or(DecodeFailure::ReplyMalformed)?),
@@ -1032,7 +1066,11 @@ fn decode_summary_reply(reply: &[u8]) -> Result<ContainerSummary, DecodeFailure>
             size: r.u64().map_err(step)?,
         });
     }
-    if !r.is_exhausted() {
+    let report = read_lines(&mut r).map_err(|fault| match fault {
+        LinesFault::Malformed => DecodeFailure::ReplyMalformed,
+        LinesFault::NoMemory => DecodeFailure::NoMemory,
+    })?;
+    if !r.is_exhausted() || report.is_empty() == (carry == Summarise::WithReport) {
         return Err(DecodeFailure::ReplyMalformed);
     }
     Ok(ContainerSummary {
@@ -1043,30 +1081,21 @@ fn decode_summary_reply(reply: &[u8]) -> Result<ContainerSummary, DecodeFailure>
         symbols,
         regions_truncated: flags & 0b01 != 0,
         symbols_truncated: flags & 0b10 != 0,
+        report,
     })
 }
 
-/// Decode a manifest reply fail-closed.
-fn decode_manifest_reply(reply: &[u8]) -> Result<ManifestInfo, DecodeFailure> {
-    let mut r = reply_body(reply, REPLY_MANIFEST)?;
-    let abi_version = r.u32().map_err(|_| DecodeFailure::ReplyMalformed)?;
-    let count = r.u32().map_err(|_| DecodeFailure::ReplyMalformed)? as usize;
-    if count > usize::from(tairix_abi::MANIFEST_MAX_CAPABILITIES) {
-        return Err(DecodeFailure::ReplyMalformed);
-    }
-    let mut capabilities = Vec::with_capacity(count);
-    for _ in 0..count {
-        let raw = r.u32().map_err(|_| DecodeFailure::ReplyMalformed)?;
-        let id = u16::try_from(raw).map_err(|_| DecodeFailure::ReplyMalformed)?;
-        capabilities.push(id);
-    }
+/// Decode a report reply fail-closed.
+fn decode_report_reply(reply: &[u8]) -> Result<Vec<ReportLine>, DecodeFailure> {
+    let mut r = reply_body(reply, REPLY_REPORT)?;
+    let lines = read_lines(&mut r).map_err(|fault| match fault {
+        LinesFault::Malformed => DecodeFailure::ReplyMalformed,
+        LinesFault::NoMemory => DecodeFailure::NoMemory,
+    })?;
     if !r.is_exhausted() {
         return Err(DecodeFailure::ReplyMalformed);
     }
-    Ok(ManifestInfo {
-        abi_version,
-        capabilities,
-    })
+    Ok(lines)
 }
 
 /// Decode a disassembly reply to the request `asked` described.
@@ -1142,9 +1171,9 @@ fn decode_disasm_reply(reply: &[u8], asked: Asked) -> Result<DisasmWindow, Decod
 #[cfg(test)]
 mod tests {
     use super::{
-        container_summary, decode_disasm_reply, decode_summary_reply, disassemble,
-        manifest_summary, CodeWindow, ContainerFormat, DecodeFailure, DecodeRefusal, DecodeService,
-        Isa, RegionKind, MAX_INPUT, MAX_REGIONS,
+        container_summary, decode_disasm_reply, decode_summary_reply, disassemble, file_report,
+        CodeWindow, ContainerFormat, DecodeFailure, DecodeRefusal, DecodeService, Isa, RegionKind,
+        Summarise, MAX_INPUT, MAX_REGIONS,
     };
     use crate::host::ParserSandbox;
     use crate::loopback::LoopbackLauncher;
@@ -1277,7 +1306,8 @@ mod tests {
     #[test]
     fn an_rxe_summary_round_trips_through_the_sandbox() {
         let mut sandbox = sandbox();
-        let summary = container_summary(&mut sandbox, &rxe_image()).expect("summary");
+        let summary =
+            container_summary(&mut sandbox, &rxe_image(), Summarise::Regions).expect("summary");
         assert_eq!(summary.format, ContainerFormat::Rxe);
         assert_eq!(summary.isa, None);
         assert_eq!(summary.entry, RXE_PAGE_SIZE + 16);
@@ -1290,24 +1320,101 @@ mod tests {
     }
 
     #[test]
-    fn a_manifest_summary_round_trips_through_the_sandbox() {
+    fn a_manifest_report_round_trips_through_the_sandbox() {
         let mut sandbox = sandbox();
         let manifest = manifest_bytes(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
-        let info = manifest_summary(&mut sandbox, &manifest).expect("manifest");
-        assert_eq!(info.abi_version, tairix_abi::ABI_VERSION_CURRENT);
+        let lines = file_report(&mut sandbox, &manifest).expect("a report");
+        assert!(lines[0].heading && lines[0].text.starts_with("TAIRiX program manifest"));
+        for name in ["CAP_FS_MOUNT", "CAP_NET_RAW"] {
+            assert!(
+                lines.iter().any(|line| line.text.contains(name)),
+                "{lines:?}"
+            );
+        }
         assert_eq!(
-            info.capabilities,
-            vec![
-                CapabilityId::FS_MOUNT.as_u16(),
-                CapabilityId::NET_RAW.as_u16()
-            ]
+            container_summary(&mut sandbox, &manifest, Summarise::Regions),
+            Err(DecodeFailure::Refused(DecodeRefusal::UnrecognisedContainer)),
+            "a manifest holds no code"
         );
+        assert_eq!(
+            file_report(&mut sandbox, b"plain text"),
+            Err(DecodeFailure::Refused(DecodeRefusal::UnrecognisedContainer))
+        );
+    }
+
+    #[test]
+    fn a_summary_carries_the_report_only_when_asked_and_a_reply_must_agree() {
+        let mut sandbox = sandbox();
+        let plain =
+            container_summary(&mut sandbox, &rxe_image(), Summarise::Regions).expect("summary");
+        assert!(plain.report.is_empty());
+        let reported =
+            container_summary(&mut sandbox, &rxe_image(), Summarise::WithReport).expect("summary");
+        assert!(reported.report[0].heading);
+        assert!(reported.report[0].text.starts_with("TAIRiX program (rxe)"));
+        assert_eq!(reported.regions, plain.regions);
+
+        // A worker answering a report nobody asked for, or none when one was,
+        // cannot be believed.
+        let mut service = DecodeService;
+        let mut w = Writer::new();
+        w.u8(super::OP_SUMMARY);
+        w.u8(1);
+        w.bytes(&rxe_image());
+        let with = service.handle(&w.finish());
+        assert_eq!(
+            decode_summary_reply(&with, Summarise::Regions),
+            Err(DecodeFailure::ReplyMalformed)
+        );
+        let mut w = Writer::new();
+        w.u8(super::OP_SUMMARY);
+        w.u8(0);
+        w.bytes(&rxe_image());
+        let without = service.handle(&w.finish());
+        assert_eq!(
+            decode_summary_reply(&without, Summarise::WithReport),
+            Err(DecodeFailure::ReplyMalformed)
+        );
+        let mut w = Writer::new();
+        w.u8(super::OP_SUMMARY);
+        w.u8(2);
+        w.bytes(&rxe_image());
+        assert_eq!(
+            decode_summary_reply(&service.handle(&w.finish()), Summarise::Regions),
+            Err(DecodeFailure::Refused(DecodeRefusal::MalformedRequest))
+        );
+    }
+
+    #[test]
+    fn a_driver_summary_places_its_program_s_regions_in_the_whole_file() {
+        let mut sandbox = sandbox();
+        let manifest = tairix_abi::DriverManifest {
+            magic: tairix_abi::DRIVER_MANIFEST_MAGIC,
+            abi_version: tairix_abi::ABI_VERSION_CURRENT,
+            kind: tairix_abi::DriverKind::UserSpace,
+            bind_key_count: 0,
+            capability_count: 1,
+            syscall_table_hash: [0; 32],
+            signer_pubkey: [0; 32],
+            signature: [0; 64],
+        };
+        let mut image = manifest.to_le_bytes().to_vec();
+        image.extend_from_slice(&CapabilityId::IRQ_BIND.as_u16().to_le_bytes());
+        let base = u64::try_from(image.len()).expect("small");
+        image.extend_from_slice(&rxe_image());
+        let summary = container_summary(&mut sandbox, &image, Summarise::Regions).expect("summary");
+        assert_eq!(summary.format, ContainerFormat::Driver);
+        assert_eq!(summary.isa, None);
+        assert_eq!(summary.regions.len(), 2);
+        assert_eq!(summary.regions[0].file_offset, base);
+        assert_eq!(summary.regions[1].file_offset, base + 64);
     }
 
     #[test]
     fn an_elf_summary_reports_the_isa_and_the_program_header_fallback() {
         let mut sandbox = sandbox();
-        let summary = container_summary(&mut sandbox, &elf_image()).expect("summary");
+        let summary =
+            container_summary(&mut sandbox, &elf_image(), Summarise::Regions).expect("summary");
         assert_eq!(summary.format, ContainerFormat::Elf64);
         assert_eq!(summary.isa, Some(Isa::X86_64));
         assert_eq!(summary.entry, 0x40_1000);
@@ -1320,7 +1427,8 @@ mod tests {
     #[test]
     fn a_wasm_summary_names_sections_and_function_bodies() {
         let mut sandbox = sandbox();
-        let summary = container_summary(&mut sandbox, &wasm_module(2)).expect("summary");
+        let summary =
+            container_summary(&mut sandbox, &wasm_module(2), Summarise::Regions).expect("summary");
         assert_eq!(summary.format, ContainerFormat::Wasm);
         assert_eq!(summary.isa, Some(Isa::Wasm));
         // One section region plus one code region per body.
@@ -1335,7 +1443,8 @@ mod tests {
     fn region_overflow_is_reported_never_silent() {
         let mut sandbox = sandbox();
         let bodies = u32::try_from(MAX_REGIONS + 100).expect("fits");
-        let summary = container_summary(&mut sandbox, &wasm_module(bodies)).expect("summary");
+        let summary = container_summary(&mut sandbox, &wasm_module(bodies), Summarise::Regions)
+            .expect("summary");
         assert_eq!(summary.regions.len(), MAX_REGIONS);
         assert!(summary.regions_truncated);
     }
@@ -1344,7 +1453,11 @@ mod tests {
     fn an_unrecognised_container_is_a_typed_refusal() {
         let mut sandbox = sandbox();
         assert_eq!(
-            container_summary(&mut sandbox, b"plain text, not a binary"),
+            container_summary(
+                &mut sandbox,
+                b"plain text, not a binary",
+                Summarise::Regions
+            ),
             Err(DecodeFailure::Refused(DecodeRefusal::UnrecognisedContainer))
         );
     }
@@ -1354,7 +1467,7 @@ mod tests {
         let mut sandbox = sandbox();
         let image = rxe_image();
         assert_eq!(
-            container_summary(&mut sandbox, &image[..image.len() - 7]),
+            container_summary(&mut sandbox, &image[..image.len() - 7], Summarise::Regions),
             Err(DecodeFailure::Refused(DecodeRefusal::MalformedContainer))
         );
     }
@@ -1364,17 +1477,18 @@ mod tests {
         let mut service = DecodeService;
         let reply = service.handle(&[0xFF, 1, 2, 3]);
         assert_eq!(
-            decode_summary_reply(&reply),
+            decode_summary_reply(&reply, Summarise::Regions),
             Err(DecodeFailure::Refused(DecodeRefusal::MalformedRequest))
         );
         // Trailing bytes after a well-formed request body are refused too.
         let mut w = Writer::new();
         w.u8(super::OP_SUMMARY);
+        w.u8(0);
         w.bytes(b"x");
         w.u8(0xEE);
         let reply = service.handle(&w.finish());
         assert_eq!(
-            decode_summary_reply(&reply),
+            decode_summary_reply(&reply, Summarise::Regions),
             Err(DecodeFailure::Refused(DecodeRefusal::MalformedRequest))
         );
     }
@@ -1496,7 +1610,7 @@ mod tests {
         w.bytes(&[0x1F, 0x20, 0x03, 0xD5]);
         let reply = service.handle(&w.finish());
         assert_eq!(
-            decode_summary_reply(&reply),
+            decode_summary_reply(&reply, Summarise::Regions),
             Err(DecodeFailure::Refused(DecodeRefusal::MalformedRequest))
         );
     }
@@ -1556,7 +1670,7 @@ mod tests {
         w.u8(0);
         w.u32(u32::try_from(MAX_REGIONS + 1).expect("fits"));
         assert_eq!(
-            decode_summary_reply(&w.finish()),
+            decode_summary_reply(&w.finish(), Summarise::Regions),
             Err(DecodeFailure::ReplyMalformed)
         );
         // A disassembly reply claiming a zero-length instruction.
@@ -1579,12 +1693,12 @@ mod tests {
         );
         // An unknown reply tag.
         assert_eq!(
-            decode_summary_reply(&[0x77]),
+            decode_summary_reply(&[0x77], Summarise::Regions),
             Err(DecodeFailure::ReplyMalformed)
         );
         // An empty reply.
         assert_eq!(
-            decode_summary_reply(&[]),
+            decode_summary_reply(&[], Summarise::Regions),
             Err(DecodeFailure::ReplyMalformed)
         );
     }
@@ -1594,7 +1708,7 @@ mod tests {
         let mut sandbox = sandbox();
         let oversize = vec![0u8; MAX_INPUT + 1];
         assert!(matches!(
-            container_summary(&mut sandbox, &oversize),
+            container_summary(&mut sandbox, &oversize, Summarise::Regions),
             Err(DecodeFailure::Sandbox(_))
         ));
     }

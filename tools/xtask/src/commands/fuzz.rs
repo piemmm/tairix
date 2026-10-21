@@ -598,7 +598,7 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-binfmt",
         test: "fuzz_rxe",
         description:
-            "lib/binfmt rxe inspection view + manifest summary (untrusted executable-file bytes)",
+            "lib/binfmt rxe inspection view + the report of every TAIRiX program, driver image and manifest (untrusted executable-file bytes)",
     },
     Target {
         package: "tairix-binfmt",

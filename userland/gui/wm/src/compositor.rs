@@ -858,6 +858,7 @@ impl Compositor {
         self.refresh_frame_bands();
         self.shadow = ShadowKit::new(self.scale, &self.theme);
         self.mark(self.screen_rect());
+        self.restyle_free_layers();
         true
     }
 
@@ -926,6 +927,7 @@ impl Compositor {
         self.refresh_frame_bands();
         self.shadow = ShadowKit::new(self.scale, &self.theme);
         self.mark(self.screen_rect());
+        self.restyle_free_layers();
         true
     }
 
@@ -2625,9 +2627,10 @@ impl Compositor {
                 break;
             };
             if window.step_shadow(now_ns, duration) {
+                let id = window.id();
                 let strips = window.shadow_strips(reach);
                 for strip in strips.into_iter().filter(|strip| !strip.is_empty()) {
-                    self.mark_from(strip, index.saturating_add(1));
+                    self.mark_layer(id, strip);
                 }
             }
         }
@@ -3030,7 +3033,7 @@ impl Compositor {
                 let bands = window.furniture_bands();
                 self.chrome.invalidate(&id);
                 for band in bands.into_iter().filter(|band| !band.is_empty()) {
-                    self.mark_from(band, index.saturating_add(1));
+                    self.mark_layer(id, band);
                 }
             }
         }

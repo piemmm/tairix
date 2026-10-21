@@ -58,6 +58,10 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI32 | A shift-double-click leaves what it opened elsewhere deselected, and an activation the engine refuses is stated over the window | done |
 | FI33 | A path naming a file is shown selected in the folder holding it, in a window already showing that folder where there is one | done |
 | FI34 | An icon landing repaints only the tiles drawn through it, in the windows that show them; a copied tree is pictured once it is whole; every window shares one cache that keeps what it decoded | done |
+| FI35 | Display ▸ also orders the window: by every key its columns show, ascending or descending; where folders stand is a setting | done |
+| FI36 | The List view pictures each entry as the icon views do: an application's own icon, a folder's contents, a picture's thumbnail | done |
+| FI37 | The Home place is the full-colour Home folder wherever a place is pictured, the icon-bar menu included | done |
+| FI38 | A name may be shown without the ending the settings hide — an application's `.app` by default — and renames with it restored; items whose names begin with a dot are listed only when asked | done |
 
 ## FI1 — item names one point smaller
 
@@ -407,8 +411,9 @@ frame yet uses segments or filter deltas (`plans/OPEN-DEFECTS.md` D803).
 
 ## FI16 — a name keeps its extension
 
-A tile names its entry exactly as the volume holds it; nothing is ever
-stripped. What lost the extension was the cut: one line, elided at its end.
+A tile names its entry as the volume holds it, less only an ending the user's
+settings hide (FI38). What lost the extension was the cut: one line, elided at
+its end.
 
 - `render::Tiles::Large` reserves two name lines, in the manager's grid and on
   the desktop, and the cell grows by one line.
@@ -806,6 +811,49 @@ so one replaced or changed where its folder sees it is a new picture. Nothing
 invalidates the cache: below its ceiling — the machine's share of its memory,
 never below a screenful, shared by every window — only least-recent use takes
 an entry, and only severe and critical pressure shrink it.
+
+## FI35 — Display ▸ orders the window
+
+Display ▸ carries, beneath the three views, a radio group of the keys the
+window's columns show — Name, Type, Size and Modified, or for a listing of
+drives alone Name, Free, Filesystem and Health — then Ascending and
+Descending, the order in force marked and refused with its reason. Each
+applies to its window (`Browser::set_sort_mode`) through the one shared sort,
+keeping the selection on its entry, and a column header's press is the same
+choice. Where folders stand is the settings' choice (FM23), kept whichever the
+key and direction: first, or among the files ordered by the key like any
+entry (`Folders::Among`). Every row names its picture
+(`AppMenuSymbol::SortAscending`, `SortDescending` and `SortByHealth` among
+them).
+
+## FI36 — the List view's pictures
+
+A row asks for its picture exactly as a tile does (`entry_icon`), at the row's
+side, so an application shows its own icon, an occupied folder what it holds
+and a picture its thumbnail, through the cache and the resolver every display
+shares — no manifest is read on the loop.
+
+## FI37 — the Home folder in colour
+
+The Home place's picture is a vector master of its own (`home.svg`, the folder
+with a house on it), so every surface that pictures a place — the rail and
+the icon-bar menu, whose place rows name artwork rather than a symbol — draws
+it in colour like the folders beside it. A menu row naming the Home command's
+symbol stays the monochrome house every command is drawn with.
+
+## FI38 — hidden endings and hidden items
+
+`tairix_browse::Presentation` is how a window presents its listing:
+`HiddenEndings` (an application's `.app`, a known type's extension) shown
+without, `hidden_items` (names beginning with a dot, `tairix_path::is_hidden_name`
+— the rule `ls` and filename completion share), and `Pictures` (a picture as
+its content, a folder as what it holds). The file manager sets it from its
+settings (`plans/NEW-FILEMANAGER.md` FM23); the desktop and the trusted picker
+keep `Presentation::EXACT`. A hidden ending is display only: the tile, the row,
+the selection label and the marquee's cached parts read the shown name, the
+rename field holds it and `renamed` restores what it hid, and every operation
+acts on the exact name. A hidden item is left out as a listing is adopted,
+merged or reloaded, so nothing reaches it from the window.
 
 ## Sequencing
 

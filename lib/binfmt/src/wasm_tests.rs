@@ -22,7 +22,7 @@ fn push_section(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
 
 /// A module with a custom section, one function type, two functions, and
 /// a two-body code section.
-fn fixture() -> Vec<u8> {
+pub(crate) fn fixture() -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"\0asm");
     out.extend_from_slice(&1u32.to_le_bytes());

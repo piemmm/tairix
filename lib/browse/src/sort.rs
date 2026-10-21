@@ -6,9 +6,10 @@
 //! definition: a pure, total, stable order over [`Entry`], parameterised by a
 //! [`SortMode`] the app may toggle.
 //!
-//! The order is **directories first, then the chosen key**. Grouping folders
-//! ahead of files (and bundles) is fixed regardless of direction — reversing
-//! only reverses the order *within* each group — because a file manager that
+//! The order is **directories first, then the chosen key**, unless the mode
+//! asks for folders among the files ([`Folders::Among`]). Grouped, folders
+//! stay ahead of files (and bundles) whichever the direction — reversing only
+//! reverses the order *within* each group — because a file manager that
 //! scattered folders through a descending size list would be harder to scan,
 //! not easier. Equal keys fall back to a deterministic case-insensitive name
 //! order so the result never depends on the source's incidental ordering.
@@ -18,7 +19,7 @@ use core::cmp::Ordering;
 use alloc::vec::Vec;
 
 use crate::entry::{Entry, EntryKind};
-use crate::media::media_for_named;
+use crate::media::{media_for_named, Site};
 
 /// Which field a listing is ordered by.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
@@ -48,6 +49,19 @@ pub enum SortKey {
     Health,
 }
 
+impl SortKey {
+    /// Every key, in the order a menu offering them numbers its rows.
+    pub const ALL: [Self; 7] = [
+        Self::Name,
+        Self::Kind,
+        Self::Size,
+        Self::Modified,
+        Self::Free,
+        Self::Filesystem,
+        Self::Health,
+    ];
+}
+
 /// Ascending or descending within the [`SortKey`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub enum SortDirection {
@@ -58,25 +72,45 @@ pub enum SortDirection {
     Descending,
 }
 
-/// How a listing is ordered: a [`SortKey`] and a [`SortDirection`].
+impl SortDirection {
+    /// Both directions, in the order a menu offering them numbers its rows.
+    pub const ALL: [Self; 2] = [Self::Ascending, Self::Descending];
+}
+
+/// Where folders stand in a listing's order.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub enum Folders {
+    /// Ahead of every file and bundle, whichever the key and direction.
+    #[default]
+    First,
+    /// Among the files, ordered by the key like everything else.
+    Among,
+}
+
+/// How a listing is ordered: a [`SortKey`], a [`SortDirection`], and where
+/// [`Folders`] stand.
 ///
-/// The default — [`SortKey::Name`] ascending — is the general-purpose listing
-/// order both views open with.
+/// The default — [`SortKey::Name`] ascending, folders first — is the
+/// general-purpose listing order both views open with.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub struct SortMode {
     /// The field ordered by.
     pub key: SortKey,
     /// The direction within the key.
     pub direction: SortDirection,
+    /// Where folders stand.
+    pub folders: Folders,
 }
 
 impl SortMode {
-    /// The listing order both views open with: by name, ascending.
+    /// The listing order both views open with: by name, ascending, folders
+    /// first.
     #[must_use]
     pub const fn default_order() -> Self {
         Self {
             key: SortKey::Name,
             direction: SortDirection::Ascending,
+            folders: Folders::First,
         }
     }
 
@@ -99,7 +133,11 @@ impl SortMode {
             (Modified, Ascending) => (Modified, Descending),
             (Modified, Descending) | (Free | Filesystem | Health, _) => (Name, Ascending),
         };
-        Self { key, direction }
+        Self {
+            key,
+            direction,
+            folders: self.folders,
+        }
     }
 
     /// The order a press on the column header ordering by `key` asks for: by
@@ -111,15 +149,20 @@ impl SortMode {
         } else {
             SortDirection::Ascending
         };
-        Self { key, direction }
+        Self {
+            key,
+            direction,
+            ..self
+        }
     }
 }
 
 /// Sort `entries` in place into the shared listing order for `mode`.
 ///
-/// Stable and total: directories come before files and bundles, then the
-/// chosen key decides, then a case-insensitive name tiebreak makes the result
-/// independent of the input order.
+/// Stable and total: directories come before files and bundles unless
+/// `mode` places them among the files, then the chosen key decides, then a
+/// case-insensitive name tiebreak makes the result independent of the input
+/// order.
 pub fn sort_entries(entries: &mut [Entry], mode: SortMode) {
     if mode.key != SortKey::Kind {
         entries.sort_by(|a, b| entry_cmp(a, b, mode));
@@ -154,15 +197,18 @@ fn permute(entries: &mut [Entry], mut order: Vec<usize>) {
 /// The name of `entry`'s content type, which [`SortKey::Kind`] orders files
 /// by within their structural rank.
 fn type_name(entry: &Entry) -> &'static str {
-    media_for_named(entry.name(), entry.kind(), false).name()
+    media_for_named(entry.name(), entry.kind(), Site::Plain).name()
 }
 
-/// The group a kind sorts into: directories (`0`) ahead of everything else
-/// (`1`). A bundle is a launchable unit, not a folder to descend, so it sorts
-/// with files rather than with directories.
-fn group_rank(entry: &Entry) -> u8 {
-    // Directories (rank 0) sort ahead of everything else (rank 1).
-    u8::from(!entry.is_directory())
+/// The group an entry sorts into under `folders`: directories (`0`) ahead of
+/// everything else (`1`), or one group for all. A bundle is a launchable unit,
+/// not a folder to descend, so it sorts with files rather than with
+/// directories.
+fn group_rank(entry: &Entry, folders: Folders) -> u8 {
+    match folders {
+        Folders::First => u8::from(!entry.is_directory()),
+        Folders::Among => 0,
+    }
 }
 
 /// The total order two entries take under `mode`.
@@ -179,7 +225,8 @@ pub(crate) fn entry_cmp(a: &Entry, b: &Entry, mode: SortMode) -> Ordering {
 /// under [`SortKey::Kind`]: the one comparison both the one-off sort and the
 /// incremental insertions read.
 fn ordered(a: &Entry, b: &Entry, mode: SortMode, types: (&str, &str)) -> Ordering {
-    group_rank(a).cmp(&group_rank(b)).then_with(|| {
+    let group = |entry| group_rank(entry, mode.folders);
+    group(a).cmp(&group(b)).then_with(|| {
         let primary = match mode.key {
             SortKey::Name => name_cmp(a.name(), b.name()),
             SortKey::Kind => kind_rank(a)

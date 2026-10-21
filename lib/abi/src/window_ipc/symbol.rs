@@ -375,12 +375,22 @@ pub enum AppMenuSymbol {
     /// Run it as an account that may do more, once that account's password
     /// is given.
     RunAsAdministrator,
+    /// Order the listing smallest, earliest or A to Z first.
+    SortAscending,
+    /// Order the listing largest, latest or Z to A first.
+    SortDescending,
+    /// Order the volumes by the space each has free.
+    SortByFree,
+    /// Order the volumes by the filesystem each carries.
+    SortByFilesystem,
+    /// Order the volumes by how well each is serving.
+    SortByHealth,
 }
 
 impl AppMenuSymbol {
     /// Every symbol, in wire order: the symbol with wire value `n` is
     /// `ALL[n - 1]`.
-    pub const ALL: [Self; 180] = [
+    pub const ALL: [Self; 185] = [
         Self::Open,
         Self::OpenWith,
         Self::OpenFolder,
@@ -561,6 +571,11 @@ impl AppMenuSymbol {
         Self::BringHome,
         Self::Favourite,
         Self::RunAsAdministrator,
+        Self::SortAscending,
+        Self::SortDescending,
+        Self::SortByFree,
+        Self::SortByFilesystem,
+        Self::SortByHealth,
     ];
 
     /// The symbol's wire value, never zero.

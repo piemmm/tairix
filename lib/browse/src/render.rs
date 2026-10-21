@@ -28,6 +28,7 @@
 //! there, and nothing can mark the chrome above it or the scrollbar gutter
 //! beside it.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -81,6 +82,8 @@ use tairix_abi::fs::FileKind;
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
 use tairix_util::utf8::shown;
 
+use crate::presentation::{HiddenEndings, Pictures};
+
 #[path = "render_shown.rs"]
 mod shown_art;
 pub use shown_art::{chooser_art, manager_art, properties_art, ShownArt};
@@ -124,6 +127,14 @@ impl ListColumns {
         } else {
             Self::Files
         }
+    }
+
+    /// The keys the columns order by, in column order: the orders a listing
+    /// of this kind offers, wherever it offers them.
+    #[must_use]
+    pub const fn keys(self) -> [SortKey; 4] {
+        let [first, second, third, fourth] = self.columns();
+        [first.1, second.1, third.1, fourth.1]
     }
 
     /// Each column's title and the order a press on it asks for.
@@ -775,17 +786,10 @@ fn place_row(place: &Place, places: &Places, index: usize, selected: Option<usiz
 /// Draw the visible list rows below the toolbar as shared [`TableRow`]s,
 /// giving the selected entry the row chrome's selection state.
 ///
-/// Each row's identity icon resolves through `artwork` at the row's own icon
-/// side, exactly as a grid tile's does — so a row draws the shipped class
-/// artwork where there is any and the cached built-in glyph otherwise, and
-/// **no** row rasterises vector coverage a previous frame already resolved.
-/// Only the rows on screen are asked for.
-///
-/// A row asks by *class* rather than naming a bundle: a list is a dense text
-/// view of a directory that may hold hundreds of bundles, and reading each
-/// one's manifest to find its own icon is work a row-height picture cannot
-/// show. The grid, whose tiles are large enough to tell two applications
-/// apart, names the bundle.
+/// Each row's picture is asked for exactly as a grid tile's is
+/// ([`entry_icon`]) — a bundle's own icon, a picture file's own content, what
+/// a folder holds — at the row's own icon side, so a row shows what a small
+/// icon shows. Only the rows on screen are asked for.
 fn draw_list<S: DirectorySource>(
     surface: &mut Surface,
     scale: Scale,
@@ -799,8 +803,11 @@ fn draw_list<S: DirectorySource>(
     let offset = browser.scroll_offset();
     let parent = browser.components();
     let entries = browser.entries();
+    let presentation = *browser.presentation();
     let columns = ListColumns::of(entries);
     let header = header_rect(scale, theme, content, toolbar);
+    let dir = crate::vfs::spell_absolute_path(parent);
+    let mut scratch = String::new();
     if !withheld(surface, header) {
         columns
             .header(browser.sort_mode())
@@ -816,12 +823,19 @@ fn draw_list<S: DirectorySource>(
             if withheld(surface, bounds) {
                 continue;
             }
-            let (kind, side) = row_art(entry, parent, bounds, scale, theme);
-            let mut row = entry_row((entry, parent), columns, browser.is_selected(index), kind);
+            let (kind, request, side) = row_art(
+                (&dir, parent),
+                entry,
+                bounds,
+                (scale, theme, presentation.pictures),
+                &mut scratch,
+            );
+            let selected = (browser.is_selected(index), presentation.endings);
+            let mut row = entry_row((entry, parent), columns, selected, kind);
             if browser.drop_mark() == Some(index) {
                 row.set_state(row.state().with_pointer(PointerState::DragTarget));
             }
-            let art = artwork.artwork(IconRequest::kind(kind), side);
+            let art = artwork.artwork(request, side);
             row.render(surface, bounds, scale, theme, &COLUMNS, art);
         }
     });
@@ -880,7 +894,7 @@ fn draw_grid<S: DirectorySource>(
                 (&dir, parent),
                 entry,
                 bounds,
-                (scale, theme),
+                (scale, theme, browser.presentation().pictures),
                 &mut scratch,
             );
             let mut state = ControlState::idle();
@@ -890,7 +904,7 @@ fn draw_grid<S: DirectorySource>(
             if browser.drop_mark() == Some(index) {
                 state.pointer = PointerState::DragTarget;
             }
-            let mut tile = tiles.tile(entry, state, kind);
+            let mut tile = tiles.tile(entry, state, kind, browser.presentation().endings);
             if chrome.renaming == Some(index) {
                 tile = tile.with_name_withheld();
             }
@@ -911,10 +925,10 @@ fn tile_art<'a>(
     (dir, parent): (&str, &[String]),
     entry: &'a Entry,
     bounds: Rect,
-    (scale, theme): (Scale, &Theme),
+    (scale, theme, pictures): (Scale, &Theme, Pictures),
     scratch: &'a mut String,
 ) -> (IconKind, IconRequest<'a>, u32) {
-    let (kind, request) = entry_icon(dir, parent, entry, scratch);
+    let (kind, request) = entry_icon(dir, parent, entry, pictures, scratch);
     (
         kind,
         request,
@@ -1083,7 +1097,7 @@ fn listing_column<S: DirectorySource>(
 fn entry_row(
     (entry, parent): (&Entry, &[String]),
     columns: ListColumns,
-    selected: bool,
+    (selected, endings): (bool, HiddenEndings),
     icon: IconKind,
 ) -> TableRow {
     let [size, second, third] = match entry.volume() {
@@ -1099,7 +1113,7 @@ fn entry_row(
         ],
     };
     let cells = vec![
-        TableCell::new(entry_label(entry)).with_icon(icon),
+        TableCell::new(entry_label(entry, endings).into_owned()).with_icon(icon),
         TableCell::numeric(size),
         TableCell::new(second),
         TableCell::new(third),
@@ -1113,21 +1127,22 @@ fn entry_row(
 const ROW_TEXT: TextRole = TextRole::ItemLabel;
 
 /// What the list row for `entry` laid out at `bounds` asks the artwork lookup
-/// for: the entry's kind, at the side the row draws it. A row asks by class
-/// alone ([`draw_list`]).
-fn row_art(
-    entry: &Entry,
-    parent: &[String],
+/// for: the entry's kind and request ([`entry_icon`]), as a tile's, and the
+/// side the row draws its picture at.
+fn row_art<'a>(
+    (dir, parent): (&str, &[String]),
+    entry: &'a Entry,
     bounds: Rect,
-    scale: Scale,
-    theme: &Theme,
-) -> (IconKind, u32) {
+    (scale, theme, pictures): (Scale, &Theme, Pictures),
+    scratch: &'a mut String,
+) -> (IconKind, IconRequest<'a>, u32) {
     // A row derives the side from its height and text alone, so an empty one
     // set in the same text answers for every row.
     let side = TableRow::new(Vec::new())
         .with_text_role(ROW_TEXT)
         .icon_side(bounds, scale, theme);
-    (icon_for_entry(entry, parent), side)
+    let (kind, request) = entry_icon(dir, parent, entry, pictures, scratch);
+    (kind, request, side)
 }
 
 /// What a drive's row states in the three columns after its name: its free
@@ -1234,8 +1249,8 @@ impl Tiles {
         }
     }
 
-    /// The [`IconTile`] for `entry`: its file-type `icon` and its name,
-    /// carrying the shared selection state when selected. The `icon` is the
+    /// The [`IconTile`] for `entry`: its file-type `icon` and its name less
+    /// the `endings` hidden, carrying the shared selection state when selected. The `icon` is the
     /// shared classification ([`icon_for_entry`]) resolved by the caller, so a
     /// tile and a list row draw the same icon for the same entry.
     ///
@@ -1243,8 +1258,14 @@ impl Tiles {
     /// its extension is never what is dropped. A large tile's picture casts its
     /// soft shadow; a small one, like a list row's, casts none.
     #[must_use]
-    pub fn tile(self, entry: &Entry, state: ControlState, icon: IconKind) -> IconTile {
-        let label = entry_label(entry);
+    pub fn tile(
+        self,
+        entry: &Entry,
+        state: ControlState,
+        icon: IconKind,
+        endings: HiddenEndings,
+    ) -> IconTile {
+        let label = entry_label(entry, endings).into_owned();
         let cut = name_cut(&label);
         let tile = IconTile::new(label, icon)
             .with_layout(self.layout())
@@ -1267,16 +1288,18 @@ pub fn name_cut(name: &str) -> Cut {
     }
 }
 
-/// The name shown for an entry: the name the volume holds, with any
-/// character in it that would draw nothing shown as U+FFFD
-/// ([`tairix_util::utf8::shown`]), so two names that differ never look alike.
+/// The name shown for an entry: the name the volume holds less the ending
+/// `endings` hide ([`HiddenEndings::shown`]), with any character in it that
+/// would draw nothing shown as U+FFFD ([`tairix_util::utf8::shown`]), so two
+/// names that differ never look alike.
 ///
 /// No kind suffix is appended — both views carry the entry's icon
-/// ([`icon_for_entry`]), so the label is the name and nothing else, and what
-/// the user reads on screen is what they type, copy, and rename.
+/// ([`icon_for_entry`]), so the label is the name and nothing else. Every
+/// surface that sets, measures or hit-tests a name reads it here, so what is
+/// pressed is what is drawn.
 #[must_use]
-pub fn entry_label(entry: &Entry) -> String {
-    shown(entry.name()).into_owned()
+pub fn entry_label(entry: &Entry, endings: HiddenEndings) -> Cow<'_, str> {
+    shown(endings.shown(entry))
 }
 
 /// Height in pixels of one rendered list row, measured on the theme's own body
@@ -1821,9 +1844,16 @@ fn entry_at<S: DirectorySource>(
     };
     let at = view.view(offset).to_content(point)?;
     let entry = browser.entries().get(index)?;
-    entry_parts(tiles, entry, grid.cell_rect(index)?, scale, theme)?
-        .contains(at)
-        .then_some(index)
+    let endings = browser.presentation().endings;
+    entry_parts(
+        tiles,
+        (entry, endings),
+        grid.cell_rect(index)?,
+        scale,
+        theme,
+    )?
+    .contains(at)
+    .then_some(index)
 }
 
 /// The part every `tiles` tile holds whatever its name — its picture with its
@@ -1839,17 +1869,17 @@ pub(crate) fn tile_core(tiles: Tiles, scale: Scale, theme: &Theme) -> Rect {
 }
 
 /// What the `tiles` tile for `entry`, laid out in `cell`, is made of: its
-/// picture and its name's drawn lines ([`TileLayout::parts`]). The rest of the
-/// cell is ground.
+/// picture and its name's drawn lines, the name less the `endings` hidden
+/// ([`TileLayout::parts`]). The rest of the cell is ground.
 #[must_use]
 pub fn entry_parts(
     tiles: Tiles,
-    entry: &Entry,
+    (entry, endings): (&Entry, HiddenEndings),
     cell: Rect,
     scale: Scale,
     theme: &Theme,
 ) -> Option<TileParts> {
-    let name = shown(entry.name());
+    let name = entry_label(entry, endings);
     tiles
         .layout()
         .parts(cell, scale, theme, &name, name_cut(&name))
@@ -1937,7 +1967,10 @@ pub fn entry_target<S: DirectorySource>(
     let scrolled = view.view(offset);
     let parts = entry_parts(
         tiles,
-        browser.entries().get(index)?,
+        (
+            browser.entries().get(index)?,
+            browser.presentation().endings,
+        ),
         grid.cell_rect(index)?,
         scale,
         theme,
@@ -2015,7 +2048,7 @@ pub fn entry_name_target<S: DirectorySource>(
     let name = match Tiles::of(browser.view_mode()) {
         None => list_name_rect(browser, entry, item, scale, theme)?,
         Some(tiles) => {
-            let shown = shown(entry.name());
+            let shown = entry_label(entry, browser.presentation().endings);
             tiles
                 .layout()
                 .name_target(item, scale, theme, &shown, name_cut(&shown))?
@@ -2041,7 +2074,9 @@ fn list_name_rect<S: DirectorySource>(
     let parent = browser.components();
     let kind = icon_for_entry(entry, parent);
     let columns = ListColumns::of(browser.entries());
-    entry_row((entry, parent), columns, false, kind).cell_text_rect(item, scale, theme, &COLUMNS, 0)
+    let endings = browser.presentation().endings;
+    entry_row((entry, parent), columns, (false, endings), kind)
+        .cell_text_rect(item, scale, theme, &COLUMNS, 0)
 }
 
 /// Draw the in-place rename `field` over the chosen item's name, laid out

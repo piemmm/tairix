@@ -49,7 +49,9 @@ use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::media::BlankDocument;
 use crate::open_with::{AppAssociation, OPEN_WITH_QUICK_MAX};
-use crate::sort::SortMode;
+use crate::presentation::HiddenEndings;
+use crate::render::ListColumns;
+use crate::sort::{SortDirection, SortKey, SortMode};
 use crate::source::DirectorySource;
 use crate::vfs::push_shown_name;
 
@@ -554,6 +556,10 @@ pub enum ContextChoice {
     NewDocument(usize),
     /// This display was chosen from Display ▸.
     Display(ViewMode),
+    /// The listing is to be ordered by this key, chosen from Display ▸.
+    SortBy(SortKey),
+    /// The listing is to be ordered in this direction, chosen from Display ▸.
+    SortIn(SortDirection),
 }
 
 /// The id the Rename row's quick-entry field answers with: the one past the
@@ -572,8 +578,16 @@ const NEW_FOLDER: usize = FIRST_CANDIDATE + OPEN_WITH_QUICK_MAX;
 /// the machine's, so no display's id moves with what is installed.
 const FIRST_DISPLAY: usize = NEW_FOLDER + 1;
 
+/// The id the first of Display ▸'s sort keys answers with, the rest following
+/// in [`SortKey::ALL`] order whichever of them a listing offers.
+const FIRST_SORT_KEY: usize = FIRST_DISPLAY + ViewMode::ALL.len();
+
+/// The id the first of Display ▸'s sort directions answers with, the other
+/// following in [`SortDirection::ALL`] order.
+const FIRST_SORT_DIRECTION: usize = FIRST_SORT_KEY + SortKey::ALL.len();
+
 /// The first New ▸ document's id.
-const FIRST_DOCUMENT: usize = FIRST_DISPLAY + ViewMode::ALL.len();
+const FIRST_DOCUMENT: usize = FIRST_SORT_DIRECTION + SortDirection::ALL.len();
 
 /// New ▸'s label, which also titles its plate.
 const NEW_LABEL: &str = "New";
@@ -586,6 +600,9 @@ const DISPLAY_LABEL: &str = "Display";
 
 /// Why the display in force cannot be chosen again.
 const REASON_CURRENT_DISPLAY: &str = "the window shows its items this way";
+
+/// Why the order in force cannot be chosen again.
+const REASON_CURRENT_ORDER: &str = "the window is sorted this way";
 
 /// The selection row's label while it names no one item.
 const SELECTION_LABEL: &str = "Selection";
@@ -619,6 +636,56 @@ impl ViewMode {
     }
 }
 
+impl SortKey {
+    /// The label Display ▸ offers ordering by this key under.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Sort by Name",
+            Self::Kind => "Sort by Type",
+            Self::Size => "Sort by Size",
+            Self::Modified => "Sort by Date Modified",
+            Self::Free => "Sort by Free Space",
+            Self::Filesystem => "Sort by Filesystem",
+            Self::Health => "Sort by Health",
+        }
+    }
+
+    /// The function this key's row shows.
+    #[must_use]
+    pub const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Name => AppMenuSymbol::SortByName,
+            Self::Kind => AppMenuSymbol::SortByKind,
+            Self::Size => AppMenuSymbol::SortBySize,
+            Self::Modified => AppMenuSymbol::SortByDate,
+            Self::Free => AppMenuSymbol::SortByFree,
+            Self::Filesystem => AppMenuSymbol::SortByFilesystem,
+            Self::Health => AppMenuSymbol::SortByHealth,
+        }
+    }
+}
+
+impl SortDirection {
+    /// The label Display ▸ offers this direction under.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ascending => "Ascending",
+            Self::Descending => "Descending",
+        }
+    }
+
+    /// The function this direction's row shows.
+    #[must_use]
+    pub const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Ascending => AppMenuSymbol::SortAscending,
+            Self::Descending => AppMenuSymbol::SortDescending,
+        }
+    }
+}
+
 /// The accelerator that also makes a new folder.
 const NEW_FOLDER_SHORTCUT: &str = "Ctrl+Shift+N";
 
@@ -627,10 +694,12 @@ const NEW_FOLDER_SHORTCUT: &str = "Ctrl+Shift+N";
 ///
 /// The exact inverse of the numbering [`context_menu`] assigns: the commands
 /// in [`CONTEXT_COMMANDS`] order, the Rename row's field, the quick
-/// candidates, New ▸ Folder, the displays, then the New ▸ documents. A candidate's or a
-/// document's index is its position in the list the menu was *given*, not
-/// among the rows that fitted, so a row the plate could not seat shifts no
-/// other row's meaning.
+/// candidates, New ▸ Folder, the displays, every sort key, both sort
+/// directions, then the New ▸ documents. A candidate's or a document's index
+/// is its position in the list the menu was *given*, not among the rows that
+/// fitted, and a key's is its place in [`SortKey::ALL`], not among the keys a
+/// listing offers, so neither a row the plate could not seat nor a listing of
+/// drives shifts another row's meaning.
 #[must_use]
 pub fn context_choice_from_item(item: AppMenuItemId) -> Option<ContextChoice> {
     let index = item.index();
@@ -641,8 +710,14 @@ pub fn context_choice_from_item(item: AppMenuItemId) -> Option<ContextChoice> {
         RENAME_COMMIT => ContextChoice::RenameCommit,
         NEW_FOLDER => ContextChoice::NewFolder,
         _ if index < NEW_FOLDER => ContextChoice::OpenWithCandidate(index - FIRST_CANDIDATE),
-        _ if index < FIRST_DOCUMENT => {
+        _ if index < FIRST_SORT_KEY => {
             ContextChoice::Display(*ViewMode::ALL.get(index - FIRST_DISPLAY)?)
+        }
+        _ if index < FIRST_SORT_DIRECTION => {
+            ContextChoice::SortBy(*SortKey::ALL.get(index - FIRST_SORT_KEY)?)
+        }
+        _ if index < FIRST_DOCUMENT => {
+            ContextChoice::SortIn(*SortDirection::ALL.get(index - FIRST_SORT_DIRECTION)?)
         }
         _ => ContextChoice::NewDocument(index - FIRST_DOCUMENT),
     })
@@ -665,8 +740,8 @@ fn item_id(index: usize) -> Result<AppMenuItemId, Errno> {
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ContextQuick<'a> {
     /// The one chosen entry, whose name the selection's row names and the
-    /// Rename row's field starts out holding, with its
-    /// [`rename_selection`](crate::rename_selection) selected.
+    /// Rename row's field starts out holding as
+    /// [`rename_text`](crate::rename_text) gives it.
     pub chosen: Option<&'a Entry>,
     /// The applications that can open the selection, highest-ranked first
     /// ([`quick_applications`](crate::open_with::quick_applications)); a plate
@@ -678,7 +753,8 @@ pub struct ContextQuick<'a> {
 }
 
 /// Build the row model a secondary press asks the desktop to open, under the
-/// root `title`: Display ▸, then the selection's own submenu and New ▸, then
+/// root `title`: Display ▸ (the views, then the listing's orders), then the
+/// selection's own submenu and New ▸, then
 /// Select All and Clear Selection, then Paste. The selection's submenu holds
 /// the verbs that act on it ([`ContextCommand::acts_on_selection`]) and is
 /// labelled with what it acts on — `File ‘notes.txt’`, the name shortened to
@@ -698,10 +774,11 @@ pub struct ContextQuick<'a> {
 /// cannot hold leaves the row opening the in-place editor instead. New ▸ always
 /// opens, onto Folder and then `quick`'s documents: it acts on the directory,
 /// and whether the directory takes a new entry is the VFS's answer at create
-/// time. Command rows are pushed before New ▸'s, the displays and the
-/// candidates, so neither a long candidate list nor the documents can crowd a
-/// command off the plate; a row the text budget cannot seat is left out, and a
-/// candidate whose path will not fit keeps its row and loses only its picture.
+/// time. The commands and Display ▸'s fixed rows are pushed before New ▸'s
+/// documents and the candidates, so neither a long candidate list nor the
+/// documents can crowd a fixed row off the plate; a row the text budget cannot
+/// seat is left out, and a candidate whose path will not fit keeps its row and
+/// loses only its picture.
 ///
 /// The menu performs nothing — the caller dispatches the chosen row in its own
 /// capability-checked tail — so composing it grants no authority; the
@@ -721,7 +798,7 @@ pub fn context_menu(
     quick: ContextQuick<'_>,
 ) -> Result<AppMenu, Errno> {
     let mut menu = AppMenu::titled(AppMenuLabel::new(title)?);
-    let name = quick.chosen.map_or("", Entry::name);
+    let name = quick.chosen.map_or("", |entry| model.endings.shown(entry));
     let display_row = push_submenu(
         &mut menu,
         AppMenuLabel::new(DISPLAY_LABEL)?,
@@ -758,17 +835,15 @@ pub fn context_menu(
         }
         let reason = model.reason(command);
         let enabled = reason.is_empty();
-        push_on(
-            &mut menu,
-            &AppMenuRow::Item(command_item(index, command, reason, quick.chosen)?),
-            plate,
-        )?;
+        let item = command_item(index, command, reason, (quick.chosen, model.endings))?;
+        push_on(&mut menu, &AppMenuRow::Item(item), plate)?;
         if command == ContextCommand::OpenWith && enabled && !quick.candidates.is_empty() {
             open_with_row = Some(menu.len() - 1);
         }
     }
-    push_new_rows(&mut menu, new_row, quick.documents)?;
     push_display_rows(&mut menu, display_row, model.display)?;
+    push_sort_rows(&mut menu, display_row, model.sort, model.sort_keys)?;
+    push_new_rows(&mut menu, new_row, quick.documents)?;
     if let Some(parent) = open_with_row {
         push_candidates(&mut menu, parent, quick.candidates)?;
     }
@@ -777,8 +852,9 @@ pub fn context_menu(
 
 /// The row for `command`, numbered by its `index` in [`CONTEXT_COMMANDS`]:
 /// disabled with `reason` when there is one, and — for an actionable Rename —
-/// carrying a quick-entry field holding `chosen`'s name, its stem selected,
-/// when the field can hold it.
+/// carrying a quick-entry field holding `chosen`'s name as `endings` show it,
+/// its stem selected ([`rename_text`](crate::rename_text)), when the field can
+/// hold it.
 ///
 /// # Errors
 ///
@@ -787,7 +863,7 @@ fn command_item(
     index: usize,
     command: ContextCommand,
     reason: &str,
-    chosen: Option<&Entry>,
+    (chosen, endings): (Option<&Entry>, HiddenEndings),
 ) -> Result<AppMenuItem, Errno> {
     let mut item = AppMenuItem::new(
         item_id(index)?,
@@ -803,15 +879,15 @@ fn command_item(
     }
     if command == ContextCommand::Rename {
         let field = chosen.and_then(|entry| {
-            AppMenuEntryText::new(entry.name())
+            let (text, selected) = crate::rename_text(entry, endings);
+            AppMenuEntryText::new(text)
                 .ok()
                 .filter(|initial| !initial.is_empty())
-                .map(|initial| (entry, initial))
+                .map(|initial| (initial, selected))
         });
-        if let Some((entry, initial)) = field {
+        if let Some((initial, selected)) = field {
             item = item.with_entry(
-                AppMenuEntry::new(item_id(RENAME_COMMIT)?, initial)
-                    .with_selection(crate::rename_selection(entry))?,
+                AppMenuEntry::new(item_id(RENAME_COMMIT)?, initial).with_selection(selected)?,
             );
         }
     }
@@ -941,6 +1017,66 @@ fn push_display_rows(menu: &mut AppMenu, parent: usize, shown: ViewMode) -> Resu
     Ok(())
 }
 
+/// Push Display ▸'s orders under the submenu row at `parent`, after the
+/// displays: a group of the `keys` the listing's columns order by, then a group
+/// of both directions, the order in force marked in each and refused with its
+/// reason.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shared bounds refuse. The rows are fixed, so a refusal
+/// can only mean those bounds changed under this menu.
+fn push_sort_rows(
+    menu: &mut AppMenu,
+    parent: usize,
+    order: SortMode,
+    keys: [SortKey; 4],
+) -> Result<(), Errno> {
+    menu.push_under(AppMenuRow::Separator, parent)?;
+    for key in keys {
+        let row = (sort_key_id(key)?, key.label(), key.symbol());
+        push_order_row(menu, parent, row, key == order.key)?;
+    }
+    menu.push_under(AppMenuRow::Separator, parent)?;
+    for (at, direction) in SortDirection::ALL.into_iter().enumerate() {
+        let row = (
+            item_id(FIRST_SORT_DIRECTION + at)?,
+            direction.label(),
+            direction.symbol(),
+        );
+        push_order_row(menu, parent, row, direction == order.direction)?;
+    }
+    Ok(())
+}
+
+/// The id Display ▸ numbers ordering by `key` with: its place in
+/// [`SortKey::ALL`].
+fn sort_key_id(key: SortKey) -> Result<AppMenuItemId, Errno> {
+    let at = SortKey::ALL
+        .iter()
+        .position(|&each| each == key)
+        .ok_or(Errno::OutOfRange)?;
+    item_id(FIRST_SORT_KEY + at)
+}
+
+/// Push one of Display ▸'s orders under `parent`, marked as its group's choice
+/// and refused with its reason when it is `in_force`.
+fn push_order_row(
+    menu: &mut AppMenu,
+    parent: usize,
+    (id, label, symbol): (AppMenuItemId, &str, AppMenuSymbol),
+    in_force: bool,
+) -> Result<(), Errno> {
+    let mut item = AppMenuItem::new(id, AppMenuLabel::new(label)?, symbol);
+    if in_force {
+        item = item
+            .with_mark(AppMenuMark::Radio)
+            .disabled()
+            .with_reason(AppMenuReason::new(REASON_CURRENT_ORDER)?);
+    }
+    menu.push_under(AppMenuRow::Item(item), parent)
+}
+
 /// Push the quick candidates under the "Open With…" row at `parent`, at most
 /// [`OPEN_WITH_QUICK_MAX`] of them.
 ///
@@ -1007,6 +1143,13 @@ pub struct ContextMenuModel {
     has_clipboard: bool,
     /// How the window shows its entries, which Display ▸ marks.
     display: ViewMode,
+    /// How the window orders its entries, which Display ▸ marks.
+    sort: SortMode,
+    /// The keys the listing's columns order by, which Display ▸ offers.
+    sort_keys: [SortKey; 4],
+    /// The endings the window shows names without, which the selection's row
+    /// and the Rename field show the chosen name without too.
+    endings: HiddenEndings,
 }
 
 impl ContextMenuModel {
@@ -1025,6 +1168,9 @@ impl ContextMenuModel {
             listed: browser.entries().len(),
             has_clipboard,
             display: browser.view_mode(),
+            sort: browser.sort_mode(),
+            sort_keys: ListColumns::of(browser.entries()).keys(),
+            endings: browser.presentation().endings,
         }
     }
 

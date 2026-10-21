@@ -63,8 +63,8 @@ use tairix_abi::Errno;
 use tairix_browse::render::{entry_parts, Tiles};
 use tairix_browse::{
     applications_for, entry_icon, merge_changes, resolve_occupancy, sort_entries, AppAssociation,
-    DirectorySource, Entry, EntryChange, EntryKind, GridFlow, GridView, LinkTarget, Listing,
-    NewEntry, SortDirection, SortKey, SortMode,
+    DirectorySource, Entry, EntryChange, EntryKind, GridFlow, GridView, HiddenEndings, LinkTarget,
+    Listing, NewEntry, Pictures, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::IconTile;
@@ -922,7 +922,8 @@ impl<S: DirectorySource> Desktop<S> {
             theme,
             |bounds| !bounds.intersection(&area).is_empty(),
             |icon| {
-                let tile = Tiles::Large.tile(icon.entry, self.icon_state(icon.index), icon.kind);
+                let state = self.icon_state(icon.index);
+                let tile = Tiles::Large.tile(icon.entry, state, icon.kind, HiddenEndings::NONE);
                 let art = artwork.shadowed(icon.request, icon.side, shadow);
                 tile.render(surface, icon.bounds, scale, theme, art);
             },
@@ -952,7 +953,8 @@ impl<S: DirectorySource> Desktop<S> {
             let Some(bounds) = shown_whole(layout, index).filter(|&bounds| wanted(bounds)) else {
                 continue;
             };
-            let (kind, request) = entry_icon(&dir, &self.folder, entry, &mut scratch);
+            let (kind, request) =
+                entry_icon(&dir, &self.folder, entry, Pictures::ALL, &mut scratch);
             visit(ShownIcon {
                 index,
                 entry,
@@ -970,9 +972,16 @@ impl<S: DirectorySource> Desktop<S> {
     fn icon_at(&self, layout: &GridView, at: Point, scale: Scale, theme: &Theme) -> Option<usize> {
         let index = layout.index_at(DESKTOP_SCROLL, at)?;
         let cell = shown_whole(layout, index)?;
-        entry_parts(Tiles::Large, self.entries.get(index)?, cell, scale, theme)?
-            .contains(at)
-            .then_some(index)
+        let entry = self.entries.get(index)?;
+        entry_parts(
+            Tiles::Large,
+            (entry, HiddenEndings::NONE),
+            cell,
+            scale,
+            theme,
+        )?
+        .contains(at)
+        .then_some(index)
     }
 
     /// The composed control state of the icon at `index`: selected, hovered,
@@ -1409,7 +1418,7 @@ const fn sort_mode(sort: IconSort) -> SortMode {
     };
     SortMode {
         key,
-        direction: SortDirection::Ascending,
+        ..SortMode::default_order()
     }
 }
 

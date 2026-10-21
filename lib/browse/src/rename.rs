@@ -25,6 +25,8 @@
 //! as [`RenameError::Clash`] too. Exact matching never refuses a name the
 //! volume would take, so a re-spelling of the entry itself goes through.
 
+use alloc::borrow::Cow;
+use alloc::string::String;
 use core::ops::Range;
 
 use tairix_abi::Errno;
@@ -32,6 +34,7 @@ use tairix_path::PathError;
 
 use crate::entry::{Entry, EntryKind};
 use crate::media::Ending;
+use crate::presentation::HiddenEndings;
 
 /// Why a rename was not applied.
 ///
@@ -144,15 +147,39 @@ pub fn validate_new_name(
     Ok(())
 }
 
-/// The part of `entry`'s name an in-place rename opens with selected:
-/// everything before what ends it — an extension, a RISC OS file type, a
-/// bundle's suffix — so typing replaces the name and keeps what it is. A
-/// folder's name has no ending to keep and is selected whole.
+/// What an in-place rename of `entry` opens with: its name as `endings` show
+/// it, and the part of that selected — everything before what ends it (an
+/// extension, a RISC OS file type, a bundle's suffix), so typing replaces the
+/// name and keeps what it is. A folder's name, or one whose ending is hidden,
+/// has no ending on show to keep and is selected whole.
 #[must_use]
-pub fn rename_selection(entry: &Entry) -> Range<usize> {
-    let name = entry.name();
-    match entry.kind().resolved() {
-        Some(EntryKind::Directory) => 0..name.len(),
-        _ => 0..Ending::of(name).stem.len(),
+pub fn rename_text(entry: &Entry, endings: HiddenEndings) -> (&str, Range<usize>) {
+    let text = endings.shown(entry);
+    let selected = match entry.kind().resolved() {
+        Some(EntryKind::Directory) => 0..text.len(),
+        _ if !endings.hidden(entry).is_empty() => 0..text.len(),
+        _ => 0..Ending::of(text).stem.len(),
+    };
+    (text, selected)
+}
+
+/// The name a rename of `entry` to `typed` gives it: `typed` with the ending
+/// `endings` hide restored, so renaming what is shown keeps what the entry is
+/// — unless `typed` already ends in that ending, or is empty and so names
+/// nothing.
+#[must_use]
+pub fn renamed<'a>(entry: &Entry, endings: HiddenEndings, typed: &'a str) -> Cow<'a, str> {
+    let hidden = endings.hidden(entry);
+    let restates = typed
+        .len()
+        .checked_sub(hidden.len())
+        .and_then(|at| typed.get(at..))
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(hidden));
+    if hidden.is_empty() || typed.is_empty() || restates {
+        return Cow::Borrowed(typed);
     }
+    let mut name = String::with_capacity(typed.len() + hidden.len());
+    name.push_str(typed);
+    name.push_str(hidden);
+    Cow::Owned(name)
 }

@@ -62,6 +62,9 @@
 //!   associations, resolving a file's type through [`media`](mod@media) and
 //!   matching along its subclass chain, most specific declaration first.
 //! * [`sort`](mod@sort) — the [`SortMode`] and the one shared listing order.
+//! * [`presentation`](mod@presentation) — the [`Presentation`] a browser shows
+//!   its listing by: the [`HiddenEndings`] names are shown without, whether
+//!   hidden items are listed, and the [`Pictures`] entries are drawn as.
 //! * [`trash`](mod@trash) — the recoverable-delete model: the
 //!   [`trash_strategy`] same-volume move-vs-unlink decision, the
 //!   collision-safe [`trash_dest_path`] destination naming
@@ -143,6 +146,7 @@ pub mod mode_edit;
 pub mod open_with;
 pub mod owner_edit;
 pub mod places;
+pub mod presentation;
 pub mod probes;
 pub mod progress;
 pub mod properties;
@@ -175,8 +179,8 @@ pub use delete::{
 pub use desk::{ListingDesk, ListingJob};
 pub use drive::{Drive, DriveChange, DrivePanels, DriveSample};
 pub use entry::{
-    is_bundle_name, resolve_target, DriveMark, Entry, EntryKind, LinkResolution, LinkTarget,
-    Occupancy,
+    bundle_stem, is_bundle_name, resolve_target, DriveMark, Entry, EntryKind, LinkResolution,
+    LinkTarget, Occupancy,
 };
 pub use error::BrowseError;
 pub use execute::{
@@ -188,7 +192,7 @@ pub use layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLay
 pub use marquee::Marquee;
 pub use media::{
     entry_icon, folder_sample, icon_for_entry, media_for_entry, media_for_name, BlankDocument,
-    Ending, Family, MediaType,
+    Ending, Family, MediaType, Site,
 };
 pub use mode_edit::{validate_mode, InvalidMode};
 pub use open_with::{
@@ -199,14 +203,15 @@ pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
 pub use places::{
     bare_open_places, Place, PlaceKind, Places, Volume, VolumeFacts, FIXED_LABELS, MAX_PLACE_LABEL,
 };
+pub use presentation::{HiddenEndings, Pictures, Presentation};
 pub use probes::Probes;
 pub use progress::{ProgressModel, ProgressOp, Reading, Subject, Tally};
 pub use properties::{Attribute, Attributes, Properties};
-pub use rename::{rename_selection, validate_new_name, RenameError};
+pub use rename::{rename_text, renamed, validate_new_name, RenameError};
 pub use render::{render_into, ManagerChrome};
 pub use rowlist::RowList;
 pub use select::Selection;
-pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
+pub use sort::{sort_entries, Folders, SortDirection, SortKey, SortMode};
 pub use source::{resolve_occupancy, DirectorySource, Listing, Probe};
 pub use survey::{Survey, SurveyStep};
 pub use tairix_abi::window_ipc::WindowSizing;
@@ -395,6 +400,20 @@ pub const WIN_RESIZABLE: bool = sizing_of(0, 0, 0).resizable();
 /// value, so the tile a script aims at and the tile the renderer paints
 /// cannot disagree.
 pub const MANAGER_VIEW_MODE: ViewMode = ViewMode::LargeIcons;
+
+/// How a **file-manager** window presents its listing until the user's
+/// settings say otherwise: an application without its `.app` ending, items
+/// whose names begin with a dot left out, a picture and a folder shown by what
+/// they hold. Read by the app's default settings and by the same host-side
+/// reconstruction as [`MANAGER_VIEW_MODE`], for the same reason.
+pub const MANAGER_PRESENTATION: Presentation = Presentation {
+    endings: HiddenEndings {
+        applications: true,
+        known_types: false,
+    },
+    hidden_items: false,
+    pictures: Pictures::ALL,
+};
 
 /// The command-toolbar band a **file-manager** window opens with: none.
 ///

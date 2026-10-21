@@ -101,7 +101,8 @@ pub fn path_matches(word: &str, bare_dir: &str, lister: &dyn DirLister) -> Vec<D
         return Vec::new();
     };
     entries.retain(|entry| {
-        entry.name.starts_with(leaf) && (!entry.name.starts_with('.') || leaf.starts_with('.'))
+        entry.name.starts_with(leaf)
+            && (!tairix_path::is_hidden_name(&entry.name) || tairix_path::is_hidden_name(leaf))
     });
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     entries

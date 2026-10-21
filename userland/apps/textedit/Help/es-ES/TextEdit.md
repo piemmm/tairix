@@ -24,26 +24,36 @@ que parece contener datos binarios se abre en la vista hexadecimal, que
 muestra cada byte como dos dígitos hexadecimales junto a su carácter y edita
 los mismos bytes que la vista de texto.
 
-Un ejecutable — una imagen de programa de TAIRiX, un archivo ELF64 o un
-módulo WebAssembly — se abre en cambio en la vista de código: sus regiones y
-luego las instrucciones de cada región de código, una por línea con su
-dirección y sus bytes de codificación, rotuladas con los símbolos que inician
-y los símbolos a los que llegan sus saltos. La vista de código es de solo
-lectura; las vistas de texto y hexadecimal editan el mismo archivo. El código
-lo descodifica un segundo proceso de trabajo propio, también sin ningún
-alcance, y se lee como el juego de instrucciones que nombra el archivo o, si
-no, como el de esta máquina; «Juego de instrucciones» del menú Ver lo lee como
-otro, y el campo de vista de la línea de estado ofrece la vista de código
-junto a texto y hexadecimal.
+Un ejecutable — una imagen de programa de TAIRiX, un controlador, un archivo
+ELF64 o un módulo WebAssembly — se abre en cambio en la vista de código: lo
+que dicen sus cabeceras, cada parte en su posición con su longitud y lo que
+declara — la versión del sistema para la que se compiló, su punto de
+entrada, sus segmentos y las bibliotecas que necesita, el manifiesto firmado
+de un controlador con las capacidades que solicita y el hardware al que se
+vincula, las cabeceras de programa y de sección de un archivo ELF, las
+secciones de un módulo — y luego las instrucciones de cada región de código,
+una por línea con su dirección y sus bytes de codificación, rotuladas con
+los símbolos que inician y los símbolos a los que llegan sus saltos. Las
+claves y las firmas se muestran tal como están escritas, sin comprobarse. La
+vista de código es de solo lectura; las vistas de texto y hexadecimal editan
+el mismo archivo. El código lo descodifica un segundo proceso de trabajo
+propio, también sin ningún alcance, y se lee como el juego de instrucciones
+que nombra el archivo o, si no, como el de esta máquina; «Juego de
+instrucciones» del menú Ver lo lee como otro, y el campo de vista de la
+línea de estado ofrece la vista de código junto a texto y hexadecimal.
 
 Una imagen —PNG, JPEG, GIF, BMP, TIFF, WEBP, un archivo de icono o de
 puntero, un área de sprites de RISC OS o un documento OpenRaster— se abre en
 su lugar en la vista de datos: de qué está hecho el archivo, cada registro
 en su posición con su longitud y lo que declara, cada etiqueta EXIF por su
 nombre con su valor, y después cada byte del archivo en hexadecimal junto a
-su carácter. La vista de datos es de solo lectura; la vista hexadecimal
-edita los mismos bytes. La imagen la lee un tercer proceso de trabajo
-propio, también sin acceso a nada, y el menú Ver ofrece la vista de datos
+su carácter. Un manifiesto firmado —el `AppInfo` de una aplicación o el
+manifiesto de un programa— también se abre ahí: lo que nombra, las
+capacidades que solicita, los tipos de archivo que reclama y los servicios
+que busca, y después sus bytes. La vista de datos es de solo lectura; la
+vista hexadecimal edita los mismos bytes. Una imagen la lee un tercer
+proceso de trabajo propio y un manifiesto lo lee el de la vista de código,
+ninguno de los dos con acceso a nada, y el menú Ver ofrece la vista de datos
 junto al texto y al hexadecimal.
 
 El código fuente se colorea: HTML, XML y SVG, CSS, JavaScript, JSON, YAML,

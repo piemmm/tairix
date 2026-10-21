@@ -275,6 +275,15 @@ pub const ICON_KINDS: [IconKind; core::mem::variant_count::<IconKind>()] = [
     IconKind::DoorOpen,
     IconKind::Star,
     IconKind::Shield,
+    IconKind::SortAscending,
+    IconKind::SortDescending,
+    IconKind::SortByHealth,
+    IconKind::Driver,
+    IconKind::Manifest,
+    IconKind::ApplicationProgram,
+    IconKind::CommandProgram,
+    IconKind::ElfExecutable,
+    IconKind::WasmModule,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

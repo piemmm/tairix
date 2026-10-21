@@ -79,10 +79,10 @@ Stability tier: **experimental**.
   parent-side path (framing, containment, typed decode) under plain
   `cargo test`, exactly as the `Fs`/`Tty` seams take fakes.
 - **`decode`** — the first consumers behind the seam: executable-container
-  summaries through [`tairix-binfmt`](./binfmt.md) and per-window
-  instruction disassembly through [`tairix-disasm`](./disasm.md). The
-  `DecodeService` runs inside the worker; the client helpers
-  (`container_summary`, `manifest_summary`, `disassemble`) marshal typed
+  summaries and file reports through [`tairix-binfmt`](./binfmt.md) and
+  per-window instruction disassembly through [`tairix-disasm`](./disasm.md).
+  The `DecodeService` runs inside the worker; the client helpers
+  (`container_summary`, `file_report`, `disassemble`) marshal typed
   requests and validate every reply field **fail-closed** — a worker that
   has parsed hostile bytes is itself hostile, so list counts, name
   lengths, tags, and instruction lengths are all bounds-checked before
@@ -149,7 +149,8 @@ Stability tier: **experimental**.
 - **`imageinspect`** — a picture's structure report over the same upload: the
   records its container holds and every EXIF tag (`tairix_image::inspect`),
   answered as lines the caller holds to `MAX_REPORT_LINES`, `MAX_LINE_BYTES`
-  and printable UTF-8. The image worker serves it beside its other ops, and
+  and printable UTF-8 — the one report reply every report op shares, as
+  `decode`'s `file_report` does. The image worker serves it beside its other ops, and
   `InspectService` alone, in a worker held to one document. `TextEdit.app`'s
   Data display is the consumer.
 - **`audiodecode`** — a sound file decoded through

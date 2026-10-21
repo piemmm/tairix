@@ -117,6 +117,7 @@ pub fn sweep<S: DirectorySource>(
     let core = layout.band_cells_within(band, part);
     let cells = layout.band_cells(band);
     let entries = browser.entries();
+    let endings = browser.presentation().endings;
     let Marquee {
         next,
         edges,
@@ -128,7 +129,9 @@ pub fn sweep<S: DirectorySource>(
         let (Some(cell), Some(entry)) = (layout.layout_rect(index), entries.get(index)) else {
             return false;
         };
-        let name = FastHash::hash_bytes(0, entry.name().as_bytes());
+        // Keyed by the name as shown, so parts laid out for one presentation
+        // are never taken for another's.
+        let name = FastHash::hash_bytes(0, endings.shown(entry).as_bytes());
         let parts = match edges.binary_search_by_key(&index, |found| found.index) {
             Ok(at) if edges[at].cell == cell && edges[at].name == name => edges[at].parts,
             _ => {
@@ -143,7 +146,7 @@ pub fn sweep<S: DirectorySource>(
                         picture: Some(cell),
                         name: None,
                     }),
-                    |tiles| entry_parts(tiles, entry, cell, frame.scale, frame.theme),
+                    |tiles| entry_parts(tiles, (entry, endings), cell, frame.scale, frame.theme),
                 )
             }
         };

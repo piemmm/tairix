@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use super::report;
 use crate::ifd::{ASCII, LONG, RATIONAL, SHORT, UNDEFINED};
-use crate::inspect::Builder;
+use tairix_util::report::Builder;
 
 /// One entry of a block being built: its tag, type, count and value bytes.
 pub(crate) struct Field {

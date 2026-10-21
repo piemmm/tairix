@@ -1,12 +1,19 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_image::inspect::ReportLine;
+use tairix_abi::CapabilityId;
+use tairix_log::DiscardSink;
+use tairix_sandbox::decode::{DecodeService, MAX_INPUT};
 use tairix_sandbox::imageinspect::{InspectFailure, InspectRefusal};
 use tairix_sandbox::imagerender::ViewFormat;
+use tairix_sandbox::loopback::LoopbackLauncher;
+use tairix_sandbox::ParserSandbox;
+use tairix_util::report::ReportLine;
 
-use super::{no_memory, too_large, unreported, DataDisplay, DataRow, READING};
+use super::{report_manifest, unreported, DataDisplay, DataRow, Structure};
 use crate::answer::Unlisted;
+
+const PICTURE: Structure = Structure::Picture(None);
 
 /// The opening bytes of a PNG file.
 const PNG_HEAD: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR";
@@ -24,9 +31,12 @@ fn report(lines: usize) -> Vec<ReportLine> {
 fn a_picture_is_offered_as_data_by_its_signature_or_a_sprite_by_its_name() {
     let png = DataDisplay::of(PNG_HEAD, "anything").expect("a picture");
     assert!(png.showing(), "a picture opens as data");
-    assert_eq!(png.named(), None, "its content says what it is");
+    assert_eq!(png.structure(), PICTURE, "its content says what it is");
     let sprite = DataDisplay::of(b"\x01\0\0\0", "Sprites,ff9").expect("named");
-    assert_eq!(sprite.named(), Some(ViewFormat::Sprite));
+    assert_eq!(
+        sprite.structure(),
+        Structure::Picture(Some(ViewFormat::Sprite))
+    );
     assert!(DataDisplay::of(b"plain text", "notes.txt").is_none());
     assert!(
         DataDisplay::of(b"", "photo.jpg").is_none(),
@@ -38,7 +48,7 @@ fn a_picture_is_offered_as_data_by_its_signature_or_a_sprite_by_its_name() {
 fn the_rows_are_the_report_a_heading_then_a_row_a_sixteen_of_bytes() {
     let mut display = DataDisplay::of(PNG_HEAD, "a.png").expect("a picture");
     let len = 40;
-    assert_eq!(display.row(0, len), Some(DataRow::Note(READING)));
+    assert_eq!(display.row(0, len), Some(DataRow::Note(PICTURE.reading())));
     assert_eq!(display.row(1, len), Some(DataRow::Bytes));
     assert_eq!(display.row_count(len), 1 + 1 + 3);
     let id = display.want(1).expect("asked");
@@ -71,16 +81,16 @@ fn a_report_is_asked_once_a_generation_and_only_its_own_answer_is_taken() {
 fn a_passing_refusal_is_asked_again_when_shown_afresh_and_a_lasting_one_stands() {
     let mut display = DataDisplay::of(PNG_HEAD, "a.png").expect("a picture");
     let id = display.want(1).expect("asked");
-    assert!(display.reported(id, Err(no_memory()), 0));
+    assert!(display.reported(id, Err(PICTURE.no_memory()), 0));
     assert_eq!(
         display.row(0, 0),
-        Some(DataRow::Note(no_memory().reason.as_str()))
+        Some(DataRow::Note(PICTURE.no_memory().reason.as_str()))
     );
     assert!(display.show(false));
     assert_eq!(display.want(1), None, "not shown, not asked");
     assert!(display.show(true));
     let id = display.want(1).expect("asked again");
-    assert!(display.reported(id, Err(too_large()), 0));
+    assert!(display.reported(id, Err(PICTURE.too_large()), 0));
     assert!(display.show(false) && display.show(true));
     assert_eq!(display.want(1), None, "a lasting refusal stands");
 }
@@ -109,4 +119,56 @@ fn a_failure_to_read_says_why_and_whether_asking_again_could_help() {
             lasting: false,
         }
     );
+}
+
+/// A program manifest asking for raw sockets.
+fn manifest() -> Vec<u8> {
+    let header = tairix_abi::ManifestHeader {
+        magic: tairix_abi::MANIFEST_MAGIC,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
+        flags: 0,
+        capability_count: 1,
+        reserved0: 0,
+        syscall_table_hash: [0x11; 32],
+        signer_pubkey: [0x22; 32],
+        signature: [0x33; 64],
+    };
+    let mut bytes = header.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&CapabilityId::NET_RAW.as_u16().to_le_bytes());
+    bytes
+}
+
+#[test]
+fn a_manifest_is_offered_as_data_and_its_report_is_read_in_the_decode_worker() {
+    let file = manifest();
+    let display = DataDisplay::of(&file, "AppInfo").expect("a manifest");
+    assert_eq!(display.structure(), Structure::Manifest);
+    assert_eq!(
+        Structure::Manifest.reading(),
+        "Reading the manifest\u{2026}"
+    );
+    assert!(
+        DataDisplay::of(b"RXEL\x01\0\0\0", "Run").is_none(),
+        "code is not data"
+    );
+
+    let mut sandbox = ParserSandbox::new(
+        LoopbackLauncher::new(DecodeService::default as fn() -> _),
+        DiscardSink,
+    );
+    let lines = report_manifest(&mut sandbox, &file).expect("a report");
+    assert!(lines[0].heading, "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line.text.contains("CAP_NET_RAW")),
+        "{lines:?}"
+    );
+    let huge = alloc::vec![0u8; MAX_INPUT + 1];
+    assert_eq!(
+        report_manifest(&mut sandbox, &huge),
+        Err(Structure::Manifest.too_large())
+    );
+    assert!(Structure::Manifest
+        .too_large()
+        .reason
+        .contains("a manifest"));
 }

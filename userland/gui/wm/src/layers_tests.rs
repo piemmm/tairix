@@ -16,7 +16,9 @@ use crate::color::{Color, Pixel};
 use crate::geometry::{Point, Rect, Region};
 use crate::pointer::{Ghost, Halo, HaloRing};
 use crate::surface::Surface;
-use crate::tests::{mode, new_compositor, opaque, solid_cursor, MockDisplay};
+use crate::tests::{
+    decorated, mode, new_compositor, opaque, solid_cursor, MockDisplay, SETTLED_NS,
+};
 use crate::{Compositor, Presentation, WindowFrame, WindowId, WindowSizeState};
 
 use super::Source;
@@ -1605,4 +1607,109 @@ fn a_pointer_bake_short_of_memory_stages_nothing() {
     let (finished, settled) = staged(&c).expect("the pointer's layer");
     assert!(finished.is_some(), "staged once the row could be had");
     assert_eq!(settled, None);
+}
+
+/// An opaque decorated window over grey: a free layer carrying its frame and
+/// its shadow.
+fn framed(c: &mut Compositor) -> WindowId {
+    let id = c.add_window(Point::new(60, 40), opaque(60, 40, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    id
+}
+
+/// Repaint a corner of `id`'s client in `shade`, as a clock's tick repaints
+/// its digits.
+fn tick(c: &mut Compositor, id: WindowId, shade: u8) {
+    let mut area = Region::new();
+    area.add(Rect::new(2, 2, 3, 3));
+    assert!(c.repaint_window(id, (60, 40), &area, |surface, rects| {
+        for rect in rects {
+            surface.fill_rect(
+                rect.left().cast_unsigned(),
+                rect.top().cast_unsigned(),
+                rect.width,
+                rect.height,
+                Color::rgb(shade, shade, shade),
+            );
+        }
+    }));
+}
+
+/// `framed`'s window on a free layer of `engine`, presented once, with each
+/// later present held to the software composite of `look` and then of two
+/// ticks: a tick bakes the buffer the engine is not showing, so a look that
+/// reached only one of a layer's two buffers flips with every tick.
+fn holds_through_ticks(look: impl Fn(&mut Compositor)) {
+    let output = mode(200, 160);
+    let grey = Color::rgb(0x80, 0x80, 0x80);
+    let mut c = new_compositor(output, grey).expect("compositor");
+    let id = framed(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert!(
+        c.layers.as_ref().is_some_and(|stack| stack
+            .layers
+            .iter()
+            .any(|layer| layer.source == Source::Window(id, super::Role::Free))),
+        "the window has a free layer"
+    );
+
+    look(&mut c);
+    c.present(&mut engine).expect("presents");
+    let restyled = software(output, grey, |c| {
+        framed(c);
+        look(c);
+    });
+    assert_close(&engine.screen, &restyled, 1);
+    for shade in [9, 10] {
+        tick(&mut c, id, shade);
+        c.present(&mut engine).expect("presents");
+        let expected = software(output, grey, |c| {
+            let id = framed(c);
+            look(c);
+            tick(c, id, shade);
+        });
+        assert_close(&engine.screen, &expected, 1);
+    }
+}
+
+#[test]
+fn a_shadow_coming_to_rest_and_a_frame_dimming_reach_both_buffers_of_a_free_layer() {
+    holds_through_ticks(|c| {
+        c.follow_focus(None);
+        c.step_elevations(0);
+        c.step_elevations(SETTLED_NS);
+    });
+}
+
+#[test]
+fn a_new_theme_is_baked_into_both_buffers_of_a_free_layer() {
+    holds_through_ticks(|c| {
+        assert!(c.set_theme(tairix_theme::Theme::light()));
+    });
+}
+
+#[test]
+fn a_new_scale_leaves_both_buffers_of_a_free_layer_owing_a_whole_bake() {
+    let output = mode(200, 160);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let id = c.add_window(Point::new(20, 20), opaque(40, 30, RED));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+
+    assert!(c.set_scale(tairix_geometry::Scale::from_percent(150).expect("scale")));
+    let layer = c
+        .layers
+        .as_ref()
+        .and_then(|stack| {
+            stack
+                .layers
+                .iter()
+                .find(|layer| layer.source == Source::Window(id, super::Role::Free))
+        })
+        .expect("the window keeps its free layer");
+    let whole = Rect::new(0, 0, layer.at.width, layer.at.height);
+    for held in &layer.held {
+        assert_eq!(held.stale.rects(), [whole]);
+    }
 }

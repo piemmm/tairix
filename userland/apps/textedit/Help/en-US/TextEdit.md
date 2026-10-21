@@ -22,10 +22,16 @@ file that looks like binary data opens in the hex view, which shows every
 byte as two hex digits beside its character and edits the same bytes the
 text view does.
 
-An executable — a TAIRiX program image, an ELF64 file or a WebAssembly
-module — opens in the code view instead: its regions, then each code region's
-instructions, one a line with its address and encoding bytes, labelled with
-the symbols they start and the symbols their branches reach. The code view is
+An executable — a TAIRiX program image, a driver, an ELF64 file or a
+WebAssembly module — opens in the code view instead: what its headers say,
+each part at its offset with its length and what it declares — the system
+version it was built for, its entry point, its segments and the libraries it
+needs, a driver's signed manifest with the capabilities it asks for and the
+hardware it binds to, an ELF file's program and section headers, a module's
+sections — then each code region's instructions, one a line with its address
+and encoding bytes, labelled with the symbols they start and the symbols
+their branches reach. Keys and signatures are shown as they are written, not
+checked. The code view is
 read-only; the text and hex views edit the same file. The code is decoded by
 a second worker of its own, with no reach either, and read as the instruction
 set the file names, else as this machine's; the View menu's Instruction set
@@ -36,9 +42,13 @@ A picture — PNG, JPEG, GIF, BMP, TIFF, WEBP, an icon or cursor file, a RISC
 OS sprite area or an OpenRaster document — opens in the data view instead:
 what the file is made of, each record at its offset with its length and what
 it declares, every EXIF tag by name with its value, then every byte of the
-file as hex beside its character. The data view is read-only; the hex view
-edits the same bytes. The picture is read by a third worker of its own, with
-no reach either, and the View menu offers the data view beside text and hex.
+file as hex beside its character. A signed manifest — an application's
+`AppInfo` or a program's manifest — opens there too: what it names, the
+capabilities it asks for, the file types it claims and the services it
+browses, then its bytes. The data view is read-only; the hex view edits the
+same bytes. A picture is read by a third worker of its own, a manifest by the
+code view's, neither with any reach, and the View menu offers the data view
+beside text and hex.
 
 Source files are coloured: HTML, XML and SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python and shell scripts. The system's settings

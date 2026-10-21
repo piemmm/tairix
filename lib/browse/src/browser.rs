@@ -28,7 +28,8 @@ use crate::entry::{resolve_target, DriveMark, Entry, EntryKind, LinkTarget};
 use crate::error::BrowseError;
 use crate::layout::{BandMarks, ViewMode};
 use crate::places::{PlaceKind, Places};
-use crate::rename::{validate_new_name, RenameError};
+use crate::presentation::{HiddenEndings, Presentation};
+use crate::rename::{renamed, validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
 use crate::source::{DirectorySource, Listing};
@@ -113,6 +114,9 @@ pub struct Browser<S: DirectorySource> {
     drop_mark: Option<usize>,
     sort_mode: SortMode,
     view_mode: ViewMode,
+    /// How the listing is presented: which names it lists, and how it shows
+    /// them.
+    presentation: Presentation,
     /// How far the item view is scrolled, and the bar in the right-edge
     /// gutter that draws it.
     scroll: ScrollColumn,
@@ -222,6 +226,7 @@ impl<S: DirectorySource> Browser<S> {
             drop_mark: None,
             sort_mode,
             view_mode: ViewMode::default(),
+            presentation: Presentation::EXACT,
             scroll: ScrollColumn::new(),
             back: VecDeque::new(),
             forward: VecDeque::new(),
@@ -332,6 +337,65 @@ impl<S: DirectorySource> Browser<S> {
         }
         self.entries = tagged.into_iter().map(|(entry, _)| entry).collect();
         Some(place)
+    }
+
+    /// How the listing is presented.
+    #[must_use]
+    pub const fn presentation(&self) -> &Presentation {
+        &self.presentation
+    }
+
+    /// Present the listing as `presentation` says, answering whether what it
+    /// lists changes.
+    ///
+    /// Leaving hidden items out takes them from the listing in place, keeping
+    /// the focus and selection on the entries still shown. Listing them again
+    /// needs the directory read afresh, which is asked for unless a listing is
+    /// already on its way, since every listing is adopted as the presentation
+    /// then in force says.
+    ///
+    /// # Errors
+    ///
+    /// [`BrowseError::Source`] when the fresh read is refused at once; the
+    /// presentation is taken all the same.
+    pub fn set_presentation(&mut self, presentation: Presentation) -> Result<bool, BrowseError> {
+        let relisted = presentation.hidden_items != self.presentation.hidden_items;
+        self.presentation = presentation;
+        if !relisted {
+            return Ok(false);
+        }
+        if !presentation.hidden_items {
+            self.leave_out_hidden();
+        } else if self.pending.is_none() {
+            self.refresh()?;
+        }
+        Ok(true)
+    }
+
+    /// Take the entries the presentation does not list out of the listing,
+    /// carrying the focus and selection on the rest.
+    fn leave_out_hidden(&mut self) {
+        let presentation = self.presentation;
+        let mut placed = Vec::new();
+        if placed.try_reserve_exact(self.entries.len()).is_err() {
+            self.entries
+                .retain(|entry| presentation.lists(entry.name()));
+            self.selection.clear();
+            self.clamp_selection();
+            return;
+        }
+        let mut kept = 0;
+        for entry in &self.entries {
+            if presentation.lists(entry.name()) {
+                placed.push(Some(kept));
+                kept += 1;
+            } else {
+                placed.push(None);
+            }
+        }
+        self.entries
+            .retain(|entry| presentation.lists(entry.name()));
+        self.carry_selection(&Placement::table(placed));
     }
 
     /// The current directory's path components, root-first. Empty at the root.
@@ -716,22 +780,33 @@ impl<S: DirectorySource> Browser<S> {
         Ok(())
     }
 
-    /// The rename of the chosen entry to `new_name`, prepared but not yet
-    /// carried out: the name is validated ([`validate_new_name`]) and both
-    /// absolute paths spelled, so the move itself — a filesystem call a
-    /// window must not wait on — can run wherever the caller runs it.
+    /// The rename of the chosen entry to the name `typed` gives it in a field
+    /// opened showing names without `shown` ([`renamed`]: what was typed, with
+    /// the ending the field left off restored), prepared but not yet carried
+    /// out: the name is validated ([`validate_new_name`]) and both absolute
+    /// paths spelled, so the move itself — a filesystem call a window must not
+    /// wait on — can run wherever the caller runs it.
+    ///
+    /// The endings are the field's, not the presentation now in force: a
+    /// field opened before the presentation changed showed what it showed.
     ///
     /// # Errors
     ///
     /// A [`RenameError`] decided before any syscall: no selection, a bad
     /// spelling, a clash, or [`RenameError::Unchanged`] for the current name.
-    pub fn prepare_rename(&self, new_name: &str) -> Result<PendingRename, RenameError> {
-        let current = self.chosen_name().ok_or(RenameError::NoSelection)?;
-        validate_new_name(new_name, current, &self.entries)?;
+    pub fn prepare_rename(
+        &self,
+        typed: &str,
+        shown: HiddenEndings,
+    ) -> Result<PendingRename, RenameError> {
+        let chosen = self.chosen_entry().ok_or(RenameError::NoSelection)?;
+        let current = chosen.name();
+        let new_name = renamed(chosen, shown, typed);
+        validate_new_name(&new_name, current, &self.entries)?;
         Ok(PendingRename {
             from: self.child_path(current)?,
-            to: self.child_path(new_name)?,
-            name: String::from(new_name),
+            to: self.child_path(&new_name)?,
+            name: new_name.into_owned(),
             dir: self.components.clone(),
         })
     }
@@ -887,6 +962,12 @@ impl<S: DirectorySource> Browser<S> {
         &mut self,
         changes: Vec<EntryChange>,
     ) -> Result<Option<Placement>, BrowseError> {
+        let mut changes = changes;
+        let presentation = self.presentation;
+        changes.retain(|change| match change {
+            EntryChange::Upsert(entry) => presentation.lists(entry.name()),
+            EntryChange::Remove(_) => true,
+        });
         if changes.is_empty() {
             return Ok(None);
         }
@@ -902,6 +983,8 @@ impl<S: DirectorySource> Browser<S> {
     /// is probed again — a format that stamps no directory when its contents
     /// change (FAT) leaves an unchanged record proving nothing.
     fn relist(&mut self, mut entries: Vec<Entry>) {
+        let presentation = self.presentation;
+        entries.retain(|entry| presentation.lists(entry.name()));
         sort_entries(&mut entries, self.sort_mode);
         let old = mem::take(&mut self.entries);
         // Without the memory to match the two listings nothing is carried
@@ -1346,6 +1429,8 @@ impl<S: DirectorySource> Browser<S> {
     /// fresh directory's: nothing selected and the focus at the top, since the
     /// old indices name nothing here.
     fn adopt_entries(&mut self, mut entries: Vec<Entry>) {
+        let presentation = self.presentation;
+        entries.retain(|entry| presentation.lists(entry.name()));
         sort_entries(&mut entries, self.sort_mode);
         self.entries = entries;
         self.selected = 0;

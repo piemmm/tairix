@@ -8,6 +8,9 @@
 //! ([`HOME_COMMAND_STORE_DIR`](crate::HOME_COMMAND_STORE_DIR),
 //! [`HOME_APPLICATION_STORE_DIR`](crate::HOME_APPLICATION_STORE_DIR)).
 
+/// The root-view folder every user's home is in, as `/Users/<name>/`.
+pub const USERS_DIR: &str = "Users";
+
 /// The folder whose contents the desktop shows as its icons.
 pub const HOME_DESKTOP_DIR: &str = "Desktop";
 

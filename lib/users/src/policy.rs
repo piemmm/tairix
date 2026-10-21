@@ -16,7 +16,9 @@ use alloc::string::String;
 
 use tairix_abi::driver::filesystem::{NodeSecurity, SecurityAcl, SecuritySubject};
 use tairix_abi::driver::DriverError;
-use tairix_abi::home::{HOME_DESKTOP_DIR, HOME_FILES_DIR, HOME_LIBRARY_DIR, HOME_SETTINGS_DIR};
+use tairix_abi::home::{
+    HOME_DESKTOP_DIR, HOME_FILES_DIR, HOME_LIBRARY_DIR, HOME_SETTINGS_DIR, USERS_DIR,
+};
 use tairix_abi::{CapabilityId, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR};
 
 use crate::provision::{CONFD_UID, SERVICES_GID};
@@ -34,7 +36,7 @@ pub const DEFAULT_SHELL: &str = "/System/Commands/elsh.app/Run";
 /// `/Users/<name>` layout the installed-system contract fixes.
 #[must_use]
 pub fn default_home(username: &str) -> String {
-    format!("/Users/{username}")
+    format!("/{USERS_DIR}/{username}")
 }
 
 /// Permission mode a home directory, and every directory the OS creates

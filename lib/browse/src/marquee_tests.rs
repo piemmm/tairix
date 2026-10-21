@@ -69,7 +69,7 @@ fn parts_of(browser: &Browser<Flat>, frame: Frame<'_>, index: usize) -> TilePart
     let cell = rect_of(browser, frame, index);
     let parts = entry_parts(
         Tiles::Large,
-        &browser.entries()[index],
+        (&browser.entries()[index], browser.presentation().endings),
         Rect::new(0, 0, cell.width, cell.height),
         frame.scale,
         frame.theme,

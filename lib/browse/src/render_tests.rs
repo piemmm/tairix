@@ -16,6 +16,7 @@ use crate::chrome::ToolbarBand;
 use crate::entry::{DriveMark, Entry, EntryKind};
 use crate::layout::ViewMode;
 use crate::places::VolumeFacts;
+use crate::presentation::HiddenEndings;
 use crate::sort::{SortDirection, SortKey, SortMode};
 use crate::source::{DirectorySource, Listing};
 
@@ -99,7 +100,12 @@ fn a_file_row_states_its_size_modification_and_type_and_a_folder_no_size() {
         2048,
         Time64::from_secs(86_400 * 365),
     );
-    let row = entry_row((&file, &[]), ListColumns::Files, false, IconKind::Generic);
+    let row = entry_row(
+        (&file, &[]),
+        ListColumns::Files,
+        (false, HiddenEndings::NONE),
+        IconKind::Generic,
+    );
     let cells = texts(&row);
     assert_eq!(cells[0], "notes.txt");
     assert_eq!(cells[1], "2.0 KiB");
@@ -108,8 +114,38 @@ fn a_file_row_states_its_size_modification_and_type_and_a_folder_no_size() {
     assert_eq!(row.cells()[0].icon(), Some(IconKind::Generic));
 
     let folder = Entry::directory("Docs");
-    let row = entry_row((&folder, &[]), ListColumns::Files, true, IconKind::Folder);
+    let row = entry_row(
+        (&folder, &[]),
+        ListColumns::Files,
+        (true, HiddenEndings::NONE),
+        IconKind::Folder,
+    );
     assert!(texts(&row)[1].is_empty(), "a folder has no meaningful size");
+}
+
+/// A row names its entry as the window shows it, without the endings it
+/// hides.
+#[test]
+fn a_row_names_its_entry_without_the_endings_hidden() {
+    let bundle = Entry::new("Paint.app", EntryKind::Bundle, 0, Time64::UNIX_EPOCH);
+    let hiding = HiddenEndings {
+        applications: true,
+        known_types: false,
+    };
+    let row = entry_row(
+        (&bundle, &[]),
+        ListColumns::Files,
+        (false, hiding),
+        IconKind::AppBundle,
+    );
+    assert_eq!(texts(&row)[0], "Paint");
+    let exact = entry_row(
+        (&bundle, &[]),
+        ListColumns::Files,
+        (false, HiddenEndings::NONE),
+        IconKind::AppBundle,
+    );
+    assert_eq!(texts(&exact)[0], "Paint.app");
 }
 
 /// A browser at the root of `entries`, in `view`.
@@ -150,6 +186,7 @@ fn a_press_on_a_column_title_orders_by_it_and_a_second_reverses_it() {
         Some(SortMode {
             key: SortKey::Size,
             direction: SortDirection::Ascending,
+            ..SortMode::default_order()
         })
     );
     browser.set_sort_mode(asked.expect("an order"));

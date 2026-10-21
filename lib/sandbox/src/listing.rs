@@ -26,6 +26,7 @@ pub const fn failure_reason(failure: DecodeFailure) -> &'static str {
         DecodeFailure::Sandbox(SandboxError::RequestTooLarge) => "too large to decode",
         DecodeFailure::Sandbox(_) => "the decode sandbox is unavailable",
         DecodeFailure::ReplyMalformed => "the decode worker replied nonsense",
+        DecodeFailure::NoMemory => "there is not enough memory for the answer",
     }
 }
 

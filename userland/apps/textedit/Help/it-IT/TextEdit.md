@@ -24,27 +24,37 @@ contenere dati binari si apre nella vista esadecimale, che mostra ogni byte
 come due cifre esadecimali accanto al suo carattere e modifica gli stessi
 byte della vista testo.
 
-Un eseguibile — un'immagine di programma TAIRiX, un file ELF64 o un modulo
-WebAssembly — si apre invece nella vista codice: le sue regioni, poi le
-istruzioni di ogni regione di codice, una per riga con il suo indirizzo e i
-suoi byte di codifica, etichettate con i simboli da cui iniziano e con i
-simboli raggiunti dai loro salti. La vista codice è di sola lettura; le viste
-testo ed esadecimale modificano lo stesso file. Il codice viene decodificato
-da un secondo processo di lavoro tutto suo, anch'esso senza alcun accesso, e
-letto nel set di istruzioni indicato dal file, altrimenti in quello di questa
-macchina; «Set di istruzioni» nel menu Vista lo legge in un altro, e il campo
-della vista nella riga di stato offre la vista codice accanto a testo ed
-esadecimale.
+Un eseguibile — un'immagine di programma TAIRiX, un driver, un file ELF64 o
+un modulo WebAssembly — si apre invece nella vista codice: ciò che dicono le
+sue intestazioni, ogni parte alla sua posizione con la sua lunghezza e ciò
+che dichiara — la versione del sistema per cui è stato compilato, il suo
+punto d'ingresso, i suoi segmenti e le librerie di cui ha bisogno, il
+manifesto firmato di un driver con le capacità che richiede e l'hardware a
+cui si associa, le intestazioni di programma e di sezione di un file ELF, le
+sezioni di un modulo — poi le istruzioni di ogni regione di codice, una per
+riga con il suo indirizzo e i suoi byte di codifica, etichettate con i
+simboli da cui iniziano e con i simboli raggiunti dai loro salti. Chiavi e
+firme sono mostrate così come sono scritte, senza essere verificate. La vista
+codice è di sola lettura; le viste testo ed esadecimale modificano lo stesso
+file. Il codice viene decodificato da un secondo processo di lavoro tutto
+suo, anch'esso senza alcun accesso, e letto nel set di istruzioni indicato
+dal file, altrimenti in quello di questa macchina; «Set di istruzioni» nel
+menu Vista lo legge in un altro, e il campo della vista nella riga di stato
+offre la vista codice accanto a testo ed esadecimale.
 
 Un'immagine — PNG, JPEG, GIF, BMP, TIFF, WEBP, un file di icona o di
 puntatore, un'area di sprite di RISC OS o un documento OpenRaster — si apre
 invece nella vista dei dati: di che cosa è fatto il file, ogni record alla
 sua posizione con la sua lunghezza e ciò che dichiara, ogni tag EXIF per
 nome con il suo valore, poi ogni byte del file in esadecimale accanto al suo
-carattere. La vista dei dati è di sola lettura; la vista esadecimale
-modifica gli stessi byte. L'immagine viene letta da un terzo processo di
-lavoro tutto suo, anch'esso senza alcun accesso, e il menu Visualizza offre
-la vista dei dati accanto a testo ed esadecimale.
+carattere. Anche un manifesto firmato — l'`AppInfo` di un'applicazione o il
+manifesto di un programma — si apre lì: ciò che nomina, le capacità che
+richiede, i tipi di file che rivendica e i servizi che cerca, poi i suoi
+byte. La vista dei dati è di sola lettura; la vista esadecimale modifica gli
+stessi byte. Un'immagine viene letta da un terzo processo di lavoro tutto
+suo, un manifesto da quello della vista codice, nessuno dei due con alcun
+accesso, e il menu Vista offre la vista dei dati accanto a testo ed
+esadecimale.
 
 Il codice sorgente viene colorato: HTML, XML e SVG, CSS, JavaScript, JSON,
 YAML, TOML, Markdown, Rust, C, Java, Python e script di shell. Anche i file di

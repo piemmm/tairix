@@ -10,9 +10,10 @@ files — graphical filesystem browser
 
 Opens a desktop window listing the filesystem, starting at the folder
 `path` names on the command line — or, when it names a file, at the folder
-holding that file, with the file selected — or at the launching user's
-`Home` folder when none is named (their home directory if that cannot
-be listed). The window's title names the current directory; the window
+holding that file, with the file selected — or, when none is named, at the
+folder the settings choose: the launching user's `Home` folder unless they
+choose their `Desktop` or the attached storage (their home directory if that
+cannot be listed). The window's title names the current directory; the window
 lists its entries, every selected entry highlighted with the active
 theme's accent colour. Every directory read is an ordinary
 permission-checked listing under the launching user's identity: an
@@ -20,10 +21,11 @@ unreadable directory is refused, never guessed at.
 
 The desktop starts the browser for you and keeps it on the icon bar: its
 slot's menu lists your own places and whatever is mounted, and choosing one
-opens a window there. A click on the slot opens one at your `Home`
-folder. Asking for a folder that already has a window brings that window to
-the front rather than opening another. That copy has no *Quit* row — it is
-part of the desktop, and closing its windows simply puts it away.
+opens a window there; *Settings…* comes last. A click on the slot opens one
+where the settings choose. Asking for a folder that already has a window
+brings that window to the front rather than opening another. That copy has
+no *Quit* row — it is part of the desktop, and closing its windows simply
+puts it away.
 
 Run by name from a shell (or opened on a folder from the desktop) it is an
 ordinary application instead: one window, and it ends when you close it.
@@ -53,12 +55,16 @@ anywhere between items. `Ctrl+A` selects everything in the listing and
 
 An item's name is shown whole, over two lines when it needs them; a name too
 long even for those keeps its start and its end, with `…` in the middle, so
-its extension always shows.
+its extension always shows. An application is shown without its `.app`
+ending, and the settings can show it, or hide the endings of the file types
+the system knows too. Items whose names begin with a dot are listed only when
+the settings ask for them.
 
 `F2` renames the selected item in place, as does clicking the name of the one
 selected item and pausing: the name opens for editing once the click can no
 longer be a double-click. The part before the extension is selected, so typing
-replaces the name and keeps the extension. `Enter`, or a click outside the
+replaces the name and keeps the extension; an ending the window does not show
+is kept as well. `Enter`, or a click outside the
 name, keeps the new name — a name the volume refuses stays open with the
 reason — and `Escape` abandons it. A click that renamed the item does
 nothing else, since the folder may have re-sorted under the pointer.
@@ -82,10 +88,23 @@ each kind an installed editor writes, and opens its name for editing.
 
 The right-click menu's *Display* submenu shows the items as large icons, the
 default; as small icons, each name on one line beside its picture; or as a
-list, one row each with its size, when it was last changed and its type. A
-drive listed among them shows instead the space it has free, its filesystem
-and how well it is serving. A press on a column's title orders the list by
-it, and a second press reverses the order.
+list, one row each with its picture, its size, when it was last changed and
+its type. A drive listed among them shows instead the space it has free, its
+filesystem and how well it is serving. Beneath the displays it orders the
+window by name, type, size or when each item was last changed — or, for a
+list of drives, by name, free space, filesystem or health — ascending or
+descending. A press on a column's title orders the list by it too, and a
+second press reverses the order. Folders stay on top whichever order is
+chosen, unless the settings place them among the files.
+
+*Settings…* on the icon-bar slot's menu, or `Ctrl+,`, opens the browser's
+settings: where a new window opens, how it shows and orders its items, and
+whether it shows the places rail and the toolbar; whether folders stay on top;
+which name endings and which items are hidden; whether a picture shows its
+own content and a folder what it holds; and whether moving items to the Trash
+asks first. *Restore defaults* puts every setting back. A change applies to
+every window at once and is remembered; a window already open keeps the
+display and order it has.
 
 `Alt+Enter` opens the selected item's *Info* window, as does *Get Info…* on
 its right-click submenu. It is a window of its own, so several can

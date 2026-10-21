@@ -36,6 +36,7 @@ bounds), and `plans/GUI-CONTROLS-DESIGN.md`.
 | I13 | A settings category's or disclosed pane's built-in picture is a colour badge | done |
 | I14 | Every drive medium has its own picture | done |
 | I15 | Every menu row's function has a picture: the `AppMenuSymbol` → `IconKind` map, and the command glyphs drawn as symbols | done |
+| I16 | A program, a driver image and a manifest are pictured by what they are | done |
 
 Each item's section below records what it guarantees or what remains.
 
@@ -149,8 +150,9 @@ the asset id, and the id *is* an `IconKind::asset_id()`, so a typo cannot
 ship: `tools/syshelp`'s build script fails the build on an unrecognised name,
 an oversize file, or a duplicate id. A kind ships **one** master, in whichever
 format suits its artwork — the folders are vector (`folder.svg`,
-`folder-filled.svg`, `folder-back.svg`, `folder-front.svg`), the
-illustrative file-class and disk pictures are raster. Two files claiming one
+`folder-filled.svg`, `folder-back.svg`, `folder-front.svg`, and the Home
+folder's `home.svg`), the illustrative file-class and disk pictures are
+raster. Two files claiming one
 id is a duplicate the build refuses: the raster tier would always win, so the
 vector could never be selected.
 
@@ -212,7 +214,8 @@ extension-keyed tables that used to exist (a four-class icon classifier and
 a separate association table). It provides the media-type spelling, the
 reverse lookup, the icon, the subclass parent, and the entry classifier
 (which distinguishes an application bundle from a service bundle by the
-store it was listed from). Association matching walks the subclass chain and
+store it was listed from). A file is typed by the layout it stands in before
+its name (`Site`, I16). Association matching walks the subclass chain and
 ranks a specific declaration ahead of a generic one. Every byte-stream type
 descends from `application/octet-stream`, and a name the registry does not know
 is that type, so a claim on it covers every file (`plans/TEXTEDIT.md` TE14).
@@ -263,12 +266,12 @@ scroll, released on teardown and trimmed when pressure deepens (driven by
 the same kernel pressure wake the session uses, never a timer).
 
 Every other icon the window draws resolves through that same cache too: the
-**list** view's row icons, the toolbar's tools, and the places rail's rows. The
-list asks by *class* rather than naming a bundle — a row-height picture cannot
-show one application apart from another, and reading each bundle's manifest to
-find out would be per-bundle I/O the reader never sees — while the grid, whose
-tiles are large enough to tell two applications apart, names the bundle. Only
-the rows and tools on screen are asked for.
+**list** view's row icons, the toolbar's tools, and the places rail's rows. A
+row asks for exactly what a tile asks for (`entry_icon`): an application's own
+icon, a folder's picture of what it holds and a picture file's thumbnail, at
+the row's side, so an entry is pictured alike in every view. A bundle's
+manifest is read where every artwork read is, on the resolver behind the
+cache, never on the loop. Only the rows and tools on screen are asked for.
 
 ## 7. I6 — storage media are real, not guessed
 
@@ -622,7 +625,27 @@ one, so no two applications draw the same command differently.
   vocabulary, every kind it answers rasterises non-blank at a menu row's side,
   and no two distinct pictures rasterise to the same mask there.
 
-## 17. What this plan deliberately does not cover
+## 17. I16 — a program is pictured by what it is
+
+A bundle's parts are named by the bundle layout, not by an extension, so the
+registry types a file by where it stands (`Site`) before its name, comparing
+every store and layout against its one `lib/abi` spelling:
+
+- a bundle's `Run` and every file in its `Code/` are programs, pictured by the
+  kind of bundle the store filing it holds — `executable-application`,
+  `executable-command`, else the generic `executable`;
+- a bundle's `AppInfo` is its signed manifest (`manifest`);
+- the driver store's `Run` is a driver's image (`driver`);
+- an ELF file and a wasm module have their own badges (`executable-elf`,
+  `executable-wasm`).
+
+The site decides what a file is called and pictured, never what opens it:
+association matching reads the name alone. The Info window takes the picture
+the listing drew, so the two cannot disagree. Each kind is a raster master over
+the program family's built-in glyph — the driver over a chip, the manifest over
+the page — so the rule stays total.
+
+## 18. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

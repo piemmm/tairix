@@ -23,25 +23,36 @@ yn un cam i'r cyrchwr. Mae ffeil sy'n edrych fel data deuaidd yn agor yn yr
 olwg hecs, sy'n dangos pob beit fel dau ddigid hecs wrth ymyl ei nod ac yn
 golygu'r un beitiau â'r olwg testun.
 
-Mae ffeil weithredadwy — delwedd rhaglen TAIRiX, ffeil ELF64 neu fodiwl
-WebAssembly — yn agor yn y wedd cod yn lle hynny: ei rhanbarthau, yna
-cyfarwyddiadau pob rhanbarth cod, un i bob llinell gyda'i gyfeiriad a'i
-feitiau amgodio, wedi'u labelu â'r symbolau y maent yn eu cychwyn a'r
-symbolau y mae eu canghennau'n eu cyrraedd. Darllen yn unig yw'r wedd cod;
-mae'r gweddau testun a hecs yn golygu'r un ffeil. Mae ail broses waith ei hun,
-heb unrhyw gyrhaeddiad chwaith, yn datgodio'r cod, a'i ddarllen fel y set
-gyfarwyddiadau y mae'r ffeil yn ei henwi, neu fel set y peiriant hwn fel arall;
-mae "Set gyfarwyddiadau" yn y ddewislen Gwedd yn ei ddarllen fel un arall, ac
-mae maes gwedd y llinell statws yn cynnig y wedd cod wrth ochr testun a hecs.
+Mae ffeil weithredadwy — delwedd rhaglen TAIRiX, gyrrwr, ffeil ELF64 neu
+fodiwl WebAssembly — yn agor yn y wedd cod yn lle hynny: yr hyn y mae ei
+phenawdau'n ei ddweud, pob rhan yn ei safle gyda'i hyd a'r hyn y mae'n ei
+ddatgan — fersiwn y system yr adeiladwyd hi ar ei chyfer, ei phwynt
+mynediad, ei segmentau a'r llyfrgelloedd y mae arni eu hangen, maniffest
+gyrrwr wedi'i lofnodi gyda'r galluoedd y mae'n gofyn amdanynt a'r caledwedd
+y mae'n rhwymo wrtho, penawdau rhaglen a phenawdau adran ffeil ELF, adrannau
+modiwl — yna cyfarwyddiadau pob rhanbarth cod, un i bob llinell gyda'i
+gyfeiriad a'i feitiau amgodio, wedi'u labelu â'r symbolau y maent yn eu
+cychwyn a'r symbolau y mae eu canghennau'n eu cyrraedd. Dangosir allweddi a
+llofnodion fel y maent wedi'u hysgrifennu, heb eu gwirio. Darllen yn unig
+yw'r wedd cod; mae'r gweddau testun a hecs yn golygu'r un ffeil. Mae ail
+broses waith ei hun, heb unrhyw gyrhaeddiad chwaith, yn datgodio'r cod, a'i
+ddarllen fel y set gyfarwyddiadau y mae'r ffeil yn ei henwi, neu fel set y
+peiriant hwn fel arall; mae "Set gyfarwyddiadau" yn y ddewislen Gwedd yn ei
+ddarllen fel un arall, ac mae maes gwedd y llinell statws yn cynnig y wedd
+cod wrth ochr testun a hecs.
 
 Mae llun — PNG, JPEG, GIF, BMP, TIFF, WEBP, ffeil eicon neu bwyntydd, ardal
 corluniau RISC OS neu ddogfen OpenRaster — yn agor yn hytrach yn y wedd
 ddata: o beth mae'r ffeil wedi'i gwneud, pob cofnod yn ei safle gyda'i hyd
 a'r hyn y mae'n ei ddatgan, pob tag EXIF wrth ei enw gyda'i werth, ac yna
-pob beit o'r ffeil mewn hecs wrth ymyl ei nod. Mae'r wedd ddata yn ddarllen
-yn unig; mae'r wedd hecs yn golygu'r un beitiau. Caiff y llun ei ddarllen
-gan drydedd broses waith ei hun, heb gyrraedd dim chwaith, ac mae'r
-ddewislen Gwedd yn cynnig y wedd ddata wrth ymyl testun a hecs.
+pob beit o'r ffeil mewn hecs wrth ymyl ei nod. Mae maniffest wedi'i lofnodi
+— `AppInfo` ap neu faniffest rhaglen — yn agor yno hefyd: yr hyn y mae'n ei
+enwi, y galluoedd y mae'n gofyn amdanynt, y mathau o ffeil y mae'n eu hawlio
+a'r gwasanaethau y mae'n chwilio amdanynt, ac yna ei feitiau. Mae'r wedd
+ddata yn ddarllen yn unig; mae'r wedd hecs yn golygu'r un beitiau. Caiff
+llun ei ddarllen gan drydedd broses waith ei hun, a maniffest gan broses y
+wedd cod, heb i'r naill na'r llall gyrraedd dim, ac mae'r ddewislen Gwedd yn
+cynnig y wedd ddata wrth ymyl testun a hecs.
 
 Mae cod ffynhonnell yn cael ei liwio: HTML, XML ac SVG, CSS, JavaScript, JSON,
 YAML, TOML, Markdown, Rust, C, Java, Python a sgriptiau cragen. Mae ffeiliau

@@ -3,20 +3,18 @@
 Read-only executable-container decoder for TAIRiX (`lib/binfmt`).
 
 Several TAIRiX components need to *look inside* an executable file without
-loading it — the file manager's disassembly viewer first, an
-`objdump`/`readelf`-class command app next. That decoding is identical
-wherever it happens, so it lives here once and every consumer imports it.
+loading it — the `fstree` disassembly viewer and the text editor's Code and
+Data displays. That decoding is identical wherever it happens, so it lives
+here once and every consumer imports it.
 
 ## What it decodes
 
 - **`rxe`** — the TAIRiX load image (`rxe::RxeView`: header, W^X-clean
-  segment table, needed libraries, entry point) and the signed manifest
-  summary (`rxe::ManifestSummary`: header plus requested capabilities).
-  Both decode *through* the `lib/abi` wire types
-  (`LoadImage::parse_for_inspection`, `ManifestHeader::from_bytes`,
-  `decode_capability_ids`), so the inspection view and the kernel load path
-  share one definition and cannot drift. The CFI tag is reported, never
-  compared — admitting a binary to execution stays the kernel loader's job.
+  segment table, needed libraries, entry point), decoded *through* the
+  `lib/abi` wire type (`LoadImage::parse_for_inspection`), so the inspection
+  view and the kernel load path share one definition and cannot drift. The
+  CFI tag is reported, never compared — admitting a binary to execution stays
+  the kernel loader's job.
 - **ELF64** — little-endian `EM_X86_64` / `EM_AARCH64` / `EM_RISCV` files
   (`elf::ElfView`): file header, program headers, section headers,
   section-name strings, and symbol tables — enough to name and bound the
@@ -27,7 +25,10 @@ wherever it happens, so it lives here once and every consumer imports it.
   the type/function/code section framing (function-body boundaries), with
   strictly validated LEB128 lengths (overlong encodings fail closed).
 
-`detect` recognises which decoder should look at a byte prefix.
+`detect` recognises which decoder should look at a byte prefix, including a
+driver image and the two signed manifests, and `report::report` states what a
+recognised file says — every part at its offset and length, with what it
+declares — through the shared report builder (`tairix_util::report`).
 
 ## What it never does
 
@@ -46,8 +47,8 @@ they link into that sandbox process unchanged.
 ## Design
 
 - `no_std` + `alloc`, `#![forbid(unsafe_code)]`.
-- One dependency: `tairix-abi` (the rxe/manifest wire types this crate
-  reads through).
+- Two dependencies: `tairix-abi` (the wire types this crate reads through)
+  and `tairix-util` (the report builder).
 - Fuzzed: `fuzz_rxe`, `fuzz_elf`, and `fuzz_wasm` are enrolled in
   `cargo xtask fuzz`.
 

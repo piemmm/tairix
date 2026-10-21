@@ -23,14 +23,19 @@ UTF-8 and control bytes round-trip exactly.
   reach.
 - **Hex.** Offset, sixteen bytes and their characters, with a caret in
   either pane. A document whose head looks binary opens here.
-- **Code.** An executable — an `rxe`, an ELF64 file or a wasm module, as its
-  head's magic says (`tairix_binfmt::detect`, a bounded compare and nothing
-  more) — opens here instead: a line naming the container, its instruction set
-  and entry, one line per region, then each code region's instructions under
-  its heading, with their addresses and encoding bytes, labelled with the
-  symbols they start and the symbols their branches reach (the shared
-  `tairix_sandbox::listing`), and it says when not every region or symbol made
-  the summary. The display is read-only: what would edit or search says so,
+- **Code.** An executable — an `rxe`, a driver bundle's image, an ELF64 file
+  or a wasm module, as its head's magic says (`tairix_binfmt::detect`, a
+  bounded compare and nothing more) — opens here instead: what its headers
+  say, each part at its file offset and length with what it declares
+  (`tairix_binfmt::report`), then, under a line naming the instruction set it
+  is read as, each code region's instructions under its heading, with their
+  addresses and encoding bytes, labelled with the symbols they start and the
+  symbols their branches reach (the shared `tairix_sandbox::listing`), and it
+  says when not every region or symbol made the summary. A driver's report
+  states its signed manifest — the capabilities it asks for and each bind
+  key's hardware — then its program's, which is the code listed. Keys and
+  signatures are shown, never checked: whether a program may run is the load
+  gate's judgement. The display is read-only: what would edit or search says so,
   showing it closes the find bar, and Text or Hex takes the document back. The
   listing is built on an editor worker thread from the document's snapshot,
   never on the event loop, and everything in it is parsed by a decode worker
@@ -47,18 +52,22 @@ UTF-8 and control bytes round-trip exactly.
   in; choosing the set already listed lists nothing again.
 - **Data.** A picture — a format `tairix_image::sniff` recognises from its head
   (a bounded compare), or a RISC OS sprite area by its name, since a sprite
-  area carries no signature — opens here instead: the structure report
-  `tairix_image::inspect` reads of it (the heading naming the format, then each
-  record of its container in file order with its offset, length and what it
-  declares, and every EXIF tag by name with its value in its unit), a heading
-  over the bytes, then every byte as the hex view draws it. The report is read
-  by a worker of its own serving `tairix_sandbox::imageinspect` — the
-  document streamed to it a run at a time from the snapshot, so the editor
-  never holds a second copy — and its reply is held to the report's bounds
-  before a line is believed; the hex rows are the document's own bytes. It is
-  read-only and scrolls as Code does; a report refused for want of memory or of
-  a worker is asked again when Data is shown afresh, and a document past
-  `MAX_DOCUMENT_BYTES` is refused without asking.
+  area carries no signature — or a signed manifest — a program's or a
+  bundle's `AppInfo`, by its magic — opens here instead: a structure report, a
+  heading over the bytes, then every byte as the hex view draws it. A
+  picture's report is the one `tairix_image::inspect` reads of it (the heading
+  naming the format, then each record of its container in file order with its
+  offset, length and what it declares, and every EXIF tag by name with its
+  value in its unit), read by a worker of its own serving
+  `tairix_sandbox::imageinspect` — the document streamed to it a run at a time
+  from the snapshot, so the editor never holds a second copy. A manifest's is
+  `tairix_binfmt::report`'s — what the bundle is, its flags and publisher
+  binding, what it asks for and claims — read by the decode worker. Either
+  reply is held to the report's bounds before a line is believed; the hex rows
+  are the document's own bytes. It is read-only and scrolls as Code does; a
+  report refused for want of memory or of a worker is asked again when Data is
+  shown afresh, and a document past what its worker takes (`MAX_DOCUMENT_BYTES`
+  for a picture, `MAX_INPUT` for a manifest) is refused without asking.
 - **Format**, orthogonal to the mode: the colouring and checking the text
   view applies (`tairix-syntax`, [its page](../lib/syntax.md)). It comes from
   the file name, then from the head (asked of the sandbox), and a format the
@@ -145,8 +154,9 @@ The loop reads nothing and waits on nothing. Workers carry what does wait:
 - the **syntax worker** holds the sandbox that lexes batches of visible
   lines, detects a format from a head, and validates a store;
 - the **code worker** and the **data worker** each hold a sandbox of their
-  own, which lists an executable's code and reads a picture's structure, one
-  window's ask at a time, taking turns over the windows so none is starved.
+  own: the code worker lists an executable's headers and code and reads a
+  manifest's report, the data worker a picture's structure, one window's ask
+  at a time, taking turns over the windows so none is starved.
 
 A window saves one snapshot at a time. A save asked for while one is in
 flight freezes the document as it then is and is written, in turn, once those

@@ -8,7 +8,8 @@
 //!   error (fail closed);
 //! * a successful parse yields a view whose every accessor (program
 //!   headers, sections, names, bytes, symbol tables) can be walked
-//!   without a panic or an out-of-bounds read.
+//!   without a panic or an out-of-bounds read, and so can the file's
+//!   report.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` mutates
 //! a hand-assembled valid ELF64 template and mixes in pure noise. A plain
@@ -101,6 +102,7 @@ fn valid_elf() -> Vec<u8> {
 
 /// Decode `bytes`; a success must be walkable without a panic.
 fn exercise(bytes: &[u8]) {
+    let _ = tairix_binfmt::report::report(bytes);
     let Ok(view) = ElfView::parse(bytes) else {
         return;
     };

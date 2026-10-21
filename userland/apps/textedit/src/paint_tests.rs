@@ -186,11 +186,11 @@ fn the_data_display_draws_the_report_then_the_bytes() {
     let theme = registry.active();
     let (id, _) = view.data_want().expect("a report is wanted");
     let report = alloc::vec![
-        tairix_image::inspect::ReportLine {
+        tairix_util::report::ReportLine {
             text: String::from("PNG"),
             heading: true,
         },
-        tairix_image::inspect::ReportLine {
+        tairix_util::report::ReportLine {
             text: String::from("ok"),
             heading: false,
         },

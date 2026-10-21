@@ -18,6 +18,7 @@ use super::{
     MediaType, ALL, EXTENSION_TABLE,
 };
 use crate::entry::{Entry, EntryKind, LinkTarget};
+use crate::presentation::Pictures;
 
 /// The root-first components of a directory path, as a listing carries them.
 fn components(path: &str) -> Vec<String> {
@@ -41,8 +42,8 @@ fn bundle(name: &str) -> Entry {
 /// its mapping being asserted here.
 const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("tool.rxe", MediaType::TairixRxe, IconKind::Executable),
-    ("mod.wasm", MediaType::Wasm, IconKind::Executable),
-    ("image.elf", MediaType::Elf, IconKind::Executable),
+    ("mod.wasm", MediaType::Wasm, IconKind::WasmModule),
+    ("image.elf", MediaType::Elf, IconKind::ElfExecutable),
     ("notes.txt", MediaType::TextPlain, IconKind::Text),
     ("guide.rst", MediaType::TextPlain, IconKind::Text),
     ("boot.log", MediaType::TextPlain, IconKind::Text),
@@ -684,7 +685,13 @@ const LISTED: FileId = FileId {
 /// read, or `None` when it asks for none — listed out of [`PICTURES`].
 fn pictured(entry: &Entry) -> (IconKind, Option<Reading>) {
     let mut scratch = String::new();
-    let (kind, request) = entry_icon(PICTURES, &components(PICTURES), entry, &mut scratch);
+    let (kind, request) = entry_icon(
+        PICTURES,
+        &components(PICTURES),
+        entry,
+        Pictures::ALL,
+        &mut scratch,
+    );
     let path = alloc::format!("{PICTURES}/{}", entry.name());
     let reading = [Reading::Signature, Reading::Sprite]
         .into_iter()
@@ -760,9 +767,40 @@ fn only_a_listed_picture_the_decoders_read_has_a_thumbnail() {
             entry.with_id(LISTED)
         }
     }) {
-        let (kind, request) = entry_icon(PICTURES, &components(PICTURES), &entry, &mut scratch);
+        let (kind, request) = entry_icon(
+            PICTURES,
+            &components(PICTURES),
+            &entry,
+            Pictures::ALL,
+            &mut scratch,
+        );
         assert_eq!(request, IconRequest::kind(kind), "{}", entry.name());
     }
+}
+
+/// A picture file or a folder whose own picture is left off is asked for as
+/// its kind; with it on, the folder asks for what it holds.
+#[test]
+fn a_picture_left_off_is_asked_for_as_its_kind() {
+    let off = Pictures {
+        thumbnails: false,
+        folder_contents: false,
+    };
+    let at = components(PICTURES);
+    let mut scratch = String::new();
+    let photo = Entry::new("cat.jpg", EntryKind::File, 4096, Time64::UNIX_EPOCH).with_id(LISTED);
+    let (kind, request) = entry_icon(PICTURES, &at, &photo, off, &mut scratch);
+    assert_eq!(request, IconRequest::kind(kind));
+
+    let mut folder = Entry::directory("Trips");
+    folder.set_occupancy(crate::entry::Occupancy::NonEmpty(
+        tairix_icon::FolderSample::new([tairix_icon::SampleCard::Kind(IconKind::Text)]),
+    ));
+    let (kind, request) = entry_icon(PICTURES, &at, &folder, off, &mut scratch);
+    assert_eq!(kind, IconKind::FolderFilled);
+    assert_eq!(request, IconRequest::kind(IconKind::FolderFilled));
+    let (_, request) = entry_icon(PICTURES, &at, &folder, Pictures::ALL, &mut scratch);
+    assert_ne!(request, IconRequest::kind(IconKind::FolderFilled));
 }
 
 /// A mounted volume's root is drawn as its drive, even once probed as holding
@@ -783,7 +821,7 @@ fn a_volume_root_is_pictured_as_its_drive() {
         },
     }));
     let mut scratch = String::new();
-    let (kind, request) = entry_icon("/Storage", &storage, &root, &mut scratch);
+    let (kind, request) = entry_icon("/Storage", &storage, &root, Pictures::ALL, &mut scratch);
     assert_eq!(kind, IconKind::DiskNvme);
     assert_eq!(request, IconRequest::kind(IconKind::DiskNvme));
     assert_eq!(super::icon_for_entry(&root, &storage), IconKind::DiskNvme);
@@ -808,7 +846,13 @@ fn a_listed_bundle_asks_for_its_icon_at_the_version_listed() {
     let path = alloc::format!("{APPS}/One.app");
 
     let bundle = Entry::new("One.app", EntryKind::Bundle, 4096, written).with_id(LISTED);
-    let (kind, request) = entry_icon(APPS, &components(APPS), &bundle, &mut scratch);
+    let (kind, request) = entry_icon(
+        APPS,
+        &components(APPS),
+        &bundle,
+        Pictures::ALL,
+        &mut scratch,
+    );
     assert_eq!(
         request,
         IconRequest::listed_bundle(kind, &path, bundle.stamp())
@@ -818,12 +862,122 @@ fn a_listed_bundle_asks_for_its_icon_at_the_version_listed() {
         Entry::new("One.app", EntryKind::Link(LinkTarget::Bundle), 16, written).with_id(LISTED);
     let unnamed = Entry::new("One.app", EntryKind::Bundle, 4096, written);
     for entry in [link, unnamed] {
-        let (kind, request) = entry_icon(APPS, &components(APPS), &entry, &mut scratch);
+        let (kind, request) =
+            entry_icon(APPS, &components(APPS), &entry, Pictures::ALL, &mut scratch);
         assert_eq!(
             request,
             IconRequest::bundle(kind, &path),
             "{:?}",
             entry.kind()
+        );
+    }
+}
+
+/// Each layout that names what a file is, found by where a folder stands.
+#[test]
+fn a_folder_s_site_is_the_layout_it_stands_in() {
+    use super::Site;
+    use tairix_abi::ProgramKind;
+
+    let bundle = |kind, code| Site::Bundle { kind, code };
+    for (path, site) in [
+        ("/Users/ann/Home", Site::Plain),
+        ("/System/Drivers", Site::Drivers),
+        ("/System/Drivers/input/usb_hid", Site::Drivers),
+        ("/System/Services", Site::StartedStore),
+        ("/System/Components", Site::StartedStore),
+        (
+            "/System/Applications/Paint.app",
+            bundle(Some(ProgramKind::Application), false),
+        ),
+        (
+            "/System/Applications/Paint.app/Code",
+            bundle(Some(ProgramKind::Application), true),
+        ),
+        ("/System/Applications/Paint.app/Resources", Site::Plain),
+        (
+            "/System/Commands/ls.app",
+            bundle(Some(ProgramKind::Command), false),
+        ),
+        (
+            "/System/Services/fontd.app",
+            bundle(Some(ProgramKind::Service), false),
+        ),
+        (
+            "/Users/ann/Applications/games/Chess.app",
+            bundle(Some(ProgramKind::Application), false),
+        ),
+        (
+            "/Users/ann/Commands/tool.app",
+            bundle(Some(ProgramKind::Command), false),
+        ),
+        ("/Users/ann/Home/Builds/Mine.app", bundle(None, false)),
+    ] {
+        assert_eq!(Site::of(&components(path)), site, "{path}");
+    }
+}
+
+/// What a file is in each layout, and the picture it is drawn as: a driver's
+/// image, a program by the kind of bundle it runs, and a bundle's manifest.
+#[test]
+fn a_layout_names_its_own_files_and_pictures_its_programs_by_kind() {
+    for (folder, name, media, icon) in [
+        (
+            "/System/Drivers/input/usb_hid",
+            "Run",
+            MediaType::TairixDriver,
+            IconKind::Driver,
+        ),
+        (
+            "/System/Applications/Paint.app",
+            "Run",
+            MediaType::TairixRxe,
+            IconKind::ApplicationProgram,
+        ),
+        (
+            "/Users/ann/Commands/tool.app",
+            "Run",
+            MediaType::TairixRxe,
+            IconKind::CommandProgram,
+        ),
+        (
+            "/System/Services/fontd.app",
+            "Run",
+            MediaType::TairixRxe,
+            IconKind::Executable,
+        ),
+        (
+            "/System/Applications/Paint.app/Code",
+            "filters",
+            MediaType::TairixRxe,
+            IconKind::ApplicationProgram,
+        ),
+        (
+            "/System/Applications/Paint.app",
+            "AppInfo",
+            MediaType::TairixAppInfo,
+            IconKind::Manifest,
+        ),
+        (
+            "/Users/ann/Home",
+            "Run",
+            MediaType::ApplicationOctetStream,
+            IconKind::File,
+        ),
+        (
+            "/System/Drivers/input/usb_hid",
+            "notes.txt",
+            MediaType::TextPlain,
+            IconKind::Text,
+        ),
+    ] {
+        let parent = components(folder);
+        let file = Entry::file(name);
+        assert_eq!(media_for_entry(&file, &parent), media, "{folder}/{name}");
+        assert_eq!(
+            super::icon_for_entry(&file, &parent),
+            icon,
+            "{folder}/{name}"
         );
     }
 }

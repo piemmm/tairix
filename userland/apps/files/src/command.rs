@@ -322,9 +322,9 @@ pub const fn listing_refusal(err: BrowseError) -> &'static str {
 }
 
 /// The places a window may open at, tried in order until one lists: the one
-/// named, then the bare-open places beneath home
-/// ([`tairix_browse::bare_open_places`]), then the root view, which the
-/// namespace always has.
+/// named, then the one a window asked for no folder opens at, then the
+/// bare-open places beneath home ([`tairix_browse::bare_open_places`]), then
+/// the root view, which the namespace always has.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Ladder {
     /// The places not yet refused, the one being tried first.
@@ -340,17 +340,26 @@ pub struct Ladder {
 
 impl Ladder {
     /// The ladder from `named` (a bare open when `None`) for a user whose home
-    /// is `home`. A place reached twice — `named` *is* home, say — is tried
-    /// once: trying it again after its refusal could only be refused again,
-    /// and would say so twice.
+    /// is `home`, a window asked for no folder opening at `start`. A place
+    /// reached twice — `named` *is* home, say — is tried once: trying it again
+    /// after its refusal could only be refused again, and would say so twice.
     #[must_use]
-    pub fn new(named: Option<Vec<String>>, home: Option<&[String]>) -> Self {
+    pub fn new(
+        named: Option<Vec<String>>,
+        home: Option<&[String]>,
+        start: Option<Vec<String>>,
+    ) -> Self {
         let beneath_home = home
             .map(tairix_browse::bare_open_places)
             .into_iter()
             .flatten();
         let mut places: VecDeque<Vec<String>> = VecDeque::new();
-        for place in named.into_iter().chain(beneath_home).chain([Vec::new()]) {
+        for place in named
+            .into_iter()
+            .chain(start)
+            .chain(beneath_home)
+            .chain([Vec::new()])
+        {
             if !places.contains(&place) {
                 places.push_back(place);
             }

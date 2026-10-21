@@ -5,21 +5,20 @@
 //! ([`crate::imagerender::ImageRenderService`]) on a document handed over the
 //! one upload path ([`crate::imagerender::send_document`],
 //! [`crate::imagerender::upload_document`]), and only text reaches the
-//! caller. That text is checked as though the worker had been taken over:
-//! the line count and every line's length are held to the report's own
-//! bounds, and a line that is not printable text refuses the whole reply.
+//! caller, checked as every report reply is (`crate::report`).
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_image::inspect::{inspect, ReportLine, MAX_LINE_BYTES, MAX_REPORT_LINES};
+use tairix_image::inspect::inspect;
 use tairix_image::sniff;
+use tairix_util::report::ReportLine;
 
 use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 use crate::imagerender::{
     encode_error, is_document_op, Document, DocumentFailure, ReplyFailure, ViewFormat,
 };
 use crate::memory::WorkerMemory;
+use crate::report::{read_lines, write_lines, LinesFault};
 use crate::wire::{Reader, Writer};
 use crate::worker::Service;
 
@@ -192,11 +191,7 @@ fn serve(request: &[u8], document: &mut Option<Document>) -> Result<Vec<u8>, Ins
     let report = inspect(&bytes, format);
     let mut w = Writer::new();
     w.u8(REPLY_INSPECTED);
-    w.u32(u32::try_from(report.lines().len()).unwrap_or(u32::MAX));
-    for line in report.lines() {
-        w.u8(u8::from(line.heading));
-        w.bytes(line.text.as_bytes());
-    }
+    write_lines(&mut w, report.lines());
     Ok(w.finish())
 }
 
@@ -221,36 +216,15 @@ pub fn inspect_document<L: Launcher, S: tairix_log::Sink>(
     })
 }
 
-/// Any failure to read a reply: it cannot be believed.
-fn malformed<E>(_: E) -> InspectFailure {
-    InspectFailure::ReplyMalformed
-}
-
 /// The report a reply carries, refused whole when any of it breaks its
 /// bounds.
 fn read_report(reply: &[u8]) -> Result<Vec<ReportLine>, InspectFailure> {
     let mut r = Reader::new(reply);
     InspectFailure::expect_tag(&mut r, REPLY_INSPECTED)?;
-    let count = usize::try_from(r.u32().map_err(malformed)?).map_err(malformed)?;
-    if count > MAX_REPORT_LINES {
-        return Err(InspectFailure::ReplyMalformed);
-    }
-    let mut lines = Vec::new();
-    lines
-        .try_reserve_exact(count)
-        .map_err(|_| InspectFailure::NoMemory)?;
-    for _ in 0..count {
-        let heading = InspectFailure::flag(&mut r)?;
-        let text = r.bytes(MAX_LINE_BYTES).map_err(malformed)?;
-        let text = core::str::from_utf8(text).map_err(malformed)?;
-        if text.chars().any(char::is_control) {
-            return Err(InspectFailure::ReplyMalformed);
-        }
-        lines.push(ReportLine {
-            text: String::from(text),
-            heading,
-        });
-    }
+    let lines = read_lines(&mut r).map_err(|fault| match fault {
+        LinesFault::Malformed => InspectFailure::ReplyMalformed,
+        LinesFault::NoMemory => InspectFailure::NoMemory,
+    })?;
     if !r.is_exhausted() {
         return Err(InspectFailure::ReplyMalformed);
     }

@@ -1126,6 +1126,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1308,6 +1309,7 @@ name = "tairix-complete"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-path",
 ]
 
 [[package]]
@@ -2432,6 +2434,7 @@ name = "tairix-files"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
  "tairix-appdata",
  "tairix-appstore",
  "tairix-browse",

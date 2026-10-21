@@ -406,7 +406,7 @@ fn list_directories(
         // silently — never advertised as an omission.
         let before_dotfiles = entries.len();
         match options.hidden {
-            Hidden::Skip => entries.retain(|entry| !entry.name.starts_with('.')),
+            Hidden::Skip => entries.retain(|entry| !tairix_path::is_hidden_name(&entry.name)),
             Hidden::AlmostAll => entries.retain(|entry| entry.name != "." && entry.name != ".."),
             Hidden::All => {}
         }

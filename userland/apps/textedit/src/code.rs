@@ -1,5 +1,6 @@
-//! The Code display (`plans/TEXTEDIT.md` TE14): an executable's
-//! instructions, listed read-only beside the text and hex views.
+//! The Code display (`plans/TEXTEDIT.md` TE14, TE18): what an executable's
+//! headers say, then its instructions, listed read-only beside the text and
+//! hex views.
 //!
 //! The editor parses no container. Its opening bytes are matched against the
 //! container magics (`tairix_binfmt::detect`, a bounded compare) only to offer
@@ -15,10 +16,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_sandbox::decode::{
-    self, CodeWindow, DecodeFailure, Isa, Region, RegionKind, SymbolRecord, MAX_INPUT,
+    self, CodeWindow, DecodeFailure, Isa, Region, RegionKind, Summarise, SymbolRecord, MAX_INPUT,
     MAX_WINDOW_INSNS,
 };
-use tairix_sandbox::listing::{code_lines, failure_reason, region_line, CodeLine};
+use tairix_sandbox::listing::{code_lines, failure_reason, CodeLine};
 use tairix_sandbox::{Launcher, ParserSandbox, SandboxError};
 
 use crate::answer::{Answered, Unlisted};
@@ -74,14 +75,17 @@ impl Unlisted {
         }
     }
 
-    /// Why `failure` left no listing: lasting, unless the decode worker could
-    /// not start or ran short of memory, which says nothing of the document.
-    fn of(failure: DecodeFailure) -> Self {
-        let passing = matches!(
-            failure,
-            DecodeFailure::Sandbox(error)
-                if error.out_of_memory() || matches!(error, SandboxError::WorkerUnavailable(_))
-        );
+    /// Why `failure` left no listing or report: lasting, unless the decode
+    /// worker could not start or memory ran short, which says nothing of the
+    /// document.
+    pub(crate) fn of(failure: DecodeFailure) -> Self {
+        let passing = match failure {
+            DecodeFailure::Sandbox(error) => {
+                error.out_of_memory() || matches!(error, SandboxError::WorkerUnavailable(_))
+            }
+            DecodeFailure::NoMemory => true,
+            DecodeFailure::Refused(_) | DecodeFailure::ReplyMalformed => false,
+        };
         Self {
             reason: String::from(failure_reason(failure)),
             lasting: !passing,
@@ -95,8 +99,8 @@ enum Stop {
     Time,
 }
 
-/// List `image`'s code through `sandbox`: a line naming the container, one
-/// per region, then each code region's instructions under its heading.
+/// List `image` through `sandbox`: what its headers say, then each code
+/// region's instructions under its heading.
 ///
 /// Read as the instruction set the user chose, else as the one the container
 /// names, else as the `system`'s, which is what an `rxe` installed here is
@@ -117,25 +121,20 @@ pub fn list_code<L: Launcher, S: tairix_log::Sink>(
         return Err(Unlisted::too_large());
     }
     let deadline = clock().saturating_add(LISTING_BUDGET_NS);
-    let mut summary = decode::container_summary(sandbox, image).map_err(Unlisted::of)?;
+    let mut summary =
+        decode::container_summary(sandbox, image, Summarise::WithReport).map_err(Unlisted::of)?;
     summary.symbols.sort_by_key(|symbol| symbol.addr);
     let isa = chosen.or(summary.isa).or(system).ok_or_else(|| Unlisted {
         reason: String::from("no instruction set is known to read this code as"),
         lasting: true,
     })?;
-    let mut lines = Vec::new();
-    lines.push(label(format!(
-        "{} \u{b7} {} \u{b7} entry {:#x}",
-        summary.format.name(),
-        isa.name(),
-        summary.entry
-    )));
-    lines.extend(
-        summary
-            .regions
-            .iter()
-            .map(|region| plain(region_line(region))),
-    );
+    let mut lines: Vec<CodeLine> = core::mem::take(&mut summary.report)
+        .into_iter()
+        .map(|line| CodeLine {
+            text: line.text,
+            is_label: line.heading,
+        })
+        .collect();
     if summary.regions_truncated {
         lines.push(plain(String::from(
             "  \u{2026} and more regions than are listed",
@@ -147,11 +146,16 @@ pub fn list_code<L: Launcher, S: tairix_log::Sink>(
         )));
     }
     let mut stop = None;
-    for region in summary
+    let mut code = summary
         .regions
         .iter()
         .filter(|region| region.kind == RegionKind::Code)
-    {
+        .peekable();
+    if code.peek().is_some() {
+        lines.push(plain(String::new()));
+        lines.push(label(format!("Instructions, read as {}", isa.name())));
+    }
+    for region in code {
         lines.push(plain(String::new()));
         lines.push(label(region_heading(region)));
         let Some(bytes) = region_bytes(image, region) else {
@@ -280,10 +284,11 @@ pub struct CodeDisplay {
 
 impl CodeDisplay {
     /// The display for a document opening with `head`, shown at once, or
-    /// `None` when `head` names no executable container.
+    /// `None` when `head` names no container of code.
     #[must_use]
     pub fn of(head: &[u8]) -> Option<Self> {
-        tairix_binfmt::detect(head).map(|_| Self {
+        let format = tairix_binfmt::detect(head)?;
+        format.holds_code().then(|| Self {
             showing: true,
             choice: None,
             listing: Answered::new(),

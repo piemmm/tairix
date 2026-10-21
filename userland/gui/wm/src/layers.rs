@@ -390,12 +390,6 @@ impl Compositor {
         change: Change,
         footprints: [Rect; 2],
     ) -> bool {
-        let reach = self.shadow.reach();
-        let footprint = self
-            .windows
-            .iter()
-            .find(|window| window.id() == id)
-            .map(|window| window.footprint(reach));
         let Some(stack) = self.layers.as_mut() else {
             return false;
         };
@@ -406,6 +400,12 @@ impl Compositor {
         else {
             return false;
         };
+        let reach = self.shadow.reach();
+        let footprint = self
+            .windows
+            .iter()
+            .find(|window| window.id() == id)
+            .map(|window| window.footprint(reach));
         let mut zones: ArrayVec<Rect, MAX_ACCEL_LAYERS> = ArrayVec::new();
         for above in stack.layers.iter().skip(at.saturating_add(1)) {
             if above.role() == Some(Role::Flattened) {
@@ -433,6 +433,17 @@ impl Compositor {
             }
         }
         true
+    }
+
+    /// Stale every free layer whole: the theme or density its window's
+    /// furniture and shadow are baked from changed, which no window's own
+    /// damage reports.
+    pub(super) fn restyle_free_layers(&mut self) {
+        for layer in self.layers.iter_mut().flat_map(|stack| &mut stack.layers) {
+            if layer.role() == Some(Role::Free) {
+                layer.dirty_all();
+            }
+        }
     }
 
     /// Whether the layers owe the display a present that the base's damage

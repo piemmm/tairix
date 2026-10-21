@@ -422,14 +422,17 @@ plain file. Activation descends or opens *through* the link, but launches a
 bundle by its **resolved** path, because the spawn gate parses an entry point
 as `…/<Name>.app/Run` and a link named after the program is not that shape.
 
-`SortMode` (`SortKey` — `Name`/`Size`/`Modified` — plus a `SortDirection`)
-is the one listing order both the file manager and the trusted picker share
-(`AGENTS.md` §2.2): directories first, then the chosen key, with a
-case-insensitive name tiebreak so the result never depends on the source's
-incidental order. `sort_entries` is the pure definition; the `Browser`
-applies it to every listing and `set_sort_mode` re-orders in place, keeping
-the selection on the same entry. The default is name-ascending — a
-general-purpose directory order.
+`SortMode` (a `SortKey` — name, type, size or modified, and a drive's free
+space, filesystem and health — a `SortDirection`, and where `Folders` stand)
+is the one listing order the file manager, the trusted picker and the desktop
+share (`AGENTS.md` §2.2): directories first, unless the mode puts them among the
+files, then the chosen key, with a case-insensitive name tiebreak so the
+result never depends on the source's incidental order. `sort_entries` is the
+pure definition; the `Browser` applies it to every listing and `set_sort_mode`
+re-orders in place, keeping the selection on the same entry. The default is
+name-ascending with folders first — a general-purpose directory order. The
+window menu's Display ▸ offers every key a listing's columns show, both
+directions and whether folders come first, beside the three views.
 
 ### The production source (`vfs`)
 
@@ -910,17 +913,23 @@ drift apart (`AGENTS.md` §2.2):
   registry knows first, else the extension — ASCII-case-insensitively and
   without allocating, and `name_endings(media)` lists the endings a type is
   known by, the ones a save holds a name to; `media_for_named(name, kind,
-  service_store)` classifies a node known only by its name and kind —
-  `inode/directory` for a directory whatever its name,
-  `application/x-tairix-service` for a `<Name>.app` in the system service store
-  and `application/x-tairix-app` elsewhere, and the extension's type for a
-  regular file, falling closed to `application/octet-stream`; a link classifies
-  as what it *names*, and a dangling one as the generic type.
-  `media_for_entry(entry, parent)` is that same rule for a listed entry, whose
-  parent directory is what answers the service-store question. A surface
-  describing *one* node — the Info window's identity band — has only the
-  name and kind, so it classifies through the same definition rather than
-  growing a private copy.
+  site)` classifies a node known by its name, its kind and the layout it
+  stands in (`Site`) — `inode/directory` for a directory whatever its name,
+  `application/x-tairix-service` for a `<Name>.app` in a store of programs the
+  system starts and `application/x-tairix-app` elsewhere, and for a regular
+  file what the layout names it before its extension's type, falling closed to
+  `application/octet-stream`; a link classifies as what it *names*, and a
+  dangling one as the generic type. The layouts are the bundle's own: a
+  bundle's `Run` and every file in its `Code/` are programs
+  (`application/x-tairix-rxe`, pictured by the kind of bundle its store holds —
+  an application's, a command's, else the generic program), its `AppInfo` is
+  its signed manifest (`application/x-tairix-appinfo`), and the driver store's
+  `Run` is a driver's image (`application/x-tairix-driver`); every store and
+  layout is compared against its one `lib/abi` spelling. The site decides what
+  a file is called and pictured, never what opens it: association reads the
+  name alone. `media_for_entry(entry, parent)` is that same rule for a listed
+  entry, whose parent directory is its site. The Info window takes the
+  picture the listing drew, so the two cannot disagree.
 - `MediaType::icon` is the glyph the type draws. That mapping is deliberately
   many-to-one and is the *only* part of the registry allowed to be: several
   distinct types share `IconKind::Text`. Two types are never merged because
@@ -1003,9 +1012,11 @@ the same collection control (and the same one column-width definition) the
 trusted picker uses, so the file manager and the picker are
 one coherent themed surface rather than a browser-private row painter
 (`AGENTS.md` §2.2). A name is spelled bare, whatever the entry is, and the row's
-name cell carries the entry's icon — the same `icon_for_entry` classification
-the grid tile draws, painted as the built-in glyph — so a folder is told from a
-file by that icon rather than by a name suffix. The size column
+name cell carries the entry's icon at the row's side, asked for exactly as a
+tile asks (`entry_icon`): an application's own icon, a folder's picture of what
+it holds, a picture file's thumbnail, else the class artwork — so a folder is
+told from a file by that icon rather than by a name suffix, and an entry is
+pictured alike in every display. The size column
 is blank for a directory or bundle and otherwise the binary-unit `format_size`
 (`1.5 MiB`); the modified column is `format_minute` (an ISO `YYYY-MM-DD HH:MM`,
 blank at the epoch so a stampless file is never given a fabricated date, §21);
@@ -1203,10 +1214,10 @@ only ever draws an answer it has:
   same, so a program refused a thread draws plain folders rather than reading
   on its loop.
 
-### Grid-view icon artwork
+### Icon artwork
 
-The grid draws each application's own icon, and the OS's shipped class masters
-for everything else. The `Run` binary binds the renderer's `IconArtwork` lookup
+Every display draws each application's own icon, and the OS's shipped class
+masters for everything else. The `Run` binary binds the renderer's `IconArtwork` lookup
 to the shared artwork layer (`lib/icon::artwork`), so a tile shows the real
 picture where one exists and the built-in vector glyph where it does not.
 Resolution is therefore **total**: an absent, over-long, undecodable, or
@@ -1456,9 +1467,8 @@ resolved a press on the window's top row against a strip nothing painted
 
 `F9` shows or hides the rail; `Ctrl+F9` the toolbar. They are what keeps every
 command the strip carries reachable while it is hidden — the view toggle, the
-sort cycle, and the Trash tools have no keyboard equivalent of their own —
-until the desktop settings application sets the same two fields from the
-user's stored preference. The picker is unaffected: `ManagerChrome::none()`
+sort cycle, and the Trash tools have no keyboard equivalent of their own — and
+a new window opens with the bands the file manager's settings name. The picker is unaffected: `ManagerChrome::none()`
 still carries `ToolbarBand::Shown`, and `picker::PICKER_CHROME` names that
 once so the painted band and the hit-tests cannot disagree.
 
@@ -1515,6 +1525,35 @@ read-only chooser bounded to the tree the requesting application was authorised
 to be shown, and one-click jumps to arbitrary mounted volumes would widen the
 pick beyond what was asked for.
 
+### Settings
+
+The file manager keeps its own settings in its private app-data store
+(`userland/apps/files/src/preferences.rs`, a closed `tairix_appconf`
+registry, `plans/APPDATA.md`): where a window asked for no folder opens — the
+user's `Home`, their `Desktop`, or the attached storage — the view, order,
+places rail and toolbar a new window opens with, whether folders stand first
+in every window, which endings a name is shown without (an application's
+`.app` by default, a known type's extension when asked), whether items whose
+names begin with a dot are listed (not by default, as `ls`), whether a picture
+is drawn as its content and a folder as what it holds, and whether a move to
+the Trash asks first. *Settings…* on the icon-bar menu, in either role, and
+`Ctrl+,` open the settings window (`settings.rs`): one page of the shared form
+controls in groups — New windows, Listings, Icons, Trash — with *Restore
+defaults* last, scrolled when it outgrows its window and walked by `Tab`,
+`Shift+Tab` and the arrows.
+
+A change applies to every window at once and is written off the loop through
+the publication desk (`tairix_appdata`): the page shows what it asked for and
+adopts what the store then says, a refusal stated beneath *Restore defaults*.
+A window already open keeps its own view and order and takes only where
+folders stand; a change arriving while its listing is held by a menu, a rename
+or a drag waits for the hold to end. The presentation is the browser's
+(`Browser::set_presentation`, `tairix_browse::Presentation`): a hidden ending
+is display only — an entry keeps its exact name, which every operation acts
+on — and a hidden item is left out of the listing, so nothing in the window
+reaches it. The desktop and the trusted picker show every entry by its exact
+name whatever the manager's settings say.
+
 ### The `Run` bundle
 
 `files.app`'s entry point (`plans/APPWIN.md` AW3) wires `VfsDirectorySource`
@@ -1562,10 +1601,13 @@ breaks a rule or clashes with an existing sibling shows the reason in the
 field as you type. `Enter` commits and `Escape` abandons the edit.
 
 However the field opens — `F2`, the menu's **Rename**, New ▸, or a click — it
-selects the name's **stem** (`tairix_browse::rename_selection`): everything
-before the extension, so typing replaces the name and keeps the extension; a
-folder, and a name with no extension, are selected whole, and a bundle keeps
-`.app`. A press inside the field places the caret and a drag from it selects;
+holds the name as the window shows it (`tairix_browse::rename_text`) and
+selects its **stem**: everything before the extension, so typing replaces the
+name and keeps the extension; a folder, and a name with no extension, are
+selected whole, and a bundle keeps `.app`. A name shown without an ending the
+settings hide is edited without it, and the commit puts the ending back
+(`tairix_browse::renamed`), the field remembering the endings it opened with
+so a settings change meanwhile cannot drop one. A press inside the field places the caret and a drag from it selects;
 a press outside commits the name as `Enter` does. An unchanged name closes
 the field and the press acts as it would have with none open; a rename that
 took closes it and spends the press, since the folder may have re-sorted

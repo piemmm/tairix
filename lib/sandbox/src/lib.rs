@@ -100,6 +100,7 @@ pub mod listing;
 pub mod loopback;
 pub mod memory;
 pub mod proto;
+mod report;
 #[cfg(all(freestanding, feature = "program"))]
 pub mod rt;
 pub mod session;

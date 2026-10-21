@@ -8,7 +8,7 @@
 //!
 //! * **Hostile input files** — mutated container/help-document/icon/picture
 //!   templates and pure noise fed to
-//!   [`tairix_sandbox::decode::container_summary`] / [`manifest_summary`] /
+//!   [`tairix_sandbox::decode::container_summary`] / [`file_report`] /
 //!   [`disassemble`] / [`render_help`] / [`rasterise_icon`] over the
 //!   in-process loopback worker — and mutated NTP server replies fed to
 //!   [`tairix_sandbox::timesync::evaluate_datagram`]: every outcome must be
@@ -35,7 +35,7 @@ use tairix_image::{
 };
 use tairix_raster::Region;
 use tairix_sandbox::decode::{
-    container_summary, disassemble, manifest_summary, CodeWindow, DecodeService, Isa,
+    container_summary, disassemble, file_report, CodeWindow, DecodeService, Isa, Summarise,
 };
 use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
@@ -265,6 +265,27 @@ fn rxe_template() -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&header.to_le_bytes());
     bytes.extend_from_slice(&segment.to_le_bytes());
+    bytes
+}
+
+/// A minimal valid driver image: a manifest asking for IRQ binding, then the
+/// rxe template as its program.
+fn driver_template() -> Vec<u8> {
+    let manifest = tairix_abi::DriverManifest {
+        magic: tairix_abi::DRIVER_MANIFEST_MAGIC,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
+        kind: tairix_abi::DriverKind::UserSpace,
+        bind_key_count: 1,
+        capability_count: 1,
+        syscall_table_hash: [0x11; 32],
+        signer_pubkey: [0x22; 32],
+        signature: [0x33; 64],
+    };
+    let key = tairix_abi::DriverBindKey::new(1, tairix_abi::HwMatchKey::virtio(2));
+    let mut bytes = manifest.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&tairix_abi::CapabilityId::IRQ_BIND.as_u16().to_le_bytes());
+    bytes.extend_from_slice(&key.to_le_bytes());
+    bytes.extend_from_slice(&rxe_template());
     bytes
 }
 
@@ -661,9 +682,9 @@ fn fuzz_inspect_iteration(
                 continue;
             }
             if let Ok(lines) = inspect_document(honest, *rng.pick(&EDIT_FORMATS)) {
-                assert!(lines.len() <= tairix_image::inspect::MAX_REPORT_LINES);
+                assert!(lines.len() <= tairix_util::report::MAX_REPORT_LINES);
                 for line in lines {
-                    assert!(line.text.len() <= tairix_image::inspect::MAX_LINE_BYTES);
+                    assert!(line.text.len() <= tairix_util::report::MAX_LINE_BYTES);
                     assert!(!line.text.chars().any(char::is_control));
                 }
             }
@@ -960,26 +981,31 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
     );
     let wasm = wasm_template();
     let rxe = rxe_template();
+    let driver = driver_template();
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A container template with a handful of bytes flipped, plus a
-        //    random truncation, summarised through the honest worker.
-        let template = if rng.next_u64() & 1 == 0 { &wasm } else { &rxe };
+        //    random truncation, summarised and reported through the honest
+        //    worker.
+        let template = *rng.pick(&[&wasm, &rxe, &driver]);
         let mut mutated = template.clone();
         for _ in 0..rng.at_most(6) {
             let pos = rng.below(mutated.len());
             mutated[pos] ^= rng.next_u8();
         }
-        let _ = container_summary(&mut honest, &mutated);
+        let carry = *rng.pick(&[Summarise::Regions, Summarise::WithReport]);
+        let _ = container_summary(&mut honest, &mutated, carry);
+        let _ = file_report(&mut honest, &mutated);
         let cut = rng.at_most(mutated.len());
-        let _ = container_summary(&mut honest, &mutated[..cut]);
+        let _ = container_summary(&mut honest, &mutated[..cut], carry);
+        let _ = file_report(&mut honest, &mutated[..cut]);
 
-        // 2. Pure noise as an input file and as a manifest.
+        // 2. Pure noise as an input file, summarised and reported.
         let mut noise = vec![0u8; rng.at_most(MAX_NOISE)];
         rng.fill(&mut noise);
-        let _ = container_summary(&mut honest, &noise);
-        let _ = manifest_summary(&mut honest, &noise);
+        let _ = container_summary(&mut honest, &noise, carry);
+        let _ = file_report(&mut honest, &noise);
 
         // 3. Noise disassembled under every ISA at a random address,
         //    depth, and window size, as the whole code or a window of it.
@@ -1026,8 +1052,8 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         // 8. The hostile worker: framed noise replies into every client
         //    decoder. Each request crashes and replaces the worker, so
         //    every iteration sees fresh noise.
-        let _ = container_summary(&mut hostile, &rxe);
-        let _ = manifest_summary(&mut hostile, &noise[..rng.at_most(noise.len())]);
+        let _ = container_summary(&mut hostile, &rxe, carry);
+        let _ = file_report(&mut hostile, &noise[..rng.at_most(noise.len())]);
         let nops = CodeWindow {
             address: 0,
             depth: 0,

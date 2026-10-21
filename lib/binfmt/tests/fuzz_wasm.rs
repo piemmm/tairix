@@ -8,7 +8,8 @@
 //!   error (fail closed);
 //! * a successful parse yields a directory whose every payload, count,
 //!   and function-body walk terminates without a panic (a hostile LEB128
-//!   length cannot cause an overrun or an unbounded loop).
+//!   length cannot cause an overrun or an unbounded loop), and so does the
+//!   module's report.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` mutates
 //! a hand-assembled valid module and mixes in pure noise. A plain
@@ -37,8 +38,9 @@ fn valid_module() -> Vec<u8> {
     out
 }
 
-/// Decode `bytes`; a success must be walkable without a panic.
+/// Decode and report `bytes`; a success must be walkable without a panic.
 fn exercise(bytes: &[u8]) {
+    let _ = tairix_binfmt::report::report(bytes);
     let Ok(view) = WasmView::parse(bytes) else {
         return;
     };

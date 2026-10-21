@@ -939,7 +939,8 @@ the row's icon side, the raster, vector and built-in tiers every surface draws
 through, so an application names a picture and can never name a file. An
 unknown id draws the generic glyph, and a bundle row whose bundle will not
 resolve draws the built-in application glyph. The file manager's icon-bar rows
-name the folder artwork for its places and each drive's own for its volumes.
+name each place's own artwork, the Home folder's and the folder's, and each
+drive's own for its volumes.
 
 ### M9 — the *Info* sheet (landed)
 

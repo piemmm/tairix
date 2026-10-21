@@ -14,7 +14,10 @@ use tairix_abi::window_ipc::{
 };
 use tairix_browse::{Places, Volume};
 
-use super::{component_declaration, place_of, DESKTOP_SLOT_CLICK, WINDOW_SLOT_CLICK};
+use super::{
+    component_declaration, is_settings, place_of, window_declaration, DESKTOP_SLOT_CLICK,
+    SETTINGS_ROWS, WINDOW_SLOT_CLICK,
+};
 use crate::test_fs::mounted;
 
 /// A USB unit that reported a non-rotating medium: served as removable.
@@ -41,10 +44,20 @@ fn kinds(places: &Places) -> Vec<AppMenuRowKind> {
         .collect()
 }
 
-/// The labels of a declaration's item rows, in order.
+/// The labels of a declaration's place rows, in order.
 fn labels(places: &Places) -> Vec<String> {
     let (bar, _) = component_declaration(7, places).expect("the rows fit");
-    item_labels(&bar)
+    place_labels(&bar)
+}
+
+/// The label of the *Settings…* row.
+const SETTINGS: &str = "Settings\u{2026}";
+
+/// The labels of `bar`'s place rows, in order: every item but *Settings…*.
+fn place_labels(bar: &AppBar) -> Vec<String> {
+    let mut shown = item_labels(bar);
+    assert_eq!(shown.pop().as_deref(), Some(SETTINGS), "Settings… is last");
+    shown
 }
 
 /// The labels of `bar`'s item rows, in order.
@@ -112,7 +125,7 @@ fn the_component_offers_the_places_and_neither_of_the_conventions_rows() {
         "a component declares no information row"
     );
     assert!(
-        !labels(&places).iter().any(|label| label == "Quit"),
+        !item_labels(&bar).iter().any(|label| label == "Quit"),
         "a component declares no Quit row"
     );
     // Every row is the rail's, in the rail's own order.
@@ -151,7 +164,7 @@ fn each_row_draws_its_places_own_picture() {
         );
     }
     assert_eq!(
-        pictures.last().map(|(_, icon)| *icon),
+        pictures.get(places.len() - 1).map(|(_, icon)| *icon),
         Some(AppMenuIconView::Asset("disk-usb")),
         "a removable volume draws its drive"
     );
@@ -159,12 +172,16 @@ fn each_row_draws_its_places_own_picture() {
 
 #[test]
 fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
-    // Nothing mounted: no divider, because there is nothing to divide.
+    // Nothing mounted: no divider among the places, because there is nothing
+    // to divide — only the one that sets Settings… apart.
     let bare = Places::new(&home(), &[]);
-    assert!(
-        !kinds(&bare).contains(&AppMenuRowKind::Separator),
-        "no volumes, no rule"
-    );
+    let rules = |kinds: &[AppMenuRowKind]| {
+        kinds
+            .iter()
+            .filter(|kind| **kind == AppMenuRowKind::Separator)
+            .count()
+    };
+    assert_eq!(rules(&kinds(&bare)), 1, "no volumes, no rule among them");
 
     // Mounted: the rule falls exactly where the volume rows begin, and the
     // volumes follow the user's own places.
@@ -180,12 +197,9 @@ fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
         "one divider, at the rail's own volume boundary"
     );
     assert_eq!(
-        declared
-            .iter()
-            .filter(|kind| **kind == AppMenuRowKind::Separator)
-            .count(),
-        1,
-        "one rule, not one per volume"
+        rules(&declared),
+        2,
+        "one rule for the volumes, not one per volume, and Settings…'s own"
     );
     // Sorted by label, after the fixed places.
     assert_eq!(
@@ -202,6 +216,9 @@ fn a_chosen_row_names_the_place_the_user_saw() {
         let AppMenuRowView::Item(item) = row else {
             continue;
         };
+        if is_settings(item.id) {
+            continue;
+        }
         let index = place_of(item.id).expect("a declared id names a place");
         assert_eq!(
             places.rows()[index].label(),
@@ -247,8 +264,9 @@ fn the_row_cap_drops_the_tail_and_reports_how_many() {
     assert_eq!(bar.menu.len(), APP_MENU_MAX_ROWS, "the cap is filled");
     assert_eq!(
         skipped,
-        places.rows().len() - (APP_MENU_MAX_ROWS - 1),
-        "every place past the cap — the rule taking one row of it — is counted"
+        places.rows().len() - (APP_MENU_MAX_ROWS - 1 - SETTINGS_ROWS),
+        "every place past the cap — the volumes' rule and Settings… taking \
+         rows of it — is counted"
     );
     // What is shown is still a prefix of the rail, so the rows the user sees
     // are the ones the rail would have shown first.
@@ -263,11 +281,36 @@ fn the_row_cap_drops_the_tail_and_reports_how_many() {
 }
 
 #[test]
-fn an_empty_rail_declares_an_empty_menu_rather_than_failing() {
-    // A session with no home and nothing attached: a menu with no rows is a
-    // menu the bar opens nothing for, which is honest, not an error.
+fn an_empty_rail_still_offers_settings() {
+    // A session with no home and nothing attached has no place to offer, but
+    // its file manager's settings are still the user's to reach.
     let places = Places::default();
-    let (bar, skipped) = component_declaration(7, &places).expect("an empty menu is admissible");
-    assert_eq!(bar.menu.len(), 0);
+    let (bar, skipped) = component_declaration(7, &places).expect("the menu is admissible");
+    assert_eq!(item_labels(&bar), [SETTINGS.to_string()]);
+    assert_eq!(
+        bar.menu.len(),
+        1,
+        "no rule above it with nothing to set it apart from"
+    );
     assert_eq!(skipped, 0);
+}
+
+#[test]
+fn an_ordinary_file_manager_offers_settings_between_the_convention_s_ends() {
+    let bar = window_declaration(7).expect("the rows fit");
+    assert_eq!(bar.click, WINDOW_SLOT_CLICK);
+    assert_eq!(
+        item_labels(&bar),
+        [SETTINGS.to_string(), tairix_window::QUIT_LABEL.to_string()]
+    );
+    let settings = bar
+        .menu
+        .rows()
+        .find_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) if item.label == SETTINGS => Some(item.id),
+            _ => None,
+        })
+        .expect("Settings… is declared");
+    assert!(is_settings(settings));
+    assert!(!tairix_window::is_quit(settings));
 }

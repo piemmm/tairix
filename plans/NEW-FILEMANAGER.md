@@ -63,6 +63,7 @@ which the drift guard enforces.
 | FM21 | A `/Storage` volume is drawn as its drive, and the rail keeps a degraded or recovering volume | done |
 | FM22 | A drive's Properties: kind, filesystem, options, capacity as a ring, activity as a live trace, health, read off the loop | done |
 | FM20 | Nothing touches a disk on the window's loop: long operations on an operations worker, every one-shot write on the reader by ticket, the opening ladder and the mount list on the reader, and every refusal stated in the window | done |
+| FM23 | The file manager's own settings, kept in its app-data store and edited in a settings window of its own | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -187,6 +188,25 @@ that check and the removal). A machine that grants no thread carries each of
 these out on the loop — an operation in half-frame slices, still cancellable —
 slower, never wrong; on exit the desks are stopped and the worker joined.
 
+**FM23 — the manager's settings.** The file manager keeps its own settings in
+its private app-data store (`preferences::Preferences`, a closed
+`tairix_appconf` registry): where a window asked for no folder opens (Home,
+Desktop or Storage), the view, order and bands a new window opens with, whether
+folders stand first in every window, which endings are hidden (an
+application's `.app` ending by default, a known type's extension when asked),
+whether hidden items are listed (not by default, as `ls`), whether a picture
+is its content and a folder shows what it holds, and whether a move to the
+Trash asks first. The settings window (`settings::SettingsWindow`, reached by
+*Settings…* on the icon-bar menu in either role and by `Ctrl+,`) is one
+scrolled page of the shared form controls; a change applies to every window
+at once — a window open keeps its own view and order, taking only where
+folders stand — and is written off the loop through the publication desk
+(`tairix_appdata`), the page adopting what the store then says. A settings
+change arriving while a window's listing is held by a menu, a rename or a drag
+waits for the hold to end. A name's shown form is display only: a rename edits
+it and restores the ending it hid, and the desktop and the trusted picker keep
+the exact names.
+
 **FM-dialogs — the two popup surfaces.** Three defects, one of them shared
 with every other surface on the desktop.
 
@@ -305,9 +325,8 @@ and a window showing no rail routes nothing to one.
 `F9` shows or hides the rail and `Ctrl+F9` the toolbar. These are what keep
 every command the toolbar carries reachable while it is hidden — the view
 toggle, the sort cycle, and the Trash tools have no keyboard equivalent of
-their own — until the desktop settings application sets the same two fields
-from the user's stored preference (`plans/NEW-DESKTOP-SETTINGS.md`); the
-accelerators stay afterwards, as the in-window spelling of the setting. The
+their own. A new window opens showing the bands the manager's own settings
+name (FM23); the accelerators are the in-window spelling of the setting. The
 read-only picker is unchanged: `ManagerChrome::none()` still carries
 `ToolbarBand::Shown`, and `picker::PICKER_CHROME` names it once so the painted
 band and the hit-tests that invert it cannot disagree.

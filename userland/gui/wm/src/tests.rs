@@ -3697,7 +3697,7 @@ fn clearing_a_root_viewport_removes_the_furniture() {
 // ---- server-side window decorations (Stage A geometry) ---------------
 
 /// A movable, resizable, active furniture state for a decorated test window.
-fn decorated() -> WindowFurnitureState {
+pub(crate) fn decorated() -> WindowFurnitureState {
     WindowFurnitureState {
         activation: WindowActivationState::Active,
         size: WindowSizeState::Restored,
@@ -11835,7 +11835,7 @@ fn stepped(c: &mut Compositor, now_ns: u64) {
 }
 
 /// Long past any ease the built-in themes run.
-const SETTLED_NS: u64 = 1_000_000_000;
+pub(crate) const SETTLED_NS: u64 = 1_000_000_000;
 
 #[test]
 fn the_family_in_front_stands_lifted_and_every_other_window_rests() {

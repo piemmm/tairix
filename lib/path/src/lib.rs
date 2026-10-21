@@ -682,6 +682,14 @@ pub fn validate_file_name(name: &str) -> Result<(), PathError> {
     validate_component(name)
 }
 
+/// Whether a directory entry named `name` is a *hidden item*, which a
+/// listing leaves out unless asked for everything: a name beginning with a
+/// dot, the convention every listing on the system follows.
+#[must_use]
+pub fn is_hidden_name(name: &str) -> bool {
+    name.starts_with('.')
+}
+
 /// The final component of the spelling `path` — its POSIX *base name*.
 ///
 /// Trailing `/`s are ignored, so `/a/b/` names `b`. A spelling that holds
@@ -735,6 +743,15 @@ mod tests {
 
     fn components(p: &Path) -> Vec<String> {
         p.components().to_vec()
+    }
+
+    #[test]
+    fn a_name_beginning_with_a_dot_is_a_hidden_item() {
+        assert!(is_hidden_name(".profile"));
+        assert!(is_hidden_name("..."));
+        assert!(!is_hidden_name("notes.txt"));
+        assert!(!is_hidden_name("Paint.app"));
+        assert!(!is_hidden_name(""));
     }
 
     #[test]

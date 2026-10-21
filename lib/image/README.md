@@ -153,9 +153,10 @@ OpenRaster archive's members — and every EXIF tag by name with its value in
 its unit (`exif`, which reads a TIFF file's own pages too). Advisory reading,
 walked tolerantly: a record that will not read ends the walk with where and
 why, an EXIF entry list cut short is read as far as it goes, and no directory
-is visited twice. The report is bounded — `MAX_REPORT_LINES` lines of at most
-`MAX_LINE_BYTES` bytes, saying where it stopped — and the text a file carries
-is shown with its control bytes escaped. The TIFF directory layout every
+is visited twice. The report is bounded by the shared builder
+(`tairix_util::report`: `MAX_REPORT_LINES` lines of at most `MAX_LINE_BYTES`
+bytes, saying where it stopped) and the text a file carries is shown with its
+control bytes escaped. The TIFF directory layout every
 reader here shares — the decoder's strict reading and the advisory walks — is
 `ifd`.
 

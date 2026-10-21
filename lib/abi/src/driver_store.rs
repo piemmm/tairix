@@ -37,6 +37,10 @@ use crate::driver::DriverBindKey;
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
 use crate::{Errno, DRIVER_MANIFEST_MAX_BIND_KEYS};
 
+/// The signed-driver store's place in the namespace: every installed driver
+/// bundle lives beneath it, at `<class>[_<subtype>]/<leaf>/Run`.
+pub const DRIVER_STORE_PATH: &str = "/System/Drivers";
+
 /// Well-known kernel-owned call-endpoint id of the read-only `/System`
 /// driver-store service (Design D D2b).
 ///

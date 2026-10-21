@@ -235,3 +235,43 @@ fn the_chooser_walk_names_what_its_paint_asks_for() {
         assert_eq!(named, painted.0, "in {viewport:?}");
     }
 }
+
+/// A list row asks for the picture a small icon asks for: an application's own
+/// icon, a picture file's own content, a folder as itself.
+#[test]
+fn a_list_row_asks_for_what_a_small_icon_asks_for() {
+    let theme = Theme::dark();
+    let chrome = ManagerChrome {
+        tools: MANAGER_TOOLS,
+        tool_model: ManagerToolModel::none(),
+        sidebar: None,
+        toolbar: ToolbarBand::Hidden,
+        renaming: None,
+    };
+    let window = Rect::new(0, 0, 1600, 1200);
+    let asked = |view| {
+        let mut browser = Browser::open_root(Fixed(entries())).expect("the root lists");
+        browser.set_view_mode(view);
+        let mut painted = Asked::default();
+        let mut surface = Surface::new(window.width, window.height).expect("surface");
+        render_into(
+            &mut surface,
+            &browser,
+            Scale::ONE,
+            &theme,
+            window,
+            &chrome,
+            &mut painted,
+        );
+        painted
+            .0
+            .into_iter()
+            .map(|(request, _)| request)
+            .collect::<Vec<_>>()
+    };
+    let listed = asked(ViewMode::List);
+    assert_eq!(listed.len(), entries().len(), "every row is on screen");
+    assert!(listed.iter().any(|request| request.contains("App 00.app")));
+    assert!(listed.iter().any(|request| request.contains("photo-0.png")));
+    assert_eq!(listed, asked(ViewMode::SmallIcons));
+}

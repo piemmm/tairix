@@ -1,28 +1,80 @@
-//! The Data display (`plans/TEXTEDIT.md` TE16): a picture's structure — the
-//! records its container holds, and every EXIF tag by name — then the whole
-//! file as a hex dump, read-only beside the text and hex views.
+//! The Data display (`plans/TEXTEDIT.md` TE16, TE18): a picture's or a signed
+//! manifest's structure — the records its container holds, every EXIF tag by
+//! name, what a manifest requests and claims — then the whole file as a hex
+//! dump, read-only beside the text and hex views.
 //!
-//! The editor parses no picture. Its opening bytes are matched against the
-//! picture formats' signatures (`tairix_image::sniff`, a bounded compare), or
-//! its name against the one format that carries none, only to offer the
-//! display. The report is read by a sandboxed worker of the editor's own
-//! (`run.rs`), so a hostile picture is parsed in neither the editor nor the
-//! workers that colour text or list code; the hex rows are the document's own
-//! bytes.
+//! The editor parses neither. Its opening bytes are matched against the
+//! picture formats' signatures (`tairix_image::sniff`) and the manifest magics
+//! (`tairix_binfmt::detect`), bounded compares, or its name against the one
+//! picture format that carries none, only to offer the display. The report is
+//! read by a sandboxed worker of the editor's own (`run.rs`) — the picture
+//! worker for a picture, the decode worker for a manifest — so a hostile file
+//! is parsed in neither the editor nor the worker that colours text; the hex
+//! rows are the document's own bytes.
 
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
+use tairix_binfmt::Format;
 use tairix_browse::{media_for_name, MediaType};
-use tairix_image::inspect::ReportLine;
+use tairix_sandbox::decode::{self, MAX_INPUT};
 use tairix_sandbox::imageinspect::InspectFailure;
 use tairix_sandbox::imagerender::{ViewFormat, MAX_DOCUMENT_BYTES};
+use tairix_sandbox::{Launcher, ParserSandbox};
 use tairix_util::hexdump::BYTES_PER_ROW;
+use tairix_util::report::ReportLine;
 
 use crate::answer::{Answered, Unlisted};
 
-/// What the display says while the worker reads the picture.
-pub const READING: &str = "Reading the picture's structure\u{2026}";
+/// What a document's structure is read as, and so which worker reads it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Structure {
+    /// A picture, read by the picture worker — as the format its name gives
+    /// it, for one whose content carries no signature: a sprite area.
+    Picture(Option<ViewFormat>),
+    /// A signed manifest, read by the decode worker.
+    Manifest,
+}
+
+impl Structure {
+    /// What the display says while the worker reads it.
+    #[must_use]
+    pub const fn reading(self) -> &'static str {
+        match self {
+            Self::Picture(_) => "Reading the picture's structure\u{2026}",
+            Self::Manifest => "Reading the manifest\u{2026}",
+        }
+    }
+
+    /// The document is past what one report may read.
+    #[must_use]
+    pub fn too_large(self) -> Unlisted {
+        let (what, limit) = match self {
+            Self::Picture(_) => ("a picture", MAX_DOCUMENT_BYTES),
+            Self::Manifest => ("a manifest", MAX_INPUT),
+        };
+        Unlisted {
+            reason: alloc::format!(
+                "too large to read as {what}: over {} MiB",
+                limit / (1024 * 1024)
+            ),
+            lasting: true,
+        }
+    }
+
+    /// The allocator would not hold the document's bytes for a report.
+    #[must_use]
+    pub fn no_memory(self) -> Unlisted {
+        let what = match self {
+            Self::Picture(_) => "the picture's structure",
+            Self::Manifest => "the manifest",
+        };
+        Unlisted {
+            reason: alloc::format!("there is not enough memory to read {what}"),
+            lasting: false,
+        }
+    }
+}
 
 /// What one row of the display is.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -38,13 +90,11 @@ pub enum DataRow<'a> {
     Hex(usize),
 }
 
-/// What the window shows of a picture as data.
+/// What the window shows of a document as data.
 #[derive(Debug)]
 pub struct DataDisplay {
     showing: bool,
-    /// The format the document's name gives it, for one whose content
-    /// carries no signature: a sprite area.
-    named: Option<ViewFormat>,
+    structure: Structure,
     report: Answered<Vec<ReportLine>>,
     /// The widest report line, in characters.
     widest: usize,
@@ -54,14 +104,24 @@ pub struct DataDisplay {
 
 impl DataDisplay {
     /// The display for a document called `name` opening with `head`, shown
-    /// at once, or `None` when it is no picture.
+    /// at once, or `None` when it is neither a picture nor a manifest.
     #[must_use]
     pub fn of(head: &[u8], name: &str) -> Option<Self> {
         let named =
             (media_for_name(name) == Some(MediaType::ImageSprite)).then_some(ViewFormat::Sprite);
-        (named.is_some() || tairix_image::sniff(head).is_some()).then(|| Self {
+        let structure = if named.is_some() || tairix_image::sniff(head).is_some() {
+            Structure::Picture(named)
+        } else if matches!(
+            tairix_binfmt::detect(head),
+            Some(Format::Manifest | Format::AppInfo)
+        ) {
+            Structure::Manifest
+        } else {
+            return None;
+        };
+        Some(Self {
             showing: true,
-            named,
+            structure,
             report: Answered::new(),
             widest: 0,
             top: 0,
@@ -85,11 +145,10 @@ impl DataDisplay {
         changed
     }
 
-    /// The format to read the document as, where its name rather than its
-    /// content says.
+    /// What the document's structure is read as.
     #[must_use]
-    pub const fn named(&self) -> Option<ViewFormat> {
-        self.named
+    pub const fn structure(&self) -> Structure {
+        self.structure
     }
 
     /// The id to ask for the report of the document at `generation` by, when
@@ -155,7 +214,7 @@ impl DataDisplay {
     /// past the last.
     #[must_use]
     pub fn row(&self, at: usize, len: usize) -> Option<DataRow<'_>> {
-        if let Some(note) = self.report.note(READING) {
+        if let Some(note) = self.report.note(self.structure.reading()) {
             if at == 0 {
                 return Some(DataRow::Note(note));
             }
@@ -208,25 +267,19 @@ pub fn unreported(failure: InspectFailure) -> Unlisted {
     }
 }
 
-/// The document is past what one report may read.
-#[must_use]
-pub fn too_large() -> Unlisted {
-    Unlisted {
-        reason: alloc::format!(
-            "too large to read as a picture: over {} MiB",
-            MAX_DOCUMENT_BYTES / (1024 * 1024)
-        ),
-        lasting: true,
+/// The report of the manifest `bytes`, read through `sandbox`.
+///
+/// # Errors
+///
+/// Why there is none, in the words a decode's failure is stated in.
+pub fn report_manifest<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    bytes: &[u8],
+) -> Result<Vec<ReportLine>, Unlisted> {
+    if bytes.len() > MAX_INPUT {
+        return Err(Structure::Manifest.too_large());
     }
-}
-
-/// The allocator would not hold the document's bytes for a report.
-#[must_use]
-pub fn no_memory() -> Unlisted {
-    Unlisted {
-        reason: String::from("there is not enough memory to read the picture's structure"),
-        lasting: false,
-    }
+    decode::file_report(sandbox, bytes).map_err(Unlisted::of)
 }
 
 #[cfg(test)]

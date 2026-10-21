@@ -1,16 +1,15 @@
 //! Which of the file manager's own chrome bands a window is showing, the keys
 //! that turn them on, and the keys that run the toolbar's commands directly.
 //!
-//! A window opens showing the listing alone. The places rail and the command
-//! toolbar are surfaces the user asks for, not fixed parts of the layout, so
-//! neither reserves any of the window until it does: a plain window is the
-//! directory and nothing else. The desktop settings application will set the
-//! same two fields from the user's stored preference
-//! (`plans/NEW-FILEMANAGER.md`); the two toggles here are how they are
-//! reached from the window itself, and are what keeps every command the
-//! toolbar carries — the view toggle, the sort cycle, the Trash tools —
-//! reachable while it is hidden. [`Accelerator`] is the keyboard's direct
-//! reach to the rest.
+//! A window opens showing what the file manager's own settings say
+//! ([`crate::preferences`]), the listing alone unless the user asked for more.
+//! The places rail and the command toolbar are surfaces the user asks for, not
+//! fixed parts of the layout, so neither reserves any of the window until it
+//! does; the two toggles here are how they are reached from the window itself,
+//! and are what keeps every command the toolbar carries — the view toggle, the
+//! sort cycle, the Trash tools — reachable while it is hidden. [`Accelerator`]
+//! is the keyboard's direct reach to the rest, and [`opens_settings`] to the
+//! settings window.
 //!
 //! Each decision is a pure function of the key, so it is host-tested; the
 //! program only applies the answer.
@@ -113,6 +112,13 @@ impl Accelerator {
             _ => None,
         }
     }
+}
+
+/// Whether `key` opens the file manager's settings window: `Ctrl+,`, the
+/// desktop's spelling for an application's settings.
+#[must_use]
+pub fn opens_settings(key: KeyValue, modifiers: Modifiers) -> bool {
+    key == KeyValue::Char(',') && modifiers.ctrl && !modifiers.alt && !modifiers.shift
 }
 
 /// A change to the listing's selection as a whole, which a key or the context

@@ -25,6 +25,7 @@ address space and I/O off its loop.
 | TE15 | A document on a read-only volume is handed over read-only, and an open the hand-over refuses is stated in a window | done |
 | TE16 | Data: a picture opens as a report of its structure and metadata, then its bytes as a hex dump, parsed by a worker of its own | done |
 | TE17 | A secondary press on a window's close button closes it and shows its file selected in the file manager, without the editor learning the path | done |
+| TE18 | An executable's headers, a driver image's manifest and a signed manifest are reported in words, read by the decode worker | done |
 
 ## What it is
 
@@ -86,12 +87,18 @@ text view shows.
   to show code other than the code that runs. A token is one caret stop.
 - **Hex.** Offset, sixteen bytes, and their ASCII, with a caret in either pane;
   typing a hex digit writes a nibble, overwrite by default, `Insert` toggles.
-- **Code.** An executable — an rxe, ELF64 or wasm container, recognised by
-  its opening magic alone (`tairix_binfmt::detect`) — opens read-only as a
-  listing of its code: a line naming the container, one per region, a note
-  when not every region or symbol made the summary, then each code region's
-  instructions with their encodings and symbolised branch targets
-  (`tairix_sandbox::listing`, the formatting `fstree` lists with). It is built
+- **Code.** An executable — an rxe, a driver bundle's image, an ELF64 file
+  or a wasm module, recognised by its opening magic alone
+  (`tairix_binfmt::detect`) — opens read-only as a listing: what its headers
+  say (`tairix_binfmt::report`: each part at its offset and length, with what
+  it declares — ABI, entry, CFI tag, segments, needed libraries, a driver's
+  signed manifest, the capabilities it asks for and the hardware its bind
+  table names, an ELF file's program and section headers, a module's
+  sections; keys and signatures shown, never checked), a note when not every
+  region or symbol made the summary, then each code region's instructions
+  with their encodings and symbolised branch targets
+  (`tairix_sandbox::listing`, the formatting `fstree` lists with). A driver's
+  code is its program's, at its place in the whole file. It is built
   on an editor worker thread from the document's snapshot, and every byte it
   lists is parsed by a decode worker of its own, so a hostile executable is
   parsed in neither the editor nor the worker that colours text. Past
@@ -102,17 +109,22 @@ text view shows.
   else the system's own; picking the set already listed lists nothing again.
   Showing Code closes the find bar, as nothing it does reaches code.
 - **Data.** A picture — any format `tairix_image` recognises, by its media
-  type or its opening signature — opens read-only as a report of its
-  structure: the container's records in file order with their offsets and
-  lengths, what each declares (dimensions, colour model, density, palette,
-  frames, colour profile, text, and every EXIF tag by name with its value
-  rendered), then the whole file as a hex dump. The report is built by
-  `tairix_image::inspect` in a data worker of its own
-  (`tairix_sandbox::imageinspect::InspectService`), so a hostile picture is
-  parsed neither in the editor nor beside the code or syntax parsers; the hex
-  rows are drawn straight from the document. The report is bounded
-  (`MAX_REPORT_LINES`, `MAX_LINE_BYTES` a line) and says where it stopped.
-  Hex stays the raw dump; Text stays the bytes as text.
+  type or its opening signature — or a signed manifest — a program's (`RXM1`)
+  or a bundle's `AppInfo`, by its magic — opens read-only as a report of its
+  structure, then the whole file as a hex dump. A picture's report lists the
+  container's records in file order with their offsets and lengths and what
+  each declares (dimensions, colour model, density, palette, frames, colour
+  profile, text, and every EXIF tag by name with its value rendered), built
+  by `tairix_image::inspect` in a data worker of its own
+  (`tairix_sandbox::imageinspect::InspectService`). A manifest's lists what
+  it names, requests and claims — identity, kind, flags, publisher binding,
+  capabilities, file types, browsed services — built by
+  `tairix_binfmt::report` in the decode worker. Neither file is parsed in the
+  editor or beside the syntax parser; the hex rows are drawn straight from
+  the document. Every report is bounded by the one builder
+  (`tairix_util::report`: `MAX_REPORT_LINES`, `MAX_LINE_BYTES` a line) and
+  says where it stopped. Hex stays the raw dump; Text stays the bytes as
+  text.
 - **Format** (orthogonal to the mode): the syntax colouring and validation
   applied in Text mode — plain text, HTML, XML/SVG, CSS, JavaScript, JSON,
   Markdown, Rust, C, Python, shell, TOML, and the TAIRiX settings formats.
@@ -136,7 +148,7 @@ Every file is the editor's to open: it claims `text/plain` and
 the registry does not know is (TE14), ranked behind any application that claims
 a type more narrowly. On load: a document whose head has a NUL, or invalid UTF-8 or control bytes
 past a fixed fraction, opens in Hex; otherwise Text. A head an executable container's magic opens in
-Code. The format comes from a
+Code, and a manifest's in Data. The format comes from a
 settings store's fixed file name first (two different grammars share `.conf`,
 and the editor knows a document by its name only, never its path), then the
 extension (`lib/browse`'s media registry, the one extension table), then the

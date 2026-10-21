@@ -1,7 +1,7 @@
 //! A ZIP archive's members, as the structure report lists them.
 
 use super::{Archive, DEFLATED, STORED};
-use crate::inspect::{clean, Builder};
+use tairix_util::report::{clean, Builder};
 
 /// List `bytes`' members, read through the archive's central directory.
 pub(crate) fn members(bytes: &[u8], out: &mut Builder) {

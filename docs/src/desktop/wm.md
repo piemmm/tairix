@@ -291,8 +291,9 @@ The back buffer holds at each pixel the composite the frame or layer showing
 it needs. A layer's buffers alternate: the engine shows one while what changed
 is baked into the other, so it never reads a buffer being written, and
 `Presenter::ready` holds a frame while a present is queued. Each buffer
-catches up on what changed while the other was shown, and a frame with nothing
-new presents nothing.
+catches up on what changed while the other was shown, including what no client
+reports: a shadow easing between its levels, a frame's activation, and a new
+theme or scale. A frame with nothing new presents nothing.
 
 A **fullscreen window that covers the output** with a free layer is promoted
 to the one layer the scene is: no base is presented, and the base's damage is

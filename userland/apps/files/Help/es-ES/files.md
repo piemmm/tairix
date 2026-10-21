@@ -11,20 +11,23 @@ files — navegador gráfico del sistema de archivos
 Abre una ventana de escritorio que lista el sistema de archivos, empezando
 por la carpeta que `ruta` nombra en la línea de órdenes — o, si nombra un
 archivo, por la carpeta que contiene ese archivo, con el archivo
-seleccionado — o, si no se nombra ninguna, por la carpeta `Home` del usuario
-que lo inicia (su directorio personal si esa carpeta no puede listarse). El
-título de la ventana nombra el directorio actual; la ventana lista sus
-entradas, cada entrada seleccionada resaltada con el color de acento del
-tema activo. Cada lectura de un directorio es un listado ordinario, sujeto
-a permisos, bajo la identidad del usuario que lo inicia: un directorio
-ilegible se rechaza, nunca se adivina.
+seleccionado — o, si no se nombra ninguna, por la carpeta que elija la
+configuración: la carpeta `Home` del usuario que lo inicia, salvo que este
+elija su carpeta `Desktop` o los volúmenes conectados (su directorio
+personal si esa carpeta no puede listarse). El título de la ventana nombra
+el directorio actual; la ventana lista sus entradas, cada entrada
+seleccionada resaltada con el color de acento del tema activo. Cada lectura
+de un directorio es un listado ordinario, sujeto a permisos, bajo la
+identidad del usuario que lo inicia: un directorio ilegible se rechaza,
+nunca se adivina.
 
 El escritorio inicia el explorador por usted y lo mantiene en la barra de
 iconos: el menú de su ranura lista sus propios lugares y todo lo montado, y
-elegir uno abre allí una ventana. Un clic en la ranura abre una en su
-carpeta `Home`. Pedir una carpeta que ya tiene ventana trae esa ventana
-al frente en lugar de abrir otra. Esa copia no tiene fila *Salir*: forma
-parte del escritorio, y cerrar sus ventanas simplemente la retira.
+elegir uno abre allí una ventana; *Configuración…* va al final. Un clic en
+la ranura abre una donde indique la configuración. Pedir una carpeta que ya
+tiene ventana trae esa ventana al frente en lugar de abrir otra. Esa copia
+no tiene fila *Salir*: forma parte del escritorio, y cerrar sus ventanas
+simplemente la retira.
 
 Iniciado por su nombre desde un shell (o abierto sobre una carpeta desde el
 escritorio), es en cambio una aplicación ordinaria: una ventana, y termina
@@ -55,15 +58,22 @@ están también en el menú contextual.
 
 El nombre de un elemento se muestra entero, en dos líneas cuando las
 necesita; un nombre demasiado largo incluso para ellas conserva su principio
-y su final, con `…` en medio, de modo que su extensión siempre se ve.
+y su final, con `…` en medio, de modo que su extensión siempre se ve. Una
+aplicación se muestra sin su sufijo `.app`, y la configuración puede
+mostrarlo, o bien ocultar también los sufijos de los tipos de archivo que el
+sistema conoce. Los elementos cuyo nombre empieza por un punto solo se
+listan cuando la configuración lo pide.
 
 `F2` cambia el nombre del elemento seleccionado en su sitio, igual que hacer
 clic en el nombre del único elemento seleccionado y esperar: el nombre se
 abre para editarlo en cuanto el clic ya no puede ser un doble clic. Queda
 seleccionada la parte anterior a la extensión, así que lo que se escribe
-sustituye al nombre y conserva la extensión. `Intro`, o un clic fuera del
-nombre, conserva el nombre nuevo —un nombre que el volumen rechaza sigue
-abierto con el motivo— y `Escape` lo descarta.
+sustituye al nombre y conserva la extensión; un sufijo que la ventana no
+muestra también se conserva. `Intro`, o un clic fuera del nombre, conserva
+el nombre nuevo —un nombre que el volumen rechaza sigue abierto con el
+motivo— y `Escape` lo descarta. Un clic que ha cambiado el nombre del
+elemento no hace nada más, ya que la carpeta puede haberse reordenado bajo
+el puntero.
 
 Arrastrar los elementos seleccionados a otra ventana del gestor de archivos,
 a una carpeta de ella o al escritorio los copia allí; manteniendo Mayús, en
@@ -88,11 +98,26 @@ editarlo.
 
 El submenú *Mostrar* del menú contextual presenta los elementos como iconos
 grandes, la opción predeterminada; como iconos pequeños, cada nombre en una
-línea junto a su imagen; o como lista, una fila por elemento con su tamaño,
-la fecha de su último cambio y su tipo. Una unidad que aparezca entre ellos
-muestra en su lugar su espacio libre, su sistema de archivos y lo bien que
-funciona. Un clic en el título de una columna ordena la lista por ella, y un
-segundo clic invierte el orden.
+línea junto a su imagen; o como lista, una fila por elemento con su imagen,
+su tamaño, la fecha de su último cambio y su tipo. Una unidad que aparezca
+entre ellos muestra en su lugar su espacio libre, su sistema de archivos y
+lo bien que funciona. Debajo de las vistas, ordena la ventana por nombre,
+tipo, tamaño o fecha del último cambio de cada elemento — o, en una lista de
+unidades, por nombre, espacio libre, sistema de archivos o estado — de forma
+ascendente o descendente. Un clic en el título de una columna también ordena
+la lista por ella, y un segundo clic invierte el orden. Las carpetas quedan
+arriba sea cual sea el orden elegido, salvo que la configuración las coloque
+entre los archivos.
+
+*Configuración…* en el menú de la ranura de la barra de iconos, o `Ctrl+,`,
+abre la configuración del explorador: dónde se abre una ventana nueva, cómo
+muestra y ordena sus elementos, y si muestra la columna de lugares y la
+barra de herramientas; si las carpetas quedan arriba; qué sufijos de nombre
+y qué elementos se ocultan; si una imagen muestra su propio contenido y una
+carpeta lo que contiene; y si mover elementos a la Papelera pide
+confirmación antes. *Restaurar valores predeterminados* restablece todos los
+ajustes. Un cambio se aplica a todas las ventanas a la vez y se recuerda;
+una ventana ya abierta conserva la vista y el orden que tiene.
 
 `Alt+Enter` abre la ventana de *información* del elemento seleccionado,
 igual que *Obtener información…* en su submenú del menú contextual. Es una ventana propia,

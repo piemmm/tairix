@@ -5,7 +5,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{Accelerator, Chrome, SelectionVerb};
+use super::{opens_settings, Accelerator, Chrome, SelectionVerb};
 use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
 use tairix_browse::{ManagerTool, Places, ToolbarBand, ToolbarCommand};
 
@@ -182,5 +182,28 @@ fn a_plain_or_alt_a_is_no_selection_verb() {
             None,
             "{key:?} {modifiers:?}"
         );
+    }
+}
+
+#[test]
+fn ctrl_comma_opens_the_settings_and_nothing_else_does() {
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    assert!(opens_settings(KeyValue::Char(','), ctrl));
+    for (key, modifiers) in [
+        (KeyValue::Char(','), Modifiers::default()),
+        (
+            KeyValue::Char(','),
+            Modifiers {
+                shift: true,
+                ..ctrl
+            },
+        ),
+        (KeyValue::Char(','), Modifiers { alt: true, ..ctrl }),
+        (KeyValue::Char('.'), ctrl),
+    ] {
+        assert!(!opens_settings(key, modifiers), "{key:?} {modifiers:?}");
     }
 }

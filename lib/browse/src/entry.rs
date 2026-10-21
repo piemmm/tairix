@@ -19,6 +19,7 @@ use alloc::string::String;
 
 use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::time::Time64;
+use tairix_abi::BUNDLE_SUFFIX;
 use tairix_icon::{DocumentStamp, FolderSample, IconKind};
 
 use crate::places::VolumeFacts;
@@ -235,11 +236,20 @@ pub fn resolve_target(link_directory: &str, target: &str) -> String {
 /// however the volume cased its extension.
 #[must_use]
 pub fn is_bundle_name(name: &str) -> bool {
-    const SUFFIX: &str = ".app";
-    name.len() > SUFFIX.len()
-        && name
-            .get(name.len() - SUFFIX.len()..)
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX))
+    bundle_stem(name).is_some()
+}
+
+/// `name` without its bundle suffix, or `None` when it is no bundle name
+/// ([`is_bundle_name`]).
+#[must_use]
+pub fn bundle_stem(name: &str) -> Option<&str> {
+    let at = name
+        .len()
+        .checked_sub(BUNDLE_SUFFIX.len())
+        .filter(|&at| at > 0)?;
+    name.get(at..)
+        .filter(|tail| tail.eq_ignore_ascii_case(BUNDLE_SUFFIX))?;
+    name.get(..at)
 }
 
 /// Whether a listed directory holds anything, and what, as far as the
