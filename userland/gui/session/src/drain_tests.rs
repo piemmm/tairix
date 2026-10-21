@@ -123,23 +123,19 @@ impl SeatRouter for Program {
         decided
     }
 
-    fn settle_chain(
-        &mut self,
-        seat: &mut Seat<'_>,
-        answered: &mut Vec<ShellOutcome>,
-        _now_ns: u64,
-    ) {
+    fn settle_chain(&mut self, seat: &mut Seat<'_>, answered: &mut Vec<ShellOutcome>, now_ns: u64) {
         self.settles += 1;
         let _ = seat
             .shell
             .present_menu_chain(seat.compositor, seat.menu, None);
+        let scale = seat.compositor.scale();
         for (owner, outcome) in seat.menu.take_answers() {
             if let (ChainOwner::Bar(subject), ChainOutcome::Chosen(item)) = (owner, outcome) {
                 if let Some(response) = seat
                     .shell
                     .session_mut()
                     .taskbar_mut()
-                    .menu_chosen(&subject, item)
+                    .menu_chosen(&subject, item, now_ns, scale)
                 {
                     answered.push(ShellOutcome::Taskbar(response));
                 }

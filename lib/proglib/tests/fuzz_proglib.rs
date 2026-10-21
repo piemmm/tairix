@@ -16,6 +16,10 @@
 //!    the last word on it — the user's patch, else the machine's, else its
 //!    own declaration — shows it.
 //!
+//! 4. The account's own record ([`Personal`]) never panics on any stored
+//!    value, re-reads what it renders, and stays bounded under any run of
+//!    edits, changing only the records each edit reports.
+//!
 //! The generator emits *whole records* and mutates them at a low rate, so
 //! most documents are accepted and the round-trip and merge invariants are
 //! genuinely exercised rather than being refused at the first line. The
@@ -28,8 +32,8 @@
 use tairix_appconf::Document;
 use tairix_fuzzseed::Prng;
 use tairix_proglib::{
-    document as catalog_document, load, merge, Catalog, CatalogError, EntryPatch, Record,
-    MAX_ENTRIES,
+    document as catalog_document, load, merge, personal, Catalog, CatalogError, Edit, EntryId,
+    EntryPatch, Personal, Record, MAX_ENTRIES,
 };
 
 /// Read `text` the way a store's reader does: through the format engine,
@@ -322,4 +326,122 @@ fn the_generator_produces_accepted_documents() {
         u64::try_from(accepted).expect("count fits") * 4 >= DRAWS,
         "only {accepted} of {DRAWS} generated documents parsed; the corpus is degenerate"
     );
+}
+
+/// Value tokens a generated personal record is built from: mostly well-formed
+/// so the round trip is genuinely exercised, with the grammar's edges mixed in.
+const PERSONAL_TOKENS: &[&str] = &[
+    "favourite=1",
+    "favourite=7",
+    "favourite=0",
+    "favourite=01",
+    "weight=1000 last=5",
+    "weight=1000000 last=-9223372036854775808",
+    "weight=0 last=1",
+    "weight=5",
+    "last=5",
+    "none",
+    "colour=red",
+    "",
+];
+
+/// One generated stored value: up to three tokens joined by single spaces, now
+/// and then by a double one.
+fn personal_value(rng: &mut Prng) -> String {
+    let mut value = String::new();
+    for index in 0..=rng.below(3) {
+        if index > 0 {
+            value.push_str(if rng.below(16) == 0 { "  " } else { " " });
+        }
+        value.push_str(rng.pick(PERSONAL_TOKENS));
+    }
+    value
+}
+
+#[test]
+fn personal_records_never_panic_and_accepted_ones_round_trip() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "personal_records_never_panic_and_accepted_ones_round_trip",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            let stored: Vec<(String, String)> = (0..rng.below(6))
+                .map(|_| {
+                    let key = format!("library.{}", rng.pick(IDS));
+                    (key, personal_value(&mut rng))
+                })
+                .collect();
+            let (personal, _) = Personal::load(
+                stored
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            );
+            assert!(personal.len() <= personal::MAX_RECORDS);
+            let rendered: Vec<(String, String)> = personal
+                .keeps()
+                .filter_map(|(id, _)| Some((personal::key_of(id), personal.stored(id)?)))
+                .collect();
+            let (reread, refused) = Personal::load(
+                rendered
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            );
+            assert!(refused.is_empty(), "a rendered record was refused");
+            assert_eq!(reread, personal, "render/read is not a round trip");
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn personal_edits_keep_the_record_bounded_and_readable() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "personal_edits_keep_the_record_bounded_and_readable",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let entries: Vec<EntryId> = (0..personal::MAX_RECORDS + 8)
+        .map(|n| EntryId::new(&format!("e{n}")).expect("valid"))
+        .collect();
+    loop {
+        let mut personal = Personal::new();
+        for _ in 0..SMOKE_ITERATIONS {
+            let entry = rng.pick(&entries).clone();
+            let now = i64::from(rng.next_u32()) - i64::from(u32::MAX / 2);
+            let edit = match rng.below(8) {
+                0..=2 => Edit::Launched(entry, (rng.below(8) != 0).then_some(now)),
+                3 => Edit::Favourite(entry),
+                4 => Edit::Unfavourite(entry),
+                5 => Edit::MoveEarlier(entry),
+                6 => Edit::MoveLater(entry),
+                _ if rng.below(64) == 0 => Edit::ForgetAll,
+                _ => Edit::Forget(entry),
+            };
+            let before = personal.clone();
+            match personal.apply(&edit) {
+                Ok(changed) => {
+                    // Exactly the reported records may differ.
+                    for (id, keep) in before.keeps() {
+                        if !changed.contains(id) {
+                            assert_eq!(personal.keep(id), keep, "{id} changed unreported");
+                        }
+                    }
+                }
+                Err(_) => assert_eq!(personal, before, "a refused edit changed the record"),
+            }
+            assert!(personal.len() <= personal::MAX_RECORDS);
+            let shelf = personal.shelf(Some(now));
+            assert!(shelf
+                .frequent
+                .iter()
+                .all(|id| !shelf.favourites.contains(id)));
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
 }

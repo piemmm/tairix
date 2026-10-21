@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use tairix_abi::audio::AudioGain;
 use tairix_appconf::{validate_key, Document, Refusal, Registry, MOST_KEYS};
 
-use super::{SoundKey, SoundSettings};
+use super::{in_namespace, SoundKey, SoundSettings};
 use crate::user::merge_pushed;
 use crate::{SoundEvent, DEFAULT_THEME};
 
@@ -21,6 +21,7 @@ fn every_key_is_spelled_once_as_its_event_names_it() {
         .collect();
     for name in &names {
         assert_eq!(validate_key(name), Ok(()), "{name}");
+        assert!(in_namespace(name), "{name} lives under the sound namespace");
     }
     assert_eq!(SoundSettings::name(SoundKey::Gain), "sound.gain");
     for event in SoundEvent::ALL {

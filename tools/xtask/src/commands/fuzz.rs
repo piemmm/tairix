@@ -293,8 +293,8 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-proglib",
         test: "fuzz_proglib",
-        description:
-            "program-library catalog store (entry grammar, patch merge, render round-trip, bounds)",
+        description: "program-library catalog store and the account's own record (entry grammar, \
+                      patch merge, render round-trip, edits, bounds)",
     },
     Target {
         package: "tairix-wallpaper",

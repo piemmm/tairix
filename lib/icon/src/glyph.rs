@@ -581,6 +581,10 @@ pub enum IconKind {
     LevelHard,
     /// An open door, for letting the companion out.
     DoorOpen,
+    /// A five-pointed star, for keeping a program among the favourites.
+    Star,
+    /// A shield, for running a program as an account that may do more.
+    Shield,
 }
 
 impl IconKind {
@@ -842,6 +846,8 @@ impl IconKind {
             "level-medium" => Self::LevelMedium,
             "level-hard" => Self::LevelHard,
             "door-open" => Self::DoorOpen,
+            "star" => Self::Star,
+            "shield" => Self::Shield,
             _ => Self::Generic,
         }
     }
@@ -1109,6 +1115,8 @@ impl IconKind {
             Self::LevelMedium => 246,
             Self::LevelHard => 247,
             Self::DoorOpen => 248,
+            Self::Star => 249,
+            Self::Shield => 250,
         }
     }
 
@@ -1375,6 +1383,8 @@ impl IconKind {
             Self::LevelMedium => "level-medium",
             Self::LevelHard => "level-hard",
             Self::DoorOpen => "door-open",
+            Self::Star => "star",
+            Self::Shield => "shield",
         }
     }
 }
@@ -1725,6 +1735,8 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::LevelMedium
         | IconKind::LevelHard
         | IconKind::DoorOpen
+        | IconKind::Star
+        | IconKind::Shield
         | IconKind::NavBack
         | IconKind::NavForward
         | IconKind::NavUp

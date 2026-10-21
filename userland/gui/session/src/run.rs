@@ -103,6 +103,7 @@ mod program {
         command_endpoint_for, CommandSection, SwitchboardCommand, SEAT_REPORT_OWNERS_MAX,
         SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST, SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
+    use tairix_abi::time::WallTimeState;
     use tairix_abi::window_ipc::{
         event_endpoint_for, AlertSeverity, AlertSpec, BundleRunPath, DocumentName, DragItems,
         DropTarget, MenuOutcome, PointerAction, PreviewOutcome, WindowEvent, WINDOW_ENDPOINT,
@@ -125,7 +126,11 @@ mod program {
     use tairix_desktop_session::about::SystemFacts;
     use tairix_desktop_session::alert::{alert_title, Speaker};
     use tairix_desktop_session::effects::{
-        load_choices, store_choices, Effects, EffectsWork, LoadedChoices, ReadAsk,
+        load_choices, store_choices, Effects, EffectsWork, LoadedChoices, ReadAsk, MAX_HELD_CALLS,
+    };
+    use tairix_desktop_session::launcher::{
+        elevated_launch, launched_entries, load_personal, running_bundles, store_personal,
+        LauncherMemory, LoadedPersonal,
     };
     use tairix_desktop_session::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
     use tairix_desktop_session::output::{Follow, Refusal};
@@ -140,6 +145,7 @@ mod program {
         SeatDeparture, SeatReturn, SessionAuthority, SwitchUser,
     };
     use tairix_desktop_session::windows::window_menu_placement;
+    use tairix_desktop_session::TapKey;
     use tairix_desktop_session::{
         admitted_pid, adopt_unlocks, catalogued, chain_geometry, deliver_pending_open,
         desktop_info, drain_authorising, drain_away, drain_locked, drop_is_noteworthy,
@@ -200,6 +206,7 @@ mod program {
     };
     use tairix_parallel::{JobRunner, Pool};
     use tairix_procinfo::IpcTransport;
+    use tairix_proglib::Edit;
     use tairix_raytrace::Detail;
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_rt::work::Worker;
@@ -399,9 +406,9 @@ mod program {
     /// session draws on moved (`plans/DISPLAY.md` D12).
     const DISPLAY_OUTPUT_TOKEN: u64 = 17;
 
-    /// The wait-set token of the sound-choices worker's wake: a store, a push
-    /// or a pane's read of the user's sound choices has come back.
-    const EFFECTS_TOKEN: u64 = 18;
+    /// The wait-set token of the private-store worker's wake: a round trip
+    /// for the user's sound choices or the launcher's record has come back.
+    const PRIVATE_TOKEN: u64 = 18;
 
     /// The wait-set token of the `CueAuthority` notice: the cue authority
     /// started, and holds none of this session's choices.
@@ -1157,7 +1164,8 @@ mod program {
     /// Step everything the session animates to `now_ns` when `pacer` has a
     /// frame due, so the frame presented next carries it: the desktop's
     /// screen fade, the windows' shadows rising and resting as the focus
-    /// moves, the pointer aids, the locked screen's own surface, a credential
+    /// moves, the program library rising, arriving and leaving, the pointer
+    /// aids, the locked screen's own surface, a credential
     /// prompt's password marker, the screensaver, and the backdrop dissolving
     /// into another. Between frames only the pointer aids take in
     /// where the pointer is. All of them are idle once nothing is in flight,
@@ -1179,6 +1187,7 @@ mod program {
         }
         fade.advance(now_ns, compositor);
         compositor.step_elevations(now_ns);
+        shell.advance_library(compositor, now_ns);
         shell.advance_pointer_aids(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
         elevate.resolve_picture(shell, compositor.scale());
@@ -2779,33 +2788,36 @@ mod program {
         }
         let _sound_guard = tairix_rt::work::WorkerGuard::new(&sound_worker);
         let mut sound = SoundSession::new();
-        // The user's sound choices leave the loop too: their store, the files
-        // they name and the cue authority are each another wait away.
-        let effects_worker = match Worker::queued(
-            serve_effects,
+        // The private scope's round trips leave the loop: the sound choices,
+        // the files they name and the cue authority, and the launcher's
+        // record. One worker carries all of them, because the app-data service
+        // stages edits per process and two writers would commit each other's.
+        let private_worker = match Worker::queued(
+            serve_private,
             (),
             tairix_rt::sync::WorkerWake::create(),
-            EFFECTS_JOBS,
+            PRIVATE_JOBS,
         ) {
             Ok(worker) => alloc::sync::Arc::new(worker),
             Err(_) => {
                 return app::fail(
                     APP_NAME,
                     EXIT_WAIT_FAILED,
-                    "no memory for the sound-choices worker",
+                    "no memory for the private-store worker",
                 );
             }
         };
-        if let Err(reason) = Worker::start(&effects_worker) {
+        if let Err(reason) = Worker::start(&private_worker) {
             app::report(
                 APP_NAME,
                 format_args!(
-                    "no sound-choices thread ({reason:?}); that work runs on the serve loop"
+                    "no private-store thread ({reason:?}); that work runs on the serve loop"
                 ),
             );
         }
-        let _effects_guard = tairix_rt::work::WorkerGuard::new(&effects_worker);
+        let _private_guard = tairix_rt::work::WorkerGuard::new(&private_worker);
         let mut effects = Effects::new();
+        let mut memory = LauncherMemory::new();
         // Each password offered at the screen lock waits on the broker's key
         // derivation away from the loop that composites every window.
         let unlock_worker = alloc::sync::Arc::new(Worker::new(
@@ -3300,13 +3312,13 @@ mod program {
                 return app::fail(APP_NAME, EXIT_WAIT_FAILED, "sound wake wait refused");
             }
         }
-        if let Some(read) = effects_worker.wake().read_end() {
+        if let Some(read) = private_worker.wake().read_end() {
             if tairix_rt::waitset_ctl(
                 set,
                 WaitSetOp::Add,
                 WaitSourceKind::Stream,
                 u64::from(read),
-                EFFECTS_TOKEN,
+                PRIVATE_TOKEN,
             ) != 0
             {
                 return app::fail(
@@ -3385,7 +3397,12 @@ mod program {
         }
         shell.set_sound(&mut compositor, sound.captures(live_captures()));
         effects.authority_is(cue_authority());
-        pump_effects(&mut effects, &effects_worker, tairix_rt::clock_get());
+        pump_private(
+            &mut effects,
+            &mut memory,
+            &private_worker,
+            tairix_rt::clock_get(),
+        );
         sound.refresh();
         pump_sound(
             &mut sound,
@@ -3617,6 +3634,7 @@ mod program {
                 {
                     fade_to_black(&mut fade, &mut compositor, &mut display);
                     shell.teardown(&mut compositor);
+                    see_out_launcher(&mut memory, &private_worker);
                     return leaving.exit_code();
                 }
             }
@@ -3800,7 +3818,7 @@ mod program {
             // Applied in turn rather than nested: nine levels of nesting said
             // nothing the order does not.
             if let Some(own) = picker.take_own() {
-                conclude_own_pick(own, &mut effects, &effects_worker);
+                conclude_own_pick(own, &mut effects, &mut memory, &private_worker);
             }
             // Input only records what it changed in an alert or prompt; the
             // drained run is painted here, once.
@@ -3839,10 +3857,12 @@ mod program {
                 park = pointer.park_deadline_ns(now_ns, park);
                 park = idle.park_deadline_ns(now_ns, park);
                 park = effects.park_deadline_ns(now_ns, park);
+                park = memory.park_deadline_ns(now_ns, park);
                 // Exactly what `animate` steps, which it steps only on a
                 // frame the pacer has due.
                 let mut step = WAITSET_TIMEOUT_NONE;
                 step = shell.backdrop_park_deadline_ns(now_ns, step, refresh);
+                step = shell.library_park_deadline_ns(now_ns, step, refresh);
                 step = shell.pointer_aids_park_deadline_ns(now_ns, step, refresh);
                 step = fade.park_deadline_ns(now_ns, step, refresh);
                 step = park_within(step, compositor.next_elevation_frame_in(now_ns));
@@ -4016,7 +4036,7 @@ mod program {
                 frame_stats.maybe_publish(&compositor, now_ns, &mut frame_sink);
                 tairix_rt::cachereport::publish_if_due();
                 effects.seat(!switch.is_background());
-                pump_effects(&mut effects, &effects_worker, now_ns);
+                pump_private(&mut effects, &mut memory, &private_worker, now_ns);
                 fetch_drawn_text(&font_worker);
                 continue;
             }
@@ -4319,8 +4339,8 @@ mod program {
                             serve_sound_call(
                                 &call,
                                 ticket,
-                                &mut effects,
-                                &effects_worker,
+                                (&mut effects, &mut memory),
+                                &private_worker,
                                 &sound_themes,
                                 &mut picker,
                                 &mut shell,
@@ -4677,14 +4697,19 @@ mod program {
                     &mut shell,
                     &mut compositor,
                 );
-            } else if token == EFFECTS_TOKEN || token == CUE_AUTHORITY_TOKEN {
-                if token == EFFECTS_TOKEN {
-                    effects_worker.wake().drain();
+            } else if token == PRIVATE_TOKEN || token == CUE_AUTHORITY_TOKEN {
+                if token == PRIVATE_TOKEN {
+                    private_worker.wake().drain();
                 } else {
                     effects.authority_is(cue_authority());
                 }
                 effects.seat(!switch.is_background());
-                pump_effects(&mut effects, &effects_worker, tairix_rt::clock_get());
+                pump_private(
+                    &mut effects,
+                    &mut memory,
+                    &private_worker,
+                    tairix_rt::clock_get(),
+                );
             } else if token == AUDIO_CAPTURE_TOKEN {
                 shell.set_sound(&mut compositor, sound.captures(live_captures()));
             } else if token == DISPLAY_OUTPUT_TOKEN {
@@ -4740,7 +4765,7 @@ mod program {
                 if let Some(result) = pushed {
                     let now = tairix_rt::clock_get();
                     refused_push(effects.pushed(now, result));
-                    pump_effects(&mut effects, &effects_worker, now);
+                    pump_private(&mut effects, &mut memory, &private_worker, now);
                 }
             } else if token == CHILD_TOKEN {
                 // Reap every exited child in one wake and act on each: a child
@@ -4885,7 +4910,12 @@ mod program {
                         // them anew.
                         effects.seat(false);
                         effects.seat(true);
-                        pump_effects(&mut effects, &effects_worker, tairix_rt::clock_get());
+                        pump_private(
+                            &mut effects,
+                            &mut memory,
+                            &private_worker,
+                            tairix_rt::clock_get(),
+                        );
                         // Idleness starts again, so the screen does not blank
                         // or lock at once.
                         idle.input(tairix_rt::clock_get());
@@ -4942,7 +4972,7 @@ mod program {
                 };
                 // The gesture that wakes the screen reaches nothing, a press
                 // of Ctrl included.
-                let _ = keyboard.take_ctrl_tap();
+                let _ = keyboard.take_tap();
                 // A preview's first moment of motion leaves it up: the hand
                 // that asked for it is still on the mouse.
                 let dismissed = saver.woken_by(waking, now_ns).then(|| {
@@ -5091,6 +5121,7 @@ mod program {
                         sound: &mut sound,
                         sound_worker: &sound_worker,
                         system: &system,
+                        memory: &mut memory,
                     },
                     tairix_rt::clock_get(),
                 );
@@ -5266,14 +5297,40 @@ mod program {
             windows.stamp_dialogs(now_ns);
             picker.stamp(now_ns);
             serve_rest(&mut shell, &mut compositor, &mut menu, &windows, now_ns);
-            // A lone press of Ctrl typed this wake shows where the pointer
-            // is, unless a button or the wheel went with it: Ctrl-click and
-            // Ctrl-wheel are gestures of their own.
-            if let Some(tap) = keyboard.take_ctrl_tap() {
+            // A lone tap of Ctrl typed this wake shows where the pointer is and
+            // one of Meta opens or closes the program library, unless a button
+            // or the wheel went with it: Ctrl-click and Ctrl-wheel are gestures
+            // of their own. Meta passes over nothing a prompt or a menu holds
+            // the seat for.
+            if let Some(tap) = keyboard.take_tap() {
                 if pointer.quiet_since(tap.pressed_ns) && !switch.is_background() {
-                    shell.locate_pointer(now_ns);
+                    match tap.key {
+                        TapKey::Ctrl => shell.locate_pointer(now_ns),
+                        TapKey::Meta => {
+                            let held = seat_held(&lock, &picker, (&confirm, &elevate, &resolution));
+                            if !held
+                                && !menu.is_open()
+                                && shell.toggle_library(&mut compositor, now_ns)
+                                    == TaskbarResponse::OpenLibrary
+                            {
+                                library_opened(
+                                    &memory,
+                                    &catalogs,
+                                    (&mut shell, &mut compositor),
+                                    &mut programs,
+                                );
+                            }
+                        }
+                    }
                 }
             }
+            launcher_turn(
+                &mut memory,
+                &mut launched,
+                &mut apps,
+                (&mut shell, &mut compositor),
+            );
+            pump_private(&mut effects, &mut memory, &private_worker, now_ns);
             animate(
                 &mut fade,
                 (&mut lock, &mut elevate),
@@ -5366,6 +5423,9 @@ mod program {
     struct AppBarPanel {
         service: AppBarService,
         strip: alloc::vec::Vec<tairix_desktop_session::AppGroup>,
+        /// Whether the strip's bundles changed since the launcher was last told
+        /// what runs.
+        moved: bool,
     }
 
     /// What the installed programs let the desktop resolve: the file types
@@ -5443,7 +5503,13 @@ mod program {
             Self {
                 service: AppBarService::new(),
                 strip: alloc::vec::Vec::new(),
+                moved: false,
             }
+        }
+
+        /// Take the latch on the strip's bundles.
+        fn take_moved(&mut self) -> bool {
+            core::mem::take(&mut self.moved)
         }
     }
 
@@ -7454,6 +7520,8 @@ mod program {
         sound: &'a mut SoundSession,
         sound_worker: &'a SoundWorker,
         system: &'a SystemFacts,
+        /// The account's record of its program library.
+        memory: &'a mut LauncherMemory,
     }
 
     impl<S: DirectorySource, F: FnMut() -> S> SessionRoute<'_, S, F> {
@@ -7564,6 +7632,7 @@ mod program {
                 self.pending_open,
                 self.programs,
                 self.system,
+                self.memory,
             );
             reconcile_focus(
                 self.focused,
@@ -7955,7 +8024,12 @@ mod program {
                     continue;
                 }
                 ChainOwner::Bar(subject) => {
-                    answer_bar_menu(&subject, &outcome, shell, desk);
+                    answer_bar_menu(
+                        &subject,
+                        &outcome,
+                        (shell, compositor.scale(), now_ns),
+                        desk,
+                    );
                     continue;
                 }
             };
@@ -8009,7 +8083,7 @@ mod program {
     fn answer_bar_menu<S: DirectorySource>(
         subject: &MenuSubject,
         outcome: &ChainOutcome,
-        shell: &mut DesktopShell,
+        (shell, scale, now_ns): (&mut DesktopShell, tairix_wm::Scale, u64),
         desk: &mut DesktopMenuDesk<'_, S>,
     ) {
         let item = match outcome {
@@ -8022,7 +8096,11 @@ mod program {
                 return;
             }
         };
-        if let Some(response) = shell.session_mut().taskbar_mut().menu_chosen(subject, item) {
+        if let Some(response) = shell
+            .session_mut()
+            .taskbar_mut()
+            .menu_chosen(subject, item, now_ns, scale)
+        {
             desk.answered
                 .push(tairix_desktop_session::ShellOutcome::Taskbar(response));
         }
@@ -8263,8 +8341,8 @@ mod program {
     fn serve_sound_call<S: DirectorySource, F: FnMut() -> S>(
         call: &SoundCall,
         ticket: u64,
-        effects: &mut Effects,
-        worker: &EffectsWorker,
+        (effects, memory): (&mut Effects, &mut LauncherMemory),
+        worker: &PrivateWorker,
         themes: &[alloc::string::String],
         picker: &mut SessionPicker<S, F>,
         shell: &mut DesktopShell,
@@ -8272,16 +8350,23 @@ mod program {
     ) {
         let now = tairix_rt::clock_get();
         let work = match *call {
+            SoundCall::Read if !effects.admit_call() => Err(Errno::Busy),
             SoundCall::Read => match effects.read_ask() {
                 Ok(ask) => {
-                    match worker.submit(EffectsJob::Read { ask, ticket }) {
-                        Ok(true) => pump_effects(effects, worker, now),
+                    match worker.submit(PrivateJob::Read { ask, ticket }) {
+                        Ok(true) => pump_private(effects, memory, worker, now),
                         Ok(false) => {}
-                        Err(_) => reply_pinboard(ticket, Err(Errno::Busy)),
+                        Err(_) => {
+                            effects.release_call();
+                            reply_pinboard(ticket, Err(Errno::Busy));
+                        }
                     }
                     return;
                 }
-                Err(err) => Err(err),
+                Err(err) => {
+                    effects.release_call();
+                    Err(err)
+                }
             },
             SoundCall::Themes { from } => {
                 answer_themes(themes, from, ticket);
@@ -8326,7 +8411,7 @@ mod program {
             }
         };
         match work {
-            Ok(work) => submit_effects(effects, worker, work, now),
+            Ok(work) => submit_effects(effects, memory, worker, work, now),
             Err(err) => reply_pinboard(ticket, Err(err)),
         }
     }
@@ -8354,7 +8439,7 @@ mod program {
         // Attested rather than looked up in what the desktop launched: a
         // viewer the file manager spawned, or a program started from a shell,
         // is the same application either way.
-        apps.strip = apps.service.strip(
+        let strip = apps.service.strip(
             &owners,
             |owner| {
                 identity
@@ -8364,6 +8449,12 @@ mod program {
             },
             bundles,
         );
+        // What runs moves only with the bundles, not with a slot's artwork.
+        apps.moved |= !strip
+            .iter()
+            .map(|group| group.bundle.as_deref())
+            .eq(apps.strip.iter().map(|group| group.bundle.as_deref()));
+        apps.strip = strip;
         let side = shell.session().taskbar().app_icon_side(compositor.scale());
         let slots = {
             let strip = core::mem::take(&mut apps.strip);
@@ -8479,6 +8570,7 @@ mod program {
         pending_open: &mut Option<CommandSection>,
         programs: &mut Programs,
         system: &SystemFacts,
+        memory: &mut LauncherMemory,
     ) -> Routed {
         use tairix_desktop_session::ShellOutcome;
         match outcome {
@@ -9120,6 +9212,42 @@ mod program {
                     },
                 );
             }
+            ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunchElevated { entry }) => {
+                // As the clock's *Set Date & Time…*: the session asks for an
+                // account that may run the program, and the console's broker
+                // re-authenticates it and starts the program itself.
+                let catalog = shell.session().taskbar().library().catalog();
+                match catalogued(catalog, &entry) {
+                    Ok(chosen) => {
+                        let Some(attested) = programs.bundles.identity_of(chosen.bundle().as_str())
+                        else {
+                            let _ = writeln!(
+                                Stderr,
+                                "desktop: {} was not run as an administrator: no signed manifest \
+                                 vouches for what it would run",
+                                chosen.name().as_str()
+                            );
+                            return Routed::Continue;
+                        };
+                        let request = elevated_launch(chosen, attested);
+                        if !elevate.ask(request, elevator, shell, compositor) {
+                            io::write_stderr_line(
+                                "desktop: could not ask for authorisation; the program was not run",
+                            );
+                        }
+                    }
+                    Err(reason) => {
+                        let _ = write!(Stderr, "{reason}");
+                    }
+                }
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::LibraryEdit(edit)) => {
+                if memory.apply(edit).is_err() {
+                    io::write_stderr_line(
+                        "desktop: the launcher's record has no room for that change; nothing was kept",
+                    );
+                }
+            }
             ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) => {
                 // The bar draws no menu: it hands over a model and an anchor,
                 // and the seat's one chain places, draws, grabs and answers it
@@ -9134,16 +9262,7 @@ mod program {
                 );
             }
             ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary) => {
-                // Ask for the stores to be re-read each time the popup opens,
-                // so an edit made through `applib` (or a fresh install) shows
-                // without restarting the session. The popup opens on the
-                // catalogue already in hand and adopts the fresh one when it
-                // lands: two documents plus one manifest per installed
-                // application is far more than a frame's worth of reads, and
-                // doing them on this click is what used to freeze the desktop
-                // as the launcher opened. What each application opens comes
-                // from the same scan, so the two can never disagree.
-                request_programs(catalogs, shell, compositor, programs);
+                library_opened(memory, catalogs, (shell, compositor), programs);
             }
             ShellOutcome::Taskbar(TaskbarResponse::AppDefault { app }) => {
                 // The application declared that it handles the primary click
@@ -9361,15 +9480,26 @@ mod program {
         Routed::Continue
     }
 
-    /// The most sound-choices jobs held at once: a load, a store, a push and
-    /// the pane's reads, each answered in turn. A containment bound on what a
-    /// caller can queue, not a capacity: a job past it is refused with its
-    /// reason.
-    const EFFECTS_JOBS: usize = 8;
+    /// The private-store jobs the session asks for itself, each held one at a
+    /// time: the sound choices' load and push, and the launcher record's read
+    /// and write.
+    const OWN_PRIVATE_JOBS: usize = 4;
 
-    /// One round trip for the user's sound choices: each is a store, a disk
-    /// or another service away.
-    enum EffectsJob {
+    /// The most private-store jobs held at once: the session's own, and the
+    /// pinboard calls it holds. A containment bound, not a capacity: a call past
+    /// it is answered busy, and the session's own always fit.
+    const PRIVATE_JOBS: usize = OWN_PRIVATE_JOBS + MAX_HELD_CALLS;
+
+    /// One round trip in this session's private scope: each is a store, a
+    /// disk or another service away.
+    enum PrivateJob {
+        /// Read the launcher's record.
+        LauncherLoad,
+        /// Write the launcher record's changes, the ask `number`.
+        LauncherStore {
+            number: u64,
+            changes: Vec<(alloc::string::String, Option<alloc::string::String>)>,
+        },
         /// Read the stored choices.
         Load,
         /// Store `choices`, the ask `number`, answering `ticket` once stored.
@@ -9389,8 +9519,15 @@ mod program {
         Read { ask: ReadAsk, ticket: u64 },
     }
 
-    /// What a sound-choices round trip came to.
-    enum EffectsAnswer {
+    /// What a private-store round trip came to.
+    enum PrivateAnswer {
+        /// The launcher's record, read.
+        LauncherLoaded(LoadedPersonal),
+        /// What the launcher record's write `number` left the store holding.
+        LauncherStored {
+            number: u64,
+            result: Result<Vec<(alloc::string::String, Option<alloc::string::String>)>, Errno>,
+        },
         Loaded(LoadedChoices),
         Stored {
             number: u64,
@@ -9408,34 +9545,39 @@ mod program {
         Answered,
     }
 
-    type EffectsWorker = Worker<
+    type PrivateWorker = Worker<
         (),
-        EffectsJob,
-        EffectsAnswer,
-        tairix_util::defer::JobQueue<EffectsJob, EffectsAnswer>,
+        PrivateJob,
+        PrivateAnswer,
+        tairix_util::defer::JobQueue<PrivateJob, PrivateAnswer>,
     >;
 
-    fn serve_effects((): &mut (), job: &mut EffectsJob) -> EffectsAnswer {
+    fn serve_private((): &mut (), job: &mut PrivateJob) -> PrivateAnswer {
         match job {
-            EffectsJob::Load => EffectsAnswer::Loaded(load_choices(&mut RtHost)),
-            EffectsJob::Store {
+            PrivateJob::LauncherLoad => PrivateAnswer::LauncherLoaded(load_personal(&mut RtHost)),
+            PrivateJob::LauncherStore { number, changes } => PrivateAnswer::LauncherStored {
+                number: *number,
+                result: store_personal(&mut RtHost, changes),
+            },
+            PrivateJob::Load => PrivateAnswer::Loaded(load_choices(&mut RtHost)),
+            PrivateJob::Store {
                 number,
                 choices,
                 ticket,
-            } => EffectsAnswer::Stored {
+            } => PrivateAnswer::Stored {
                 number: *number,
                 result: store_choices(&mut RtHost, choices),
                 ticket: *ticket,
             },
-            EffectsJob::Push { authority, choices } => {
+            PrivateJob::Push { authority, choices } => {
                 let (files, unavailable) = hand_over_files(*authority, choices);
-                EffectsAnswer::Handed {
+                PrivateAnswer::Handed {
                     document: choices.pushed(),
                     files,
                     unavailable,
                 }
             }
-            EffectsJob::Read { ask, ticket } => {
+            PrivateJob::Read { ask, ticket } => {
                 let machine = machine_sound_settings();
                 let reading = ask.reading(&machine);
                 let mut frame = [0u8; PINBOARD_MAX_REPLY];
@@ -9444,7 +9586,7 @@ mod program {
                 if let Ok(len) = len {
                     let _ = tairix_rt::call_reply(PINBOARD_ENDPOINT, *ticket, &frame[..len]);
                 }
-                EffectsAnswer::Answered
+                PrivateAnswer::Answered
             }
         }
     }
@@ -9538,29 +9680,51 @@ mod program {
 
     /// Hand `work` to the sound-choices worker, adopting at once what ran here
     /// for want of one; work it has no room for is refused with its reason.
-    fn submit_effects(effects: &mut Effects, worker: &EffectsWorker, work: EffectsWork, now: u64) {
+    fn submit_effects(
+        effects: &mut Effects,
+        memory: &mut LauncherMemory,
+        worker: &PrivateWorker,
+        work: EffectsWork,
+        now: u64,
+    ) {
         let job = match work {
             EffectsWork::Store {
                 number,
                 choices,
                 ticket,
-            } => EffectsJob::Store {
-                number,
-                choices,
-                ticket,
-            },
-            EffectsWork::Push { authority, choices } => EffectsJob::Push { authority, choices },
+            } => {
+                if ticket.is_some() && !effects.admit_call() {
+                    effects.stored(number, Err(Errno::Busy));
+                    if let Some(ticket) = ticket {
+                        reply_pinboard(ticket, Err(Errno::Busy));
+                    }
+                    return;
+                }
+                PrivateJob::Store {
+                    number,
+                    choices,
+                    ticket,
+                }
+            }
+            EffectsWork::Push { authority, choices } => PrivateJob::Push { authority, choices },
         };
         match worker.submit(job) {
-            Ok(true) => pump_effects(effects, worker, now),
-            Ok(false) | Err(EffectsJob::Load | EffectsJob::Read { .. }) => {}
-            Err(EffectsJob::Store { number, ticket, .. }) => {
+            Ok(true) => pump_private(effects, memory, worker, now),
+            Ok(false)
+            | Err(
+                PrivateJob::Load
+                | PrivateJob::Read { .. }
+                | PrivateJob::LauncherLoad
+                | PrivateJob::LauncherStore { .. },
+            ) => {}
+            Err(PrivateJob::Store { number, ticket, .. }) => {
                 effects.stored(number, Err(Errno::Busy));
                 if let Some(ticket) = ticket {
+                    effects.release_call();
                     reply_pinboard(ticket, Err(Errno::Busy));
                 }
             }
-            Err(EffectsJob::Push { .. }) => {
+            Err(PrivateJob::Push { .. }) => {
                 effects.pushed(now, Err(Errno::Busy));
             }
         }
@@ -9568,7 +9732,12 @@ mod program {
 
     /// Carry a pick the session made for itself into the user's sound
     /// choices, answering the call that asked for it.
-    fn conclude_own_pick(own: OwnPick, effects: &mut Effects, worker: &EffectsWorker) {
+    fn conclude_own_pick(
+        own: OwnPick,
+        effects: &mut Effects,
+        memory: &mut LauncherMemory,
+        worker: &PrivateWorker,
+    ) {
         let Requester::Sound(_) = own.requester else {
             return;
         };
@@ -9580,7 +9749,7 @@ mod program {
         };
         if let Ok(path) = tairix_appconf::SettingPath::new(&path) {
             if let Some(work) = effects.chosen(&path) {
-                submit_effects(effects, worker, work, tairix_rt::clock_get());
+                submit_effects(effects, memory, worker, work, tairix_rt::clock_get());
             }
         } else {
             app::report(
@@ -9593,17 +9762,43 @@ mod program {
         }
     }
 
-    /// Adopt every sound-choices answer that has come back, then ask for the
-    /// read and the push owed, if either is.
-    fn pump_effects(effects: &mut Effects, worker: &EffectsWorker, now: u64) {
+    /// Adopt every private-store answer that has come back — the sound
+    /// choices' and the launcher record's — then ask for each read, push and
+    /// write owed.
+    fn pump_private(
+        effects: &mut Effects,
+        memory: &mut LauncherMemory,
+        worker: &PrivateWorker,
+        now: u64,
+    ) {
         worker.collect_landed(|answer| match answer {
-            EffectsAnswer::Loaded(loaded) => {
+            PrivateAnswer::LauncherLoaded(loaded) => {
+                for warning in &loaded.warnings {
+                    let _ = write!(Stderr, "{warning}");
+                }
+                memory.loaded(now, loaded.personal);
+            }
+            PrivateAnswer::LauncherStored { number, result } => {
+                if let Err(err) = &result {
+                    app::report(
+                        APP_NAME,
+                        format_args!("the launcher's record could not be kept ({err})"),
+                    );
+                }
+                for key in memory.stored(number, result) {
+                    app::report(
+                        APP_NAME,
+                        format_args!("the launcher record `{key}` reads back as none kept"),
+                    );
+                }
+            }
+            PrivateAnswer::Loaded(loaded) => {
                 for warning in &loaded.warnings {
                     let _ = write!(Stderr, "{warning}");
                 }
                 effects.loaded(now, loaded.choices);
             }
-            EffectsAnswer::Stored {
+            PrivateAnswer::Stored {
                 number,
                 result,
                 ticket,
@@ -9617,25 +9812,45 @@ mod program {
                 let outcome = result.as_ref().map(|_| ()).map_err(|err| *err);
                 effects.stored(number, result);
                 if let Some(ticket) = ticket {
+                    effects.release_call();
                     reply_pinboard(ticket, outcome);
                 }
             }
-            EffectsAnswer::Handed {
+            PrivateAnswer::Handed {
                 document,
                 files,
                 unavailable,
             } => effects.handed_over(document, files, unavailable),
-            EffectsAnswer::Answered => {}
+            PrivateAnswer::Answered => effects.release_call(),
         });
         if effects.next_load(now) {
-            match worker.submit(EffectsJob::Load) {
-                Ok(true) => pump_effects(effects, worker, now),
+            match worker.submit(PrivateJob::Load) {
+                Ok(true) => pump_private(effects, memory, worker, now),
                 Ok(false) => {}
                 Err(_) => effects.loaded(now, None),
             }
         }
         if let Some(work) = effects.next_push(now) {
-            submit_effects(effects, worker, work, now);
+            submit_effects(effects, memory, worker, work, now);
+        }
+        if memory.next_load(now) {
+            match worker.submit(PrivateJob::LauncherLoad) {
+                Ok(true) => pump_private(effects, memory, worker, now),
+                Ok(false) => {}
+                Err(_) => memory.loaded(now, None),
+            }
+        }
+        if let Some(ask) = memory.next_store() {
+            let number = ask.number;
+            match worker.submit(PrivateJob::LauncherStore {
+                number,
+                changes: ask.changes,
+            }) {
+                Ok(true) => pump_private(effects, memory, worker, now),
+                Ok(false) => {}
+                // Nothing was asked: the edits ride with the next write.
+                Err(_) => memory.unasked(number),
+            }
         }
     }
 
@@ -9849,7 +10064,7 @@ mod program {
         shell.session_mut().taskbar_mut().redraw_text();
         compositor.refresh_titles();
         shell.present(compositor);
-        shell.present_desktop(compositor, desktop);
+        shell.present_desktop_text(compositor, desktop);
         shell.redraw_drag_plate(compositor);
         if menu.refit(&chain_geometry(shell.session(), compositor)) {
             present_menu_chain(menu, shell, compositor, windows);
@@ -10129,6 +10344,9 @@ mod program {
         for warning in &loaded.warnings {
             let _ = write!(Stderr, "{warning}");
         }
+        // Read in the same scan as the catalog, so a program's stated purpose
+        // can never be another bundle's.
+        shell.set_library_facts(loaded.bundles.library_facts(&loaded.catalog));
         shell.set_library(compositor, loaded.catalog);
         shell.warm_icon_artwork(compositor);
         programs.associations = loaded.associations;
@@ -10137,10 +10355,27 @@ mod program {
         programs.adopted |= programs.bundles != loaded.bundles;
         programs.bundles = loaded.bundles;
         shell.set_settings_installed(
-            SETTINGS_RUN_PATH
-                .strip_suffix("/Run")
+            tairix_appstore::bundle_of_entry(SETTINGS_RUN_PATH)
                 .is_some_and(|bundle| programs.bundles.holds(bundle)),
         );
+    }
+
+    /// The launcher opened, from its button or a lone tap of Meta: its shelf is
+    /// ranked afresh, since use decays with the time passed, and the stores are
+    /// asked to be re-read so an edit made through `applib`, or a fresh
+    /// install, shows without restarting the session.
+    ///
+    /// The popup opens on the catalogue already in hand and adopts the fresh
+    /// one when it lands: two documents and a manifest per installed program
+    /// are far more than a frame's worth of reads.
+    fn library_opened(
+        memory: &LauncherMemory,
+        catalogs: &Catalogs,
+        (shell, compositor): (&mut DesktopShell, &mut Compositor),
+        programs: &mut Programs,
+    ) {
+        shell.set_library_shelf(compositor, memory.shelf(launcher_now()));
+        request_programs(catalogs, shell, compositor, programs);
     }
 
     /// Ask for a fresh program catalogue, adopting it at once when there is no
@@ -10153,6 +10388,105 @@ mod program {
     ) {
         if let Some(loaded) = catalogs.submit() {
             adopt_programs(loaded, shell, compositor, programs);
+        }
+    }
+
+    /// How long the session holds its exit for the launcher record's last
+    /// writes: a containment bound, so a store that stopped answering costs a
+    /// moment of the logout rather than all of it.
+    const SEE_OUT_NS: u64 = 2_000_000_000;
+
+    /// Make the launcher record's last writes and wait — at most
+    /// [`SEE_OUT_NS`] — for the store to take them, so a launch made just
+    /// before the session ends is kept, saying so when one is not. What else
+    /// the worker answers meanwhile belongs to a session that is over.
+    fn see_out_launcher(memory: &mut LauncherMemory, worker: &PrivateWorker) {
+        let deadline = tairix_rt::clock_get().saturating_add(SEE_OUT_NS);
+        loop {
+            if let Some(ask) = memory.next_store() {
+                let number = ask.number;
+                if worker
+                    .submit(PrivateJob::LauncherStore {
+                        number,
+                        changes: ask.changes,
+                    })
+                    .is_err()
+                {
+                    // An answer collected below frees the room to ask again.
+                    memory.unasked(number);
+                }
+            }
+            if !memory.writing() {
+                if memory.holds_unconfirmed() {
+                    app::report(
+                        APP_NAME,
+                        "the launcher's last changes were not kept: its record was never read",
+                    );
+                }
+                return;
+            }
+            match worker.wait_until(deadline) {
+                Some(PrivateAnswer::LauncherStored { number, result }) => {
+                    if let Err(err) = &result {
+                        app::report(
+                            APP_NAME,
+                            format_args!("the launcher's last changes were not kept ({err})"),
+                        );
+                    }
+                    let _ = memory.stored(number, result);
+                }
+                Some(_) => {}
+                None => {
+                    app::report(
+                        APP_NAME,
+                        "the launcher's last changes were not kept: the store did not answer in time",
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The wall-clock second the launcher's record is kept against, or `None`
+    /// while no wall time has been set this boot: a record dated by the epoch
+    /// placeholder would decay to nothing the moment the clock is set.
+    fn launcher_now() -> Option<i64> {
+        let reading = tairix_rt::wall_time().ok()?;
+        (reading.state() != WallTimeState::Unset).then(|| reading.time().secs())
+    }
+
+    /// Count the launches the user asked for this turn into the launcher's
+    /// record, and hand the launcher its shelf whenever the record moved and
+    /// what runs whenever the strip or the desktop's children did.
+    fn launcher_turn(
+        memory: &mut LauncherMemory,
+        launched: &mut LaunchTable,
+        apps: &mut AppBarPanel,
+        (shell, compositor): (&mut DesktopShell, &mut Compositor),
+    ) {
+        let used = launched.take_used();
+        if !used.is_empty() {
+            let now = launcher_now();
+            let catalog = shell.session().taskbar().library().catalog();
+            let mut full = false;
+            for entry in launched_entries(catalog, &used) {
+                full |= memory.apply(Edit::Launched(entry, now)).is_err();
+            }
+            if full {
+                app::report(
+                    APP_NAME,
+                    "the launcher's record has no room for another launch",
+                );
+            }
+        }
+        if memory.take_moved() {
+            shell.set_library_shelf(compositor, memory.shelf(launcher_now()));
+        }
+        // Both latches drained, so neither survives a wake the other caused.
+        let strip_moved = apps.take_moved();
+        let children_moved = launched.take_moved();
+        if strip_moved || children_moved {
+            shell.set_library_running(compositor, running_bundles(&apps.strip, launched));
         }
     }
 
@@ -10884,7 +11218,7 @@ mod program {
                 return;
             }
         };
-        let run_path = alloc::format!("{}/Run", chosen.bundle().as_str());
+        let run_path = tairix_appstore::entry_path(chosen.bundle().as_str());
         // Owned before the launch, which needs the shell mutably: the chosen
         // entry borrows the catalog the shell holds.
         let label = alloc::string::String::from(chosen.name().as_str());
@@ -11361,10 +11695,14 @@ mod program {
             args: &[&[u8]],
             target: Option<LaunchTarget<'_>>,
         ) -> Option<u64> {
-            match self.reach_running(shell, compositor, run_path, target) {
+            let launched = match self.reach_running(shell, compositor, run_path, target) {
                 Some(pid) => Some(pid),
                 None => spawn_and_record(self.launched, run_path, label, args),
+            };
+            if launched.is_some() {
+                self.launched.note_used(run_path);
             }
+            launched
         }
 
         /// Hand the document `opened` for the bundle whose entry binary is
@@ -11410,6 +11748,9 @@ mod program {
                     run_path,
                 ),
             };
+            if launched.is_some() {
+                self.launched.note_used(run_path);
+            }
             launched
         }
 

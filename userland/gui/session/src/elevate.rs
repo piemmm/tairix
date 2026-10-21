@@ -92,7 +92,9 @@ pub struct Request {
     pub program: String,
     /// How it runs once allowed.
     pub elevation: Elevation,
-    /// Who is asking, as the kernel attested it, by the name shown.
+    /// Who is asking, by the name shown: one the system vouches for — the
+    /// desktop's own name for its task, or a program's signed manifest's —
+    /// never one a caller or an account's catalog chose.
     pub requester: String,
     /// The bundle directory whose picture stands for the requester.
     pub bundle: Option<String>,

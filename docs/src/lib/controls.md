@@ -594,7 +594,9 @@ it, or frame the content that does:
   row and draws none of the three; a reading belongs in its label there.
   Because a vertical entry's rectangle depends on the theme's own metrics, the
   hit test and every damage-reporting entry point take the scale and theme the
-  strip was laid out with, exactly as `ActionRail` does.
+  strip was laid out with, exactly as `ActionRail` does. `Tabs::tab_rect` is
+  the hit test's inverse — where a tab is drawn — for an owner that aims at
+  one, such as a pointer script reaching a launcher folder.
 - **A list longer than its column is scrolled by its owner, in pixels.**
   `Tabs::measured_height` states the height a whole list wants; the owner lays
   the strip out that tall, unscrolled, and shows it through a `ScrollView`, so
@@ -625,8 +627,8 @@ it, or frame the content that does:
   section starts in one posture, open or closed, and moves on its own, so
   opening a second section never closes the first. It records only the
   sections a reader has moved, keyed by whatever names a section (`Ord`), and
-  `reset` puts them all back. The Settings sidebar and the program library's
-  folders both keep one, so neither carries an accordion policy of its own.
+  `reset` puts them all back. The Settings sidebar and the widget gallery's
+  sidebar both keep one, so neither carries an accordion policy of its own.
 - **A group may be set apart by a break instead of a heading.**
   `Tab::with_group_break` puts a blank band half an entry's line tall above the
   entry that starts a group — for a list whose runs a reader recognises without
@@ -1080,10 +1082,29 @@ picture rather than a colour the theme knows: a resting tile paints no plate, so
 the login chooser's account names sit straight on its scene. A tile that
 sets none draws exactly the pixels it always did.
 
+`IconTile::with_live_mark` draws a small disc beneath the picture, in the
+name's own ink, for an item that is live — a running program in the launcher.
+It is a mark of state rather than of choice, so it never takes the accent the
+selection wears, and a tile that sets none draws exactly the pixels it did.
+
 A tile renders state and never dispatches. The view owns the grid geometry and
 hit-tests pointer input against that same geometry, so a tile carries no pointer
 position or press latch of its own, unlike a `ListRow` or a `Card` — controls
 the user clicks directly.
+
+## A list row's second line, and what a search matched
+
+`ListRow::with_caption` gives a row a second line — a muted caption beneath the
+label, at `ListRow::captioned_height` — for a list where what each item *is* is
+worth a line of its own, such as the launcher's search results. A row's icon
+then spans both lines.
+
+`ListRow::with_emphasis` sets the label's byte ranges a search matched in the
+heavier face, in the label's own ink: emphasis says *what matched*, never *what
+is chosen*, so it never takes the selection's accent. Ranges must be in order,
+disjoint, non-empty and on character boundaries of the label; anything else is
+ignored whole rather than half-drawn, and a label too long for its row still
+elides with the shared mark.
 
 ## The card: a group that can be chosen
 

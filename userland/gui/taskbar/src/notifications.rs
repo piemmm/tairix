@@ -236,8 +236,8 @@ impl NotificationArea {
 
     /// Replace the status signals, dropping any later duplicate id (fail
     /// closed: a repeated id keeps its first, deterministic slot rather than
-    /// drawing the same signal twice).
-    pub fn set_signals(&mut self, signals: Vec<StatusSignal>) {
+    /// drawing the same signal twice), and hand back the ones they replace.
+    pub fn set_signals(&mut self, signals: Vec<StatusSignal>) -> Vec<StatusSignal> {
         let mut deduped: Vec<StatusSignal> = Vec::with_capacity(signals.len());
         for signal in signals {
             if deduped.iter().any(|kept| kept.id == signal.id) {
@@ -245,7 +245,7 @@ impl NotificationArea {
             }
             deduped.push(signal);
         }
-        self.signals = deduped;
+        core::mem::replace(&mut self.signals, deduped)
     }
 
     // --- Transient notifications --------------------------------------

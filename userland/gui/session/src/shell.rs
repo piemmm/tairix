@@ -767,6 +767,9 @@ impl DesktopShell {
             surface,
             title,
         )?;
+        // A window that arrives takes the screen from a launcher still
+        // leaving it, so its first frame never shows the two together.
+        self.session.taskbar_mut().finish_library_departure();
         // Focus moved to the new window; keep the decorated active frame in
         // step (a no-op for this bare window, but it deactivates whatever
         // decorated window previously held focus).
@@ -840,6 +843,9 @@ impl DesktopShell {
         ) {
             return false;
         }
+        // As for a window the session opens: the frame that shows it shows no
+        // launcher still leaving.
+        self.session.taskbar_mut().finish_library_departure();
         self.follow_focus(compositor);
         self.present(compositor);
         true
@@ -1281,7 +1287,8 @@ impl DesktopShell {
     }
 
     /// Bring the compositor's active theme in step with the session's,
-    /// returning whether it changed.
+    /// returning whether the look changed — a change of motion alone is taken
+    /// and answers `false`.
     ///
     /// The whole theme, not just its desktop colour: the compositor draws
     /// every decorated window's furniture from it, so pushing only the
@@ -1590,6 +1597,22 @@ impl DesktopShell {
     ) {
         let whole = Region::from(compositor.screen_rect());
         self.present_desktop_area(compositor, desktop, &whole);
+    }
+
+    /// Lay out and draw again the text the desktop layer shows — its icons'
+    /// names — leaving the ground between them alone: what a landing of text
+    /// drawn provisionally owes the layer.
+    pub fn present_desktop_text<S: DirectorySource>(
+        &mut self,
+        compositor: &mut Compositor,
+        desktop: &Desktop<S>,
+    ) {
+        let layout = self.desktop_layout(compositor, desktop);
+        let mut cells = damage::sink();
+        desktop.mark_text(&layout, &mut cells);
+        if !cells.is_empty() {
+            self.present_desktop_area(compositor, desktop, &cells);
+        }
     }
 
     /// Repaint just the parts of the desktop layer covered by `area`.
@@ -2016,11 +2039,76 @@ impl DesktopShell {
     /// machine store merged with the user's overlay) and re-present, so an
     /// open popup refreshes in the same frame it is re-catalogued.
     pub fn set_library(&mut self, compositor: &mut Compositor, catalog: Catalog) {
-        self.session
-            .taskbar_mut()
-            .library_mut()
-            .set_catalog(catalog);
+        self.session.taskbar_mut().set_library_catalog(catalog);
         self.present(compositor);
+    }
+
+    /// Hand the launcher each entry's manifest facts, read in the same scan
+    /// as the catalog.
+    pub fn set_library_facts(
+        &mut self,
+        facts: alloc::collections::BTreeMap<tairix_proglib::EntryId, tairix_taskbar::AppIdentity>,
+    ) {
+        self.session.taskbar_mut().set_library_facts(facts);
+    }
+
+    /// Hand the launcher the account's shelf and re-present, so a favourite
+    /// kept from its menu shows in the frame after the menu closes.
+    pub fn set_library_shelf(&mut self, compositor: &mut Compositor, fresh: tairix_proglib::Shelf) {
+        self.session.taskbar_mut().set_library_shelf(fresh);
+        self.present(compositor);
+    }
+
+    /// Hand the launcher which bundle directories are running, presenting the
+    /// marks that moved.
+    pub fn set_library_running(
+        &mut self,
+        compositor: &mut Compositor,
+        bundles: alloc::collections::BTreeSet<alloc::string::String>,
+    ) {
+        if self
+            .session
+            .taskbar_mut()
+            .set_library_running(bundles, compositor.scale())
+        {
+            self.present(compositor);
+        }
+    }
+
+    /// Open the launcher if it is closed, close it if open — the lone tap of
+    /// the Meta key — at `now_ns`, answering what the bar asks the embedder
+    /// for and presenting.
+    pub fn toggle_library(&mut self, compositor: &mut Compositor, now_ns: u64) -> TaskbarResponse {
+        let response = self
+            .session
+            .taskbar_mut()
+            .toggle_library(now_ns, compositor.scale());
+        self.present(compositor);
+        response
+    }
+
+    /// Step the launcher's motion to `now_ns`, presenting what the frame
+    /// changed: the window's rise and fade cost a placement, not a repaint.
+    pub fn advance_library(&mut self, compositor: &mut Compositor, now_ns: u64) {
+        if self
+            .session
+            .taskbar_mut()
+            .advance_library(now_ns, compositor.scale())
+        {
+            self.present(compositor);
+        }
+    }
+
+    /// `park_ns` shortened to the launcher's next frame of motion on a display
+    /// refreshing at `refresh`, or left as it is while nothing moves.
+    #[must_use]
+    pub fn library_park_deadline_ns(&self, now_ns: u64, park_ns: u64, refresh: RefreshRate) -> u64 {
+        park_within(
+            park_ns,
+            self.session
+                .taskbar()
+                .library_next_frame_in(now_ns, refresh),
+        )
     }
 
     /// Hand the taskbar's application strip the session's freshly resolved
@@ -2237,7 +2325,11 @@ impl DesktopShell {
     /// Show what the audio service reports on the bar, re-presenting it only
     /// when that moved its pixels.
     pub fn set_sound(&mut self, compositor: &mut Compositor, state: tairix_taskbar::SoundState) {
-        if self.session.taskbar_mut().set_sound(state) {
+        if self
+            .session
+            .taskbar_mut()
+            .set_sound(state, compositor.scale())
+        {
             self.present(compositor);
         }
     }
@@ -2321,7 +2413,11 @@ impl DesktopShell {
     /// embedder attests the producer on the endpoint before this call, so
     /// the model only ever renders what the desktop's own service published.
     pub fn set_tray_summary(&mut self, compositor: &mut Compositor, summary: Option<TraySummary>) {
-        if self.session.taskbar_mut().set_tray_summary(summary) {
+        if self
+            .session
+            .taskbar_mut()
+            .set_tray_summary(summary, compositor.scale())
+        {
             self.present(compositor);
         }
     }
@@ -2334,7 +2430,11 @@ impl DesktopShell {
         compositor: &mut Compositor,
         report: Option<NetworkReport>,
     ) {
-        if self.session.taskbar_mut().set_network(report) {
+        if self
+            .session
+            .taskbar_mut()
+            .set_network(report, compositor.scale())
+        {
             self.present(compositor);
         }
     }
@@ -2347,7 +2447,11 @@ impl DesktopShell {
     /// service — the session is the one component that observes whether an
     /// app drains its window events.
     pub fn set_tray_unresponsive(&mut self, compositor: &mut Compositor, count: u16) {
-        if self.session.taskbar_mut().set_tray_unresponsive(count) {
+        if self
+            .session
+            .taskbar_mut()
+            .set_tray_unresponsive(count, compositor.scale())
+        {
             self.present(compositor);
         }
     }
@@ -2360,7 +2464,11 @@ impl DesktopShell {
     /// this leaves the capsule on the mark a nameless account gets, rather
     /// than an initial nobody chose.
     pub fn set_account(&mut self, compositor: &mut Compositor, name: &str) {
-        if self.session.taskbar_mut().set_account(name) {
+        if self
+            .session
+            .taskbar_mut()
+            .set_account(name, compositor.scale())
+        {
             self.present(compositor);
         }
     }
@@ -2530,7 +2638,7 @@ impl DesktopShell {
         let widest = self.clock.widest();
         let reshaped = self.session.taskbar().clock().widest() != widest.as_slice();
         if reshaped {
-            self.session.taskbar_mut().clock_mut().set_widest(widest);
+            self.session.taskbar_mut().set_clock_widest(widest);
         }
         CivilAdoption {
             zone,
@@ -2562,8 +2670,7 @@ impl DesktopShell {
         let heading = String::from(self.clock.heading());
         self.session
             .taskbar_mut()
-            .clock_mut()
-            .set_reading(lines, heading);
+            .set_clock_reading(lines, heading, compositor.scale());
         self.present(compositor);
         true
     }

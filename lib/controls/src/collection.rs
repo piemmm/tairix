@@ -29,7 +29,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_colour::Rgba;
-use tairix_font::{BitmapFont, Cut, TextShadow};
+use tairix_font::{BitmapFont, Cut, FontWeight, TextShadow};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -44,11 +44,11 @@ use crate::damage;
 use crate::paint::{
     bead_band, centre_x, centred_in, dominant_color, draw_outline, foreground, grab_after,
     heavy_contrast, icon_slot_side, inset, key_activation, line_budget, paint_bead, paint_chevron,
-    paint_count_badge, paint_drop_target, paint_icon_slot, paint_row, paint_run,
-    paint_surface_plate, plate_border, plate_corner, pointer_activation, press_latch,
-    rail_thickness, resolve_bead, role_font, route_pointer, row_content_span, run_width,
-    seam_thickness, seam_width, surface_rect, to_i32, withheld, ArtworkTone, ChevronDir,
-    ChromeLayer, PlateInterior, TextAlign, TextBlock,
+    paint_count_badge, paint_drop_target, paint_emphasised, paint_icon_slot, paint_row, paint_run,
+    paint_surface_plate, plate_border, plate_corner, plate_frame_inset, pointer_activation,
+    press_latch, rail_thickness, resolve_bead, role_font, route_pointer, row_content_span,
+    run_width, seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld,
+    ArtworkTone, BeadShape, ChevronDir, ChromeLayer, PlateInterior, TextAlign, TextBlock,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -80,8 +80,11 @@ struct CellContext<'a> {
 
 /// One selectable, focusable, activatable row of a list (spec §11.13).
 ///
-/// A list row carries a label, an optional leading icon, and an optional
-/// trailing caption. Its hover, selection, live activity, resource pressure,
+/// A list row carries a label, an optional leading icon, an optional trailing
+/// caption, and optionally a second line beneath the label
+/// ([`with_caption`](Self::with_caption)) and characters of the label set in
+/// the heavier weight ([`with_emphasis`](Self::with_emphasis)) — what a search
+/// matched. Its hover, selection, live activity, resource pressure,
 /// recovery, and authority states are read from its composed [`ControlState`]
 /// and drawn by the shared row chrome. The row renders state and never
 /// dispatches — a completed click or Space/Enter reports [`RowAction`] and the
@@ -95,6 +98,8 @@ struct CellContext<'a> {
 pub struct ListRow {
     label: String,
     trailing: Option<String>,
+    caption: Option<String>,
+    emphasis: Vec<core::ops::Range<usize>>,
     icon: Option<IconKind>,
     role: ControlRole,
     state: ControlState,
@@ -111,12 +116,51 @@ impl ListRow {
         Self {
             label: label.into(),
             trailing: None,
+            caption: None,
+            emphasis: Vec::new(),
             icon: None,
             role: ControlRole::Neutral,
             state: ControlState::idle(),
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(false),
         }
+    }
+
+    /// This row with a second line beneath its label, muted and in the
+    /// caption face — what the item is, where a name alone does not say.
+    ///
+    /// A captioned row is laid out at [`captioned_height`](Self::captioned_height)
+    /// and its icon spans both lines.
+    #[must_use]
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+
+    /// This row with the label's bytes in `ranges` set in the heavier weight,
+    /// in the label's own ink: what a search matched, readable in every theme
+    /// and told by shape as well as tone.
+    ///
+    /// The ranges must be ordered, disjoint, inside the label, and on
+    /// character boundaries; ranges that are not are ignored whole and the
+    /// label drawn plain, never cut mid-character.
+    #[must_use]
+    pub fn with_emphasis(mut self, ranges: Vec<core::ops::Range<usize>>) -> Self {
+        self.emphasis = ranges;
+        self
+    }
+
+    /// The height a [captioned](Self::with_caption) row needs: its label's line
+    /// and its caption's line, inside the row's frame, never shorter than a
+    /// one-line row.
+    #[must_use]
+    pub fn captioned_height(scale: Scale, theme: &Theme) -> u32 {
+        let lines = role_font(theme, scale, TextRole::Body)
+            .line_height()
+            .saturating_add(role_font(theme, scale, TextRole::Caption).line_height());
+        lines
+            .saturating_add(plate_frame_inset(theme, scale).saturating_mul(2))
+            .max(text_plate_height(theme, scale, TextRole::Body))
     }
 
     /// This row with a leading icon glyph on a reserved column.
@@ -205,20 +249,37 @@ impl ListRow {
     /// This is the render geometry itself, exposed so an owner rasterising
     /// per-entry artwork produces it at exactly the size [`Self::render`] will
     /// place — the two can never disagree. The icon column is sized off the
-    /// text line so it lines up with the label, and the side is the same
-    /// whether or not the row carries an icon (the reserved column is fixed),
-    /// so a caller can size artwork before deciding to supply it.
+    /// text — one line, or both lines of a captioned row — so it lines up with
+    /// what it stands beside, and the side is the same whether or not the row
+    /// carries an icon (the reserved column is fixed), so a caller can size
+    /// artwork before deciding to supply it.
     #[must_use]
     pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
-        let font = role_font(theme, scale, TextRole::Body);
-        // The list row's icon column is sized purely off the text line and the
-        // row height; the scale and theme are accepted only so the query
-        // matches the shared collection-control shape.
-        let _ = (scale, theme);
         let Some((_, _, _, h)) = surface_rect(bounds) else {
             return 0;
         };
-        icon_slot_side(font, h)
+        self.icon_slot(h, scale, theme)
+    }
+
+    /// The icon column's side in a row whose content is `height` tall.
+    fn icon_slot(&self, height: u32, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        match self.caption {
+            Some(_) => self.text_block_height(scale, theme).min(height),
+            None => icon_slot_side(font, height),
+        }
+    }
+
+    /// How tall the row's text stands: the label's line, and the caption's
+    /// beneath it where there is one.
+    fn text_block_height(&self, scale: Scale, theme: &Theme) -> u32 {
+        let label = role_font(theme, scale, TextRole::Body).line_height();
+        match self.caption {
+            Some(_) => {
+                label.saturating_add(role_font(theme, scale, TextRole::Caption).line_height())
+            }
+            None => label,
+        }
     }
 
     /// The bounds width at which this row draws its icon, label, and trailing
@@ -234,16 +295,30 @@ impl ListRow {
         let font = role_font(theme, scale, TextRole::Body);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let icon = match self.icon {
-            Some(_) => icon_slot_side(font, height).saturating_add(pad),
+            Some(_) => self.icon_slot(height, scale, theme).saturating_add(pad),
             None => 0,
         };
         let trailing = match &self.trailing {
             Some(text) => font.text_width(text).saturating_add(pad),
             None => 0,
         };
-        font.text_width(&self.label)
-            .saturating_add(icon)
+        let heavy = font.with_weight(FontWeight::BOLD);
+        let strong = self.valid_emphasis();
+        let label = self.label.char_indices().fold(0u32, |sum, (at, ch)| {
+            let face = if strong.iter().any(|range| range.contains(&at)) {
+                heavy
+            } else {
+                font
+            };
+            sum.saturating_add(face.advance(ch))
+        });
+        let caption = self.caption.as_ref().map_or(0, |caption| {
+            role_font(theme, scale, TextRole::Caption).text_width(caption)
+        });
+        label
             .saturating_add(trailing)
+            .max(caption)
+            .saturating_add(icon)
             .saturating_add(rail_thickness(theme, scale).saturating_mul(2))
             .saturating_add(pad.saturating_mul(3))
             .saturating_add(bead_band(theme, scale, height))
@@ -286,12 +361,16 @@ impl ListRow {
         let fg = foreground(theme, disposition);
         let muted = Color::from(theme.palette().on_surface_muted);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let text_y = font.centred_top(to_i32(cy), ch);
+        let block = self.text_block_height(scale, theme).min(ch);
+        let text_y = match self.caption {
+            Some(_) => to_i32(cy.saturating_add(ch.saturating_sub(block) / 2)),
+            None => font.centred_top(to_i32(cy), ch),
+        };
 
         let mut left = cx;
         // The leading icon on a reserved column, so labels line up whether or
         // not a row has an icon (text stability, spec §14).
-        let icon_slot = icon_slot_side(font, ch);
+        let icon_slot = self.icon_slot(ch, scale, theme);
         if let Some(kind) = self.icon {
             if icon_slot > 0 {
                 let iy = cy + (ch.saturating_sub(icon_slot)) / 2;
@@ -325,10 +404,44 @@ impl ListRow {
             }
         }
 
-        // The label, left-aligned in the remaining space.
+        // The label, left-aligned in the remaining space, and the caption under
+        // it across the whole of that space: the trailing text sits on the
+        // label's line alone.
         if right > left {
-            let run = font.elide_to_width(&self.label, right - left);
-            paint_run(surface, font, run, (to_i32(left), text_y), fg, None);
+            paint_emphasised(
+                surface,
+                (font, font.with_weight(FontWeight::BOLD)),
+                (&self.label, self.valid_emphasis()),
+                (to_i32(left), text_y, right - left),
+                fg,
+            );
+        }
+        if let Some(caption) = &self.caption {
+            let small = role_font(theme, scale, TextRole::Caption);
+            let width = cx.saturating_add(cw).saturating_sub(left);
+            let run = small.elide_to_width(caption, width);
+            let y = text_y.saturating_add(to_i32(font.line_height()));
+            paint_run(surface, small, run, (to_i32(left), y), muted, None);
+        }
+    }
+
+    /// The emphasis ranges, or none at all when any of them is out of order,
+    /// overlapping, outside the label, or off a character boundary.
+    fn valid_emphasis(&self) -> &[core::ops::Range<usize>] {
+        let mut end = 0;
+        let valid = self.emphasis.iter().all(|range| {
+            let ok = range.start >= end
+                && range.start < range.end
+                && self.label.is_char_boundary(range.start)
+                && self.label.is_char_boundary(range.end)
+                && range.end <= self.label.len();
+            end = range.end;
+            ok
+        });
+        if valid {
+            &self.emphasis
+        } else {
+            &[]
         }
     }
 
@@ -2137,6 +2250,7 @@ pub struct IconTile {
     name_cut: Cut,
     casts_shadow: bool,
     name_withheld: bool,
+    live: bool,
     layout: TileLayout,
 }
 
@@ -2154,8 +2268,18 @@ impl IconTile {
             name_cut: Cut::End,
             casts_shadow: false,
             name_withheld: false,
+            live: false,
             layout: TileLayout::new(1),
         }
+    }
+
+    /// This tile marking its item as live — a program that is running — with
+    /// a small disc under its picture in the name's ink, legible by shape in
+    /// every theme and never in the accent, which only selection wears.
+    #[must_use]
+    pub fn with_live_mark(mut self, live: bool) -> Self {
+        self.live = live;
+        self
     }
 
     /// This tile with its name withheld, for an owner laying an editor where
@@ -2300,6 +2424,15 @@ impl IconTile {
                 if let Some(frame) = picture.frame() {
                     paint_frame(surface, at, frame, scale, theme);
                 }
+            }
+            if self.live {
+                let below = parts
+                    .and_then(|parts| parts.picture)
+                    .and_then(surface_rect)
+                    .map_or(slot.1.saturating_add(slot.2), |(_, y, _, h)| {
+                        y.saturating_add(h)
+                    });
+                paint_live_mark(surface, slot, below, scale, theme, ink);
             }
         }
         if !self.name_withheld {
@@ -2571,6 +2704,30 @@ impl IconTile {
         }
         foreground(theme, self.state.disposition())
     }
+}
+
+/// The disc a live tile draws: half a bead across, centred under the picture
+/// `slot` in the space between the slot's foot and `below`, the foot of the
+/// picture's part, and lifted onto the slot's own foot where that space is too
+/// small to hold it.
+fn paint_live_mark(
+    surface: &mut Surface,
+    (x, y, side): (u32, u32, u32),
+    below: u32,
+    scale: Scale,
+    theme: &Theme,
+    ink: Color,
+) {
+    let diameter = (scale.scale_length(theme.metrics().bead_size) / 2).max(3);
+    let foot = y.saturating_add(side);
+    let room = below.saturating_sub(foot);
+    let top = if room >= diameter {
+        foot.saturating_add((room - diameter) / 2)
+    } else {
+        below.saturating_sub(diameter)
+    };
+    let left = x.saturating_add(side / 2).saturating_sub(diameter / 2);
+    paint_bead(surface, left, top, diameter, ink, BeadShape::Check);
 }
 
 /// What an [`IconTile`] is made of, each part with a half inset of margin: its

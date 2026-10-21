@@ -2,12 +2,13 @@
 //!
 //! It answers the `appdata-v1` wire exactly as `confd` does — decoding real
 //! request frames, encoding real reply frames, holding a committed document
-//! per configuration scope, a staging session, and a sealed document written
-//! through immediately — so a test drives the codec the client and the service
-//! actually share rather than a mock of it. That is also why it lives here
-//! rather than in each consumer: an application migrating onto the store needs
-//! the same fake, and two copies of it would be two different ideas of what the
-//! service does.
+//! per configuration scope, a staging session, the administrator's policy
+//! layer a private read composes beneath the caller's own document, and a
+//! sealed document written through immediately — so a test drives the codec
+//! the client and the service actually share rather than a mock of it. That is
+//! also why it lives here rather than in each consumer: an application
+//! migrating onto the store needs the same fake, and two copies of it would be
+//! two different ideas of what the service does.
 //!
 //! It does not *encrypt* the sealed scope: the sealing is the service's, behind
 //! its own tests, and a fake that reimplemented it would be a second opinion
@@ -66,6 +67,10 @@ pub struct FakeService {
     word: String,
     /// The committed document of each scope, as the service would hold it.
     committed: [Document; SCOPES],
+    /// The administrator's policy layer beneath the private scope: what a read
+    /// answers for a key the account's own document does not set, and what no
+    /// write or commit ever lands in.
+    policy: Document,
     /// The sealed document, as the service would hold it — with no staging
     /// beside it, because a sealed write is applied before the reply.
     sealed: Document,
@@ -90,6 +95,15 @@ pub struct FakeService {
     /// between a write that landed and the re-read that follows it. Shared for
     /// the same reason [`FakeService::refuse`] is.
     refuse_reads: Rc<Cell<Option<Errno>>>,
+    /// When set, only a commit is refused, and what was staged stays staged
+    /// for a retry, exactly as the service keeps it. Shared for the same
+    /// reason [`FakeService::refuse`] is.
+    refuse_commits: Rc<Cell<Option<Errno>>>,
+    /// Commits to let land before refusing every later one with the error
+    /// held: a store that takes one write and fails the next.
+    refuse_after: Option<(usize, Errno)>,
+    /// Commits landed.
+    commits: usize,
     /// Calls served, so a test can prove a read is one round trip.
     calls: usize,
     /// When set, the private document grows before every read — the concurrent
@@ -114,6 +128,7 @@ impl FakeService {
         Self {
             word: String::from(word),
             committed: [Document::new(), Document::new()],
+            policy: Document::new(),
             sealed: Document::new(),
             sealed_refusal: None,
             staged: [Vec::new(), Vec::new()],
@@ -122,6 +137,9 @@ impl FakeService {
             candidates: Vec::new(),
             refuse: Rc::new(Cell::new(None)),
             refuse_reads: Rc::new(Cell::new(None)),
+            refuse_commits: Rc::new(Cell::new(None)),
+            refuse_after: None,
+            commits: 0,
             calls: 0,
             growing_writer: false,
             blobs: Vec::new(),
@@ -163,6 +181,18 @@ impl FakeService {
     #[must_use]
     pub fn with_store(self, text: &str) -> Self {
         self.with_scope(ConfigScope::Private, text)
+    }
+
+    /// Seed the administrator's policy layer beneath the private scope with
+    /// `text`.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::with_store`].
+    #[must_use]
+    pub fn with_policy(mut self, text: &str) -> Self {
+        self.policy = Document::parse(text).expect("a legal store fixture");
+        self
     }
 
     /// Seed the calling program's own committed **published** scope with
@@ -243,6 +273,19 @@ impl FakeService {
         Rc::clone(&self.refuse_reads)
     }
 
+    /// The switch that refuses only a commit, leaving what was staged staged.
+    #[must_use]
+    pub fn commit_refusal(&self) -> Rc<Cell<Option<Errno>>> {
+        Rc::clone(&self.refuse_commits)
+    }
+
+    /// Let `landed` commits land and refuse every later one with `err`.
+    #[must_use]
+    pub fn refusing_commits_after(mut self, landed: usize, err: Errno) -> Self {
+        self.refuse_after = Some((landed, err));
+        self
+    }
+
     /// Calls served so far.
     #[must_use]
     pub const fn calls(&self) -> usize {
@@ -287,9 +330,9 @@ impl FakeService {
         &self.committed[slot(scope)]
     }
 
-    /// The document a read of `scope` answers with: the committed one plus the
-    /// caller's staged edits, exactly as the service composes it.
-    fn served(&self, scope: ConfigScope) -> Document {
+    /// The caller's own document of `scope`: the committed one plus its staged
+    /// edits — what a commit lands.
+    fn own(&self, scope: ConfigScope) -> Document {
         let mut document = copy_of(self.scope(scope));
         for (key, value) in &self.staged[slot(scope)] {
             match value {
@@ -300,6 +343,21 @@ impl FakeService {
             }
         }
         document
+    }
+
+    /// The document a read of `scope` answers with, exactly as the service
+    /// composes it: the caller's own over the policy layer for the private
+    /// scope, and its own alone for the published one.
+    fn served(&self, scope: ConfigScope) -> Document {
+        let own = self.own(scope);
+        if matches!(scope, ConfigScope::Public) {
+            return own;
+        }
+        let mut layered = copy_of(&self.policy);
+        for setting in own.settings() {
+            let _ = layered.set(setting.key, setting.value);
+        }
+        layered
     }
 }
 
@@ -427,7 +485,18 @@ impl AppDataHost for FakeService {
                 Ok(status(Ok(()), reply))
             }
             AppDataRequest::ConfigCommit { scope } => {
-                self.committed[slot(scope)] = self.served(scope);
+                let spent = self
+                    .refuse_after
+                    .and_then(|(landed, err)| (self.commits >= landed).then_some(err));
+                if let Some(err) = self.refuse_commits.get().or(spent) {
+                    return Ok(status(Err(err), reply));
+                }
+                self.commits += 1;
+                self.committed[slot(scope)] = self.own(scope);
+                self.staged[slot(scope)].clear();
+                Ok(status(Ok(()), reply))
+            }
+            AppDataRequest::ConfigDiscard { scope } => {
                 self.staged[slot(scope)].clear();
                 Ok(status(Ok(()), reply))
             }

@@ -273,6 +273,8 @@ pub const ICON_KINDS: [IconKind; core::mem::variant_count::<IconKind>()] = [
     IconKind::LevelMedium,
     IconKind::LevelHard,
     IconKind::DoorOpen,
+    IconKind::Star,
+    IconKind::Shield,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

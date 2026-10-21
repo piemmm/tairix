@@ -908,10 +908,13 @@ impl Compositor {
     /// decorated window re-resolves its reserved furniture band (a theme may
     /// change the border, inset, or title-bar metrics), and the whole screen
     /// is marked dirty so the next composite repaints every window and its
-    /// decorations under the new palette. Setting the theme already in effect
-    /// changes nothing and returns `false`.
+    /// decorations under the new palette. A theme that
+    /// [draws like](Theme::draws_like) the one in effect — the same one, or
+    /// one differing only in its motion — is taken without marking anything
+    /// and returns `false`.
     pub fn set_theme(&mut self, theme: Theme) -> bool {
-        if theme == self.theme {
+        if theme.draws_like(&self.theme) {
+            self.theme = theme;
             return false;
         }
         self.theme = theme;

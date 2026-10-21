@@ -565,6 +565,10 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
                 self.config_commit(fs, origin, &identity, scope)?;
                 Ok(ok(out))
             }
+            AppDataRequest::ConfigDiscard { scope } => {
+                self.discard(origin, scope);
+                Ok(ok(out))
+            }
             AppDataRequest::PublicRead {
                 bundle_id,
                 capacity,
@@ -1201,6 +1205,18 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
     }
 
     /// Index of the calling process instance's staging session.
+    /// Withdraw what `origin` staged against `scope`, publishing nothing, and
+    /// forget a session left with nothing staged.
+    fn discard(&mut self, origin: &Origin, scope: ConfigScope) {
+        let Some(index) = self.session_index(origin) else {
+            return;
+        };
+        self.sessions[index].clear(scope);
+        if self.sessions[index].is_empty() {
+            self.sessions.remove(index);
+        }
+    }
+
     fn session_index(&self, origin: &Origin) -> Option<usize> {
         let proc_id = origin.proc_id();
         self.sessions

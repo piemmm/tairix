@@ -25,7 +25,8 @@ window manager also paints with), the shared `tairix-font` text rasteriser
 `tairix-input` event vocabulary (the same `PointerButton`/`InputEvent`/`Key`
 the window manager routes), the shared Reactive Alloy control vocabulary
 (`tairix-controls`, `plans/GUI-CONTROLS-DESIGN.md` — the leading launcher
-buttons and the popup's panel, search field, list rows, and scrollbar; the
+buttons and the launcher's panel, search field, sidebar tabs, icon tiles,
+list rows, and scrollbar; the
 [widget gallery](widgets.md) is its worked reference), the
 program-library catalog engine ([`tairix-proglib`](../lib/proglib.md) — the
 typed `Catalog` the popup lists), and the shared
@@ -293,59 +294,59 @@ owes nothing.
 
 **A model change owes a `Parts` account too, wherever the model knows which
 item moved.** The session re-derives the application strip on every wake that
-*could* have changed it, and resolves every shown launcher row before every
+*could* have changed it, and resolves every shown launcher program before every
 paint, so a model change is far more often a no-op than not: `set_apps` and
-`set_library_row_artwork` compare what they are handed against what is there
-and owe only the slots and rows whose drawn state actually moved — nothing at
-all for a push that changed nothing. A changed slot *count* re-lays every
-rectangle inside the strip, so that owes `app_strip`, which is the region that
-changed rather than one slot's damage.
+`set_library_artwork` compare what they are handed against what is there and
+owe only the slots and tiles whose drawn state actually moved — nothing at all
+for a push that changed nothing. A changed slot *count* re-lays every rectangle
+inside the strip, so that owes `app_strip`, which is the region that changed
+rather than one slot's damage. The launcher reports its own rectangles for every
+event it routes ([below](#repaints)).
 
-The one surface that stays whole-account by construction is the **library
-popup**: its outcome type reports only "the popup's pixels changed", and the
-changes behind it are not alike — a moved row highlight is two rows, while a
-scroll moves every row and a filter edit rebuilds the list, both of which its
-scrollbar and search field report nothing for. Making it per-row means having
-every site in the popup report its own rectangles, which is a change of its own
-with its own tests (`plans/FIX-DESKTOP-SPEEDUP.md`).
-
-**Why per surface.** The surfaces are wildly unequal in cost: measured on the
-host in release, rendering the bar takes 1655 µs and the library popup 1001 µs,
-against about a hundred for a small popover. With a single boolean the embedder
+**Why per surface.** The surfaces are unequal in cost: measured on the host in
+release at 1920 × 1080, painting the launcher whole over forty programs takes
+about 525 µs and the bar about 100 µs. With a single boolean the embedder
 could not tell which had changed, so it re-rendered and re-pushed all of them
-every time — a pointer drifting from one cell to the next of a small open
-popover cost about 2.8 ms of rendering plus a recomposite of every window
-rectangle, when a hundred microseconds and one small rectangle was the whole of
-the change. That is a pointer moving over a popover, among the most frequent
-interactions the desktop has, and it is why the desktop felt laggy. Naming the
-surface lets the presenter repaint the cheap one and leave the others exactly as
-the compositor already has them; naming the *rectangles* on it lets a hover cost
+every time, and a pointer moving over one small popover paid for every surface
+and a recomposite of every window rectangle. Naming the surface lets the
+presenter repaint the one that changed and leave the others exactly as the
+compositor already has them; naming the *rectangles* on it lets a hover cost
 the control it moved rather than the strip that control sits on.
 
 A menu is **not** among them: every menu is the desktop's own chain, so the bar
 has no menu pixels to latch.
 
-**The contract.** Every change that alters what a surface draws latches that
-surface, and a change touching several latches all of them:
+**The contract.** Every change that alters what a surface draws latches the
+parts of that surface it moved — the whole surface only when it re-lays it —
+and a change touching several surfaces latches each:
 
-- a hover moving between bar buttons or application slots → `bar`;
+- a hover moving between bar buttons or application slots → those controls'
+  rectangles on `bar`;
 - a highlight moving inside the open hover window picker → `picker`;
-- opening or closing the popup → `library` **and** `bar` (the Library button
-  reads as visually held open);
-- raising or dismissing a notification → `notifications` **and** `bar` (the
-  notification-area icon);
-- a Switchboard tray summary change → `bar` when it moves the capsule's own
-  glyph, state, or badge, plus `readout` while the readout is expanded and the
-  reading moves anything it draws;
+- opening or closing the launcher → `library`, and the Library button's own
+  rectangle on `bar` (it reads as held open while the launcher shows);
+- raising or dismissing a notification → `notifications`; the bar draws no
+  notification, only the status signals;
+- a status signal changing → its own slot on `bar`, and the whole `bar` when a
+  signal appears or goes, since the bar lays a slot for each;
+- the clock turning → its own rectangle on `bar`: it keeps room for its widest
+  reading, so nothing beside it moves; a change to that room
+  (`Taskbar::set_clock_widest`) re-lays the whole `bar`;
+- a Switchboard tray summary, unresponsive count or account change → the
+  capsule's own slot on `bar` when it moves the capsule's glyph, state, badge
+  or disc, plus `readout` while the readout is expanded and the reading moves
+  anything it draws;
 - a theme swap, or an edge or resize through `Taskbar::set_config` → `ALL`,
   since every surface draws from the palette and anchors off the bar's
-  geometry.
+  geometry — though a theme that differs only in its motion latches nothing
+  (`Theme::draws_like`), since no resting pixel moves with it.
 
-Latch sites deliberately **err toward latching more, never less**: an extra
-latch costs one redundant repaint, while a missing one leaves stale pixels on
-screen, which is a correctness bug. Because the contract holds at every
-mutator, the embedder may present *strictly* from the drained latch — and
-present nothing at all when it is empty.
+A missed part leaves stale pixels on screen, and a part the change did not
+move costs a repaint of pixels nobody can tell apart, so every latch site names
+exactly what moved; scoped repaints are proven to land the pixels a whole paint
+lands. Because the contract holds at every mutator, the embedder may present
+*strictly* from the drained latch — and present nothing at all when it is
+empty.
 
 The tray is the one place that latch is drawn *tight* rather than generous,
 and only because the tightness is proven rather than assumed. The Switchboard
@@ -358,27 +359,26 @@ construction and drift-guarded byte for byte (see
 [the controls library](../lib/controls.md)); the bar is not repainted for a
 figure only the expanded readout draws.
 
-The contract holds even for a borrow the bar cannot see into. Each `&mut`
-sub-model accessor latches the moment it hands the borrow out, whether or not
-the caller goes on to change anything: `tasks_mut` and `clock_mut` latch
-`bar`, and `library_mut` latches `library` **and** `bar`, since the same
-borrow can open or close the popup and so redraw the Library button. Those
-accessors carry genuine state changes — a task added, a catalog resolved, the
-clock advanced — never a per-input-sample update, so the conservative latch
-costs nothing on the hot path. The crate-internal routing seams the input
-router borrows the popup and the menu through are the deliberate opposite:
-they do not latch, because the router latches from the outcome the sub-model
-reports, which is what keeps a pointer sample over the open popup from
-repainting it.
+Every input a surface draws is handed over by value and compared, so no borrow
+has to assume a change: the clock's reading and room, the tray's facts, the
+status signals, and the launcher's catalog, facts, shelf and running set
+(`set_library_catalog` and its siblings), which the session re-reads on every
+open, so the same values handed again must cost no repaint. The one `&mut`
+accessor, `tasks_mut`, latches nothing, because no surface draws from the task
+list: the capsule's task cycling and which slots open a picker read it, and a
+slot's look comes from `set_apps`. The
+crate-internal routing seams the input router borrows the launcher and the
+volume panel through (`library_routing_mut`, `sound_routing_mut`) do not latch
+either, because the router latches from the outcome the sub-model reports,
+which is what keeps a pointer sample over the open launcher from repainting
+it.
 
 `Taskbar::report_library_shown` is that same opposite, for the one thing an
-embedder does on **every** published frame: firing the popup's one-shot
-"these rows have been seen" witness. Recording that a frame was seen changes
-no pixel, so it has its own non-latching route. Taken through `library_mut`
-instead it dirtied the whole bar and the whole popup each frame, so the next
-frame recomposed a full-width strip, published, and dirtied it again — a
-desktop that never settled, and a hover sample that cost a bar instead of a
-control.
+embedder does on **every** published frame: firing the launcher's one-shot
+"shown whole" witness. Recording that a frame was seen changes no pixel, so it
+has its own non-latching route; one that latched would dirty the launcher on
+every frame, so the next frame recomposed it, published, and dirtied it again —
+a desktop that never settled.
 
 That leaves exactly one thing the embedder still owns: the desktop `Scale`,
 which the compositor passes per layout and render call rather than being bar
@@ -473,7 +473,9 @@ glyphs across frames, built by `icon_cache` from the shared
 bounded by a budget derived from the real framebuffer byte size, dropped
 under memory pressure, and wiped on release. The renderer is the right home
 for that state: the `Taskbar` model stays pure data. `paint_library` (the
-popup painter) needs no cache of its own, so it stays a `&self` method.
+launcher's painter) holds one more piece of it — the content layer a cascade
+blends from, painted once per content change and drawn over again in place
+while it fits — and drops it when the entrance ends.
 
 ## Floating chrome
 
@@ -486,7 +488,7 @@ pixels in both built-in themes — behind each surface. Along-bar popup placemen
 no popup enters the wallpaper gap.
 
 Every *background* on those surfaces therefore lets the backdrop through: the
-hover and press wash under a bar icon, the library's rows and its search field,
+hover and press wash under a bar icon, the launcher's tiles, rows and search field,
 the readout's *Open Switchboard* button, a notification card, and the scrollbar
 channel. Each keeps the colour role it wears when solid — the bar, its context
 menu and the readout ground in `surface_raised`, a `Panel` in `surface` — so a
@@ -505,7 +507,7 @@ Every application icon the bar draws resolves through **one** rule, written
 once in `render` rather than restated per slot (`AGENTS.md` §2.2):
 
 1. the artwork the slot carries of its *own* (a running application's own
-   bundle icon, a library row's own icon, a picker cell's window thumbnail, the
+   bundle icon, a launcher program's own icon, a picker cell's window thumbnail, the
    trailing capsule's account disc), else
 2. the artwork the `IconArtwork` lookup holds for the slot's `IconKind` — the
    shipped class master under `/System/Graphics/Icons`, else
@@ -617,111 +619,157 @@ A **secondary** press opens the network menu, one table
 A primary press is claimed and inert, as on every status signal but volume.
 The readout has its own repaint account (`TaskbarRepaint::NETWORK`) and window.
 
-## The program-library popup
+## The program-library launcher
 
-`LibraryPopup` is the folder-organised application launcher the Library
-button opens (`plans/NEW-TASKBAR.md` T5). It is a pure model over the
-**resolved** program-library `Catalog` the session hands it
-(`LibraryPopup::set_catalog`) — the machine store merged with the user's
-overlay through `tairix_proglib::merge` (see
-[the program library](../lib/proglib.md)). The popup never touches the VFS;
-choosing an entry only reports `LibraryLaunch { entry }` with the entry's
-identifier, and the session resolves the bundle and launches it through the
-ordinary signature-checked load gate.
+`LibraryPopup` is the launcher the Library button — or a lone tap of the Meta
+key — opens (`plans/NEW-TASKBAR.md` T5, T22–T24). It is a pure model over
+what the session hands it: the **resolved** program-library `Catalog`
+(`set_catalog`; the machine store merged with the user's overlay, see
+[the program library](../lib/proglib.md)), each entry's manifest facts
+(`set_facts`: purpose, version, author), the account's `Shelf` of favourites
+and frequently used programs (`set_shelf`), and the bundle directories
+running now (`set_running`), which it matches against the catalog it holds,
+so a catalog handed after a program started still marks it. It never touches
+the VFS and holds no authority: every choice
+leaves as a typed `TaskbarResponse` — `LibraryLaunch`, `LibraryLaunchElevated`,
+`LibraryEdit`, `CreateDesktopShortcut`, `OpenMenu` — that the session carries
+out under its own authority.
 
-The surface is composed from the shared Reactive Alloy vocabulary
-(`plans/GUI-CONTROLS-DESIGN.md`): a `Panel` whose anchor notch points back at
-the Library button, a `SearchField` filter, one shared `ListRow` per folder
-or entry, and a `ScrollBar` when the rows overflow the viewport. Folders are
-the closed ten-folder taxonomy in its canonical order; a folder with no
-entries is never listed; entries sort by display name within their folder. An
-empty library renders a calm "No programs are catalogued" placeholder — and a
-filter matching nothing "No matching programs" — never an error
-(`plans/NEW-TASKBAR.md`).
+Opening is deterministic: the query cleared, *Home* shown from its top, and
+the keyboard on the search field, so the same catalog and shelf always present
+the same way.
 
-Opening is deterministic: the search comes up cleared, every folder expanded,
-the cursor and scroll at the top, and the keyboard on the search field, so
-the same catalog always presents the same way. Each folder then folds and
-unfolds on its own — the folders are a `lib/controls` `DisclosureSet` that
-starts open, the desktop's one model of sections that open in place — so
-folding one never touches another.
+### Layout
 
-### Geometry
+A `SearchField` across the top; a vertical `Tabs` sidebar — *Home*, then a
+*Folders* group with one tab per non-empty folder and its count; a scrolled
+content pane; and a one-line details strip at the foot naming what the
+highlighted program is for, its folder, and whether it is running. The panel
+is a fixed 720 × 560 logical pixels capped by the room beside the bar, so
+typing never makes it jump, and it opens outward from the Library button on
+every edge. A panel that cannot hold the sidebar beside a usable pane, or the
+sidebar's whole strip, drops it, and *Home* still lists everything.
+`LibraryLayout` is computed once and read by painting and hit-testing alike;
+the chrome overhead is probed from the shared `Panel`, every length goes
+through `Scale::scale_length`, and all arithmetic saturates, so a degenerate
+screen draws chrome over an empty pane rather than panicking.
 
-`Taskbar::library_layout` computes the popup's geometry (`LibraryLayout`):
-the panel opens *outward* from the bar — above a bottom bar, below a top bar,
-to the inner side of a left/right bar — aligned to the Library button and
-clamped along the bar's own span, so it cannot enter the wallpaper gap. Its
-height is sized to the rows it has, capped by the space between the bar and
-the opposite screen edge; overflowing rows scroll by pixels. The rows are laid
-out unscrolled and shown through the viewport's `ScrollView`, so a row its edge
-crosses is drawn cut and still chosen where it shows, and a wheel detent moves
-the list the desktop's one wheel step.
-The panel chrome overhead is *measured* by probing the shared `Panel`
-geometry rather than re-deriving its arithmetic, so a metrics change can
-never drift the layout from what the panel draws (`AGENTS.md` §2.2). Widths,
-row heights, and the corner radius are *logical* lengths converted through
-the one shared `Scale::scale_length`; all arithmetic saturates, and a screen
-too small for even one row yields chrome with an empty viewport rather than a
-panic (`AGENTS.md` §2.9).
+### Pages
 
-### Keyboard model
+*Home* lists the favourites in the account's order, one row of the frequently
+used — as many as the pane is wide — then *All Programs* by name; a folder tab
+lists that folder by name. A section with nothing in it is left out, and an
+empty library says "No programs are catalogued". Programs are `IconTile`s on
+the shared grid: a picture over a two-line name, the tile's live mark beneath a
+running program, and a hit on the picture or the drawn name only, never the
+ground beside them. A folder page depends on the catalog alone, which is what
+`Taskbar::library_route_to` reads: the two clicks — folder tab, then picture —
+that reach an entry whatever the account's history, the route the QEMU pointer
+scripts take.
 
-While open the popup is modal and fully keyboard-driven
-(`plans/GUI-CONTROLS-DESIGN.md` §9): `Tab` cycles the two focus fields
-(search ↔ rows); `Up`/`Down` move the row cursor (wrapping), `Home`/`End`
-jump, `PageUp`/`PageDown` move by a viewport, and the view follows the
-cursor; `Enter` (or space) activates the cursor row — a folder toggles its
-expansion, an entry launches; `Left` collapses a folder or climbs from an
-entry to its folder, `Right` expands or steps into the first entry — the one
-tree-key rule every two-level list takes (`lib/controls`' `tree_step`), so on
-a search's flat matches, beneath no folder, both do nothing; typing
-anywhere routes into the search field (type-to-filter, case-insensitive,
-flat name-sorted results), `Enter` in the search launches the first match,
-and `Escape` clears a non-empty search, then dismisses. Everything fails
-closed: activating with no cursor, launching with no match, and stepping in
-an empty list all change nothing (`AGENTS.md` §2.9).
+### Search
 
-### Rendering
+Typing anywhere searches. A query is folded into at most eight terms of at
+most 64 characters, every one of which must match the program's name, its
+manifest's purpose, or its folder's name. A name match outranks a purpose
+match, and within the name a whole match, a prefix, a word's start (`Edit` in
+`TextEdit`), the words' initials (`fm` for *File Manager*), a run inside, and
+the characters in order rank in that order. Ties go to the more used program
+and then the name, so the list never reorders between identical keystrokes.
+Each program is folded once, when the catalog or its facts arrive, so a
+keystroke builds nothing.
 
-`TaskbarRenderer::paint_library` paints the open popup: the `Panel` chrome
-(anchored back at the Library button), the search field, the visible rows —
-a folder row carries the open/closed folder glyph, its label, and a trailing
-entry count; an entry row is indented beneath its folder and draws **the
-application's own icon** (below) over the app-bundle glyph; the hovered row
-raises its fill, and the keyboard cursor row shows the shared selection rail
-and focus ring — the calm placeholder when nothing is listed, and the
-scrollbar when the rows overflow. Like the bar, it rounds itself — at
-`LibraryLayout::corner_radius`, which the window manager takes as its
-silhouette — and it returns `None` while the popup is closed (`AGENTS.md`
-§2.9).
+Results are two-line `ListRow`s — the name with the characters that matched in
+the heavier face, the purpose (or the folder) beneath it, and *Running*
+trailing — and the best match is the selection, so `Enter` opens it. While
+searching the sidebar reads *All* and each folder with its match count, and
+choosing one narrows the results; a narrowed search that finds nothing says so
+by the folder's name.
+
+### Keyboard
+
+The keyboard is in the search field, the sidebar, or the content, and
+`Tab`/`Shift+Tab` cycle through the ones with something in them. In the content
+the arrows move in two dimensions, crossing into the section above or below at
+the nearest column, and `Up` from the top row returns to the search;
+`Home`/`End`/`PageUp`/`PageDown` move as they say, scrolling what they reach
+into view. In the sidebar the arrows choose a page, or narrow a search. Typing
+from either carries on in the search. `Enter` opens the selection,
+`Ctrl+Shift+Enter` asks to run it as an administrator, `Shift+F10` opens its
+menu, and `Escape` clears a query — handing the keyboard back to the search —
+and then dismisses. The selection is the program drawn as the keyboard's: a
+search's current result wherever the keyboard is, or the cursor while the
+keyboard is in the content, so nothing the user cannot see is ever opened.
+
+### Pointer
+
+A press on a program arms it and a release on the same program opens it, so a
+press slid away opens nothing; a secondary press asks for its menu. A press on
+the panel's own ground is claimed and one beyond the panel dismisses. The wheel
+scrolls the content, and whatever moves the programs beneath a resting pointer
+re-derives what it lights.
+
+### The entry menu
+
+`menu::EntryRow` lists every row once: *Open*; *Run as Administrator…* where
+the console can authorise an account; *Add to Favourites* or *Remove from
+Favourites*, with *Move Earlier* and *Move Later* on a favourite that has a
+neighbour that way; *Remove from Frequently Used* and *Clear Frequently Used*
+on a program with a record of use; and *Create Desktop Shortcut*. A row's id is
+its place in that one list, so a chosen id reads back through the list it was
+built from. The menu then closes with its information row, *Info* — the
+signed-manifest sheet, where the manifest was read — which is no `EntryRow`.
+Only the rows that act where the launcher would stand in front of the result —
+opening it either way, and the shortcut — close the launcher.
+
+### Motion
+
+Every movement is a state change over one of the theme's durations, so reduced
+motion lands each at its end and asks for no frame. The window rises from the
+bar and fades in over `PanelOpen` while the first page cascades in, each
+program a beat after the one before; it sinks and fades away over `PanelClose`,
+catching no pointer, and reopening part-way resumes from what is on screen. A
+window arriving — the program a launch opened — ends a departure at once
+(`Taskbar::finish_library_departure`), so the two never draw together. A page
+chosen from the sidebar slides in from the side of the list it lies on, and
+turning to results arrives once; a refined query holds still. The keyboard's
+mark cross-fades between tiles over `SelectionChange`.
+
+The window's own motion is the compositor's: the presenter moves and fades the
+window it painted once. An entrance paints the content once into a layer the
+renderer holds only while it runs and blends that layer each frame, so a frame
+costs a blend rather than a repaint, and any interaction with the content
+settles it.
+
+### Repaints
+
+Every routed event reports exactly the rectangles it changed: a hover the
+programs it moved between and the details strip, a keystroke the content, the
+sidebar's counts and the strip, a step of the mark the two tiles it moves
+between. `Taskbar::advance_library` steps the motion and owes what that frame
+redraws.
 
 ### Each application's own icon
 
-An entry row shows the icon its bundle ships, and the popup carries that
-artwork the same way the application strip does: the owner resolves it, the bar only
-draws it (`AGENTS.md` §2.2, §17.4). Three methods express the split:
+A program shows the icon its bundle ships, and the launcher carries that
+artwork the way the application strip does: the session resolves it and the bar
+only draws it.
 
 - `LibraryPopup::visible_icon_requests(layout, scale, theme)` reports one
-  `LibraryIconRequest { row, side, entry }` per entry row **the viewport
-  actually shows**, each carrying the exact pixel side that row's slot will
-  draw at. A hundred-entry library therefore costs the session a read and a
-  decode per *visible* row, never per catalogued application, and scrolling
-  asks only for the rows that just came into view.
-- `Taskbar::set_library_row_artwork(row, layout, artwork)` files an answer,
-  latching that row's own rectangle when the picture changed and nothing when
-  it did not; an out-of-range index, or a row the layout does not show, is
-  ignored rather than mis-filed. The comparison is what makes resolving before
-  *every* paint free: latching unconditionally here would re-dirty the popup on
-  each frame it is drawn and repaint it for ever.
-- `row_artwork(row)` is what `paint_library` blits.
+  `LibraryIconRequest { entry, side }` per program **the viewport shows** —
+  once however many sections show it — at the pixel side it is drawn at. A
+  large library therefore costs a read and a decode per *visible* program, and
+  scrolling asks only for what just came into view.
+- `Taskbar::set_library_artwork(entry, side, layout, artwork)` files the
+  answer, owing only the rectangles that program is shown at when the picture
+  changed and nothing when it did not. The comparison is what makes resolving
+  before *every* paint free.
+- `LibraryPopup::artwork(entry)` is what the paint blits.
 
-A changed filter or a folder folded or expanded moves each filed picture to
-wherever its entry now sits, and an entry shown afresh waits for the session;
-a new catalog clears them all, since its icons may differ. Either way an index
-never draws one application's icon on another's row. A row with no artwork
-draws the app-bundle glyph, which is why a library still lists legibly on a
-system with no artwork at all.
+A side other than the one held retires every picture made for the old one, and
+a new catalog clears them all. A program with no artwork draws the app-bundle
+glyph, which is why a library still lists legibly on a system with no artwork
+at all.
 
 ## The window registry
 
@@ -917,16 +965,17 @@ Four subjects ask for one:
   them. An application declares only that the row exists, so it cannot state an
   identity that is not its own inside system-drawn chrome, and an omitted field
   is absent rather than a blank row.
-- **A program-library entry row** in the open popup: the two things the popup
-  can do to a row that its own click cannot. *Open* answers `LibraryLaunch`;
-  *Create Desktop Shortcut* answers `CreateDesktopShortcut`, which the session
-  turns into a symbolic link in the user's own `Desktop` folder — named after the
-  entry, pointing at its bundle directory (`plans/SYMLINKS.md`). Both rows come
-  from one `EntryRow` list that the model is built from and the answer is read
-  back through, so a reordering cannot silently re-map what a row does;
-  `EntryRow::label` is the one definition an embedder's test or a QEMU pointer
-  script aims by. Either row closes the popup: it is modal, so leaving it up
-  would stand between the user and what they asked for.
+- **A program in the open launcher**: what the launcher can do to a program
+  that its own click cannot ([the entry menu](#the-entry-menu)). *Open* answers
+  `LibraryLaunch`, *Run as Administrator…* `LibraryLaunchElevated`, the
+  favourite and frequent-use rows `LibraryEdit`, and *Create Desktop Shortcut*
+  `CreateDesktopShortcut`, which the session turns into a symbolic link in the
+  user's own `Desktop` folder — named after the entry, pointing at its bundle
+  directory (`plans/SYMLINKS.md`). Every row comes from one `EntryRow` list that
+  the model is built from and the answer is read back through, so a reordering
+  cannot silently re-map what a row does; `EntryRow::label` is the one
+  definition an embedder's test or a QEMU pointer script aims by. Only the rows
+  that act where the launcher would stand in front of the result close it.
 - **The Switchboard capsule**: the desktop's system quick actions (see *The
   system quick-actions menu*).
 - **The clock**: the reading the bar is drawing, and setting the machine's time
@@ -1030,25 +1079,25 @@ While the popup is **open** the router treats it as modal and consumes the
 whole event stream — presses, releases, scroll, and keys all route into the
 popup, so a click lands on exactly one thing (`AGENTS.md` §2.1):
 
-- a primary press on a **folder header** toggles it at once; a primary press
-  on an **entry row** arms the click instead, and the release that ends the
-  press launches the entry (`LibraryLaunch { entry }`, closing the popup) —
-  unless the pointer left the row it pressed, in which case nothing is
-  launched, so a press-and-move-away never launches the wrong thing;
+- a primary press on a **program** arms the click, and the release that ends
+  the press launches it (`LibraryLaunch { entry }`, closing the popup) —
+  unless the pointer left the program it pressed, in which case nothing is
+  launched, so a press-and-move-away never launches the wrong thing; a press
+  on a **sidebar tab** turns the page on its release;
 - a primary press on the **Library button** toggles the popup shut
   (`LibraryDismissed`);
-- a press **anywhere else** — any button — dismisses the popup without
-  acting on what it landed on (`LibraryDismissed`), the standard click-away
-  behaviour;
-- scroll wheels the row viewport; keys drive the keyboard model above.
+- a press on the panel's own ground is claimed; a press **anywhere else** —
+  any button — dismisses the popup without acting on what it landed on
+  (`LibraryDismissed`), the standard click-away behaviour;
+- scroll wheels the content; keys drive the keyboard model above.
 
-Whatever moves the rows under a pointer that did not move — a wheel turn, a key
-that scrolls the cursor into view, a fold or a filter that rebuilds the list —
-re-derives the lit row from where the pointer rests, and a pointer the seat
-said has left lights nothing.
+Whatever moves the programs under a pointer that did not move — a wheel turn,
+a key that scrolls the cursor into view, a page turned or a query that rebuilds
+the content — re-derives the lit program from where the pointer rests, and a
+pointer the seat said has left lights nothing.
 
-Popup-internal changes (a hover, a scroll, an edit, a fold) are reported as
-`Ignored` with the repaint latch set, so the embedder re-presents without
+Changes inside the launcher (a hover, a scroll, an edit, a page) are reported
+as `Ignored` with the repaint latch set, so the embedder re-presents without
 mistaking them for actions.
 
 ## The Switchboard capsule's tap-or-hold gesture
@@ -1212,19 +1261,19 @@ that comes with losing the second window, survival of a strip update that
 keeps the choice, the refusal to open under a modal surface, and the rendered
 cells (a window's own frame, and the application's glyph where a window has
 none).
-The popup model tests cover taxonomy-ordered folders with name-sorted
-entries, hidden empty folders, folder labels, the calm empty and no-match
-placeholders, the deterministic reopen state, case-insensitive filtering with
-Enter-launches-first-match, Escape's clear-then-dismiss, wrap-around cursor
-movement, folder fold/expand from both pointer and keyboard, focus cycling
-with type-to-filter, and cursor-follows-view scrolling. The input tests cover
-both buttons' presses, click-away dismissal that activates nothing beneath,
-secondary-press dismissal, wheel scrolling of an overflowing popup, and hover
-repaint latching. The row-click tests cover the whole gesture: a press that
-barely moves is still a click and launches, a release away from the row that
-was pressed launches nothing (nor the row the pointer ended over), a rebuild
-under a held press launches nothing at all, and a folder header acts on the
-press and arms nothing.
+The launcher's model tests cover Home's sections and the folder pages, the
+sidebar's tabs and counts, the calm empty and no-match placeholders, the
+deterministic reopen state, search ranking and emphasis, Enter opening only a
+selection in view (and bringing one scrolled away back first), Escape's
+clear-then-dismiss, the keyboard's walk across tiles and sections, focus
+cycling with type-to-filter, the cursor kept on its program when the shelf
+reorders it, and every edit the entry menu makes. The input tests cover both
+buttons' presses, click-away dismissal that activates nothing beneath, wheel
+scrolling of an overflowing launcher, and what each change owes — the tiles a
+hover or a mark moves between, the viewport a key cuts a cascade short in, the
+scrollbar the keyboard lights. The click tests cover the whole gesture: a
+release on the picture pressed opens it, a release away from it opens nothing,
+and a rebuild under a held press opens nothing at all.
 The rendering tests probe painted pixels for the bar regions; the bar's own rim
 (the theme's rim tone at the chrome weight on both built-in themes, the ground
 one `plate_border` further in, lighter than that ground on the dark theme and
@@ -1239,18 +1288,18 @@ its popup is open; notification
 glyphs (including the unknown-asset fallback and cache retint on theme
 switch); the clock's text; an application slot's centred icon with no label
 ink anywhere beside it; and
-the popup's panel, rows, hover/selection states, placeholder ink, scrollbar,
-and dark / light /
-high-contrast rendering.
+the launcher's panel, tiles and rows, hover/selection states, the running
+mark, placeholder ink, scrollbar, a part repainted alone matching a whole
+paint, and dark / light / high-contrast rendering.
 The icon-artwork tests drive `render` with a recording lookup: the
 Library launcher button asks for its kind at its drawn side
 and blits what comes back, an application slot with no artwork of its own
 falls back to its kind's artwork before the glyph, two running applications
 each draw their own picture and only their own (one the session could not
-attribute keeping the shared glyph), the popup asks only for
-the entry rows the viewport shows (and, after a scroll, only for the rows
-that just appeared), a fold or filter keeps each entry's artwork on its own
-row while a new catalog drops it, and a bar rendered through `NoArtwork` still
+attribute keeping the shared glyph), the launcher asks only for the programs
+the viewport shows, once each however many sections show them, and owes only
+where a picture changed, a new side retires every picture made for the old
+one, and a bar rendered through `NoArtwork` still
 draws every element from its built-in glyphs — the property that keeps a
 machine with no `/System/Graphics` fully usable.
 The Switchboard tray tests cover the slot's trailing-most placement on every

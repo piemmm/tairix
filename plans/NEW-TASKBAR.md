@@ -8,7 +8,7 @@
 | T2 | Programmatic add/remove: the `applib` command app | done |
 | T3 | Discovery and reconciliation, never a compiled-in list | done |
 | T4 | The taskbar's leading Program Library icon | done |
-| T5 | The Program Library popup, a folder-organised launcher | done |
+| T5 | The Program Library launcher: search, folders, favourites, frequent use | done |
 | T6 | The application strip: one slot per running application | done |
 | T7 | The app-to-bar contract: declared presence, menu, and picker | done |
 | T8 | The notification area | done |
@@ -25,6 +25,10 @@
 | T19 | A slot's application is the kernel's attestation, not the launch record | done |
 | T20 | A file dropped on an application's slot | done |
 | T21 | A drop the application does not take is answered, and its windows take a drop as its slot does | done |
+| T22 | The launcher's memory: favourites and frequent use, private to the account | done |
+| T23 | The launcher's motion | done |
+| T24 | A lone tap of the Meta key opens the launcher | done |
+| T25 | An entry identifier always leaves room for a key segment | done |
 
 Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
 (`userland/gui/taskbar`, `tairix-taskbar`), a floating **icon bar** with:
@@ -641,69 +645,70 @@ Library button's pixels), the session suite (routing, raise-vs-launch, launch
 table), and the AW3/AW4 QEMU vertical, whose pointer script now clicks the
 reveal and then the first app slot.
 
-## T5 — Program Library popup (folder-organised launcher)
+## T5 — The Program Library launcher
 
-The folder-organised launcher the Library button opens.
+The launcher the Library button (or a lone tap of the Meta key, T24) opens: a
+two-pane surface to search and to browse what is installed, with the user's
+own favourites and most-used programs first.
 
-What now stands:
+- **Layout** (`userland/gui/taskbar::library`, `LibraryLayout`): a
+  `SearchField` across the top; a vertical `Tabs` sidebar — *Home*, then a
+  *Folders* group with one tab per non-empty `LibraryCategory` and its count;
+  a scrolled content pane; and a one-line details strip at the foot naming
+  what the highlighted program is for. The panel is a fixed size capped by the
+  room beside the bar, so typing never makes it jump; it drops the sidebar
+  where the panel is too narrow or too short to hold it whole, and Home still
+  lists everything. Geometry opens outward on every edge, clamps along the
+  bar's own span, and probes the shared `Panel` chrome rather than re-deriving
+  it.
+- **Pages.** *Home* is *Favourites* (the user's order), *Frequently Used* (one
+  row, most-used first, favourites excluded; T22), then *All Programs* by
+  display name. A folder tab shows that folder alone. Programs are `IconTile`s
+  on a `GridRun` grid; a running program wears the tile's live mark. A
+  folder page's layout depends on the catalog alone, which is what the QEMU
+  pointer scripts navigate through.
+- **Search.** Typing anywhere searches. A query is folded
+  (`tairix_util::utf8::fold`) into terms, every one of which must match the
+  name, the manifest's one-line purpose, or the folder; name matches rank
+  above purpose matches, and a whole-name, prefix, word-start, initials,
+  substring, then in-order subsequence match rank in that order. Ties go to
+  the more used program, then the name. Results are two-line `ListRow`s — the
+  name with its matched characters emphasised, the purpose beneath, a running
+  program marked — and the first is current, so `Enter` opens it. In search
+  the sidebar narrows: *All* and each folder state their match counts and
+  choosing one scopes the results.
+- **Keyboard.** `Tab`/`Shift+Tab` cycle search, sidebar, content; arrows move
+  through a grid in two dimensions and cross section boundaries at the nearest
+  column; `Home`/`End`/`PageUp`/`PageDown`; `Enter` opens,
+  `Ctrl+Shift+Enter` runs as an administrator, `Shift+F10` opens the entry's
+  menu; `Escape` clears a query, then dismisses. While open the popup holds the
+  pointer and keyboard grab at both routing layers; click-away dismisses
+  without acting on what it hit.
+- **The entry menu** (`menu::EntryRow`): *Open*; *Run as Administrator…*
+  where the console has an elevation broker; *Add to Favourites* or *Remove
+  from Favourites*, with *Move Earlier*/*Move Later* on a favourite that has a
+  neighbour that way; *Remove from Frequently Used* and *Clear Frequently Used*
+  on a program with history; and *Create Desktop Shortcut*; then the menu's
+  information row, *Info*, the signed-manifest sheet the strip's slots use
+  (`about_sheet`). Every entry row is read back through the one row list it was
+  built from.
+- **What the popup is handed** (`set_catalog`, `set_facts`, `set_shelf`,
+  `set_running`): the resolved catalog, each entry's manifest facts (purpose,
+  version, author), the account's shelf (T22), and the bundles running now,
+  from the kernel-attested strip and the desktop's own launches, which the
+  popup matches against its own catalog. The session hands that set only when
+  the strip or its children change. It holds no authority: every choice is a
+  typed `TaskbarResponse`.
+- **The session** re-reads the stores on every open (the catalogue scan also
+  yields the facts), resolves `LibraryLaunch` through the catalog to the
+  entry's `Run` path, records the launch (T22), and turns
+  `LibraryLaunchElevated` into the console's authorisation prompt.
 
-- `userland/gui/taskbar::library` — `LibraryPopup`, a pure model over the
-  **resolved** `Catalog` the session hands it (`set_catalog`; the popup
-  never touches the VFS), composed from `lib/controls`: a `Panel` anchored
-  back at the Library button, a `SearchField` filter, one shared `ListRow`
-  per folder/entry (folders carry open/closed glyphs and a trailing count;
-  entries indent beneath them), and a `ScrollBar` on overflow. Folders
-  follow the closed taxonomy order, entries sort by display name, empty
-  folders are hidden, and an empty library / empty filter shows a calm
-  placeholder ("No programs are catalogued" / "No matching programs").
-  Opening is deterministic (search cleared, all folders expanded, cursor and
-  scroll at top, keyboard on search). Geometry (`Taskbar::library_layout`)
-  opens outward on every edge, clamps along the bar's own span, sizes to the rows
-  capped by the available space, and **probes** the shared `Panel` chrome
-  rather than re-deriving it; the WM rounds the panel with the same radius
-  the chrome draws (§2.2). Controls are static renderers, so reduced motion
-  holds by construction.
-- **Full keyboard model**: `Tab` cycles search↔rows; arrows wrap, Home/End/
-  PageUp/PageDown jump with the view following the cursor; Enter/space
-  activates (folder toggles, entry launches); Left/Right fold/climb/descend
-  by the shared `lib/controls` `tree_step`, and do nothing on a search's flat
-  matches;
-  typing anywhere routes into the search (type-to-filter, case-insensitive);
-  Enter in the search launches the first match; Escape clears then
-  dismisses. While open the popup holds an **active grab** on the pointer and
-  the keyboard at both routing layers (the taskbar router and the session's
-  input seat): presses, releases, scroll, and keys all route in wherever the
-  pointer is; click-away (any button) dismisses without acting on what it hit;
-  nothing at all is delivered to the windows beneath.
-- `userland/gui/session` — `library::load_library` reads the machine store +
-  the user's overlay through the one `SessionFileReader` seam (the renamed
-  graphics-asset seam — one file-read seam, one production impl), parses
-  fail-closed, and merges; an absent store is silently empty, an unusable
-  one contributes an empty catalog plus a ready-to-print `stderr` warning.
-  The `Run` binary loads at bring-up and **re-reads on every popup open**
-  (so `applib` edits show live), hands the catalog over with
-  `DesktopShell::set_library`, and resolves `LibraryLaunch { entry }` back
-  through that catalog to the entry's `Run` path — async-spawned, refusals
-  reported loudly by the shared reap path. One present per event, at one
-  site, driven purely by the drained per-surface latch: every model change
-  latches the surfaces it alters, so a pointer crossing no control presents
-  nothing at all.
-- **Deliberate deviation, recorded**: the staged text had T5 "offer" a
-  right-click *Pin to taskbar* typed action. Pinning is gone from the design
-  (T6/T7). An entry row's context menu offers the two things the popup can do
-  to a row that its own click cannot: *Open*, and *Create Desktop Shortcut*
-  — a symbolic link in the user's own `Desktop` folder, named after the entry
-  and pointing at its bundle, which the session creates under its own
-  identity (`plans/SYMLINKS.md` S5). Both rows come from the one `EntryRow`
-  list, so a reordering cannot re-map what a row does.
-  Right-press inside the panel is claimed (modal) and does nothing today.
-
-Tested in the taskbar suite (rows/sort/hide-empty/placeholders, keyboard
-nav, filtering, folds, wheel + scrollbar, dark/light/high-contrast pixel
-probes), the session suite (loader fail-closed matrix, modality, launch
-flow end-to-end, open-popup refresh), and the AW4 QEMU vertical, which now
-opens the popup from the planted machine store and launches the terminal
-through its catalog entry (keyed by bundle identity, not display text).
+Tested in the taskbar suite (layout on every edge and density, the narrow
+drop of the sidebar, pages, search ranking and emphasis, keyboard and pointer
+models, menus, motion, pixel probes under both themes and high contrast), the
+session suite (facts, running set, launch recording, elevation, presentation),
+and every QEMU vertical that launches from the library.
 
 ## T6 — The application strip: one slot per running application
 
@@ -905,10 +910,9 @@ What now stands:
   is part of the bar's one hover routine (`Taskbar::track_hover`), so a move,
   an enter and a leave derive it alike, and a pointer that leaves the panel
   lights no cell. A wheel turn re-derives it where the pointer rests. The
-  program-library popup's router replays the resting pointer after every round
-  that changed the popup — a wheel turn, a key that scrolled the cursor into
-  view, a fold or a filter — and a pointer the seat said has left lights no
-  row.
+  launcher's router replays the resting pointer after every round that changed
+  it — a wheel turn, a key that scrolled the cursor into view, a page or a
+  query — and a pointer the seat said has left lights no program.
 - **Thumbnails are prepared a window at a time.** The session answers
   `ShowWindowPicker { app }` with one `PickerEntry` per window, each carrying
   that window's **last presented frame** — pixels the compositor already
@@ -2048,6 +2052,100 @@ application that opens it (`plans/TEXTEDIT.md`, the drag carrier in
   application (`plans/APPWIN.md` AW8), never dropped silently.
 - **A refused desktop gesture** (`GestureRefusal`) is stated on `stderr` and in
   a notice of the desktop's own.
+
+## T22 — The launcher's memory: favourites and frequent use
+
+The account's own record of its library — which programs it keeps as
+favourites and in what order, and how often and how lately it launches each —
+is what puts the right programs first.
+
+- **Engine** (`lib/proglib::personal`): `Personal` holds one `Keep` per entry
+  (an optional favourite rank and an optional `Use` of a weight and the wall
+  second it was last launched). A launch adds one launch's weight to the
+  weight decayed since the last one; the weight halves every
+  `HALF_LIFE_SECS`, interpolated linearly within a half-life, in integers so
+  every target ranks alike. Decay is read, never written: a record decayed
+  below `FREQUENT_FLOOR` leaves the frequently used, and is the first evicted
+  once the record is full. Records are bounded by `MAX_RECORDS`; past it the
+  least-used non-favourite is evicted. `Personal::shelf(now)` is what the launcher draws:
+  the favourites in order, and the frequently used at or above `FREQUENT_FLOOR`,
+  most-used first. Every change is an `Edit`, so the session and the popup
+  speak one vocabulary.
+- **Store.** One `library.<entry-id>` key per entry in the **desktop's own
+  private app-data scope** — never the published one, which every
+  application can read. A record's value is a closed token grammar
+  (`favourite=`, `weight=`, `last=`, or `none`), parsed fail-closed per
+  record: a refused record is left out and named. `none` is the tombstone a
+  removal writes where a machine-policy layer would otherwise show through,
+  which is also what lets an administrator seed favourites.
+- **Off the loop** (`userland/gui/session::launcher`): `LauncherMemory`
+  keeps the durable record (what the store last answered) and the live one
+  (durable plus the edits not yet confirmed, replayed in order). Edits made
+  before the first read are held and replayed onto it; nothing is ever stored
+  over a record that was not read. Reads and writes are jobs on the one
+  worker every private-scope round trip goes through, because the app-data
+  service stages per process and two writers would commit each other's keys.
+  Writes coalesce: while one is in flight the next batch gathers. A refused
+  write is reported and the live record reverts to the durable one; a session
+  ending sees its last write out.
+- **What is recorded**: every launch the desktop makes of a catalogued
+  program — from the launcher, a desktop shortcut, or a document's
+  application — matched to its catalogued entry by bundle path, so the record
+  follows the program however it was started.
+
+## T23 — The launcher's motion
+
+Every animation is a state change over a theme duration, and every one
+collapses to the end state under reduced motion with no frame asked for.
+
+- **Primitives** (`lib/theme::motion`): `Glide`, an eased positional ramp
+  that retargets from where it is, and `MotionInteraction::PanelClose`.
+- **Opening**: the window rises from the bar and fades in over `PanelOpen`,
+  driven through the compositor (`set_opacity`, `move_window`), so no pixel
+  of the popup is repainted for it; the first page's tiles cascade in,
+  staggered and rising.
+- **Closing**: the window sinks and fades over `PanelClose`, catching no
+  pointer, then is removed; reopening part-way resumes from what is on
+  screen.
+- **Page and search changes**: the arriving content fades in sliding from the
+  direction of travel over `StageTransition`. A cascade or transition paints
+  the content once into a layer the renderer holds only while it runs, then
+  each frame blends it — so a frame costs a blend, not a repaint — and any
+  interaction with the content settles it.
+- **Selection**: the keyboard's mark cross-fades between tiles over
+  `SelectionChange` (`IconTile::with_selection_fade`).
+- **A window ends a departure.** The window a launch opens ends the
+  launcher's departure at once (`Taskbar::finish_library_departure`), so the
+  frame that first carries it carries no launcher, which is what a screendump
+  keyed on that frame relies on.
+- **Cost.** A frame of any of these recomposes the popup's rectangle, and a
+  launch costs the launcher's footprint to open and again to close, pinned
+  host-side (the session's
+  `a_launch_through_the_launcher_costs_its_footprint_twice_and_one_page`). The
+  `desktop_hover` vertical therefore keeps launches out of the window it
+  budgets: its `framestats` fixture is launched from the library once, then
+  takes each sample at a click on its own icon-bar slot, and a settling sweep
+  longer than the frame publisher's rate limit runs before the click that
+  opens the window.
+
+## T24 — A lone tap of the Meta key opens the launcher
+
+The keyboard source recognises a lone tap of either Ctrl or Meta through one
+state machine (`ModifierTap`): down from no modifier, up within
+`TAP_HOLD_MAX_NS`, nothing between. Meta toggles the launcher; Ctrl still
+locates the pointer. A tap spoilt by a pointer button or the wheel does
+nothing. Meta does not act while the screen is locked, a seat-modal surface
+holds the keyboard, or a menu is open; it opens the launcher through the same
+path as its button, which ranks the shelf afresh and asks for the stores to be
+re-read.
+
+## T25 — An entry identifier always leaves room for a key segment
+
+`EntryId` admits at most `MAX_KEY_DEPTH - 1` dot segments, so `<id>.<field>`
+in a catalog and `library.<id>` in the launcher's record are always keys the
+configuration grammar accepts. A bundle identifier deeper than that is a valid
+bundle but is never catalogued: before, one such bundle catalogued by
+`applib rescan` made the whole store it was written into unreadable.
 
 ## Open questions to resolve in review (stop and ask, §15.7)
 

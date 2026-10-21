@@ -15,9 +15,9 @@ use crate::motion::{ease_out, smoothstep, MotionInteraction};
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA, SELECTION_TINT_ALPHA};
 use crate::{
     edge_weight, lifted, line_box_px, points_of, Accessibility, Appearance, Contrast, CursorKind,
-    CursorSet, CursorSetId, Density, DesktopText, Fade, FamilyKey, FontWeight, Fonts, Metrics,
-    Motion, MotionTheme, Palette, SignalRole, SurfaceGround, SyntaxPalette, SyntaxRole, TextRole,
-    Theme, ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS, TEXT_WEIGHT_LIFT,
+    CursorSet, CursorSetId, Density, DesktopText, Fade, FamilyKey, FontWeight, Fonts, Glide,
+    Metrics, Motion, MotionTheme, Palette, SignalRole, SurfaceGround, SyntaxPalette, SyntaxRole,
+    TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS, TEXT_WEIGHT_LIFT,
 };
 
 #[test]
@@ -188,6 +188,31 @@ fn the_motion_table_is_indexed_by_the_interaction_it_times() {
     let motion = MotionTheme::new(authored);
     for (slot, interaction) in MotionInteraction::ALL.into_iter().enumerate() {
         assert_eq!(usize::from(motion.duration(interaction)), slot);
+    }
+}
+
+#[test]
+fn a_theme_draws_like_itself_at_any_motion_and_unlike_itself_on_any_other_axis() {
+    let axes = |contrast, density, motion| Accessibility {
+        contrast,
+        density,
+        motion,
+    };
+    let base = Theme::dark().floating();
+    let still = base
+        .clone()
+        .with_axes(axes(Contrast::Normal, Density::Normal, Motion::Reduced));
+    assert!(base.draws_like(&still) && still.draws_like(&base));
+    assert_ne!(base, still, "the two are still different themes");
+    for other in [
+        base.clone()
+            .with_axes(axes(Contrast::High, Density::Normal, Motion::Reduced)),
+        base.clone()
+            .with_axes(axes(Contrast::Normal, Density::Compact, Motion::Full)),
+        Theme::light().floating(),
+        Theme::dark().frosted(),
+    ] {
+        assert!(!base.draws_like(&other), "{other:?}");
     }
 }
 
@@ -422,6 +447,7 @@ fn reduced_motion_collapses_every_duration_to_zero() {
         MotionInteraction::PressCompress,
         MotionInteraction::ReleaseSettle,
         MotionInteraction::PanelOpen,
+        MotionInteraction::PanelClose,
         MotionInteraction::MenuOpen,
         MotionInteraction::JobProgressPulse,
         MotionInteraction::RecoveryLatchReveal,
@@ -627,6 +653,19 @@ fn a_reduced_motion_fade_is_at_its_end_from_the_first_read() {
 }
 
 #[test]
+fn a_fade_is_finished_once_its_span_has_run_out() {
+    let fade = Fade::start(10 * MS, 100, 0, u8::MAX);
+    assert!(!fade.finished(10 * MS));
+    assert!(!fade.finished(109 * MS));
+    assert!(fade.finished(110 * MS));
+    assert!(fade.finished(u64::MAX));
+    assert!(
+        Fade::start(0, 0, 0, u8::MAX).finished(0),
+        "a reduced-motion fade is done at once"
+    );
+}
+
+#[test]
 fn settling_a_fade_lands_it_on_its_target_and_ends_the_asking() {
     let mut fade = Fade::start(0, 100, u8::MAX, 0);
     assert!(fade.running());
@@ -638,6 +677,62 @@ fn settling_a_fade_lands_it_on_its_target_and_ends_the_asking() {
     assert_eq!(fade.strength(0), 0);
     assert!(!fade.running());
     assert_eq!(fade.next_frame_in(0, RATE), None);
+}
+
+#[test]
+fn a_glide_eases_out_from_its_start_to_its_target() {
+    let rising = Glide::start(0, 100, 16, 0);
+    assert_eq!(rising.value(0), 16);
+    assert_eq!(rising.value(100 * MS), 0);
+    assert_eq!(rising.target(), 0);
+    // Easing out covers most of the way in the first half.
+    assert!(rising.value(50 * MS) < 8, "{}", rising.value(50 * MS));
+    let mut last = rising.value(0);
+    for ms in 0..=100 {
+        let now = rising.value(ms * MS);
+        assert!(now <= last, "moved backwards at {ms} ms");
+        last = now;
+    }
+    // Upwards is the same machine with its ends swapped.
+    let sinking = Glide::start(0, 100, 0, 8);
+    assert_eq!(sinking.value(0), 0);
+    assert_eq!(sinking.value(100 * MS), 8);
+}
+
+#[test]
+fn a_glide_standing_still_or_unanimated_owes_no_frame() {
+    let still = Glide::at(-3);
+    assert_eq!(still.value(0), -3);
+    assert!(!still.running());
+    assert_eq!(still.next_frame_in(0, RATE), None);
+
+    let instant = Glide::start(0, 0, 40, 2);
+    assert_eq!(instant.value(0), 2);
+    assert!(!instant.running());
+    assert_eq!(instant.next_frame_in(0, RATE), None);
+}
+
+#[test]
+fn a_retargeted_glide_sets_off_from_where_it_stands() {
+    let mut glide = Glide::start(0, 100, 100, 0);
+    let midway = glide.value(30 * MS);
+    glide.retarget(30 * MS, 100, 200);
+    assert_eq!(glide.value(30 * MS), midway);
+    assert_eq!(glide.value(130 * MS), 200);
+    assert_eq!(glide.target(), 200);
+}
+
+#[test]
+fn settling_a_glide_lands_it_and_ends_the_asking() {
+    let mut glide = Glide::start(0, 100, 10, 0);
+    // A span that ran out still owes the frame that draws the end state, and a
+    // clock behind the start reads as complete rather than stalling.
+    assert_eq!(glide.next_frame_in(200 * MS, RATE), Some(0));
+    assert!(glide.finished(200 * MS));
+    glide.settle();
+    assert_eq!(glide.value(0), 0);
+    assert!(!glide.running());
+    assert_eq!(glide.next_frame_in(0, RATE), None);
 }
 
 #[test]
@@ -1622,7 +1717,8 @@ fn sample_theme(id: ThemeId) -> Theme {
             drag_move: String::from("c.drag-move"),
         },
         MotionTheme::new([
-            90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500, 140, 320, 1400,
+            90, 80, 60, 90, 180, 120, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500, 140, 320,
+            1400,
         ]),
         Density::Normal,
         Contrast::Normal,

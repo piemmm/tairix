@@ -1306,9 +1306,10 @@ and its mean is too. A gate therefore samples the record either side of the
 gesture and judges the difference, whose counters are all work rather than
 time and so are load-independent.
 `tests/integration/desktop_hover_qemu_aarch64` is that gate: it boots the
-production aarch64 graphical session, launches the `framestats` fixture from
-the program library to take a sample, sweeps the pointer the length of the
-icon bar, and launches it again. The fixture is what makes the reading
+production aarch64 graphical session and launches the `framestats` fixture from
+the program library; once the launch has settled, it takes a sample at each
+click on the fixture's slot on the icon bar and sweeps the pointer the length of
+the bar between two of them. The fixture is what makes the reading
 reachable at all — the query is userland IPC, which a freestanding test kernel
 cannot issue, so the fixture asks and re-emits the counters through the system
 log, where the guest decodes them. The window is then held to its total damage

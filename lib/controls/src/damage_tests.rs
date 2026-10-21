@@ -14,7 +14,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonContent, IconButton, SplitButton};
-use crate::damage::{paint_parts, set, sink, Repaint};
+use crate::damage::{paint_parts, paint_parts_within, set, sink, Repaint};
 use crate::rail::ActionRail;
 use crate::shell::TraySignal;
 use crate::state::{ControlRole, PointerState};
@@ -410,4 +410,21 @@ fn a_rectangle_before_the_surfaces_own_origin_is_skipped_not_moved() {
             );
         }
     }
+}
+
+#[test]
+fn each_pass_is_handed_the_rectangle_it_repaints() {
+    let mut surface = Surface::new(8, 8).expect("a small surface");
+    let parts = [
+        Rect::new(0, 0, 2, 2),
+        Rect::new(-1, 0, 2, 2),
+        Rect::new(4, 4, 3, 3),
+    ];
+    let mut handed = alloc::vec::Vec::new();
+    paint_parts_within(&mut surface, &parts, |_, rect| handed.push(rect));
+    assert_eq!(
+        handed,
+        [parts[0], parts[2]],
+        "an unaddressable rectangle is passed over, not handed on"
+    );
 }

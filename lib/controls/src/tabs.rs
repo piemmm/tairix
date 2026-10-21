@@ -935,6 +935,26 @@ impl Tabs {
             .map(|(index, _)| index)
     }
 
+    /// Where tab `index` is drawn for the given bounds, or `None` for an index
+    /// the strip has no tab at — the inverse of [`tab_at`](Self::tab_at), for an
+    /// owner that aims at a tab or reports the tab it moved.
+    #[must_use]
+    pub fn tab_rect(
+        &self,
+        index: usize,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let mut found = None;
+        self.walk(bounds, scale, theme, |band| {
+            if band.kind == BandKind::Item(index) {
+                found = Some(band.rect);
+            }
+        });
+        found
+    }
+
     /// Paint the strip into `surface` at `bounds` for the active theme.
     ///
     /// A sidebar entry's leading glyph is resolved through `artwork` at

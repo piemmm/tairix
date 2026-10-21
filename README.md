@@ -119,6 +119,7 @@ for filesystems, the feature section below.
 | Touch input (multitouch frames; tap, scroll and pinch gestures) | ◐ virtio | ◐ virtio + ◐ USB HID | ◐ virtio | ▢ |
 | Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio + Pi jack, I²S, HDMI | ◐ virtio + USB + HD Audio | ▢ |
 | Sound files played from the command line (`play`: AU, WAV, FLAC native or in Ogg, Vorbis, Opus, and MPEG audio, chained Ogg links read in turn, decoded in the sandbox, gapless) | ✓ | ✓ | ✓ | ▢ |
+| Program library launcher (search by name, purpose and folder; favourites and frequent use kept per account; fully keyboard-driven; animated, still under reduced motion) | ✓ | ✓ | ✓ | ▢ |
 | Desktop music player (`music.app`: playlist, gapless, album art and tags read in the sandbox, no filesystem capability) | ✓ | ✓ | ✓ | ▢ |
 | Audio follows the seat (held on its frame outside the room, resumed there; recording published as a notice) | ✓ | ✓ | ✓ | ▢ |
 | Sound device controls kept per room tenant (default, level, mute; devices named by location; `audioctl`) | ✓ | ✓ | ✓ | ▢ |

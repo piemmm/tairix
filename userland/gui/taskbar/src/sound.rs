@@ -26,8 +26,8 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::edge::Edge;
 use crate::layout::{local_rect, BarLayout};
-use crate::library::panel_origin;
 use crate::notifications::{IconId, StatusKind, StatusSignal};
+use crate::popover::panel_origin;
 
 /// The notification-area id the volume signal goes by.
 pub const VOLUME_SIGNAL: IconId = IconId(0x736f_756e_6401);

@@ -284,20 +284,52 @@ pub struct LaunchedApp {
     pub run_path: String,
 }
 
-/// Every child the desktop has launched and not yet reaped, keyed by PID.
+/// Every child the desktop has launched and not yet reaped, keyed by PID, and
+/// the launches the user asked for since they were last counted.
 ///
 /// An entry is recorded when a launch is admitted and removed when the child
 /// is reaped, so the table never grows beyond the children currently alive.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LaunchTable {
     children: BTreeMap<u64, LaunchedApp>,
+    /// The entry binaries the user started or brought back since
+    /// [`take_used`](Self::take_used) last answered.
+    used: Vec<String>,
+    /// Whether a child was recorded or forgotten since
+    /// [`take_moved`](Self::take_moved) last answered.
+    moved: bool,
 }
+
+/// The most launches held between two drains of the table's uses: a
+/// containment bound, far past what one turn of the loop launches.
+pub const MAX_USED: usize = 32;
 
 impl LaunchTable {
     /// An empty table.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Note that the user started, or brought back, the program whose entry
+    /// binary is `run_path` — what the launcher's record counts. A note past
+    /// [`MAX_USED`] undrained ones is dropped: it is a count, not a launch.
+    pub fn note_used(&mut self, run_path: &str) {
+        if self.used.len() < MAX_USED {
+            self.used.push(String::from(run_path));
+        }
+    }
+
+    /// The entry binaries noted as used since this was last asked, oldest
+    /// first.
+    pub fn take_used(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.used)
+    }
+
+    /// Whether a child was recorded or forgotten since this was last asked —
+    /// the cue to tell the launcher again what runs.
+    pub fn take_moved(&mut self) -> bool {
+        core::mem::take(&mut self.moved)
     }
 
     /// Record the admitted child `pid`, launched from `run_path` and
@@ -310,11 +342,14 @@ impl LaunchTable {
                 run_path: String::from(run_path),
             },
         );
+        self.moved = true;
     }
 
     /// Forget (and return) the record for a reaped `pid`.
     pub fn remove(&mut self, pid: u64) -> Option<LaunchedApp> {
-        self.children.remove(&pid)
+        let removed = self.children.remove(&pid);
+        self.moved |= removed.is_some();
+        removed
     }
 
     /// The lowest-numbered running child spawned from `run_path`, if any —
@@ -852,6 +887,42 @@ mod tests {
         assert_eq!(reaped.label, "Files");
         assert_eq!(launched.running_from(tairix_abi::FILES_RUN_PATH), None);
         assert_eq!(launched.remove(10), None, "a reaped pid is forgotten");
+    }
+
+    #[test]
+    fn a_child_recorded_or_forgotten_moves_the_table_once() {
+        let mut launched = LaunchTable::new();
+        assert!(!launched.take_moved());
+        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH);
+        assert!(launched.take_moved());
+        assert!(!launched.take_moved(), "the latch drains");
+        assert_eq!(launched.remove(11), None);
+        assert!(!launched.take_moved(), "forgetting no child moves nothing");
+        assert!(launched.remove(10).is_some());
+        assert!(launched.take_moved());
+    }
+
+    #[test]
+    fn uses_are_handed_over_oldest_first_and_bounded() {
+        let mut launched = LaunchTable::new();
+        launched.note_used("/System/Applications/chess.app/Run");
+        launched.note_used(tairix_abi::FILES_RUN_PATH);
+        assert_eq!(
+            launched.take_used(),
+            [
+                "/System/Applications/chess.app/Run",
+                tairix_abi::FILES_RUN_PATH
+            ]
+        );
+        assert!(
+            launched.take_used().is_empty(),
+            "each use is handed over once"
+        );
+        for _ in 0..=super::MAX_USED {
+            launched.note_used(tairix_abi::FILES_RUN_PATH);
+        }
+        assert_eq!(launched.take_used().len(), super::MAX_USED);
+        assert!(!launched.take_moved(), "a use records no child");
     }
 
     /// `get` resolves a running child's own recorded launch by its kernel

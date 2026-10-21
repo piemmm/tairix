@@ -50,13 +50,74 @@ that same catalog — the entry's bundle names its `Run` binary — and spawned
 asynchronously under the session's own identity, with a refusal reported
 loudly and non-fatally (see *Launch bookkeeping*).
 
-Both things a row can ask for resolve through the **one** lookup,
-`library::catalogued`, so a row can never launch one bundle and link another,
-and a catalog that changed under the click is refused once, in one wording.
+All three things a program can ask for — to run, to run as an administrator,
+and a desktop shortcut — resolve through the **one** lookup,
+`library::catalogued`, so a program can never launch one bundle and link
+another, and a catalog that changed under the click is refused once, in one
+wording.
+
+The catalogue scan also reads each bundle's signed manifest, so the launcher
+is handed every entry's facts — what it is for, its version, who made it —
+with no read of its own (`DesktopShell::set_library_facts`); the search reads
+the purpose and the entry menu's *Info* states it.
+
+What runs reaches the launcher as bundle directories
+(`DesktopShell::set_library_running`, built by `launcher::running_bundles`):
+each one a slot on the strip is attested to, and each one a child the desktop
+launched still runs from. The popup matches them against the catalog it holds,
+so a catalog handed later still marks what already runs. The set is handed
+only when the strip is re-resolved or a child is recorded or reaped — each of
+those latches once — never recomputed on a wake that changed neither.
+
+*Run as Administrator…* asks the console's broker to start the entry's own
+`Run` binary (`launcher::elevated_launch`); the prompt names the program and
+shows its picture, and says it *wants to run as an administrator*.
+
+### The launcher's memory
+
+The account's favourites and how it uses each program (`plans/NEW-TASKBAR.md`
+T22) are kept in the session's own **private** app-data scope, one
+`library.<entry-id>` record per program in `lib/proglib`'s `personal`
+grammar, never in the published scope every application can read.
+`launcher::LauncherMemory` holds what the store last answered and the edits
+not yet confirmed, and the launcher draws that record with every unconfirmed
+edit replayed over it — so a favourite added shows at once.
+
+- **Off the loop.** Reads and writes are jobs on the one worker every
+  private-scope round trip of the session goes through (the sound choices'
+  among them), because the app-data service stages per process and two
+  writers would commit each other's keys. A write carries every edit made so
+  far; edits made while one is in flight gather into the next, so a burst of
+  launches costs one commit. The pinboard calls a pane makes hold at most
+  `effects::MAX_HELD_CALLS` places on that worker, and its room is sized for
+  them and the session's own round trips besides, so no caller can crowd the
+  record's writes out; a write the worker cannot take is asked again with the
+  next, never dropped.
+- **Nothing is stored before the record is read.** Edits made before the
+  first read are held, shown, and replayed onto the record once it arrives; a
+  read that fails is tried again after a wait that doubles to its bound, and
+  the loop wakes for it rather than polling. A stored value the record could
+  not read is replaced by the next edit of its program.
+- **What the store answers is what is kept.** A write's answer is the value
+  the store then holds for each key — the machine policy's record included,
+  where a removal uncovers one — and two sessions of one account editing one
+  program keep whichever wrote last. A removal a machine-policy record would
+  undo is written as the `none` tombstone. A refused write is stated on
+  `stderr`, withdrawn from the service (`Settings::abandon`) so no later commit
+  of the process publishes it, and its edits are dropped, so what is shown is
+  what the next start restores.
+- **Every launch counts.** Each launch the desktop makes of a catalogued
+  program — from the launcher, a desktop shortcut, or a document's
+  application — is recorded against the wall-clock second, for every entry
+  naming its bundle. While the clock is unset a launch still adds to a program
+  already recorded but starts no new record, since one dated by the epoch
+  would decay to nothing once the clock is set. The session sees its last
+  writes out before it exits, waiting at most a bounded moment and saying so
+  on `stderr` when one is not kept.
 
 ### Desktop shortcuts
 
-`CreateDesktopShortcut { entry }` — the entry menu's second row
+`CreateDesktopShortcut { entry }` — the entry menu's *Create Desktop Shortcut* row
 (`plans/SYMLINKS.md` S5) — is a symbolic link the session creates in the
 user's own `Desktop` folder under its own identity. The desktop owns the
 naming, because it owns the folder: `Desktop::shortcut_to` takes the entry's
@@ -275,7 +336,7 @@ machinery: they are the shared two-tier artwork layer (`lib/icon`'s
 - The same cache answers the bar's `IconArtwork` lookup (through
   `IconArtworkSource`) for the shipped class masters under
   `/System/Graphics/Icons`, so the launcher buttons, an application slot, a
-  picker cell, and a library row all draw out of one store and one budget.
+  picker cell, and a launcher program all draw out of one store and one budget.
 
 Every lookup is keyed by (what was resolved, pixel side), and a refusal is cached
 like a success, so an application whose icon will not decode costs one read
@@ -314,9 +375,9 @@ the built-in glyph for that frame.
   drawing its glyph for ever.
 - **A landing is adopted per item, never per surface.** The desk answers a
   `Landed` naming which decodes came back, and each surface repaints the items
-  that batch moved: the bar's application strip and the launcher popup's rows
+  that batch moved: the bar's application strip and the launcher's programs
   *store* their pictures, so they are offered the artwork again on the wake and
-  latch only the slots and rows whose stored picture actually changed; a
+  latch only the slots and tiles whose stored picture actually changed; a
   window's title-bar identity is offered it the same way. The remaining
   pictures — the class artwork a bar control with none of its own falls back to
   as it paints — have no model change behind them at all, so
@@ -330,7 +391,7 @@ the built-in glyph for that frame.
   screenful of glyphs and fills in one icon at a time afterwards. The desktop
   therefore warms what it knows it will draw, the moment it knows it:
   `DesktopShell::warm_icon_artwork` on every catalog read and strip re-resolve
-  (the launcher popup's first screenful of rows, named by
+  (the launcher's first screenful of programs, named by
   `Taskbar::catalog_icon_wants` from the same layout the paint uses),
   and `DesktopShell::warm_launched_artwork` for every application in the launch
   table at the two sides a window of it wears — a spawn, a load, and the app's
@@ -341,23 +402,23 @@ the built-in glyph for that frame.
   on the serve loop through `InlineArtwork`: slower under load, never wrong,
   and stated once on `stderr`.
 
-### The library popup's per-row icons
+### The launcher's per-program icons
 
-A program-library row shows its own application's icon through exactly the
-resolution above, driven off what the popup says it is showing:
-`resolve_library_icons` asks the popup for its
+A program in the launcher shows its own application's icon through exactly
+the resolution above, driven off what the launcher says it is showing:
+`resolve_library_icons` asks it for its
 [visible icon requests](taskbar.md#each-applications-own-icon), resolves each
-row's bundle icon at that row's own pixel side, and files the answer back.
-A row whose entry declares no icon — or whose asset is absent, over the read
-bound, or undecodable — falls back to the shipped `AppBundle` artwork, and
-then to the row's built-in glyph, so a row is never blank.
+program's bundle icon at the side it is drawn at, and files the answer back.
+A program whose entry declares no icon — or whose asset is absent, over the
+read bound, or undecodable — falls back to the shipped `AppBundle` artwork,
+and then to the tile's built-in glyph, so a program is never blank.
 
-It runs at the top of `DesktopShell::present`, before the paint, so a row
-that has just scrolled into view is drawn with its icon in the same frame; a
-row that already holds right-sized artwork is skipped, and a closed popup
-resolves nothing. Filing artwork deliberately does **not** latch a repaint:
-latching from inside the pre-paint resolution would ask for another present
-every frame, forever.
+It runs at the top of `DesktopShell::present`, before the paint, so a program
+that has just scrolled into view is drawn with its icon in the same frame; one
+that already holds right-sized artwork is skipped, and a closed launcher
+resolves nothing. Filing artwork owes only the rectangles whose picture
+changed, which that same present paints, so a launcher whose icons have all
+arrived asks for nothing more.
 
 ## The desktop icon surface
 
@@ -784,10 +845,18 @@ performs what needs capabilities the shell does not hold
   window and hands them back to the bar.
 - `LibraryLaunch { entry }` — a chosen library entry, resolved through the
   catalog and spawned (see *The program library*).
+- `LibraryLaunchElevated { entry }` — the same entry, to run as an account
+  that may do more: the session asks the console's authorisation broker for
+  that account's password (see *Asking for an account that may*), naming the
+  entry's `Run` binary, and the broker launches it once it is given (see *The
+  program library*).
+- `LibraryEdit(edit)` — a change the entry menu made to the account's own
+  record of its library (see *The launcher's memory*).
 - `CreateDesktopShortcut { entry }` — a link to that entry's bundle in the
   user's own `Desktop` folder (see *Desktop shortcuts*).
-- `OpenLibrary` — the popup opened; the embedder re-reads the stores so the
-  listing is current.
+- `OpenLibrary` — the launcher opened, from its button or a lone tap of the
+  Meta key; the embedder re-reads the stores so the listing is current and
+  hands it the shelf.
 - `LibraryDismissed`, `NotificationActivated` — surfaced for the embedder;
   the bar's own state is already up to date.
 - `SetDateTime` — the clock menu's set-time row was chosen; the session
@@ -1413,9 +1482,12 @@ panel, and presents each as a compositor window:
   itself, `Corners::painted(BarLayout::corner_radius)`: the radius is the
   silhouette its frost follows, and the compositor never cuts the arc the bar
   already drew. It casts no shadow — it sits on the desktop rather than over it;
-- while the popup is open its panel is placed above the bar at
-  `LibraryLayout::panel`'s origin, rounding itself at its `corner_radius` and
-  casting a shadow; closing the popup removes the popup window;
+- while the launcher is open its panel is placed above the bar where its
+  motion stands (`LibraryLayout::placed_at`), rounding itself at its
+  `corner_radius` and casting a shadow; once closed it is moved and faded with
+  the pixels it has, catching no pointer, until its departure ends — or a
+  window taking the screen ends it — and is then removed. A present that owes it
+  nothing while its motion stands where it was last placed lays nothing out;
 - the hover window picker, the notification popover, the Switchboard
   capsule's instrument readout, the volume panel and the network readout are
   presented the same way while each is open (`PickerLayout` /
@@ -1814,25 +1886,26 @@ races the frame the rows are in.
 `LIBRARY_SHOWN` ("program-library popup on screen") is the same announcement
 for the bar's launcher, and it needs its own because neither sibling covers
 it: the popup is not a served window, so `WINDOW_SHOWN` never speaks for it,
-and it is not a menu chain, so `MENU_SHOWN` does not either. Its rows were the
-one clickable surface on the desktop whose arrival was announced nowhere.
+and it is not a menu chain, so `MENU_SHOWN` does not either. Its programs were
+the one clickable surface on the desktop whose arrival was announced nowhere.
 
-Opening the launcher and clicking one of its rows are two gestures, and a
+Opening the launcher and clicking one of its programs are two gestures, and a
 waiter keyed on whatever let the *button* be pressed is keyed on a fact that
 was already true before the launcher existed. That does not misplace the
 click — the popup takes the pointer grab the moment it opens, from the model
-rather than from any frame, so a row press arriving before the first present
-is still hit-tested against the open popup. What it does is send the press
-into the busiest instant of the gesture: the popup is laid out, its visible
-rows' artwork resolved, and its labels rasterised through the font service
+rather than from any frame, so a press arriving before the first present is
+still hit-tested against the open popup. What it does is send the press into
+the busiest instant of the gesture: the popup is laid out, its visible
+programs' artwork resolved, and its labels rasterised through the font service
 between the two clicks, which is exactly the "busy desktop re-rendering while
 a click arrives" the input path names as when a press can be dropped
 outright. Keying on this record instead puts the press after that work, and
 lets a script state that the launcher was on screen rather than assume it.
 
-One announcement per open, not per session. A dismissed and reopened popup is
-one the user has not seen since, so it is announced again in its own right,
-and a waiter on the second showing is not released by the first's record.
+One announcement per open, not per session, made by the first presented frame
+carrying the popup risen into place. A dismissed and reopened popup is one the
+user has not seen since, so it is announced again in its own right, and a
+waiter on the second showing is not released by the first's record.
 
 ### And its own release witness
 
@@ -2759,8 +2832,8 @@ the console's own advance — and is recorded, and one font worker, the only
 thread that waits on the service, fetches what each frame recorded once the
 frame is presented. When a fetch lands, the end of that turn lays out and draws
 again everything drawn from a provisional answer (`refit_text`): the icon bar,
-every window title band and nothing else of the window, the desktop's labels,
-an open menu chain (a plate the user dragged keeps its place), the tooltip, a
+every window title band and nothing else of the window, the desktop's icon
+cells and nothing of the ground between them, an open menu chain (a plate the user dragged keeps its place), the tooltip, a
 carried drag's plate, the lock and the screensaver's text, the trusted picker,
 and the prompts and alerts, which are measured again and keep their centre if
 their size changed. That redraw of all the text the session shows is also the

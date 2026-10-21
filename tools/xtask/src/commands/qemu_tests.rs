@@ -10378,18 +10378,20 @@ static TESTS: &[QemuTest] = &[
     // the autoload layout plus the test-only `framestats` fixture bundle,
     // which the seeded program-library catalog is derived from and so lists —
     // types the unlock passphrase, logs in, and starts `desktop`. The pointer
-    // script then launches `framestats` from the library, sweeps the pointer
-    // the whole length of the icon bar, and launches `framestats` again.
+    // script then launches `framestats` from the library, sweeps the bar while
+    // the launch settles, clicks the slot the fixture takes on the icon bar,
+    // sweeps the pointer the whole length of the bar, and clicks the slot
+    // again.
     //
-    // The two samples bracket the sweep, and the guest judges the work between
-    // them: per-frame damage as a share of the screen, overdraw per damaged
-    // pixel, no recomputed frost, no re-rendered furniture, and no more driver
-    // calls than rectangles and frames. Every bound is over counted work
-    // rather than elapsed time, so the verdict is load-independent — and the
-    // window must have composed frames at all, so an empty difference fails
-    // rather than passing by measuring nothing. A whole-epoch figure could not
-    // stand in: bring-up legitimately composes full-screen frames and owns
-    // both the epoch's mean and its peak.
+    // The last two samples bracket the sweep, and the guest judges the work
+    // between them: total damage in screens, overdraw per damaged pixel, no
+    // recomputed frost, no re-rendered furniture, and no more driver calls
+    // than rectangles and frames. Every bound is over counted work rather than
+    // elapsed time, so the verdict is load-independent — and the window must
+    // have composed frames at all, so an empty difference fails rather than
+    // passing by measuring nothing. A whole-epoch figure could not stand in:
+    // bring-up legitimately composes full-screen frames and owns both the
+    // epoch's mean and its peak.
     //
     // No screendump: the claim is what the frames cost, which is a counter and
     // not a picture. Its siblings already assert the pixels.
@@ -13100,7 +13102,7 @@ fn wintersun_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 
     let BarLaunch {
         library_button,
-        entry_row,
+        entry,
         ..
     } = reconstruct_bar_launch()?;
     let window = wintersun_window()?;
@@ -13108,7 +13110,7 @@ fn wintersun_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
-    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
+    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     pen.aim(LIBRARY_SHOWN_MARKER, 1, wintersun_rest());
     // Restored from fullscreen and photographed, so the next change is the
     // maximise; the pointer stays on the toggle through the last dump.
@@ -15970,15 +15972,21 @@ fn resized_desktop_covered(
 }
 
 /// Build the desktop-hover script: launch the `framestats` fixture from the
-/// program library, sweep the pointer the whole length of the icon bar, then
-/// launch it again.
+/// program library once, then take every later sample by a click on the
+/// fixture's own icon-bar slot, sweeping the pointer the whole length of the
+/// bar between two of them.
 ///
-/// The two launches are what bracket the sweep. Pointer steps fire **strictly
-/// in script order**, so the sweep provably lies between the samples the two
-/// runs take — no marker has to say when a hover ended, which is just as well,
-/// because nothing observable says it. The gate then judges the work the
-/// desktop did inside that window; a whole-epoch figure could not, because
-/// bring-up's own full-screen frames own both its mean and its peak.
+/// Two clicks on the slot bracket the sweep. Pointer steps fire **strictly in
+/// script order**, so the sweep provably lies between the samples they take —
+/// no marker has to say when a hover ended, which is just as well, because
+/// nothing observable says it. The gate then judges the work the desktop did
+/// inside that window; a whole-epoch figure could not, because bring-up's own
+/// full-screen frames own both its mean and its peak. A click on a slot is the
+/// cheapest gesture that reaches a program — the slot's own press — so the
+/// window holds the sweep and almost nothing else. Two launches through the
+/// launcher would each open and close a panel half the screen across, and a
+/// sample read before the totals of its own launch were published would carry
+/// one of them into the window.
 ///
 /// The sweep runs along the bar's own centre line from the leading end to the
 /// trailing one, so it crosses every control the bar draws — the launcher
@@ -15995,33 +16003,44 @@ fn resized_desktop_covered(
 ///
 /// - The desktop's own reveal witness opens the script, so nothing is injected
 ///   before there is a bar to hit.
-/// - The row click waits on the popup's own [`LIBRARY_SHOWN_MARKER`], so the
-///   row is on screen before it is pressed.
-/// - Everything after the first launch waits on the fixture's own sample
-///   record: until that record exists there is no opened window to sweep
-///   inside.
+/// - The launch's folder and picture wait on the popup's own
+///   [`LIBRARY_SHOWN_MARKER`], so they are on screen before they are pressed.
+/// - A settling sweep waits on the session's own [`APPBAR_SLOT_MARKER`],
+///   counted: the autostarted file manager's slot is announced first, so the
+///   fixture's is the next, and it declares its slot only once its first
+///   sample is on the log. The sweep keeps the launch out of the window: the
+///   runner sends one move a poll tick, so it lasts some 0.8 s, and the
+///   session takes input in order, so the launcher's departure has been
+///   composed and published — the publisher runs at most a quarter of a
+///   second behind, plus its own hand-off — before the click after the sweep
+///   reaches the fixture.
+/// - That click takes the sample that opens the bracketed window, and the
+///   measured sweep waits on its record: until that record exists there is no
+///   opened window to sweep inside.
 ///
-/// The final click is what completes the run: it launches the second sample,
-/// whose record is the gate's verdict.
+/// The final click is what completes the run: its sample is the gate's
+/// verdict.
 fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_geometry::Point;
     use tairix_qemu::MouseButton;
     use tairix_taskbar::AppSlot;
-    use tairix_test_desktop_hover_qemu_aarch64::{SAMPLE_APP_NAME, SWEEP_MOVES};
+    use tairix_test_desktop_hover_qemu_aarch64::{SAMPLE_APP_NAME, SETTLING_SAMPLES, SWEEP_MOVES};
 
     let scale = RECONSTRUCTION_SCALE;
     let mut shell = reconstructed_shell(&[super::image_apps::FRAMESTATS_FIXTURE_CRATE])?;
-    // The file manager is autostarted at bring-up, so the bar already carries
-    // its slot by the time the script runs. The sweep's endpoints sit at the
-    // bar's two ends and so do not move with the strip, but the strip is
-    // modelled anyway: a sweep that did not cross a real slot would not
-    // exercise the hover the gate is about.
+    // The file manager is autostarted at bring-up and holds the leading slot;
+    // the fixture's lands beside it. The sweep's endpoints sit at the bar's two
+    // ends and so do not move with the strip, but the strip is modelled anyway:
+    // a sweep that did not cross real slots would not exercise the hover the
+    // gate is about.
     shell.session_mut().taskbar_mut().set_apps(
-        vec![AppSlot::new(
-            modelled_owner(0),
-            FILES_BAR_APP_NAME,
-            tairix_icon::IconKind::AppBundle,
-        )],
+        [FILES_BAR_APP_NAME, SAMPLE_APP_NAME]
+            .into_iter()
+            .enumerate()
+            .map(|(slot, name)| {
+                AppSlot::new(modelled_owner(slot), name, tairix_icon::IconKind::AppBundle)
+            })
+            .collect(),
         scale,
     );
 
@@ -16033,9 +16052,13 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
     // button and the account capsule, which anchor the two ends of the
     // bar, so one pass between them crosses everything drawn in between.
     let sweep_start = Point::new(library_button.x, sweep_end.y);
+    let slot = rect_centre(
+        appbar_slot_rect(taskbar.theme(), APPBAR_LAUNCHED_SLOT)?,
+        "the fixture's slot",
+    )?;
 
-    // The popup's row for the fixture bundle.
-    let sample_row = library_row_centre(
+    // The clicks that open the fixture bundle.
+    let launch = LibraryClicks::to(
         taskbar,
         scale,
         &bundle_path(tairix_abi::SYSTEM_COMMAND_STORE, SAMPLE_APP_NAME),
@@ -16046,15 +16069,20 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
     let sampled = tairix_test_framestats::SAMPLE_MESSAGE;
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
     pen.click(revealed, 1, MouseButton::Primary, library_button);
-    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, sample_row);
-    // The first sample is in, so the bracketed window is open. Walk to the
-    // leading end of the bar, then sweep it.
-    pen.aim(sampled, 1, sweep_start);
-    pen.hover(sampled, 1, sweep_end, SWEEP_MOVES);
-    // Close the window: the second sample is the verdict. The launcher's
-    // witness is one-shot per open, so this second showing is its second.
-    pen.click(sampled, 1, MouseButton::Primary, library_button);
-    pen.click(LIBRARY_SHOWN_MARKER, 2, MouseButton::Primary, sample_row);
+    launch.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
+    // The launch took the settling sample. Sweep once to settle, then open the
+    // window with a click on the fixture's slot.
+    let slot_shown =
+        u32::try_from(APPBAR_LAUNCHED_SLOT + 1).map_err(|_| "hover script: slot out of range")?;
+    pen.aim(APPBAR_SLOT_MARKER, slot_shown, sweep_start);
+    pen.hover(APPBAR_SLOT_MARKER, slot_shown, sweep_end, SWEEP_MOVES);
+    pen.click(APPBAR_SLOT_MARKER, slot_shown, MouseButton::Primary, slot);
+    // The window is open once its sample is on the log. Sweep the bar again.
+    let opened = SETTLING_SAMPLES + 1;
+    pen.aim(sampled, opened, sweep_start);
+    pen.hover(sampled, opened, sweep_end, SWEEP_MOVES);
+    // Close the window: the next sample is the verdict.
+    pen.click(sampled, opened, MouseButton::Primary, slot);
     Ok(pen.steps())
 }
 
@@ -16105,8 +16133,7 @@ fn reconstructed_shell(fixtures: &[&str]) -> Result<tairix_desktop_session::Desk
     shell
         .session_mut()
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(reconstructed_library(fixtures)?);
+        .set_library_catalog(reconstructed_library(fixtures)?);
     Ok(shell)
 }
 
@@ -16120,44 +16147,66 @@ fn bundle_path(store: &str, app: &str) -> String {
     format!("{store}/{app}{}", tairix_abi::BUNDLE_SUFFIX)
 }
 
-/// Centre of the open program-library popup's row that launches `bundle`.
+/// Where to click, in order, to open one entry from a freshly opened program
+/// library: its folder's tab, then its picture on that folder's page.
 ///
-/// Resolved through the popup's own rows and its own layout, so the point is
-/// where the guest actually draws that row rather than a coordinate copied
-/// from a screenshot; `what` names the caller in the two refusals. The one
-/// definition every script that launches from the library reads, so a change
-/// to the popup's layout or ordering cannot leave one script clicking a row
-/// that has moved.
-fn library_row_centre(
-    taskbar: &tairix_taskbar::Taskbar,
-    scale: tairix_geometry::Scale,
-    bundle: &str,
-    what: &str,
-) -> Result<tairix_geometry::Point, String> {
-    use tairix_taskbar::LibraryRow;
+/// Resolved through the launcher's own route
+/// ([`Taskbar::library_route_to`](tairix_taskbar::Taskbar::library_route_to)),
+/// so the points are where the guest actually draws them, and the same
+/// whatever the account's favourites and frequent use — which a vertical that
+/// launches more than once changes under its own feet. The one definition
+/// every script that launches from the library reads.
+#[derive(Copy, Clone, Debug)]
+struct LibraryClicks {
+    /// Centre of the entry's folder tab.
+    folder: tairix_geometry::Point,
+    /// Centre of the entry's picture on that folder's page.
+    entry: tairix_geometry::Point,
+}
 
-    let library = taskbar.library();
-    let row = library
-        .rows()
-        .iter()
-        .position(|row| match row {
-            LibraryRow::Entry { id, .. } => library
-                .catalog()
-                .entry(id)
-                .is_some_and(|entry| entry.bundle().as_str() == bundle),
-            LibraryRow::Folder { .. } => false,
+impl LibraryClicks {
+    /// The clicks that open `bundle` from `taskbar`'s library; `what` names
+    /// the caller in the refusals.
+    fn to(
+        taskbar: &tairix_taskbar::Taskbar,
+        scale: tairix_geometry::Scale,
+        bundle: &str,
+        what: &str,
+    ) -> Result<Self, String> {
+        let listed = taskbar
+            .library()
+            .catalog()
+            .entries()
+            .find(|entry| entry.bundle().as_str() == bundle)
+            .ok_or_else(|| format!("{what}: {bundle} is not listed in the program library"))?;
+        let route = taskbar
+            .library_route_to(listed.id(), scale)
+            .ok_or_else(|| format!("{what}: {bundle} is not on its folder's first screen"))?;
+        Ok(Self {
+            folder: rect_centre(route.folder, "library folder")?,
+            entry: rect_centre(route.picture, "library entry")?,
         })
-        .ok_or_else(|| format!("{what}: {bundle} is not listed in the program library"))?;
-    rect_centre(
-        taskbar
-            .library_layout(scale)
-            .rows
-            .iter()
-            .find(|(shown, _)| *shown == row)
-            .map(|(_, rect)| *rect)
-            .ok_or_else(|| format!("{what}: {bundle}'s row is not visible in the popup"))?,
-        "library entry",
-    )
+    }
+
+    /// Click through to the entry with `pen`, both clicks gated on `marker`
+    /// having appeared `occurrences` times. The guest takes them in order, so
+    /// the second lands on the folder's page the first opened.
+    fn click(self, pen: &mut PointerPen, marker: &str, occurrences: u32) {
+        use tairix_qemu::MouseButton;
+        pen.click(marker, occurrences, MouseButton::Primary, self.folder);
+        pen.click(marker, occurrences, MouseButton::Primary, self.entry);
+    }
+
+    /// Drive the same two clicks through the reconstructed model.
+    fn press(
+        self,
+        shell: &mut tairix_desktop_session::DesktopShell,
+        router: &mut tairix_taskbar::TaskbarInput,
+    ) -> tairix_taskbar::TaskbarResponse {
+        use tairix_input::PointerButton;
+        bar_press(shell, router, self.folder, PointerButton::Primary);
+        bar_press(shell, router, self.entry, PointerButton::Primary)
+    }
 }
 
 /// A host copy of the desktop model advanced to "the terminal has been
@@ -16178,8 +16227,8 @@ struct BarLaunch {
     router: tairix_taskbar::TaskbarInput,
     /// Centre of the program-library button.
     library_button: tairix_geometry::Point,
-    /// Centre of the library popup's row for the terminal's bundle.
-    entry_row: tairix_geometry::Point,
+    /// The clicks that open the terminal's bundle from the library.
+    entry: LibraryClicks,
     /// Centre of the bar slot the session gives the launched application.
     slot: tairix_geometry::Point,
 }
@@ -16249,19 +16298,19 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
         PointerButton::Primary,
     );
 
-    // The popup's row for the application whose bar this drives.
-    let entry_row = library_row_centre(
+    // The clicks that open the application whose bar this drives.
+    let entry = LibraryClicks::to(
         shell.session().taskbar(),
         scale,
         &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, BAR_APP_NAME),
         "icon-bar script",
     )?;
 
-    // Launching from a row closes the popup and puts the application on the
+    // Launching from the library closes it and puts the application on the
     // bar, so the model is advanced to the state the guest will be in: the
     // autostarted file manager already in the leading slot, and the launched
     // application beside it carrying the declaration it makes.
-    bar_press(&mut shell, &mut router, entry_row, PointerButton::Primary);
+    entry.press(&mut shell, &mut router);
     let declared = tairix_terminal::appbar::declaration(0)
         .map_err(|err| format!("icon-bar script: the terminal's declaration is invalid: {err}"))?;
     let mut seated = (0..APPBAR_LAUNCHED_SLOT)
@@ -16292,7 +16341,7 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
         shell,
         router,
         library_button,
-        entry_row,
+        entry,
         slot,
     })
 }
@@ -16700,8 +16749,9 @@ fn fsmutate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 ///
 /// - The desktop's own reveal witness opens the script, so nothing is injected
 ///   before there is a bar to hit.
-/// - The library button follows it, and the viewer's row waits on the popup's
-///   own [`LIBRARY_SHOWN_MARKER`], so the row is on screen before it is pressed.
+/// - The library button follows it, and the viewer's folder and picture wait
+///   on the popup's own [`LIBRARY_SHOWN_MARKER`], so they are on screen before
+///   they are pressed.
 /// - The document's row waits on the session's own [`FILEPICK_PICKER_MARKER`]
 ///   — a frame carrying the picker *with its listing landed* reached the
 ///   display. Nothing earlier is honest: the viewer learns only that its
@@ -16725,7 +16775,7 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let shell = reconstructed_shell(&[])?;
     let bar = shell.session().taskbar().layout(RECONSTRUCTION_SCALE);
     let library_button = rect_centre(bar.library, "Library button")?;
-    let entry_row = library_row_centre(
+    let entry = LibraryClicks::to(
         shell.session().taskbar(),
         RECONSTRUCTION_SCALE,
         &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, PICK_APP_NAME),
@@ -16740,7 +16790,7 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
     pen.click(revealed, 1, MouseButton::Primary, library_button);
-    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
+    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     // The viewer is resident: its slot is drawn and clickable before it owns
     // any window, and the click is what makes it open one and ask to pick.
     pen.click(
@@ -16840,13 +16890,13 @@ fn netmap_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         library_button,
         PointerButton::Primary,
     );
-    let entry_row = library_row_centre(
+    let entry = LibraryClicks::to(
         shell.session().taskbar(),
         scale,
         &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, NETMAP_APP_NAME),
         "netmap script",
     )?;
-    bar_press(&mut shell, &mut router, entry_row, PointerButton::Primary);
+    entry.press(&mut shell, &mut router);
 
     // Advance the model to the launched state: the autostarted file manager in
     // the leading slot, the map beside it carrying the information+Quit menu it
@@ -16898,7 +16948,7 @@ fn netmap_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let rest = pointer_rest();
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
     pen.click(revealed, 1, MouseButton::Primary, library_button);
-    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
+    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     // Off the bar and clear of the window before the frame the dump reads.
     pen.aim(LIBRARY_SHOWN_MARKER, 1, rest);
     // The quit waits on the finished probe's line, not just the retitle, so the
@@ -17134,7 +17184,7 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         mut shell,
         mut router,
         library_button,
-        entry_row,
+        entry,
         slot,
     } = reconstruct_bar_launch()?;
     // The *New window* row, named from the declaration rather than by
@@ -17161,12 +17211,12 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let rest = pointer_rest();
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
-    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
+    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     // Off the bar before the frame that measures it. A dump taken with the
-    // pointer left on the row it just clicked reads the cursor wherever the
-    // popup happened to place that row — and the popup's rows move whenever
-    // the installed set does, so the slot a cursor clips is not this
-    // script's to predict.
+    // pointer left on the picture it just clicked reads the cursor wherever
+    // the launcher happened to place it — and its programs move whenever the
+    // installed set does, so the slot a cursor clips is not this script's to
+    // predict.
     pen.aim(ready, 1, rest);
     // The application's first window is on screen, so its slot is drawn and
     // carries the declaration it made before opening that window.
@@ -17206,7 +17256,7 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
 
     let BarLaunch {
         library_button,
-        entry_row,
+        entry,
         slot,
         ..
     } = reconstruct_bar_launch()?;
@@ -17215,7 +17265,7 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     let ready = APPBAR_SETTLED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
-    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
+    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     // The launch opened the first window, so each remaining one is a click on
     // the slot once its predecessor is on screen. The guest exits as soon as
     // the band has moved and one further window is served, so the tail of this
@@ -17228,21 +17278,22 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
 }
 
 /// The touch vertical's script: tap the Library button, then the terminal's
-/// row in the popup it opens ([`reconstruct_bar_launch`]).
+/// folder and picture in the launcher it opens ([`reconstruct_bar_launch`]).
 ///
 /// The first tap waits on [`APPBAR_SETTLED_MARKER`], the session's word that
-/// the desktop is revealed with its bar drawn, and the second on the popup's
-/// own witness. One device carries both, so the guest reads them in order with
-/// nothing between them to witness.
+/// the desktop is revealed with its bar drawn, and the others on the popup's
+/// own witness. One device carries them all, so the guest reads them in order
+/// with nothing between them to witness.
 fn touch_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let BarLaunch {
         library_button,
-        entry_row,
+        entry,
         ..
     } = reconstruct_bar_launch()?;
     Ok(vec![
         touch_tap(APPBAR_SETTLED_MARKER, library_button)?,
-        touch_tap(LIBRARY_SHOWN_MARKER, entry_row)?,
+        touch_tap(LIBRARY_SHOWN_MARKER, entry.folder)?,
+        touch_tap(LIBRARY_SHOWN_MARKER, entry.entry)?,
     ])
 }
 
@@ -17453,7 +17504,7 @@ fn menu_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let BarLaunch {
         shell,
         library_button,
-        entry_row,
+        entry,
         ..
     } = reconstruct_bar_launch()?;
     // A secondary press inside the terminal's client is delivered to it as a
@@ -17471,7 +17522,7 @@ fn menu_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
-    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
+    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, press);
     pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, settings_row);
     Ok(pen.steps())
@@ -17733,8 +17784,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     shell
         .session_mut()
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(reconstructed_library(&[])?);
+        .set_library_catalog(reconstructed_library(&[])?);
     // The file manager is a core desktop component the session autostarts at
     // bring-up, so by the time the script runs the bar already carries its
     // application slot — the leading one, because Files is the first process
@@ -17760,10 +17810,9 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         "Files slot",
     )?;
     let library_button = rect_centre(bar.library, "Library button")?;
-    // The popup's terminal entry, in the deterministic freshly-opened state
-    // the guest presents after the Library click (search cleared, every
-    // folder expanded, scroll at the top).
-    let terminal_entry = library_row_centre(
+    // The terminal's folder tab and picture: the route a freshly opened
+    // launcher takes to it whatever the account's history.
+    let terminal = LibraryClicks::to(
         taskbar,
         Scale::ONE,
         &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, TERMINAL_BAR_APP_NAME),
@@ -17868,10 +17917,10 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         // frame and the terminal stage below starts in a strictly later wake.
         step(AUTOLOAD_FILES_ACTIVATED_MARKER, 1, click),
         // --- The AW4 terminal stage, keyed on the window's next delivery.
-        // Click the Library button, then the popup's "Terminal"
-        // entry, spawning the terminal bundle from the on-disk store through
-        // the planted catalog. The row click waits on the popup's own
-        // on-screen witness: no app-ward delivery or window-frame map marks a
+        // Click the Library button, then the terminal's folder and picture,
+        // spawning the terminal bundle from the on-disk store through the
+        // planted catalog. Those clicks wait on the popup's own on-screen
+        // witness: no app-ward delivery or window-frame map marks a
         // session-owned surface's arrival, and the handshake that let the
         // *button* be pressed would put the press mid-re-render.
         step(
@@ -17883,7 +17932,13 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         step(
             LIBRARY_SHOWN_MARKER,
             1,
-            move_by(library_button, terminal_entry),
+            move_by(library_button, terminal.folder),
+        ),
+        step(LIBRARY_SHOWN_MARKER, 1, click),
+        step(
+            LIBRARY_SHOWN_MARKER,
+            1,
+            move_by(terminal.folder, terminal.entry),
         ),
         step(LIBRARY_SHOWN_MARKER, 1, click),
         // A frame carrying the terminal window reached the display, so click
@@ -17899,7 +17954,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         step(
             WINDOW_SHOWN_MARKER,
             2,
-            move_by(terminal_entry, terminal_window),
+            move_by(terminal.entry, terminal_window),
         ),
         step(WINDOW_SHOWN_MARKER, 2, click),
     ])
@@ -20447,7 +20502,14 @@ mod tests {
             .iter()
             .map(|step| step.ready_marker.as_str())
             .collect();
-        assert_eq!(markers, [APPBAR_SETTLED_MARKER, LIBRARY_SHOWN_MARKER]);
+        assert_eq!(
+            markers,
+            [
+                APPBAR_SETTLED_MARKER,
+                LIBRARY_SHOWN_MARKER,
+                LIBRARY_SHOWN_MARKER
+            ]
+        );
         assert!(steps
             .iter()
             .all(|step| matches!(step.action, tairix_qemu::PointerAction::Tap { .. })));

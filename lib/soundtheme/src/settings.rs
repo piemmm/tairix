@@ -150,6 +150,15 @@ impl SoundSettings {
     }
 }
 
+/// The namespace every sound setting's key lives under.
+pub(crate) const KEY_NAMESPACE: &str = "sound";
+
+/// Whether `key` names a setting in [`KEY_NAMESPACE`].
+pub(crate) fn in_namespace(key: &str) -> bool {
+    key.split_once('.')
+        .is_some_and(|(namespace, _)| namespace == KEY_NAMESPACE)
+}
+
 impl Registry for SoundSettings {
     type Key = SoundKey;
     const KEYS: &'static [SoundKey] = &KEYS;

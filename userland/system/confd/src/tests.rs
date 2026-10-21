@@ -522,6 +522,46 @@ fn two_process_instances_of_one_app_stage_independently() {
 }
 
 #[test]
+fn a_discard_withdraws_one_scopes_staging_and_publishes_nothing() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada,
+        ConfigScope::Private,
+        "given.up",
+        "1",
+    );
+    set_in(&mut svc, &mut fs, &ada, ConfigScope::Public, "kept", "2");
+    let discard = |svc: &mut _, fs: &mut _, scope| {
+        let reply = call(svc, fs, &ada, &AppDataRequest::ConfigDiscard { scope });
+        assert_eq!(decode_status_reply(&reply), Ok(()), "discard {scope:?}");
+    };
+    discard(&mut svc, &mut fs, ConfigScope::Private);
+    assert_eq!(
+        get(&mut svc, &mut fs, &ada, "given.up"),
+        Err(Errno::NotFound),
+        "the caller no longer reads what it withdrew"
+    );
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Private);
+    assert!(
+        !fs.exists(&alloc::format!("{HOME}/Settings/Apps/os.tairix.terminal")),
+        "the private commit after it had nothing to publish"
+    );
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Public);
+    assert_eq!(
+        read_in(&mut svc, &mut fs, &ada, ConfigScope::Public)
+            .expect("read")
+            .get("kept"),
+        Some("2"),
+        "the other scope's staging was not withdrawn"
+    );
+    discard(&mut svc, &mut fs, ConfigScope::Private);
+    assert_eq!(svc.staging_sessions(), 0, "nothing staged is no error");
+}
+
+#[test]
 fn a_commit_with_nothing_staged_writes_nothing() {
     let (mut svc, mut fs) = service();
     let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));

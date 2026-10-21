@@ -34,6 +34,9 @@ pub enum MotionInteraction {
     ReleaseSettle,
     /// A panel opening.
     PanelOpen,
+    /// A panel closing: quicker than it opened, because the user has already
+    /// moved on to what it was opened for.
+    PanelClose,
     /// A menu opening.
     MenuOpen,
     /// An event-driven job-progress pulse.
@@ -78,12 +81,13 @@ impl MotionInteraction {
     /// Every interaction, in the order a [`MotionTheme`]'s duration table
     /// holds them: the table is indexed by the variant, so this order is the
     /// meaning of [`MotionTheme::new`]'s argument.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::HoverEnter,
         Self::HoverExit,
         Self::PressCompress,
         Self::ReleaseSettle,
         Self::PanelOpen,
+        Self::PanelClose,
         Self::MenuOpen,
         Self::JobProgressPulse,
         Self::RecoveryLatchReveal,
@@ -381,6 +385,13 @@ impl Fade {
         self.timeline.running()
     }
 
+    /// Whether `now_ns` has reached the end of the span — see
+    /// [`Timeline::finished`].
+    #[must_use]
+    pub fn finished(self, now_ns: u64) -> bool {
+        self.timeline.finished(now_ns)
+    }
+
     /// Nanoseconds until the next frame is worth drawing on a display
     /// refreshing at `refresh`, or `None` when this fade owes nothing — see
     /// [`Timeline::next_frame_in`].
@@ -394,6 +405,99 @@ impl Fade {
     /// owed. What an owner calls once it has drawn the end state.
     pub const fn settle(&mut self) {
         self.timeline.settle();
+    }
+}
+
+/// One movement in flight: a [`Timeline`] carrying a position from where it
+/// started to where it is going.
+///
+/// A [`Fade`] answers a strength; a glide answers a place — how far a surface
+/// still stands from its resting place as it rises into it. It eases out
+/// ([`ease_out`]): an entrance answering a gesture sets off at speed and
+/// settles into place, where a start as slow as a smoothstep's reads as lag.
+///
+/// Retargeted part-way, a glide sets off from where it actually stands, so an
+/// interrupted movement never snaps back to its old start.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Glide {
+    timeline: Timeline,
+    from: i32,
+    to: i32,
+}
+
+impl Glide {
+    /// Standing still at `at`: no span to run, and no frame owed.
+    #[must_use]
+    pub const fn at(at: i32) -> Self {
+        Self {
+            timeline: Timeline::SETTLED,
+            from: at,
+            to: at,
+        }
+    }
+
+    /// A glide from `from` to `to` over `duration_ms`, beginning at `now_ns`.
+    ///
+    /// A zero duration — a reduced-motion theme's answer for every
+    /// interaction — stands at `to` from the first read and owes no frame.
+    #[must_use]
+    pub fn start(now_ns: u64, duration_ms: u16, from: i32, to: i32) -> Self {
+        Self {
+            timeline: Timeline::start(now_ns, duration_ms),
+            from,
+            to,
+        }
+    }
+
+    /// Set off from wherever this glide stands at `now_ns` towards `to`, over
+    /// `duration_ms`.
+    pub fn retarget(&mut self, now_ns: u64, duration_ms: u16, to: i32) {
+        *self = Self::start(now_ns, duration_ms, self.value(now_ns), to);
+    }
+
+    /// Where the glide stands at `now_ns`: `from` at the start of the span,
+    /// [`target`](Self::target) at its end and ever after.
+    #[must_use]
+    pub fn value(self, now_ns: u64) -> i32 {
+        let progress = i64::from(ease_out(self.timeline.progress(now_ns)));
+        let span = i64::from(self.to) - i64::from(self.from);
+        let moved = i64::from(self.from) + span * progress / i64::from(u8::MAX);
+        i32::try_from(moved).unwrap_or(self.to)
+    }
+
+    /// The place this glide ends at.
+    #[must_use]
+    pub const fn target(self) -> i32 {
+        self.to
+    }
+
+    /// Whether this glide still has a span to run over — see
+    /// [`Timeline::running`].
+    #[must_use]
+    pub const fn running(self) -> bool {
+        self.timeline.running()
+    }
+
+    /// Whether `now_ns` has reached the end of the span — see
+    /// [`Timeline::finished`].
+    #[must_use]
+    pub fn finished(self, now_ns: u64) -> bool {
+        self.timeline.finished(now_ns)
+    }
+
+    /// Nanoseconds until the next frame is worth drawing on a display
+    /// refreshing at `refresh`, or `None` when this glide owes nothing — see
+    /// [`Timeline::next_frame_in`].
+    #[must_use]
+    pub fn next_frame_in(self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        self.timeline.next_frame_in(now_ns, refresh)
+    }
+
+    /// Stop running, having arrived: the glide stands at its target and owes
+    /// no further frame.
+    pub const fn settle(&mut self) {
+        self.timeline.settle();
+        self.from = self.to;
     }
 }
 

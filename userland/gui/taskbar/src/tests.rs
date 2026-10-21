@@ -20,7 +20,7 @@ use tairix_controls::testkit::beyond_round_rect;
 use tairix_controls::{
     ground_fill, plate_border, ActivityState, ChromeLayer, ControlRole, ControlState, MenuItem,
     MenuMark, PressureKind, PressureState, RecoveryState, TrayBadgeContent, TrayBadgeTone,
-    WindowPreview, WHEEL_STEP,
+    WindowPreview,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -72,7 +72,7 @@ static NORMAL_PRESSURE: ReportedPressure = ReportedPressure::unknown();
 
 /// A glyph cache at normal pressure, built through the real desktop
 /// policy so the tests exercise the shipping budget derivation.
-fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch, BuildFastHash> {
+pub(crate) fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     icon_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }
@@ -103,7 +103,7 @@ fn painted(size: Rect, paint: impl FnOnce(&mut Surface, &[Rect])) -> Option<Surf
 /// The tests state *which controls* changed rather than a pixel rectangle, so
 /// they keep holding when a layout moves and fail when a change spreads past
 /// the control it touched — which is the whole claim.
-fn owes(surface: Rect, regions: &[Rect]) -> Repaint {
+pub(crate) fn owes(surface: Rect, regions: &[Rect]) -> Repaint {
     let mut owed = Repaint::clean();
     for region in regions {
         owed.add(local_rect(*region, surface.origin));
@@ -133,7 +133,11 @@ fn painted_bar(
 }
 
 /// The whole program-library popup, painted — `None` while it is closed.
-fn painted_library(renderer: &TaskbarRenderer, bar: &Taskbar, scale: Scale) -> Option<Surface> {
+pub(crate) fn painted_library(
+    renderer: &mut TaskbarRenderer,
+    bar: &Taskbar,
+    scale: Scale,
+) -> Option<Surface> {
     if !bar.library().is_open() {
         return None;
     }
@@ -189,8 +193,8 @@ use crate::clock::{ClockFaces, ClockLines};
 use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse, LONG_PRESS_AFTER_NS};
 use crate::layout::{local_rect, Hit};
-use crate::library::{folder_label, LibraryFocus, LibraryRow};
-use crate::menu::{EntryRow, MenuRequest, MenuSubject};
+use crate::library::LibraryFocus;
+use crate::menu::{MenuRequest, MenuSubject};
 use crate::notifications::{
     arrival_sound, IconId, NotificationArea, NotifySeverity, Producer, Raised, StatusKind,
     StatusSignal, TransientNotification, NOTIFICATIONS_MAX, SOURCE_NOTIFICATIONS_MAX,
@@ -211,12 +215,16 @@ use crate::tray::derive_signal;
 /// module happens "instantly" at this one instant, well under
 /// [`crate::input::LONG_PRESS_AFTER_NS`], so it always resolves as a quick
 /// click. The long-press tests advance past it explicitly.
-const NOW_NS: u64 = 1_000_000_000;
+pub(crate) const NOW_NS: u64 = 1_000_000_000;
+
+/// Long past every animation the bar starts, so a step this far after one
+/// lands it at its end.
+pub(crate) const SETTLED_NS: u64 = 10_000_000_000;
 
 // ---- fixtures --------------------------------------------------------
 
 /// A validated catalog entry for `/System/Applications/<stem>.app`.
-fn entry(stem: &str, name: &str, category: LibraryCategory) -> LibraryEntry {
+pub(crate) fn entry(stem: &str, name: &str, category: LibraryCategory) -> LibraryEntry {
     LibraryEntry::new(
         EntryId::new(&format!("os.tairix.{stem}")).expect("id"),
         DisplayName::new(name).expect("name"),
@@ -227,7 +235,7 @@ fn entry(stem: &str, name: &str, category: LibraryCategory) -> LibraryEntry {
 }
 
 /// A catalog declaring one entry per `(stem, name, category)` triple.
-fn catalog(entries: &[(&str, &str, LibraryCategory)]) -> Catalog {
+pub(crate) fn catalog(entries: &[(&str, &str, LibraryCategory)]) -> Catalog {
     let mut catalog = Catalog::new();
     for &(stem, name, category) in entries {
         catalog.insert(entry(stem, name, category)).expect("fits");
@@ -238,7 +246,7 @@ fn catalog(entries: &[(&str, &str, LibraryCategory)]) -> Catalog {
 /// The standard fixture: two Office entries and one Games entry, so the
 /// popup shows two folders (taxonomy order: Office before Games) and the
 /// Office names sort as Calc before Write.
-fn office_and_games() -> Catalog {
+pub(crate) fn office_and_games() -> Catalog {
     catalog(&[
         ("write", "Write", LibraryCategory::Office),
         ("calc", "Calc", LibraryCategory::Office),
@@ -302,7 +310,7 @@ fn app(label: &str) -> AppSlot {
 
 /// The identity a signed manifest states for `name`, with both optional
 /// fields present.
-fn identity(name: &str) -> AppIdentity {
+pub(crate) fn identity(name: &str) -> AppIdentity {
     AppIdentity {
         name: String::from(name),
         version: String::from("1.2.3"),
@@ -313,30 +321,36 @@ fn identity(name: &str) -> AppIdentity {
 
 /// Show `time` alone on `bar`'s clock, stated so in its menu.
 fn show_time(bar: &mut Taskbar, time: &str) {
-    bar.clock_mut().set_reading(
+    bar.set_clock_reading(
         ClockLines {
             time: String::from(time),
             date: String::new(),
         },
         time,
+        Scale::ONE,
     );
 }
 
 /// A bottom-bar taskbar over the standard fixture with its popup closed,
 /// handed back settled: seeding the catalog latches the popup and the bar,
 /// and that is the fixture's own doing, never what a test measures.
-fn bottom_bar() -> Taskbar {
+pub(crate) fn bottom_bar() -> Taskbar {
     let mut bar = Taskbar::new(
         TaskbarConfig::bottom_bar(1000, 800),
         &Theme::dark().floating(),
     );
-    bar.library_mut().set_catalog(office_and_games());
+    bar.set_library_catalog(office_and_games());
     let _ = bar.take_repaint();
     bar
 }
 
 /// Move the pointer to `(x, y)` and press the primary button there.
-fn press_at(input: &mut TaskbarInput, taskbar: &mut Taskbar, x: i32, y: i32) -> TaskbarResponse {
+pub(crate) fn press_at(
+    input: &mut TaskbarInput,
+    taskbar: &mut Taskbar,
+    x: i32,
+    y: i32,
+) -> TaskbarResponse {
     input.handle(
         InputEvent::PointerMoved {
             to: Point::new(x, y),
@@ -356,7 +370,11 @@ fn press_at(input: &mut TaskbarInput, taskbar: &mut Taskbar, x: i32, y: i32) -> 
 }
 
 /// Press (and release) `key` with no modifiers.
-fn press_key(input: &mut TaskbarInput, taskbar: &mut Taskbar, key: Key) -> TaskbarResponse {
+pub(crate) fn press_key(
+    input: &mut TaskbarInput,
+    taskbar: &mut Taskbar,
+    key: Key,
+) -> TaskbarResponse {
     input.handle(
         InputEvent::KeyPressed {
             key,
@@ -369,7 +387,7 @@ fn press_key(input: &mut TaskbarInput, taskbar: &mut Taskbar, key: Key) -> Taskb
 }
 
 /// Open the popup by pressing the Library button, asserting it opened.
-fn open_library(input: &mut TaskbarInput, taskbar: &mut Taskbar) {
+pub(crate) fn open_library(input: &mut TaskbarInput, taskbar: &mut Taskbar) {
     let centre = centre_of(taskbar.layout(Scale::ONE).library);
     assert_eq!(
         press_at(input, taskbar, centre.x, centre.y),
@@ -379,47 +397,12 @@ fn open_library(input: &mut TaskbarInput, taskbar: &mut Taskbar) {
 }
 
 /// The centre of a non-empty rectangle.
-fn centre_of(rect: Rect) -> Point {
+pub(crate) fn centre_of(rect: Rect) -> Point {
     assert!(!rect.is_empty(), "cannot take the centre of an empty rect");
     Point::new(
         rect.left() + i32::try_from(rect.width / 2).expect("fits"),
         rect.top() + i32::try_from(rect.height / 2).expect("fits"),
     )
-}
-
-/// The row index (into the popup's rows) and screen rect of the first
-/// visible row satisfying `want`.
-fn visible_row_where(
-    taskbar: &Taskbar,
-    want: impl Fn(&LibraryRow) -> bool,
-) -> Option<(usize, Rect)> {
-    let layout = taskbar.library_layout(Scale::ONE);
-    layout
-        .rows
-        .iter()
-        .find(|(index, _)| taskbar.library().rows().get(*index).is_some_and(&want))
-        .copied()
-}
-
-/// Open the program-library popup, then ask for the context menu on its first
-/// visible entry row, reporting the entry that row names and the menu the bar
-/// asked the desktop for.
-fn ask_entry_menu(input: &mut TaskbarInput, taskbar: &mut Taskbar) -> (EntryId, MenuRequest) {
-    open_library(input, taskbar);
-    let (row, rect) = visible_row_where(taskbar, |row| matches!(row, LibraryRow::Entry { .. }))
-        .expect("an entry row is visible");
-    let entry = match taskbar.library().rows().get(row).expect("the row exists") {
-        LibraryRow::Entry { id, .. } => id.clone(),
-        LibraryRow::Folder { .. } => panic!("not an entry"),
-    };
-    let request = ask_menu(input, taskbar, centre_of(rect)).expect("the row asks for its own menu");
-    assert_eq!(
-        request.subject,
-        MenuSubject::Entry {
-            entry: entry.clone()
-        }
-    );
-    (entry, request)
 }
 
 /// A dark theme with `contrast` swapped in, for accessibility renders.
@@ -567,7 +550,7 @@ fn status_signals_set_and_dedup() {
 
 /// Raise the network signal through its own feed.
 fn show_network(bar: &mut Taskbar) {
-    assert!(bar.set_network(Some(crate::network::tests::connected())));
+    assert!(bar.set_network(Some(crate::network::tests::connected()), Scale::ONE));
 }
 
 /// A producer instance `n` of a source named after it.
@@ -721,10 +704,7 @@ fn retaining_by_policy_withdraws_only_what_it_refuses() {
     let _ = bar.take_repaint();
     assert!(bar.retain_notifications(|note| note.producer.source != quiet.source));
     assert_eq!(bar.notifications().notification_count(), 1);
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR
-    );
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NOTIFICATIONS);
     assert!(!bar.retain_notifications(|_| true), "nothing withdrawn");
     assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
 }
@@ -770,7 +750,7 @@ fn notifications_order_by_severity_then_recency() {
 }
 
 #[test]
-fn raising_and_dismissing_a_notification_latches_the_popover_and_the_bar() {
+fn raising_and_dismissing_a_notification_latches_the_popover_alone() {
     let mut bar = bottom_bar();
     let _ = bar.take_repaint();
     let p = producer(7);
@@ -781,15 +761,15 @@ fn raising_and_dismissing_a_notification_latches_the_popover_and_the_bar() {
     );
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR,
-        "a raise shows a card in the popover and updates the bar's icon"
+        TaskbarRepaint::NOTIFICATIONS,
+        "a raise shows a card in the popover; the bar draws no notification"
     );
 
     assert!(bar.clear_notification(p.instance, 1));
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR,
-        "a dismiss removes the card and updates the bar's icon"
+        TaskbarRepaint::NOTIFICATIONS,
+        "a dismiss removes the card"
     );
 }
 
@@ -1413,7 +1393,7 @@ fn a_side_bar_readout_stays_within_the_bars_span() {
         let mut bar = Taskbar::new(config, &Theme::dark().floating());
         let mut summary = tray_summary(0, 0, 300);
         summary.top_task = Some(tray_task("editor", 250));
-        bar.set_tray_summary(Some(summary));
+        bar.set_tray_summary(Some(summary), Scale::ONE);
         let mut input = TaskbarInput::new();
         hover_switchboard(&mut input, &mut bar);
 
@@ -1536,6 +1516,19 @@ fn apply_theme_swaps_the_owned_theme_and_latches_every_surface() {
         "every surface draws from the palette, so a theme switch repaints them all"
     );
     assert!(!bar.take_repaint().any(), "taking the latch clears it");
+}
+
+#[test]
+fn a_theme_changing_only_its_motion_is_adopted_without_a_repaint() {
+    let mut bar = bottom_bar();
+    let still = bar.theme().clone().with_axes(tairix_theme::Accessibility {
+        contrast: bar.theme().contrast(),
+        density: bar.theme().density(),
+        motion: tairix_theme::Motion::Reduced,
+    });
+    bar.apply_theme(&still);
+    assert!(bar.theme().motion().reduced_motion(), "the motion is taken");
+    assert!(!bar.take_repaint().any(), "and moves no pixel");
 }
 
 #[test]
@@ -1879,7 +1872,7 @@ fn choose_row(bar: &mut Taskbar, request: &MenuRequest, label: &str) -> Option<T
     let id = row_named(&request.model, label)
         .id()
         .unwrap_or_else(|| panic!("the {label:?} row names no command"));
-    bar.menu_chosen(&request.subject, id)
+    bar.menu_chosen(&request.subject, id, NOW_NS, Scale::ONE)
 }
 
 #[test]
@@ -2055,7 +2048,7 @@ fn a_menu_at_the_row_cap_states_every_row_it_declared() {
         Some(last)
     );
     assert_eq!(
-        bar.menu_chosen(&request.subject, last),
+        bar.menu_chosen(&request.subject, last, NOW_NS, Scale::ONE),
         Some(TaskbarResponse::AppMenuChosen {
             owner: ProcId::from_raw(*b"Busy\0\0\0\0\0\0\0\0\0\0\0\0"),
             item: last
@@ -2249,57 +2242,6 @@ fn a_manifest_without_purpose_or_author_states_only_what_it_has() {
         "an omitted field is absent, never a blank line"
     );
     assert!(sheet.facts().is_empty());
-}
-
-#[test]
-fn entry_menu_launches_the_row_it_was_opened_on() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let (entry_id, request) = ask_entry_menu(&mut input, &mut bar);
-
-    // Launching from the entry menu behaves exactly like launching from the
-    // row itself, and closes the popup.
-    assert_eq!(
-        choose_row(&mut bar, &request, EntryRow::Open.label()),
-        Some(TaskbarResponse::LibraryLaunch { entry: entry_id })
-    );
-    assert!(!bar.library().is_open());
-}
-
-#[test]
-fn entry_menu_asks_the_session_for_a_desktop_shortcut() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let (entry_id, request) = ask_entry_menu(&mut input, &mut bar);
-
-    // The bar writes nothing: it names the entry and the session, which
-    // holds the filesystem capability, makes the link. The popup closes for
-    // the same reason a launch closes it — it is modal, and the shortcut
-    // appears on the desktop behind it.
-    assert_eq!(
-        choose_row(&mut bar, &request, EntryRow::Shortcut.label()),
-        Some(TaskbarResponse::CreateDesktopShortcut { entry: entry_id })
-    );
-    assert!(!bar.library().is_open());
-}
-
-#[test]
-fn entry_menu_offers_exactly_the_two_rows_it_defines() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let (_, request) = ask_entry_menu(&mut input, &mut bar);
-
-    assert_eq!(
-        plate_of(&request.model, None)
-            .iter()
-            .map(|item| String::from(item.label()))
-            .collect::<Vec<_>>(),
-        alloc::vec![
-            String::from(EntryRow::Open.label()),
-            String::from(EntryRow::Shortcut.label()),
-        ],
-        "the rows the menu states are the ones it defines, in order"
-    );
 }
 
 #[test]
@@ -2632,10 +2574,14 @@ fn resting_on_two_windows_asks_for_the_picker_once_the_dwell_elapses() {
     assert!(bar.picker().is_open());
     assert_eq!(bar.picker().app(), Some(0));
     assert_eq!(bar.picker().entries().len(), 2);
+    let layout = bar.layout(Scale::ONE);
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::BAR | TaskbarRepaint::PICKER,
-        "the slot took the pointer's wash on the way in, and the picker opened"
+        TaskbarRepaint {
+            picker: Repaint::Whole,
+            ..bar_owes(&bar, Scale::ONE, &[layout.app_strip, layout.apps[0]])
+        },
+        "the strip the slot arrived in took the pointer's wash, and the picker opened"
     );
 
     // A further sample over the same slot asks again for nothing.
@@ -3370,7 +3316,11 @@ fn losing_the_second_window_closes_the_picker_with_it() {
     assert!(bar.picker_layout(Scale::ONE).is_none());
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::BAR | TaskbarRepaint::PICKER
+        TaskbarRepaint {
+            picker: Repaint::Whole,
+            ..bar_owes(&bar, Scale::ONE, &[bar.layout(Scale::ONE).apps[0]])
+        },
+        "the slot that lost a window, and the picker that closed"
     );
 }
 
@@ -3499,19 +3449,24 @@ fn render_picker_paints_a_thumbnail_or_the_applications_glyph() {
 // ---- input: open popup ----------------------------------------------
 
 #[test]
-fn opening_and_closing_the_library_popup_latches_the_popup_and_the_bar() {
+fn opening_and_closing_the_library_popup_latches_the_popup_and_its_button() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     let _ = bar.take_repaint();
 
-    let centre = centre_of(bar.layout(Scale::ONE).library);
+    let layout = bar.layout(Scale::ONE);
+    let button = TaskbarRepaint {
+        bar: owes(layout.bar, &[layout.library]),
+        ..TaskbarRepaint::LIBRARY
+    };
+    let centre = centre_of(layout.library);
     assert_eq!(
         press_at(&mut input, &mut bar, centre.x, centre.y),
         TaskbarResponse::OpenLibrary
     );
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR,
+        button,
         "opening presses the bar's Library button in and shows the popup"
     );
 
@@ -3521,8 +3476,8 @@ fn opening_and_closing_the_library_popup_latches_the_popup_and_the_bar() {
     );
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR,
-        "closing releases the button and hides the popup"
+        button,
+        "closing releases the button and hides the popup, and the bar owes no more"
     );
 }
 
@@ -3542,8 +3497,13 @@ fn the_library_announces_each_showing_once_and_never_while_closed() {
 
     open_library(&mut input, &mut bar);
     assert!(
+        !present(&mut bar),
+        "a popup still rising into place is not yet shown whole"
+    );
+    bar.advance_library(NOW_NS + SETTLED_NS, Scale::ONE);
+    assert!(
         present(&mut bar),
-        "the first frame carrying the popup announces it"
+        "the first frame carrying the risen popup announces it"
     );
     assert!(
         !present(&mut bar),
@@ -3560,6 +3520,7 @@ fn the_library_announces_each_showing_once_and_never_while_closed() {
     assert!(!present(&mut bar), "a dismissed popup announces nothing");
 
     open_library(&mut input, &mut bar);
+    bar.advance_library(NOW_NS + SETTLED_NS, Scale::ONE);
     assert!(present(&mut bar), "reopening announces the new showing");
 }
 
@@ -3589,363 +3550,6 @@ fn click_away_dismisses_without_acting_on_what_it_hit() {
         None,
         "the application was not acted on"
     );
-}
-
-#[test]
-fn secondary_press_outside_dismisses_and_folder_rows_are_claimed() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    // Inside the panel on a folder row: claimed by the modal popup — a
-    // folder offers no context actions, so nothing happens and the popup
-    // stays.
-    let (_, folder_rect) = visible_row_where(&bar, |row| matches!(row, LibraryRow::Folder { .. }))
-        .expect("a folder row is visible");
-    let inside = centre_of(folder_rect);
-    input.handle(
-        InputEvent::PointerMoved { to: inside },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert_eq!(
-        input.handle(
-            InputEvent::PointerPressed {
-                button: PointerButton::Secondary,
-            },
-            &mut bar,
-            Scale::ONE,
-            NOW_NS,
-        ),
-        TaskbarResponse::Ignored
-    );
-    assert!(bar.library().is_open());
-
-    // Outside: dismisses, exactly like a primary click-away.
-    input.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(500, 100),
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert_eq!(
-        input.handle(
-            InputEvent::PointerPressed {
-                button: PointerButton::Secondary,
-            },
-            &mut bar,
-            Scale::ONE,
-            NOW_NS,
-        ),
-        TaskbarResponse::LibraryDismissed
-    );
-    assert!(!bar.library().is_open());
-}
-
-#[test]
-fn clicking_an_entry_launches_it() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    let (index, rect) = visible_row_where(
-        &bar,
-        |row| matches!(row, LibraryRow::Entry { name, .. } if name == "Chess"),
-    )
-    .expect("Chess is visible");
-    let LibraryRow::Entry { id, .. } = bar.library().rows()[index].clone() else {
-        panic!("expected an entry row");
-    };
-
-    let centre = centre_of(rect);
-    // The press arms the drag rather than launching, so the click concludes
-    // on the release that ends it without travelling.
-    assert_eq!(
-        press_at(&mut input, &mut bar, centre.x, centre.y),
-        TaskbarResponse::Ignored
-    );
-    assert!(bar.library().is_open(), "the press alone launches nothing");
-    assert_eq!(
-        release_at(&mut input, &mut bar, NOW_NS),
-        TaskbarResponse::LibraryLaunch { entry: id }
-    );
-    assert!(!bar.library().is_open(), "a launch closes the popup");
-}
-
-/// Open the popup and press the visible "Chess" entry row, returning its
-/// catalog identifier and the press point.
-///
-/// An entry row launches on the *release* that ends the press, so a press
-/// alone is where every click gesture below starts.
-fn press_chess_row(input: &mut TaskbarInput, bar: &mut Taskbar) -> (EntryId, Point) {
-    open_library(input, bar);
-    let (index, rect) = visible_row_where(
-        bar,
-        |row| matches!(row, LibraryRow::Entry { name, .. } if name == "Chess"),
-    )
-    .expect("Chess is visible");
-    let LibraryRow::Entry { id, .. } = bar.library().rows()[index].clone() else {
-        panic!("expected an entry row");
-    };
-    let centre = centre_of(rect);
-    assert_eq!(
-        press_at(input, bar, centre.x, centre.y),
-        TaskbarResponse::Ignored
-    );
-    (id, centre)
-}
-
-#[test]
-fn a_press_that_barely_moves_is_still_a_click() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let (id, press) = press_chess_row(&mut input, &mut bar);
-
-    // Jitter within the pressed row is still that row's click.
-    assert_eq!(
-        moved_at(
-            &mut input,
-            &mut bar,
-            Point::new(press.x + 1, press.y),
-            NOW_NS
-        ),
-        TaskbarResponse::Ignored
-    );
-    assert_eq!(
-        release_at(&mut input, &mut bar, NOW_NS),
-        TaskbarResponse::LibraryLaunch { entry: id }
-    );
-}
-
-#[test]
-fn a_release_away_from_the_pressed_row_launches_nothing() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let (_, press) = press_chess_row(&mut input, &mut bar);
-
-    // The pointer left the row it pressed, so the release completes no
-    // click — and the row it ended over is not launched either.
-    let elsewhere = Point::new(press.x, press.y + 200);
-    let _ = moved_at(&mut input, &mut bar, elsewhere, NOW_NS);
-    assert_eq!(
-        release_at(&mut input, &mut bar, NOW_NS),
-        TaskbarResponse::Ignored
-    );
-    assert!(bar.library().is_open());
-}
-
-#[test]
-fn a_rebuild_under_a_held_press_launches_nothing() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let (id, press) = press_chess_row(&mut input, &mut bar);
-
-    // Typing filters the list while the button is still down, so the row the
-    // press was keyed to is gone. The armed press must go with it: releasing
-    // now would otherwise launch whatever moved into that position, which is
-    // not the program the user pressed.
-    press_key(&mut input, &mut bar, Key::Char('w'));
-    assert_eq!(bar.library().search_text(), "w");
-    assert!(
-        !bar.library()
-            .rows()
-            .iter()
-            .any(|row| matches!(row, LibraryRow::Entry { id: row_id, .. } if *row_id == id)),
-        "the filter dropped the pressed entry"
-    );
-
-    let _ = moved_at(&mut input, &mut bar, press, NOW_NS);
-    assert_eq!(
-        release_at(&mut input, &mut bar, NOW_NS),
-        TaskbarResponse::Ignored,
-        "a rebuilt list has nothing armed to launch"
-    );
-}
-
-#[test]
-fn a_folder_header_acts_on_the_press_and_arms_nothing() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let (_, rect) = visible_row_where(&bar, |row| {
-        matches!(row, LibraryRow::Folder { category, .. } if *category == LibraryCategory::Office)
-    })
-    .expect("the Office folder is visible");
-
-    // A header folds on the press, so there is nothing armed for the
-    // release to complete.
-    let centre = centre_of(rect);
-    assert_eq!(
-        press_at(&mut input, &mut bar, centre.x, centre.y),
-        TaskbarResponse::Ignored
-    );
-    assert_eq!(
-        release_at(&mut input, &mut bar, NOW_NS),
-        TaskbarResponse::Ignored
-    );
-}
-
-#[test]
-fn clicking_a_folder_toggles_its_expansion() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let all_rows = bar.library().rows().len();
-    assert_eq!(all_rows, 5, "two folders and three entries");
-
-    let (index, rect) = visible_row_where(&bar, |row| {
-        matches!(row, LibraryRow::Folder { category, .. } if *category == LibraryCategory::Office)
-    })
-    .expect("Office folder is visible");
-    assert_eq!(index, 0);
-
-    let centre = centre_of(rect);
-    let _ = bar.take_repaint();
-    assert_eq!(
-        press_at(&mut input, &mut bar, centre.x, centre.y),
-        TaskbarResponse::Ignored,
-        "a fold is the popup's own state change"
-    );
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::LIBRARY,
-        "a fold repaints only the popup"
-    );
-    assert!(bar.library().is_open());
-    assert_eq!(
-        bar.library().rows().len(),
-        3,
-        "Office collapsed: its two entries left the list"
-    );
-    assert!(matches!(
-        bar.library().rows()[0],
-        LibraryRow::Folder {
-            category: LibraryCategory::Office,
-            expanded: false,
-            count: 2,
-        }
-    ));
-
-    // Clicking it again expands it back.
-    let (_, rect) = visible_row_where(&bar, |row| {
-        matches!(row, LibraryRow::Folder { category, .. } if *category == LibraryCategory::Office)
-    })
-    .expect("Office folder is still visible");
-    let centre = centre_of(rect);
-    press_at(&mut input, &mut bar, centre.x, centre.y);
-    assert_eq!(bar.library().rows().len(), 5);
-}
-
-#[test]
-fn wheel_scrolls_the_overflowing_popup() {
-    let mut bar = Taskbar::new(
-        TaskbarConfig::bottom_bar(1000, 300),
-        &Theme::dark().floating(),
-    );
-    let mut entries: Vec<(String, String)> = Vec::new();
-    for index in 0..30 {
-        entries.push((format!("app{index:02}"), format!("App {index:02}")));
-    }
-    let mut cat = Catalog::new();
-    for (stem, name) in &entries {
-        cat.insert(entry(stem, name, LibraryCategory::Utilities))
-            .expect("fits");
-    }
-    bar.library_mut().set_catalog(cat);
-
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let layout = bar.library_layout(Scale::ONE);
-    assert!(
-        layout.visible_rows < bar.library().rows().len(),
-        "the fixture overflows the viewport"
-    );
-    assert!(layout.scrollbar.is_some(), "an overflow shows a scrollbar");
-    assert_eq!(layout.rows[0].0, 0);
-
-    let _ = bar.take_repaint();
-    assert_eq!(
-        input.handle(
-            InputEvent::PointerScrolled {
-                dx: 0,
-                dy: SCROLL_UNITS_PER_DETENT,
-            },
-            &mut bar,
-            Scale::ONE,
-            NOW_NS,
-        ),
-        TaskbarResponse::Ignored
-    );
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::LIBRARY,
-        "a scroll repaints only the popup"
-    );
-    let scrolled = bar.library_layout(Scale::ONE);
-    let rows_per_detent = WHEEL_STEP / bar.theme().metrics().control_height;
-    assert_eq!(
-        scrolled.rows[0].0,
-        usize::try_from(rows_per_detent).expect("row count fits"),
-        "the viewport moved down one detent's worth of rows"
-    );
-
-    // The panel never grows past the space between the bar and the screen
-    // edge: it fits entirely above the bar.
-    assert!(scrolled.panel.top() >= 0);
-    assert!(scrolled.panel.bottom() <= bar.layout(Scale::ONE).bar.top());
-}
-
-/// A turn of less than a row rests the list between rows: the first row is
-/// laid out whole, shown cut by the viewport's edge, and chosen at the part
-/// that shows.
-#[test]
-fn a_part_scrolled_library_row_is_shown_cut_and_chosen_where_it_shows() {
-    let mut bar = Taskbar::new(
-        TaskbarConfig::bottom_bar(1000, 300),
-        &Theme::dark().floating(),
-    );
-    let mut cat = Catalog::new();
-    for index in 0..30 {
-        cat.insert(entry(
-            &format!("app{index:02}"),
-            &format!("App {index:02}"),
-            LibraryCategory::Utilities,
-        ))
-        .expect("fits");
-    }
-    bar.library_mut().set_catalog(cat);
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    input.handle(
-        InputEvent::PointerScrolled {
-            dx: 0,
-            dy: SCROLL_UNITS_PER_DETENT / 4,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    let layout = bar.library_layout(Scale::ONE);
-    assert!(
-        layout.offset > 0 && layout.offset < layout.row_height,
-        "a quarter detent rests between rows: {} of {}",
-        layout.offset,
-        layout.row_height
-    );
-    let (first, whole) = layout.rows[0];
-    assert_eq!(first, 0, "the cut row is still laid out");
-    assert_eq!(whole.height, layout.row_height, "at its natural height");
-    let shown = layout.row_rect(0).expect("part of it shows");
-    assert_eq!(
-        shown.top(),
-        layout.viewport.top(),
-        "cut at the viewport's edge"
-    );
-    assert!(shown.height < whole.height);
-    assert_eq!(layout.row_at(centre_of(shown)), Some(0));
 }
 
 #[test]
@@ -4008,98 +3612,6 @@ fn a_part_scrolled_picker_cell_is_shown_cut_and_chosen_where_it_shows() {
         "{shown:?} is only part of {whole:?}"
     );
     assert_eq!(bar.picker().cell_at(&layout, centre_of(shown)), Some(0));
-}
-
-/// Rest the pointer on the popup's shown row at `slot`, answering where.
-fn rest_on_library_row(bar: &mut Taskbar, input: &mut TaskbarInput, slot: usize) -> Point {
-    let layout = bar.library_layout(Scale::ONE);
-    let (row, _) = layout.rows[slot];
-    let at = centre_of(layout.row_rect(row).expect("the row shows"));
-    input.handle(InputEvent::PointerMoved { to: at }, bar, Scale::ONE, NOW_NS);
-    assert_eq!(
-        bar.library().hover(),
-        Some(row),
-        "the row lit for the pointer"
-    );
-    at
-}
-
-/// A wheel turn slides the rows under a still pointer, and the row lit is
-/// the one that slid under it rather than the one that slid away.
-#[test]
-fn a_wheel_turn_under_a_still_pointer_moves_the_librarys_hover_to_the_row_now_under_it() {
-    let (mut bar, mut input) = (overflowing_library(30), TaskbarInput::new());
-    let at = rest_on_library_row(&mut bar, &mut input, 2);
-    let stale = bar.library().hover();
-    input.handle(
-        InputEvent::PointerScrolled {
-            dx: 0,
-            dy: SCROLL_UNITS_PER_DETENT,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    let now_under = bar.library_layout(Scale::ONE).row_at(at);
-    assert!(now_under.is_some() && now_under != stale, "the premise");
-    assert_eq!(bar.library().hover(), now_under);
-}
-
-/// A key that scrolls the list to reveal its cursor moves the hover with the
-/// rows exactly as the wheel does.
-#[test]
-fn a_keyboard_reveal_under_a_still_pointer_moves_the_librarys_hover_to_the_row_now_under_it() {
-    let (mut bar, mut input) = (overflowing_library(30), TaskbarInput::new());
-    let at = rest_on_library_row(&mut bar, &mut input, 2);
-    let stale = bar.library().hover();
-    for key in [NamedKey::Down, NamedKey::End] {
-        input.handle(
-            InputEvent::KeyPressed {
-                key: Key::Named(key),
-                modifiers: Modifiers::default(),
-            },
-            &mut bar,
-            Scale::ONE,
-            NOW_NS,
-        );
-    }
-    assert!(
-        bar.library_layout(Scale::ONE).offset > 0,
-        "End scrolled the list"
-    );
-    let now_under = bar.library_layout(Scale::ONE).row_at(at);
-    assert!(now_under.is_some() && now_under != stale, "the premise");
-    assert_eq!(bar.library().hover(), now_under);
-}
-
-/// A pointer the bar has been told left its surfaces lights nothing, whatever
-/// the list does under the position it last had.
-#[test]
-fn a_pointer_that_left_the_bar_lights_no_library_row_when_the_list_moves() {
-    let (mut bar, mut input) = (overflowing_library(30), TaskbarInput::new());
-    rest_on_library_row(&mut bar, &mut input, 2);
-    input.set_pointer_focus(PointerFocus::Left, &mut bar, Scale::ONE);
-    assert_eq!(bar.library().hover(), None, "the leave dropped the lit row");
-    for key in [NamedKey::Down, NamedKey::End] {
-        input.handle(
-            InputEvent::KeyPressed {
-                key: Key::Named(key),
-                modifiers: Modifiers::default(),
-            },
-            &mut bar,
-            Scale::ONE,
-            NOW_NS,
-        );
-    }
-    assert!(
-        bar.library_layout(Scale::ONE).offset > 0,
-        "End scrolled the list"
-    );
-    assert_eq!(
-        bar.library().hover(),
-        None,
-        "a row lit for a pointer elsewhere"
-    );
 }
 
 /// A bar whose one application offers six windows, with the picker open over
@@ -4211,122 +3723,7 @@ fn a_picker_cell_stops_looking_hovered_once_the_pointer_leaves_the_panel() {
 
 // ---- popup model ----------------------------------------------------
 
-#[test]
-fn rows_follow_taxonomy_order_and_sort_entries_by_name() {
-    let bar = bottom_bar();
-    let rows = bar.library().rows();
-    assert!(matches!(
-        rows[0],
-        LibraryRow::Folder {
-            category: LibraryCategory::Office,
-            expanded: true,
-            count: 2,
-        }
-    ));
-    assert!(matches!(&rows[1], LibraryRow::Entry { name, .. } if name == "Calc"));
-    assert!(matches!(&rows[2], LibraryRow::Entry { name, .. } if name == "Write"));
-    assert!(matches!(
-        rows[3],
-        LibraryRow::Folder {
-            category: LibraryCategory::Games,
-            expanded: true,
-            count: 1,
-        }
-    ));
-    assert!(matches!(&rows[4], LibraryRow::Entry { name, .. } if name == "Chess"));
-}
-
-#[test]
-fn empty_folders_are_hidden() {
-    let bar = bottom_bar();
-    assert!(
-        !bar.library().rows().iter().any(|row| matches!(
-            row,
-            LibraryRow::Folder { category, .. } if *category == LibraryCategory::Internet
-        )),
-        "a folder with no entries is never listed"
-    );
-}
-
-#[test]
-fn every_folder_has_a_label() {
-    for category in LibraryCategory::ALL {
-        assert!(!folder_label(category).is_empty());
-    }
-    assert_eq!(folder_label(LibraryCategory::SystemTools), "System Tools");
-}
-
-#[test]
-fn an_empty_catalog_shows_the_calm_placeholder() {
-    let mut bar = Taskbar::new(
-        TaskbarConfig::bottom_bar(1000, 800),
-        &Theme::dark().floating(),
-    );
-    bar.library_mut().set_catalog(Catalog::new());
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    assert!(bar.library().rows().is_empty());
-    assert_eq!(
-        bar.library().placeholder(),
-        Some("No programs are catalogued")
-    );
-    // The popup still lays out sanely: chrome plus an empty viewport.
-    let layout = bar.library_layout(Scale::ONE);
-    assert!(layout.panel.width > 0 && layout.panel.height > 0);
-    assert!(layout.rows.is_empty());
-}
-
-#[test]
-fn reopening_resets_search_expansion_and_cursor() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    // Filter, collapse-by-navigation, and move the cursor…
-    press_key(&mut input, &mut bar, Key::Char('c'));
-    assert_eq!(bar.library().search_text(), "c");
-
-    // …then close and reopen: everything is back at the deterministic
-    // opening state.
-    press_at(&mut input, &mut bar, 500, 100);
-    open_library(&mut input, &mut bar);
-    assert_eq!(bar.library().search_text(), "");
-    assert_eq!(bar.library().rows().len(), 5);
-    assert_eq!(bar.library().current(), None);
-    assert_eq!(bar.library().focus(), LibraryFocus::Search);
-}
-
 // ---- popup keyboard --------------------------------------------------
-
-#[test]
-fn typing_filters_case_insensitively_and_enter_launches_first_match() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    press_key(&mut input, &mut bar, Key::Char('c'));
-    let names: Vec<&str> = bar
-        .library()
-        .rows()
-        .iter()
-        .map(|row| match row {
-            LibraryRow::Entry { name, .. } => name.as_str(),
-            LibraryRow::Folder { .. } => panic!("a filter lists entries only"),
-        })
-        .collect();
-    assert_eq!(names, ["Calc", "Chess"], "matches sort by name");
-
-    press_key(&mut input, &mut bar, Key::Char('h'));
-    assert_eq!(bar.library().search_text(), "ch");
-    assert_eq!(bar.library().rows().len(), 1, "only Chess matches 'ch'");
-
-    let response = press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter));
-    let TaskbarResponse::LibraryLaunch { entry } = response else {
-        panic!("Enter launches the first match, got {response:?}");
-    };
-    assert_eq!(entry.as_str(), "os.tairix.chess");
-    assert!(!bar.library().is_open());
-}
 
 #[test]
 fn typing_in_the_filter_latches_only_the_popup() {
@@ -4337,243 +3734,17 @@ fn typing_in_the_filter_latches_only_the_popup() {
 
     press_key(&mut input, &mut bar, Key::Char('c'));
     let latched = bar.take_repaint();
-    assert_eq!(
-        latched,
-        TaskbarRepaint::LIBRARY,
-        "a filter edit repaints the popup only"
-    );
-}
-
-#[test]
-fn a_filter_matching_nothing_shows_the_no_match_placeholder() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    press_key(&mut input, &mut bar, Key::Char('z'));
-    assert!(bar.library().rows().is_empty());
-    assert_eq!(bar.library().placeholder(), Some("No matching programs"));
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::Ignored,
-        "nothing to launch"
-    );
-}
-
-#[test]
-fn escape_clears_the_search_then_dismisses() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    press_key(&mut input, &mut bar, Key::Char('c'));
-    assert_eq!(bar.library().search_text(), "c");
-
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
-        TaskbarResponse::Ignored,
-        "the first Escape only clears the filter"
-    );
-    assert_eq!(bar.library().search_text(), "");
-    assert!(bar.library().is_open());
-    assert_eq!(bar.library().rows().len(), 5, "the full list is back");
-
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
-        TaskbarResponse::LibraryDismissed
-    );
-    assert!(!bar.library().is_open());
-}
-
-#[test]
-fn arrows_move_the_cursor_and_wrap() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(bar.library().focus(), LibraryFocus::Rows);
-    assert_eq!(bar.library().current(), Some(0));
-
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(bar.library().current(), Some(1));
-
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Up));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Up));
-    assert_eq!(bar.library().current(), Some(4), "Up from the top wraps");
-
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(bar.library().current(), Some(0), "Down from the end wraps");
-
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
-    assert_eq!(bar.library().current(), Some(4));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Home));
-    assert_eq!(bar.library().current(), Some(0));
-}
-
-#[test]
-fn enter_activates_the_cursor_row() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    // Cursor to the Office folder header; Enter collapses it.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter));
-    assert_eq!(bar.library().rows().len(), 3);
-    assert_eq!(
-        bar.library().current(),
-        Some(0),
-        "the cursor stays on the folder it folded"
-    );
-
-    // Enter again expands; then walk to Chess and launch it.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter));
-    assert_eq!(bar.library().rows().len(), 5);
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
-    let response = press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter));
-    let TaskbarResponse::LibraryLaunch { entry } = response else {
-        panic!("Enter on an entry launches it, got {response:?}");
-    };
-    assert_eq!(entry.as_str(), "os.tairix.chess");
-}
-
-#[test]
-fn left_and_right_fold_climb_and_descend() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    // Cursor onto the Calc entry (row 1); Left climbs to its folder.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(bar.library().current(), Some(1));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Left));
-    assert_eq!(
-        bar.library().current(),
-        Some(0),
-        "Left climbs to the folder"
-    );
-
-    // Left on the expanded folder collapses it; Right expands it again;
-    // a second Right steps into its first entry.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Left));
-    assert!(matches!(
-        bar.library().rows()[0],
-        LibraryRow::Folder {
-            expanded: false,
-            ..
-        }
-    ));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
-    assert!(matches!(
-        bar.library().rows()[0],
-        LibraryRow::Folder { expanded: true, .. }
-    ));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
-    assert_eq!(bar.library().current(), Some(1), "Right steps to the child");
-}
-
-/// A search lists its matches flat, beneath no folder, so there is nothing
-/// to fold and nowhere to climb to.
-#[test]
-fn left_and_right_do_nothing_on_a_searchs_flat_matches() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    press_key(&mut input, &mut bar, Key::Char('c'));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Tab));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(bar.library().current(), Some(1), "on Chess, below Calc");
-
-    for key in [NamedKey::Left, NamedKey::Right] {
-        assert_eq!(
-            press_key(&mut input, &mut bar, Key::Named(key)),
-            TaskbarResponse::Ignored,
-            "{key:?} on a match"
-        );
-        assert_eq!(bar.library().current(), Some(1), "{key:?} moved the cursor");
-    }
-    assert_eq!(
-        bar.library().rows().len(),
-        2,
-        "the matches are as they were"
-    );
-}
-
-#[test]
-fn tab_cycles_focus_and_typing_returns_to_the_search() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    assert_eq!(bar.library().focus(), LibraryFocus::Search);
-
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Tab));
-    assert_eq!(bar.library().focus(), LibraryFocus::Rows);
-    assert_eq!(bar.library().current(), Some(0));
-
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Tab));
-    assert_eq!(bar.library().focus(), LibraryFocus::Search);
-
-    // From row focus, typing routes into the search (type-to-filter).
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Tab));
-    assert_eq!(bar.library().focus(), LibraryFocus::Rows);
-    press_key(&mut input, &mut bar, Key::Char('w'));
-    assert_eq!(bar.library().focus(), LibraryFocus::Search);
-    assert_eq!(bar.library().search_text(), "w");
-    let names: Vec<&str> = bar
-        .library()
-        .rows()
-        .iter()
-        .filter_map(|row| match row {
-            LibraryRow::Entry { name, .. } => Some(name.as_str()),
-            LibraryRow::Folder { .. } => None,
-        })
-        .collect();
-    assert_eq!(names, ["Write"]);
-}
-
-#[test]
-fn keyboard_navigation_keeps_the_cursor_visible() {
-    let mut bar = Taskbar::new(
-        TaskbarConfig::bottom_bar(1000, 300),
-        &Theme::dark().floating(),
-    );
-    let mut cat = Catalog::new();
-    for index in 0..30 {
-        cat.insert(entry(
-            &format!("app{index:02}"),
-            &format!("App {index:02}"),
-            LibraryCategory::Utilities,
-        ))
-        .expect("fits");
-    }
-    bar.library_mut().set_catalog(cat);
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let visible = bar.library_layout(Scale::ONE).visible_rows;
-    assert!(visible >= 2, "the fixture screen holds a few rows");
-
-    // Walk the cursor past the bottom of the viewport: the view follows.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    for _ in 0..visible {
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    }
-    let layout = bar.library_layout(Scale::ONE);
-    let cursor = bar.library().current().expect("cursor placed");
     assert!(
-        layout.rows.iter().any(|&(index, _)| index == cursor),
-        "the cursor row stays visible"
+        !latched.library.is_clean(),
+        "a filter edit repaints the popup"
     );
-
-    // PageDown / PageUp move by a viewport, clamped to the ends.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::PageDown));
-    let after_page = bar.library().current().expect("cursor placed");
-    assert!(after_page > cursor);
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Home));
-    assert_eq!(bar.library().current(), Some(0));
     assert_eq!(
-        bar.library_layout(Scale::ONE).rows[0].0,
-        0,
-        "view followed home"
+        TaskbarRepaint {
+            library: Repaint::clean(),
+            ..latched
+        },
+        TaskbarRepaint::NONE,
+        "and nothing else"
     );
 }
 
@@ -4587,7 +3758,7 @@ fn popup_opens_outward_on_every_edge() {
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
         let mut bar = Taskbar::new(config, &Theme::dark().floating());
-        bar.library_mut().set_catalog(office_and_games());
+        bar.set_library_catalog(office_and_games());
         let mut input = TaskbarInput::new();
         open_library(&mut input, &mut bar);
 
@@ -4608,7 +3779,13 @@ fn popup_opens_outward_on_every_edge() {
 
 #[test]
 fn popup_scales_with_the_desktop_density() {
-    let mut bar = bottom_bar();
+    // A screen with room for the panel at both densities, so neither size is
+    // the room's rather than the panel's own.
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(4000, 3000),
+        &Theme::dark().floating(),
+    );
+    bar.set_library_catalog(office_and_games());
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
     let one = bar.library_layout(Scale::ONE);
@@ -4616,22 +3793,6 @@ fn popup_scales_with_the_desktop_density() {
     assert_eq!(two.panel.width, one.panel.width * 2);
     assert_eq!(two.search.height, one.search.height * 2);
     assert_eq!(two.corner_radius, one.corner_radius * 2);
-}
-
-#[test]
-fn popup_rows_hit_test_to_their_indices() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let layout = bar.library_layout(Scale::ONE);
-    for &(index, rect) in &layout.rows {
-        assert_eq!(layout.row_at(centre_of(rect)), Some(index));
-    }
-    assert_eq!(layout.row_at(Point::new(-5, -5)), None);
-    // Entry rows are indented beneath their folder header.
-    let folder = layout.rows[0].1;
-    let entry_rect = layout.rows[1].1;
-    assert!(entry_rect.left() > folder.left());
 }
 
 #[test]
@@ -5249,7 +4410,7 @@ fn the_library_button_reads_as_held_down_while_its_popup_is_open() {
     let theme = Theme::dark();
     let palette = theme.palette();
     let layout = bar.layout(Scale::ONE);
-    bar.open_library();
+    bar.open_library(NOW_NS, Scale::ONE);
     let surface = painted_bar(
         &mut TaskbarRenderer::new(test_icon_cache()),
         &bar,
@@ -5339,7 +4500,7 @@ fn bar_with_status_signals() -> Taskbar {
     show_network(&mut bar);
     let mut sound = crate::sound::tests::speakers(-600, false, true);
     sound.recording = true;
-    assert!(bar.set_sound(sound));
+    assert!(bar.set_sound(sound, Scale::ONE));
     bar
 }
 
@@ -5569,10 +4730,12 @@ fn painted_clock_bar(bar: &Taskbar) -> Surface {
 #[test]
 fn the_date_stands_beneath_the_time_on_a_bar_deep_enough_for_both() {
     let mut bar = bottom_bar();
-    bar.clock_mut()
-        .set_widest(alloc::vec![lines("22:58", "28/12/2088")]);
-    bar.clock_mut()
-        .set_reading(lines("14:05", "18/10/2026"), "18/10/2026 14:05 BST");
+    bar.set_clock_widest(alloc::vec![lines("22:58", "28/12/2088")]);
+    bar.set_clock_reading(
+        lines("14:05", "18/10/2026"),
+        "18/10/2026 14:05 BST",
+        Scale::ONE,
+    );
     let layout = bar.layout(Scale::ONE);
     let faces = ClockFaces::of(bar.theme(), Scale::ONE);
     assert!(
@@ -5607,10 +4770,12 @@ fn the_date_stands_beside_the_time_on_a_bar_too_thin_for_two_lines() {
         ..TaskbarConfig::bottom_bar(1000, 800)
     };
     let mut bar = Taskbar::new(config, &theme);
-    bar.clock_mut()
-        .set_widest(alloc::vec![lines("22:58", "28/12/2088")]);
-    bar.clock_mut()
-        .set_reading(lines("14:05", "18/10/2026"), "18/10/2026 14:05 BST");
+    bar.set_clock_widest(alloc::vec![lines("22:58", "28/12/2088")]);
+    bar.set_clock_reading(
+        lines("14:05", "18/10/2026"),
+        "18/10/2026 14:05 BST",
+        Scale::ONE,
+    );
     let layout = bar.layout(Scale::ONE);
     assert!(!faces.stacks(layout.clock.height));
     let pair = faces.time.text_width("14:05") + faces.gap + faces.date.text_width("18/10/2026");
@@ -5623,15 +4788,21 @@ fn the_date_stands_beside_the_time_on_a_bar_too_thin_for_two_lines() {
 #[test]
 fn the_clock_keeps_room_for_its_widest_reading_as_minutes_and_days_turn() {
     let mut bar = bottom_bar();
-    bar.clock_mut().set_widest(alloc::vec![
+    bar.set_clock_widest(alloc::vec![
         lines("10:58 AM", "12/28/2088"),
         lines("10:58 PM", "12/28/2088"),
     ]);
-    bar.clock_mut()
-        .set_reading(lines("9:05 AM", "1/8/2026"), "1/8/2026 9:05 AM EST");
+    bar.set_clock_reading(
+        lines("9:05 AM", "1/8/2026"),
+        "1/8/2026 9:05 AM EST",
+        Scale::ONE,
+    );
     let first = bar.layout(Scale::ONE).clock;
-    bar.clock_mut()
-        .set_reading(lines("11:59 PM", "12/31/2026"), "12/31/2026 11:59 PM EST");
+    bar.set_clock_reading(
+        lines("11:59 PM", "12/31/2026"),
+        "12/31/2026 11:59 PM EST",
+        Scale::ONE,
+    );
     assert_eq!(bar.layout(Scale::ONE).clock, first, "the clock holds still");
     let faces = ClockFaces::of(bar.theme(), Scale::ONE);
     assert!(first.width >= faces.time.text_width("11:59 PM"));
@@ -5648,8 +4819,11 @@ fn a_date_the_clock_cannot_hold_whole_leaves_the_time_alone() {
         ..TaskbarConfig::bottom_bar(1000, 800)
     };
     let mut bar = Taskbar::new(config, &theme);
-    bar.clock_mut()
-        .set_reading(lines("14:05", "18/10/2026"), "18/10/2026 14:05 BST");
+    bar.set_clock_reading(
+        lines("14:05", "18/10/2026"),
+        "18/10/2026 14:05 BST",
+        Scale::ONE,
+    );
     let layout = bar.layout(Scale::ONE);
     assert!(faces.time.text_width("14:05") <= layout.clock.width);
     assert!(faces.date.text_width("18/10/2026") > layout.clock.width);
@@ -5661,8 +4835,11 @@ fn a_date_the_clock_cannot_hold_whole_leaves_the_time_alone() {
 #[test]
 fn the_clock_menu_states_the_heading_the_caller_wrote() {
     let mut bar = bottom_bar();
-    bar.clock_mut()
-        .set_reading(lines("14:05", "18/10/2026"), "18/10/2026 14:05 BST");
+    bar.set_clock_reading(
+        lines("14:05", "18/10/2026"),
+        "18/10/2026 14:05 BST",
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let request = ask_clock_menu(&mut input, &mut bar);
     assert_eq!(offered_row(&request, 0).label(), "18/10/2026 14:05 BST");
@@ -6030,7 +5207,7 @@ fn the_launcher_button_draws_its_shipped_artwork() {
 fn the_account_capsule_draws_its_identity_disc_and_asks_for_no_class_artwork() {
     let mut bar = bottom_bar();
     assert!(
-        bar.set_account("ann"),
+        bar.set_account("ann", Scale::ONE),
         "naming the account moves the capsule"
     );
     let stand_in = Color::rgb(255, 0, 255);
@@ -6082,7 +5259,7 @@ fn capsule_icon_square(bar: &Taskbar, scale: Scale, theme: &Theme) -> u32 {
 #[test]
 fn the_identity_disc_is_circular() {
     let mut bar = bottom_bar();
-    let _ = bar.set_account("ann");
+    let _ = bar.set_account("ann", Scale::ONE);
     let theme = Theme::dark().floating();
     let disc = bar
         .tray()
@@ -6120,7 +5297,7 @@ fn the_identity_disc_is_circular() {
 #[test]
 fn the_identity_disc_keeps_a_clearance_inside_its_icon_square() {
     let mut bar = bottom_bar();
-    let _ = bar.set_account("ann");
+    let _ = bar.set_account("ann", Scale::ONE);
     let theme = Theme::dark().floating();
     for percent in [100, 200] {
         let scale = Scale::from_percent(percent).expect("a valid scale");
@@ -6190,7 +5367,7 @@ fn the_capsule_marks_an_account_as_the_login_screen_did() {
     let colours = (Color::from(palette.accent), Color::from(palette.on_accent));
 
     for shown in ["System Administrator", "Ada Lovelace", "ann", ""] {
-        let _ = bar.set_account(shown);
+        let _ = bar.set_account(shown, Scale::ONE);
         // What the login screen would draw for the same account, at the side
         // the bar draws in: the tile and the capsule are one generator.
         let expected = monogram_disc(
@@ -6229,12 +5406,15 @@ fn an_unnamed_account_still_has_a_disc() {
 #[test]
 fn re_naming_the_same_account_latches_nothing() {
     let mut bar = bottom_bar();
-    assert!(bar.set_account("ann"));
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
-    assert!(!bar.set_account("ann"));
+    assert!(bar.set_account("ann", Scale::ONE));
+    assert_eq!(
+        bar.take_repaint(),
+        bar_owes(&bar, Scale::ONE, &[bar.layout(Scale::ONE).switchboard])
+    );
+    assert!(!bar.set_account("ann", Scale::ONE));
     assert!(!bar.take_repaint().any());
     assert!(
-        !bar.set_account("Anna"),
+        !bar.set_account("Anna", Scale::ONE),
         "a different name with the same mark draws the same disc"
     );
 }
@@ -6327,100 +5507,12 @@ fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
 #[test]
 fn render_library_is_none_while_closed() {
     let bar = bottom_bar();
-    assert!(painted_library(&TaskbarRenderer::new(test_icon_cache()), &bar, Scale::ONE).is_none());
-}
-
-#[test]
-fn open_popup_renders_panel_rows_and_search() {
-    let theme = Theme::dark();
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    let layout = bar.library_layout(Scale::ONE);
-    let surface = painted_library(&TaskbarRenderer::new(test_icon_cache()), &bar, Scale::ONE)
-        .expect("popup renders");
-    assert_eq!(surface.width(), layout.panel.width);
-    assert_eq!(surface.height(), layout.panel.height);
-
-    // The panel's content region is the floating chrome ground…
-    let viewport_gap = Point::new(layout.viewport.left(), layout.viewport.bottom() - 1);
-    let ground = floating_ground(&theme, theme.palette().surface);
-    assert_eq!(
-        pixel_at(&surface, layout.panel, viewport_gap.x, viewport_gap.y),
-        ground
-    );
-    // …the first folder row inks its label over that same ground, because a
-    // resting row is the surface it sits in rather than a plate on it…
-    assert!(region_has_role_ink(
-        &surface,
-        layout.panel,
-        layout.rows[0].1,
-        theme.palette().on_surface,
-        ground,
-    ));
-    // …and the search row is a page raised on it: the ground a field is
-    // written on, a step more solid so it reads as a field rather than
-    // dissolving into the panel, while the backdrop still shows through.
-    let field = floating_plate(&theme, theme.palette().document);
-    assert!(region_has_pixel(
-        &surface,
-        layout.panel,
-        layout.search,
-        field
-    ));
-    assert!(
-        field.a > ground.a && field.a < 255,
-        "the field is a step more solid than its panel, not opaque"
-    );
-}
-
-#[test]
-fn hovered_and_current_rows_show_their_states() {
-    let theme = Theme::dark();
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    // Hover the second row with the pointer.
-    let hover_rect = bar.library_layout(Scale::ONE).rows[1].1;
-    let hover_centre = centre_of(hover_rect);
-    input.handle(
-        InputEvent::PointerMoved { to: hover_centre },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert_eq!(bar.library().hover(), Some(1));
-
-    // Put the keyboard cursor on the first row.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(bar.library().current(), Some(0));
-
-    let layout = bar.library_layout(Scale::ONE);
-    let surface = painted_library(&TaskbarRenderer::new(test_icon_cache()), &bar, Scale::ONE)
-        .expect("popup renders");
-
-    // The hovered row takes the pointer wash — the shared hover fill, not the
-    // raised fill a *selected* row lifts to, so the pointer never imitates
-    // selection. A row is part of the panel rather than a plate on it, so the
-    // wash carries the panel's own weight and the desktop still reads through.
-    let wash = floating_ground(&theme, theme.palette().surface_hover);
-    assert!(region_has_pixel(
-        &surface,
-        layout.panel,
-        layout.rows[1].1,
-        wash
-    ));
-    assert!(wash.a < 255, "a solid highlight is a hole in the glass");
-    // The current (selected) row draws the accent selection rail in its
-    // leading gutter.
-    assert!(region_has_pixel(
-        &surface,
-        layout.panel,
-        layout.rows[0].1,
-        role(theme.palette().accent)
-    ));
+    assert!(painted_library(
+        &mut TaskbarRenderer::new(test_icon_cache()),
+        &bar,
+        Scale::ONE
+    )
+    .is_none());
 }
 
 #[test]
@@ -6430,13 +5522,17 @@ fn empty_library_renders_the_placeholder_ink() {
         TaskbarConfig::bottom_bar(1000, 800),
         &Theme::dark().floating(),
     );
-    bar.library_mut().set_catalog(Catalog::new());
+    bar.set_library_catalog(Catalog::new());
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
 
     let layout = bar.library_layout(Scale::ONE);
-    let surface = painted_library(&TaskbarRenderer::new(test_icon_cache()), &bar, Scale::ONE)
-        .expect("popup renders");
+    let surface = painted_library(
+        &mut TaskbarRenderer::new(test_icon_cache()),
+        &bar,
+        Scale::ONE,
+    )
+    .expect("popup renders");
     assert!(region_has_role_ink(
         &surface,
         layout.panel,
@@ -6462,14 +5558,18 @@ fn overflowing_popup_paints_its_scrollbar() {
         ))
         .expect("fits");
     }
-    bar.library_mut().set_catalog(cat);
+    bar.set_library_catalog(cat);
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
 
     let layout = bar.library_layout(Scale::ONE);
     let scrollbar = layout.scrollbar.expect("an overflow shows a scrollbar");
-    let surface = painted_library(&TaskbarRenderer::new(test_icon_cache()), &bar, Scale::ONE)
-        .expect("popup renders");
+    let surface = painted_library(
+        &mut TaskbarRenderer::new(test_icon_cache()),
+        &bar,
+        Scale::ONE,
+    )
+    .expect("popup renders");
     // The channel is recessed into the popup rather than raised on it, so it
     // carries the panel's own weight: an overflowing library shows a bar, not
     // an opaque strip down its frosted edge.
@@ -6487,274 +5587,20 @@ fn overflowing_popup_paints_its_scrollbar() {
 }
 
 #[test]
-fn popup_renders_under_both_themes_and_high_contrast() {
-    for theme in [
-        Theme::dark(),
-        Theme::light(),
-        dark_with_contrast(Contrast::High),
-    ] {
-        let mut bar = Taskbar::new(
-            TaskbarConfig::bottom_bar(1000, 800),
-            &theme.clone().floating(),
-        );
-        bar.library_mut().set_catalog(office_and_games());
-        let mut input = TaskbarInput::new();
-        open_library(&mut input, &mut bar);
-
-        let layout = bar.library_layout(Scale::ONE);
-        let surface = painted_library(&TaskbarRenderer::new(test_icon_cache()), &bar, Scale::ONE)
-            .expect("popup renders");
-        assert_eq!(surface.width(), layout.panel.width);
-        assert!(
-            region_has_role_ink(
-                &surface,
-                layout.panel,
-                layout.rows[0].1,
-                theme.palette().on_surface,
-                floating_ground(&theme, theme.palette().surface),
-            ),
-            "{} paints its rows",
-            theme.name()
-        );
-    }
-}
-
-#[test]
 fn popup_repaints_after_a_theme_switch() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
-    let renderer = TaskbarRenderer::new(test_icon_cache());
-    let dark = painted_library(&renderer, &bar, Scale::ONE).expect("popup renders");
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let dark = painted_library(&mut renderer, &bar, Scale::ONE).expect("popup renders");
     bar.apply_theme(&Theme::light().floating());
-    let light = painted_library(&renderer, &bar, Scale::ONE).expect("popup renders");
+    let light = painted_library(&mut renderer, &bar, Scale::ONE).expect("popup renders");
     let layout = bar.library_layout(Scale::ONE);
     let inside = Point::new(layout.viewport.left(), layout.viewport.bottom() - 1);
     assert_ne!(
         pixel_at(&dark, layout.panel, inside.x, inside.y),
         pixel_at(&light, layout.panel, inside.x, inside.y)
     );
-}
-
-/// An open popup over `count` Utilities entries on a short screen, so the
-/// list overflows its viewport and only some rows are shown.
-fn overflowing_library(count: usize) -> Taskbar {
-    let mut bar = Taskbar::new(
-        TaskbarConfig::bottom_bar(1000, 300),
-        &Theme::dark().floating(),
-    );
-    let mut cat = Catalog::new();
-    for index in 0..count {
-        cat.insert(entry(
-            &format!("app{index:02}"),
-            &format!("App {index:02}"),
-            LibraryCategory::Utilities,
-        ))
-        .expect("fits");
-    }
-    bar.library_mut().set_catalog(cat);
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    bar
-}
-
-/// The rows the popup's viewport currently shows that are launchable
-/// entries — exactly the rows that may want owner-supplied artwork.
-fn shown_entry_rows(bar: &Taskbar) -> Vec<usize> {
-    bar.library_layout(Scale::ONE)
-        .rows
-        .iter()
-        .filter(|&&(index, _)| {
-            matches!(
-                bar.library().rows().get(index),
-                Some(LibraryRow::Entry { .. })
-            )
-        })
-        .map(|&(index, _)| index)
-        .collect()
-}
-
-/// The rows the popup asks the owner to resolve artwork for.
-fn requested_rows(bar: &Taskbar) -> Vec<usize> {
-    bar.library()
-        .visible_icon_requests(&bar.library_layout(Scale::ONE), Scale::ONE, &Theme::dark())
-        .iter()
-        .map(|req| req.row)
-        .collect()
-}
-
-#[test]
-fn the_popup_asks_for_artwork_only_for_the_entry_rows_it_shows() {
-    let bar = overflowing_library(30);
-    let layout = bar.library_layout(Scale::ONE);
-    assert!(
-        layout.visible_rows < bar.library().rows().len(),
-        "the fixture overflows the viewport"
-    );
-
-    let requests = bar
-        .library()
-        .visible_icon_requests(&layout, Scale::ONE, &Theme::dark());
-    let shown = shown_entry_rows(&bar);
-    assert!(!shown.is_empty(), "the fixture shows entry rows");
-    assert_eq!(
-        requests.iter().map(|req| req.row).collect::<Vec<_>>(),
-        shown,
-        "one request per shown entry row, and none for a row off screen"
-    );
-    assert!(
-        requests.iter().all(|req| req.side > 0),
-        "every request names the pixel side its row draws at"
-    );
-    // The request carries the entry the row launches, so the owner resolves
-    // the right bundle's icon.
-    for req in &requests {
-        let Some(LibraryRow::Entry { id, .. }) = bar.library().rows().get(req.row) else {
-            panic!("a request must name an entry row");
-        };
-        assert_eq!(&req.entry, id);
-    }
-}
-
-#[test]
-fn scrolling_the_popup_asks_only_for_the_newly_shown_rows() {
-    let mut bar = overflowing_library(30);
-    let before = requested_rows(&bar);
-
-    let mut input = TaskbarInput::new();
-    input.handle(
-        InputEvent::PointerScrolled {
-            dx: 0,
-            dy: SCROLL_UNITS_PER_DETENT,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-
-    let after = requested_rows(&bar);
-    assert_ne!(before, after, "scrolling changes which rows are shown");
-    assert_eq!(
-        after,
-        shown_entry_rows(&bar),
-        "after a scroll the requests still track the viewport exactly"
-    );
-    let newly: Vec<usize> = after
-        .iter()
-        .copied()
-        .filter(|row| !before.contains(row))
-        .collect();
-    let last = *before.last().expect("rows were requested");
-    assert!(!newly.is_empty(), "the scroll brought rows into view");
-    assert!(
-        newly.iter().all(|&row| row > last),
-        "the newly asked-for rows are the ones that came into view below"
-    );
-}
-
-#[test]
-fn a_rebuild_drops_stale_row_artwork() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let magenta = Color::rgb(255, 0, 255).premultiply();
-    let layout = bar.library_layout(Scale::ONE);
-    bar.set_library_row_artwork(1, &layout, Surface::filled(16, 16, magenta));
-    assert!(bar.library().row_artwork(1).is_some());
-
-    // Re-cataloguing re-indexes the rows, so artwork keyed to the old
-    // indices must not survive and draw the wrong application's icon.
-    bar.library_mut().set_catalog(office_and_games());
-    assert!(bar.library().row_artwork(1).is_none());
-
-    // An index past the end is ignored rather than panicking.
-    bar.set_library_row_artwork(9_999, &layout, Surface::filled(16, 16, magenta));
-    assert!(bar.library().row_artwork(9_999).is_none());
-}
-
-/// A fold or a filter changes which rows show, not what an entry looks like,
-/// so each picture follows its entry and none lands on another's row.
-#[test]
-fn a_fold_or_a_filter_keeps_each_shown_entrys_artwork() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let entry_at = |bar: &Taskbar, want: &str| {
-        bar.library()
-            .rows()
-            .iter()
-            .position(|row| matches!(row, LibraryRow::Entry { id, .. } if id.as_str().strip_prefix("os.tairix.") == Some(want)))
-    };
-    let chess_art =
-        Surface::filled(16, 16, Color::rgb(255, 0, 255).premultiply()).expect("a 16px surface");
-    let calc_art =
-        Surface::filled(16, 16, Color::rgb(0, 255, 255).premultiply()).expect("a 16px surface");
-    let layout = bar.library_layout(Scale::ONE);
-    let chess = entry_at(&bar, "chess").expect("chess is listed");
-    let calc = entry_at(&bar, "calc").expect("calc is listed");
-    bar.set_library_row_artwork(chess, &layout, Some(chess_art.clone()));
-    bar.set_library_row_artwork(calc, &layout, Some(calc_art.clone()));
-
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Tab));
-    assert_eq!(bar.library().current(), Some(0), "on the Office folder");
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Left));
-    assert_eq!(entry_at(&bar, "calc"), None, "Office is folded");
-    let chess = entry_at(&bar, "chess").expect("chess is still listed");
-    assert_eq!(bar.library().row_artwork(chess), Some(&chess_art));
-    for row in (0..bar.library().rows().len()).filter(|&row| row != chess) {
-        assert_eq!(bar.library().row_artwork(row), None, "row {row}");
-    }
-
-    press_key(&mut input, &mut bar, Key::Char('c'));
-    let chess = entry_at(&bar, "chess").expect("chess matches");
-    let calc = entry_at(&bar, "calc").expect("calc matches");
-    assert_eq!(bar.library().row_artwork(chess), Some(&chess_art));
-    assert_eq!(
-        bar.library().row_artwork(calc),
-        None,
-        "calc was not shown, so it waits for the session"
-    );
-}
-
-#[test]
-fn a_popup_row_draws_its_artwork_and_a_row_without_it_draws_the_glyph() {
-    let theme = Theme::dark();
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let magenta = Color::rgb(255, 0, 255).premultiply();
-    let (row, _) = visible_row_where(&bar, |row| matches!(row, LibraryRow::Entry { .. }))
-        .expect("an entry row is shown");
-    let layout = bar.library_layout(Scale::ONE);
-    bar.set_library_row_artwork(row, &layout, Surface::filled(16, 16, magenta));
-
-    let rect = layout
-        .rows
-        .iter()
-        .find(|&&(index, _)| index == row)
-        .map(|&(_, rect)| rect)
-        .expect("the row is laid out");
-    let surface = painted_library(&TaskbarRenderer::new(test_icon_cache()), &bar, Scale::ONE)
-        .expect("popup renders");
-    assert!(region_has_pixel(&surface, layout.panel, rect, magenta));
-
-    // Every other shown row still inks its built-in glyph, so a library
-    // with no resolved artwork is never a column of blank slots.
-    for &(index, other) in &layout.rows {
-        if index == row {
-            continue;
-        }
-        assert!(
-            region_has_role_ink(
-                &surface,
-                layout.panel,
-                other,
-                theme.palette().on_surface,
-                floating_ground(&theme, theme.palette().surface),
-            ),
-            "row {index} must draw without artwork"
-        );
-    }
 }
 
 // ---- notification popover -------------------------------------------
@@ -7318,21 +6164,22 @@ fn tray_feeds_latch_repaint_only_on_change() {
     let _ = bar.take_repaint();
     // The readout is collapsed throughout, so only the bar's capsule
     // latches — the readout is not being presented to need one.
-    bar.set_tray_summary(Some(tray_summary(1, 0, 100)));
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
-    bar.set_tray_summary(Some(tray_summary(1, 0, 100)));
+    let capsule = bar_owes(&bar, Scale::ONE, &[bar.layout(Scale::ONE).switchboard]);
+    bar.set_tray_summary(Some(tray_summary(1, 0, 100)), Scale::ONE);
+    assert_eq!(bar.take_repaint(), capsule);
+    bar.set_tray_summary(Some(tray_summary(1, 0, 100)), Scale::ONE);
     assert!(
         !bar.take_repaint().any(),
         "an identical summary changes nothing"
     );
-    bar.set_tray_unresponsive(2);
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
-    bar.set_tray_unresponsive(2);
+    bar.set_tray_unresponsive(2, Scale::ONE);
+    assert_eq!(bar.take_repaint(), capsule);
+    bar.set_tray_unresponsive(2, Scale::ONE);
     assert!(!bar.take_repaint().any());
-    bar.set_tray_summary(None);
+    bar.set_tray_summary(None, Scale::ONE);
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::BAR,
+        capsule,
         "service loss reverts the capsule"
     );
 }
@@ -7345,11 +6192,11 @@ fn tray_feeds_latch_repaint_only_on_change() {
 #[test]
 fn a_calm_reading_that_moves_only_the_value_line_leaves_the_bar_alone() {
     let mut bar = bottom_bar();
-    bar.set_tray_summary(Some(tray_summary(0, 0, 100)));
+    bar.set_tray_summary(Some(tray_summary(0, 0, 100)), Scale::ONE);
     let _ = bar.take_repaint();
 
     assert!(
-        !bar.set_tray_summary(Some(tray_summary(0, 0, 400))),
+        !bar.set_tray_summary(Some(tray_summary(0, 0, 400)), Scale::ONE),
         "a figure the collapsed capsule never draws is not a repaint"
     );
     assert!(!bar.take_repaint().any());
@@ -7359,7 +6206,7 @@ fn a_calm_reading_that_moves_only_the_value_line_leaves_the_bar_alone() {
     let mut input = TaskbarInput::new();
     hover_switchboard(&mut input, &mut bar);
     let _ = bar.take_repaint();
-    assert!(bar.set_tray_summary(Some(tray_summary(0, 0, 700))));
+    assert!(bar.set_tray_summary(Some(tray_summary(0, 0, 700)), Scale::ONE));
     assert_eq!(
         bar.take_repaint(),
         TaskbarRepaint::READOUT,
@@ -7374,15 +6221,18 @@ fn tray_update_keeps_the_hovered_readout_open() {
     hover_switchboard(&mut input, &mut bar);
     assert!(bar.tray().is_expanded(), "hover expands the readout");
     let _ = bar.take_repaint();
-    bar.set_tray_summary(Some(tray_summary(4, 0, 100)));
+    bar.set_tray_summary(Some(tray_summary(4, 0, 100)), Scale::ONE);
     assert!(
         bar.tray().is_expanded(),
         "a live update never collapses the readout"
     );
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::BAR | TaskbarRepaint::READOUT,
-        "the readout is open, so a tray update repaints it alongside the bar"
+        TaskbarRepaint {
+            readout: Repaint::Whole,
+            ..bar_owes(&bar, Scale::ONE, &[bar.layout(Scale::ONE).switchboard])
+        },
+        "the readout is open, so a tray update repaints it alongside the capsule"
     );
 }
 
@@ -7778,7 +6628,7 @@ fn pressure_paints_the_dominant_kind_rail() {
     let mut bar = bottom_bar();
     let mut summary = tray_summary(0, 0, 0);
     summary.pressure = Some(tray_pressure(TrayPressureKind::Memory, 700, 1));
-    bar.set_tray_summary(Some(summary));
+    bar.set_tray_summary(Some(summary), Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     let surface = painted_bar(
         &mut TaskbarRenderer::new(test_icon_cache()),
@@ -7799,7 +6649,7 @@ fn pressure_paints_the_dominant_kind_rail() {
 fn jobs_paint_the_heat_seam_along_the_slot_bottom() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
-    bar.set_tray_summary(Some(tray_summary(2, 0, 0)));
+    bar.set_tray_summary(Some(tray_summary(2, 0, 0)), Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     let surface = painted_bar(
         &mut TaskbarRenderer::new(test_icon_cache()),
@@ -7825,24 +6675,24 @@ fn badge_tones_follow_the_dominant_state() {
     let theme = Theme::dark();
     let hung = {
         let mut bar = bottom_bar();
-        bar.set_tray_unresponsive(1);
+        bar.set_tray_unresponsive(1, Scale::ONE);
         bar
     };
     let pressured = {
         let mut bar = bottom_bar();
         let mut summary = tray_summary(0, 0, 0);
         summary.pressure = Some(tray_pressure(TrayPressureKind::Disk, 500, 3));
-        bar.set_tray_summary(Some(summary));
+        bar.set_tray_summary(Some(summary), Scale::ONE);
         bar
     };
     let working = {
         let mut bar = bottom_bar();
-        bar.set_tray_summary(Some(tray_summary(5, 0, 0)));
+        bar.set_tray_summary(Some(tray_summary(5, 0, 0)), Scale::ONE);
         bar
     };
     let recoverable = {
         let mut bar = bottom_bar();
-        bar.set_tray_summary(Some(tray_summary(0, 3, 0)));
+        bar.set_tray_summary(Some(tray_summary(0, 3, 0)), Scale::ONE);
         bar
     };
     for (bar, want, what) in [
@@ -7895,7 +6745,7 @@ fn capsule_renders_across_themes_and_high_contrast() {
         );
         let mut summary = tray_summary(2, 0, 400);
         summary.pressure = Some(tray_pressure(TrayPressureKind::Memory, 600, 2));
-        bar.set_tray_summary(Some(summary));
+        bar.set_tray_summary(Some(summary), Scale::ONE);
         let layout = bar.layout(Scale::ONE);
         let surface = painted_bar(
             &mut TaskbarRenderer::new(test_icon_cache()),
@@ -7945,7 +6795,7 @@ fn every_surface_the_bar_presents_keeps_to_its_own_corners() {
             "Disk nearly full",
             "",
         ));
-        bar.set_tray_summary(Some(tray_summary(0, 0, 300)));
+        bar.set_tray_summary(Some(tray_summary(0, 0, 300)), Scale::ONE);
         let mut input = TaskbarInput::new();
         let mut renderer = TaskbarRenderer::new(test_icon_cache());
         let radius = bar.layout(Scale::ONE).corner_radius;
@@ -7970,7 +6820,7 @@ fn every_surface_the_bar_presents_keeps_to_its_own_corners() {
         open_library(&mut input, &mut bar);
         assert_bar(&mut renderer, &bar, "with the leading launcher held down");
         let library = bar.library_layout(Scale::ONE);
-        let surface = painted_library(&renderer, &bar, Scale::ONE).expect("library");
+        let surface = painted_library(&mut renderer, &bar, Scale::ONE).expect("library");
         assert_eq!(beyond_round_rect(&surface, library.corner_radius), None);
 
         let notes = bar.notifications_layout(Scale::ONE).expect("raised");
@@ -7996,7 +6846,7 @@ fn readout_renders_the_state_and_value_lines() {
     let mut bar = bottom_bar();
     let mut summary = tray_summary(0, 0, 300);
     summary.top_task = Some(tray_task("editor", 250));
-    bar.set_tray_summary(Some(summary));
+    bar.set_tray_summary(Some(summary), Scale::ONE);
     let mut input = TaskbarInput::new();
     hover_switchboard(&mut input, &mut bar);
 
@@ -8024,7 +6874,7 @@ fn the_network_readout_states_its_facts_on_the_raised_ground_in_either_theme() {
         );
         let renderer = TaskbarRenderer::new(test_icon_cache());
         assert!(painted_network_readout(&renderer, &bar, Scale::ONE).is_none());
-        assert!(bar.set_network(Some(crate::network::tests::connected())));
+        assert!(bar.set_network(Some(crate::network::tests::connected()), Scale::ONE));
         let mut input = TaskbarInput::new();
         let signal = centre_of(bar.layout(Scale::ONE).notifications[0]);
         input.handle(
@@ -8059,7 +6909,7 @@ fn the_network_readout_states_its_facts_on_the_raised_ground_in_either_theme() {
 fn the_readout_action_is_a_plate_raised_on_the_floating_ground() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
-    bar.set_tray_summary(Some(tray_summary(0, 0, 300)));
+    bar.set_tray_summary(Some(tray_summary(0, 0, 300)), Scale::ONE);
     let mut input = TaskbarInput::new();
     hover_switchboard(&mut input, &mut bar);
 
@@ -8093,7 +6943,7 @@ fn the_readout_action_is_a_plate_raised_on_the_floating_ground() {
 #[test]
 fn every_popup_the_bar_opens_grounds_itself_in_the_floating_chrome() {
     let theme = Theme::dark();
-    let renderer = TaskbarRenderer::new(test_icon_cache());
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     // Each popup grounds in the colour role it wears solid: a `Panel` its own
     // surface, a menu and the readout the raised one. What is under test is
     // that all four let the backdrop through at the theme's one weight.
@@ -8113,7 +6963,7 @@ fn every_popup_the_bar_opens_grounds_itself_in_the_floating_chrome() {
     let library = bar.library_layout(Scale::ONE);
     grounded(
         "library",
-        &painted_library(&renderer, &bar, Scale::ONE).expect("renders"),
+        &painted_library(&mut renderer, &bar, Scale::ONE).expect("renders"),
         library.panel,
         library.viewport,
         theme.palette().surface,
@@ -8137,7 +6987,7 @@ fn every_popup_the_bar_opens_grounds_itself_in_the_floating_chrome() {
     );
 
     let mut bar = bottom_bar();
-    bar.set_tray_summary(Some(tray_summary(0, 0, 300)));
+    bar.set_tray_summary(Some(tray_summary(0, 0, 300)), Scale::ONE);
     let mut input = TaskbarInput::new();
     hover_switchboard(&mut input, &mut bar);
     let readout = bar.tray_readout_layout(Scale::ONE).expect("expanded");
@@ -8205,6 +7055,53 @@ fn a_bar_repaint_scoped_to_a_hovered_control_lands_what_a_whole_paint_lands() {
                     scoped.get(x, y),
                     whole.get(x, y),
                     "{target:?} ({x}, {y}): a scoped repaint is the pixel a whole paint laid"
+                );
+            }
+        }
+    }
+}
+
+/// The same claim for a change to what a control shows: the clock turning a
+/// minute, the capsule taking a new reading, a status signal changing. Each
+/// owes its own control's rectangle, and painting only that over the previous
+/// frame lands the bar a whole paint lands.
+#[test]
+fn a_bar_repaint_scoped_to_a_changed_control_lands_what_a_whole_paint_lands() {
+    type Change = fn(&mut Taskbar);
+    let scale = Scale::ONE;
+    let changes: [(&str, Change); 3] = [
+        ("clock", |bar| show_time(bar, "12:35")),
+        ("capsule", |bar| {
+            let _ = bar.set_tray_summary(Some(tray_summary(4, 0, 100)), Scale::ONE);
+        }),
+        ("signal", |bar| {
+            let _ = bar.set_sound(crate::sound::tests::speakers(-600, true, false), Scale::ONE);
+        }),
+    ];
+    for (name, change) in changes {
+        let mut bar = bottom_bar();
+        show_time(&mut bar, "12:34");
+        let _ = bar.set_sound(crate::sound::tests::speakers(-600, false, false), scale);
+        let mut renderer = TaskbarRenderer::new(test_icon_cache());
+        let mut scoped = painted_bar(&mut renderer, &bar, scale, &mut NoArtwork).expect("paints");
+        let _ = bar.take_repaint();
+
+        change(&mut bar);
+        let owed = bar.take_repaint();
+        let whole = painted_bar(&mut renderer, &bar, scale, &mut NoArtwork).expect("paints");
+        let Repaint::Parts(parts) = owed.bar else {
+            panic!("{name}: a control's change owes rectangles, never the whole bar");
+        };
+        assert!(!parts.is_empty(), "{name}: and it owes at least one");
+        renderer.paint(&bar, scale, &mut NoArtwork, &mut scoped, parts.rects());
+
+        let layout = bar.layout(scale);
+        for y in 0..layout.bar.height {
+            for x in 0..layout.bar.width {
+                assert_eq!(
+                    scoped.get(x, y),
+                    whole.get(x, y),
+                    "{name} ({x}, {y}): a scoped repaint is the pixel a whole paint laid"
                 );
             }
         }
@@ -8342,17 +7239,6 @@ fn taskbar_repaint_bit_or_composes_without_losing_either_side() {
 
 // ---- repaint latch: sub-model accessors -------------------------------
 
-#[test]
-fn tasks_mut_latches_the_bar() {
-    let mut bar = bottom_bar();
-    bar.tasks_mut().add(TaskId(1), "Editor");
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::BAR,
-        "task slots draw on the bar and nowhere else"
-    );
-}
-
 /// The reported defect: the embedder fires the popup's "seen" witness after
 /// every published frame, and firing it through the latching borrow marked
 /// the whole bar and the whole popup dirty each time — so the next frame
@@ -8365,6 +7251,7 @@ fn announcing_a_showing_latches_nothing_to_repaint() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
+    bar.advance_library(NOW_NS + SETTLED_NS, Scale::ONE);
     let _ = bar.take_repaint();
 
     let mut announced = false;
@@ -8384,44 +7271,130 @@ fn announcing_a_showing_latches_nothing_to_repaint() {
     );
 }
 
+/// A minute turning redraws the clock and nothing beside it: the clock keeps
+/// room for its widest reading, so no other control moves.
 #[test]
-fn library_mut_latches_the_popup_and_the_bar() {
+fn a_new_reading_owes_the_clock_alone() {
     let mut bar = bottom_bar();
-    bar.library_mut().set_catalog(office_and_games());
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR,
-        "the same borrow can also open or close the popup, which redraws the Library button"
-    );
-}
+    show_time(&mut bar, "12:34");
+    let clock = bar.layout(Scale::ONE).clock;
+    assert_eq!(bar.take_repaint(), bar_owes(&bar, Scale::ONE, &[clock]));
 
-#[test]
-fn clock_mut_latches_the_bar() {
-    let mut bar = bottom_bar();
     show_time(&mut bar, "12:34");
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::BAR,
-        "the clock draws on the bar and nowhere else"
+        TaskbarRepaint::NONE,
+        "the reading already shown"
+    );
+
+    let lines = bar.clock().lines().clone();
+    bar.set_clock_reading(lines, "a heading only the menu draws", Scale::ONE);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
+}
+
+/// The room the clock keeps is a length along the bar, so a change to it
+/// re-lays every control.
+#[test]
+fn a_new_room_for_the_clock_owes_the_whole_bar() {
+    let mut bar = bottom_bar();
+    let lines = |time: &str| ClockLines {
+        time: String::from(time),
+        date: String::new(),
+    };
+    bar.set_clock_widest(alloc::vec![lines("10:58 PM")]);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
+    bar.set_clock_widest(alloc::vec![lines("10:58 PM")]);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
+}
+
+/// No surface draws the task list, so a window opened, focused, minimised or
+/// closed repaints nothing of the bar's own; its slot moves through the strip.
+#[test]
+fn the_task_list_draws_on_no_surface() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(7), "Editor");
+    bar.tasks_mut().set_focused(Some(TaskId(7)));
+    bar.tasks_mut().minimise(TaskId(7));
+    bar.tasks_mut().remove(TaskId(7));
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
+}
+
+/// A reading that changes the capsule's look owes its own slot, never the
+/// strip it sits at the end of; so does a new account's mark on it.
+#[test]
+fn a_reading_owes_the_capsule_alone() {
+    let mut bar = bottom_bar();
+    let capsule = bar.layout(Scale::ONE).switchboard;
+    assert!(bar.set_tray_summary(Some(tray_summary(4, 0, 100)), Scale::ONE));
+    assert_eq!(bar.take_repaint(), bar_owes(&bar, Scale::ONE, &[capsule]));
+
+    assert!(bar.set_account("ann", Scale::ONE));
+    assert_eq!(bar.take_repaint(), bar_owes(&bar, Scale::ONE, &[capsule]));
+}
+
+/// A status signal that changes owes its own slot; one more or fewer re-lays
+/// the bar.
+#[test]
+fn a_changed_signal_owes_its_slot_and_a_new_one_the_bar() {
+    let mut bar = bottom_bar();
+    assert!(bar.set_network(Some(crate::network::tests::connected()), Scale::ONE));
+    let _ = bar.take_repaint();
+    assert_eq!(bar.notifications().signal_count(), 1);
+
+    assert!(bar.set_sound(
+        crate::sound::tests::speakers(-600, false, false),
+        Scale::ONE
+    ));
+    assert_eq!(
+        bar.take_repaint().bar,
+        Repaint::Whole,
+        "a signal added re-lays the bar"
+    );
+
+    assert!(bar.set_sound(crate::sound::tests::speakers(-600, true, false), Scale::ONE));
+    let layout = bar.layout(Scale::ONE);
+    let volume = layout.notifications[1];
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint {
+            sound: Repaint::Whole,
+            ..bar_owes(&bar, Scale::ONE, &[volume])
+        },
+        "muting changes the volume signal's slot and nothing else on the bar"
     );
 }
 
+/// A transient notification is shown in the popover; the bar draws only the
+/// status signals, so raising one repaints none of it.
 #[test]
-fn handing_out_a_mutable_sub_model_latches_even_when_nothing_is_changed() {
+fn a_notification_owes_the_popover_and_nothing_on_the_bar() {
     let mut bar = bottom_bar();
+    let _ = bar
+        .raise_notification(note(producer(3), 1, NotifySeverity::Info, "Saved"))
+        .expect("raised");
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NOTIFICATIONS);
+}
 
-    let _ = bar.tasks_mut();
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
+/// The launcher is handed its inputs by value and compares them, so the same
+/// catalog, facts or shelf handed again — the session re-reads them on every
+/// open — latches nothing, and only a real change latches the launcher alone.
+#[test]
+fn handing_the_launcher_what_it_already_has_latches_nothing() {
+    let mut bar = bottom_bar();
+    bar.set_library_catalog(office_and_games());
+    bar.set_library_facts(alloc::collections::BTreeMap::new());
+    bar.set_library_shelf(tairix_proglib::Shelf::default());
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
 
-    let _ = bar.clock_mut();
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
-
-    let _ = bar.library_mut();
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR,
-        "the bar cannot see into a borrow, so handing one out must assume a change"
+    bar.set_library_catalog(catalog(&[("write", "Write", LibraryCategory::Office)]));
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::LIBRARY);
+    let mut facts = alloc::collections::BTreeMap::new();
+    facts.insert(
+        EntryId::new("os.tairix.write").expect("id"),
+        identity("Write"),
     );
+    bar.set_library_facts(facts);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::LIBRARY);
 }
 
 #[test]
@@ -8446,36 +7419,6 @@ fn reading_through_an_immutable_accessor_latches_nothing() {
     );
 }
 
-#[test]
-fn routing_a_pointer_sample_over_the_open_popup_latches_only_what_changed() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let layout = bar.library_layout(Scale::ONE);
-    let row = centre_of(layout.rows[0].1);
-    input.handle(
-        InputEvent::PointerMoved { to: row },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    let _ = bar.take_repaint();
-
-    // The same row again: the router reaches into the popup, but nothing it
-    // draws changed, so the 1 ms popup render must not be asked for.
-    input.handle(
-        InputEvent::PointerMoved { to: row },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::NONE,
-        "routing borrows the popup mutably, but only a real change may latch it"
-    );
-}
-
 // ---- the system quick-actions menu ------------------------------------
 
 /// A taskbar whose catalog holds the terminal bundle the *Task Shell* row
@@ -8492,7 +7435,7 @@ fn bar_with_task_shell() -> Taskbar {
     catalog
         .insert(entry("settings", "Settings", LibraryCategory::SystemTools))
         .expect("fits");
-    bar.library_mut().set_catalog(catalog);
+    bar.set_library_catalog(catalog);
     let _ = bar.take_repaint();
     bar
 }
@@ -8540,6 +7483,8 @@ fn chosen_at(bar: &mut Taskbar, request: &MenuRequest, index: usize) -> Option<T
     bar.menu_chosen(
         &request.subject,
         AppMenuItemId::for_index(index).expect("a numbered row"),
+        NOW_NS,
+        Scale::ONE,
     )
 }
 
@@ -8583,7 +7528,7 @@ fn the_network_menus_settings_row_follows_the_component() {
     for installed in [false, true] {
         let mut bar = bottom_bar();
         bar.set_settings_installed(installed);
-        assert!(bar.set_network(Some(crate::network::tests::connected())));
+        assert!(bar.set_network(Some(crate::network::tests::connected()), Scale::ONE));
         let mut input = TaskbarInput::new();
         let signal = centre_of(bar.layout(Scale::ONE).notifications[0]);
         let request = ask_menu(&mut input, &mut bar, signal).expect("the signal asks for its menu");
@@ -8602,7 +7547,7 @@ fn the_network_menus_settings_row_follows_the_component() {
 #[test]
 fn the_row_table_states_its_labels_groups_and_roles() {
     let mut bar = bar_with_task_shell();
-    bar.set_tray_summary(Some(power_capable_summary()));
+    bar.set_tray_summary(Some(power_capable_summary()), Scale::ONE);
     let mut input = TaskbarInput::new();
     let request = ask_system_menu(&mut input, &mut bar);
 
@@ -8709,7 +7654,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
     );
 
     let mut bar = bar_with_task_shell();
-    bar.set_tray_summary(Some(power_capable_summary()));
+    bar.set_tray_summary(Some(power_capable_summary()), Scale::ONE);
     bar.set_elevation_available(true);
     bar.set_switch_user_available(true);
     bar.set_settings_installed(true);
@@ -8734,7 +7679,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
 fn an_unpermitted_power_row_is_denied_with_the_authority_mark_and_a_reason() {
     // The service published, and said it cannot power the machine.
     let mut bar = bar_with_task_shell();
-    bar.set_tray_summary(Some(tray_summary(0, 0, 100)));
+    bar.set_tray_summary(Some(tray_summary(0, 0, 100)), Scale::ONE);
     let mut input = TaskbarInput::new();
     let request = ask_system_menu(&mut input, &mut bar);
 
@@ -8781,12 +7726,12 @@ fn the_power_rows_are_denied_when_no_authority_has_been_published() {
 
     // A summary that arrives claiming the authority permits the rows, and a
     // service that then dies withdraws them again.
-    bar.set_tray_summary(Some(power_capable_summary()));
+    bar.set_tray_summary(Some(power_capable_summary()), Scale::ONE);
     let request = ask_system_menu(&mut input, &mut bar);
     let restart = system_row(SystemAction::Restart);
     assert!(offered_row(&request, restart).state().is_actionable());
 
-    bar.set_tray_summary(None);
+    bar.set_tray_summary(None, Scale::ONE);
     let request = ask_system_menu(&mut input, &mut bar);
     assert!(!offered_row(&request, restart).state().is_actionable());
 }
@@ -9121,40 +8066,6 @@ fn artwork_arriving_for_one_slot_repaints_that_slot_alone() {
     );
 }
 
-/// A launcher row's picture owes that row, and re-setting the picture it
-/// already holds owes nothing — the session re-resolves every shown row before
-/// each paint, so a latch that did not compare would repaint the popup for
-/// ever.
-#[test]
-fn artwork_arriving_for_one_library_row_repaints_that_row_alone() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-    let layout = bar.library_layout(Scale::ONE);
-    let (row, rect) = visible_row_where(&bar, |row| matches!(row, LibraryRow::Entry { .. }))
-        .expect("an entry row is shown");
-    let _ = bar.take_repaint();
-
-    let magenta = Color::rgb(255, 0, 255).premultiply();
-    let picture = Surface::filled(16, 16, magenta).expect("a picture");
-    bar.set_library_row_artwork(row, &layout, Some(picture.clone()));
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint {
-            library: owes(layout.panel, &[rect]),
-            ..TaskbarRepaint::NONE
-        },
-        "one row's picture is one row's pixels"
-    );
-
-    bar.set_library_row_artwork(row, &layout, Some(picture));
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::NONE,
-        "re-resolving a row to the picture it already holds changes nothing"
-    );
-}
-
 /// A batch naming a class master the bar draws owes the controls that fall
 /// back to it, and one naming a class nothing on the bar draws owes nothing.
 #[test]
@@ -9329,7 +8240,7 @@ fn a_held_library_bar_arrow_repeats_when_the_bar_is_ticked() {
         ))
         .expect("fits");
     }
-    bar.library_mut().set_catalog(cat);
+    bar.set_library_catalog(cat);
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
     let scrollbar = bar
@@ -9357,7 +8268,9 @@ fn a_held_library_bar_arrow_repeats_when_the_bar_is_ticked() {
         bar.library_layout(Scale::ONE).offset > pressed,
         "the hold stepped again"
     );
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::LIBRARY);
+    let owed = bar.take_repaint();
+    assert!(!owed.library.is_clean(), "the content moved");
+    assert!(owed.bar.is_clean(), "and nothing on the bar did");
 
     input.handle(
         InputEvent::PointerReleased {

@@ -86,6 +86,7 @@ pub mod network;
 pub mod network_menu;
 pub mod notifications;
 pub mod picker;
+mod popover;
 pub mod render;
 pub mod repaint;
 pub mod sound;
@@ -104,7 +105,8 @@ pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
 pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, ReadoutLayout};
 pub use library::{
-    folder_label, LibraryFocus, LibraryIconRequest, LibraryLayout, LibraryPopup, LibraryRow,
+    folder_label, ItemAt, LibraryFocus, LibraryIconRequest, LibraryItem, LibraryLayout,
+    LibraryPage, LibraryPopup, LibraryRoute, Section, SectionKind, SectionLayout,
 };
 pub use menu::{EntryRow, MenuRequest, MenuSubject};
 pub use notifications::{

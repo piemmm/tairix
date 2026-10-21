@@ -507,6 +507,34 @@ fn tab_at_maps_points_to_tabs() {
     );
 }
 
+#[test]
+fn tab_rect_is_where_tab_at_finds_the_tab_in_either_orientation() {
+    let theme = Theme::dark();
+    for (tabs, bounds) in [
+        (three_tabs(), Rect::new(0, 0, W, H)),
+        (vertical_three(), Rect::new(10, 20, W, 400)),
+    ] {
+        for index in 0..tabs.len() {
+            let rect = tabs
+                .tab_rect(index, bounds, Scale::ONE, &theme)
+                .expect("a laid-out tab");
+            assert!(!rect.is_empty());
+            assert_eq!(rect.intersection(&bounds), rect, "inside the strip");
+            for corner in [
+                Point::new(rect.left(), rect.top()),
+                Point::new(rect.right() - 1, rect.bottom() - 1),
+            ] {
+                assert_eq!(
+                    tabs.tab_at(bounds, Scale::ONE, &theme, corner),
+                    Some(index),
+                    "tab {index} at {corner:?}"
+                );
+            }
+        }
+        assert_eq!(tabs.tab_rect(tabs.len(), bounds, Scale::ONE, &theme), None);
+    }
+}
+
 // --- Theme switching and scale -----------------------------------------
 
 #[test]

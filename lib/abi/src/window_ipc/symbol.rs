@@ -370,12 +370,17 @@ pub enum AppMenuSymbol {
     LetOut,
     /// Bring the companion home.
     BringHome,
+    /// Keep it among the favourites.
+    Favourite,
+    /// Run it as an account that may do more, once that account's password
+    /// is given.
+    RunAsAdministrator,
 }
 
 impl AppMenuSymbol {
     /// Every symbol, in wire order: the symbol with wire value `n` is
     /// `ALL[n - 1]`.
-    pub const ALL: [Self; 178] = [
+    pub const ALL: [Self; 180] = [
         Self::Open,
         Self::OpenWith,
         Self::OpenFolder,
@@ -554,6 +559,8 @@ impl AppMenuSymbol {
         Self::QuestionMarks,
         Self::LetOut,
         Self::BringHome,
+        Self::Favourite,
+        Self::RunAsAdministrator,
     ];
 
     /// The symbol's wire value, never zero.

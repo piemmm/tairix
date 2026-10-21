@@ -9,6 +9,9 @@
 //! these controls exercises the same two axes and must reach for this one
 //! fixture rather than growing its own copy.
 
+use alloc::vec::Vec;
+use core::ops::Range;
+
 use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Region, Scale};
@@ -17,6 +20,13 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Contrast, Fonts, TextRole, Theme};
 
 use crate::text::Keystroke;
+
+/// The byte runs `(start, end)` name, as a row's emphasis is given them —
+/// including the malformed ones a test hands a row to prove it refuses them.
+#[must_use]
+pub fn emphasis_runs(pairs: &[(usize, usize)]) -> Vec<Range<usize>> {
+    pairs.iter().map(|&(start, end)| start..end).collect()
+}
 
 /// Whether `drew` covers every pixel of `rect`, however the region split it.
 #[must_use]

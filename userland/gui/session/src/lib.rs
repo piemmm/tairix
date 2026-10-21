@@ -201,6 +201,7 @@ pub mod idle;
 pub mod input;
 pub mod keyboard;
 pub mod launch;
+pub mod launcher;
 pub mod layer;
 pub mod library;
 pub mod lock;
@@ -287,7 +288,7 @@ pub use frames::{FrameStatsPublisher, FrameStatsSink, MIN_FRAME_PUBLISH_INTERVAL
 pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use idle::{IdleAction, IdleClock, IdlePolicy};
 pub use input::{SessionInputResponse, SessionInputRouter};
-pub use keyboard::{CtrlTap, KeyInputChannel, KeyRepeat, KeyboardInputSource};
+pub use keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource, ModifierTap, TapKey};
 pub use launch::{
     admitted_pid, launch_argv, launch_failure_report, open_entry, reap_launched, resolve_launch,
     DocumentAuthority, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,

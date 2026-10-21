@@ -83,9 +83,9 @@ fn open(input: &mut TaskbarInput, bar: &mut Taskbar) {
 #[test]
 fn the_signals_follow_the_output_and_the_recording() {
     let mut bar = bar();
-    assert!(bar.set_network(Some(crate::network::tests::connected())));
+    assert!(bar.set_network(Some(crate::network::tests::connected()), Scale::ONE));
     let _ = bar.take_repaint();
-    let _ = bar.set_sound(speakers(-600, false, true));
+    let _ = bar.set_sound(speakers(-600, false, true), Scale::ONE);
     let kinds = |bar: &Taskbar| -> alloc::vec::Vec<StatusKind> {
         bar.notifications()
             .signals()
@@ -98,7 +98,7 @@ fn the_signals_follow_the_output_and_the_recording() {
 
     let mut recording = speakers(-600, true, true);
     recording.recording = true;
-    let _ = bar.set_sound(recording.clone());
+    let _ = bar.set_sound(recording.clone(), Scale::ONE);
     assert_eq!(
         kinds(&bar),
         [
@@ -108,10 +108,10 @@ fn the_signals_follow_the_output_and_the_recording() {
         ]
     );
     let _ = bar.take_repaint();
-    let _ = bar.set_sound(recording);
+    let _ = bar.set_sound(recording, Scale::ONE);
     assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE, "nothing moved");
 
-    let _ = bar.set_sound(SoundState::default());
+    let _ = bar.set_sound(SoundState::default(), Scale::ONE);
     assert_eq!(kinds(&bar), [StatusKind::Network], "no output, no signal");
     assert!(bar
         .notifications()
@@ -123,7 +123,7 @@ fn the_signals_follow_the_output_and_the_recording() {
 #[test]
 fn the_panel_moves_the_level_live_and_settles_where_the_drag_ends() {
     let mut bar = bar();
-    let _ = bar.set_sound(speakers(-6_000, false, true));
+    let _ = bar.set_sound(speakers(-6_000, false, true), Scale::ONE);
     let mut input = TaskbarInput::new();
     open(&mut input, &mut bar);
     let layout = bar.sound_layout(Scale::ONE).expect("an open panel");
@@ -158,7 +158,7 @@ fn the_panel_moves_the_level_live_and_settles_where_the_drag_ends() {
         "quieter back to the middle"
     );
     // A report arriving mid-drag cannot pull the slider from under the pointer.
-    let _ = bar.set_sound(speakers(-6_000, false, true));
+    let _ = bar.set_sound(speakers(-6_000, false, true), Scale::ONE);
     let settled = release(&mut input, &mut bar);
     assert_eq!(
         settled,
@@ -189,7 +189,7 @@ fn the_panel_moves_the_level_live_and_settles_where_the_drag_ends() {
 #[test]
 fn the_panel_closes_on_escape_outside_or_its_signal_and_when_the_output_goes() {
     let mut bar = bar();
-    let _ = bar.set_sound(speakers(-600, false, true));
+    let _ = bar.set_sound(speakers(-600, false, true), Scale::ONE);
     let mut input = TaskbarInput::new();
     open(&mut input, &mut bar);
     send(
@@ -218,7 +218,7 @@ fn the_panel_closes_on_escape_outside_or_its_signal_and_when_the_output_goes() {
     assert!(!bar.sound().is_open(), "its own signal closes it");
 
     open(&mut input, &mut bar);
-    let _ = bar.set_sound(SoundState::default());
+    let _ = bar.set_sound(SoundState::default(), Scale::ONE);
     assert!(
         !bar.sound().is_open(),
         "an output that went away takes its panel"
@@ -231,7 +231,7 @@ fn the_panel_closes_on_escape_outside_or_its_signal_and_when_the_output_goes() {
 #[test]
 fn a_mute_marks_its_box_and_stills_the_level_until_it_is_lifted() {
     let mut bar = bar();
-    let _ = bar.set_sound(speakers(-1_200, false, true));
+    let _ = bar.set_sound(speakers(-1_200, false, true), Scale::ONE);
     let mut input = TaskbarInput::new();
     open(&mut input, &mut bar);
     let layout = bar.sound_layout(Scale::ONE).expect("an open panel");
@@ -258,7 +258,7 @@ fn a_mute_marks_its_box_and_stills_the_level_until_it_is_lifted() {
         )
     };
     assert_eq!(shown(&bar), (SelectionState::Selected, 0, false));
-    let _ = bar.set_sound(speakers(-1_200, true, true));
+    let _ = bar.set_sound(speakers(-1_200, true, true), Scale::ONE);
     assert_eq!(
         shown(&bar),
         (SelectionState::Selected, 0, false),
@@ -287,7 +287,7 @@ fn a_mute_marks_its_box_and_stills_the_level_until_it_is_lifted() {
 #[test]
 fn another_sessions_room_is_shown_not_changed() {
     let mut bar = bar();
-    let _ = bar.set_sound(speakers(-600, false, false));
+    let _ = bar.set_sound(speakers(-600, false, false), Scale::ONE);
     let mut input = TaskbarInput::new();
     open(&mut input, &mut bar);
     let layout = bar.sound_layout(Scale::ONE).expect("an open panel");
@@ -315,7 +315,7 @@ fn another_sessions_room_is_shown_not_changed() {
 #[test]
 fn escape_mid_drag_settles_the_level_before_it_closes() {
     let mut bar = bar();
-    let _ = bar.set_sound(speakers(-6_000, false, true));
+    let _ = bar.set_sound(speakers(-6_000, false, true), Scale::ONE);
     let mut input = TaskbarInput::new();
     open(&mut input, &mut bar);
     let layout = bar.sound_layout(Scale::ONE).expect("an open panel");

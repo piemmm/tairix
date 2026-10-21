@@ -10,7 +10,8 @@
 # enforces that gate against this process's kernel-attested origin,
 # CAP_LOG_EMIT to put the sampled counters on the system log where the guest
 # can read them back, and CAP_CONSOLE_WRITE for the fail-loud stderr
-# diagnostic when a sample cannot be taken.
+# diagnostic when a sample cannot be taken. Its icon-bar slot needs none: any
+# program of the account may declare one.
 id = "os.tairix.test.framestats"
 name = "framestats"
 version = "0.1.0"
@@ -20,6 +21,7 @@ author = "The TAIRiX Project"
 capabilities = ["CAP_SYSINFO_GLOBAL", "CAP_LOG_EMIT", "CAP_CONSOLE_WRITE"]
 # Listed in the desktop's program library so the vertical's pointer script can
 # launch it with a click: the desktop owns the screen, so a click is the only
-# gesture that reaches a program, and a pointer script's steps fire strictly in
-# order — which is what brackets the hover between two samples.
+# gesture that reaches a program. Once running it holds a slot on the icon bar
+# and samples at each click on it, and a pointer script's steps fire strictly
+# in order — which is what brackets the hover between two samples.
 library = "Programming"

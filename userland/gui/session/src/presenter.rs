@@ -34,7 +34,7 @@
 use tairix_controls::damage::Repaint;
 use tairix_icon::IconArtwork;
 use tairix_taskbar::{Taskbar, TaskbarRenderer, TaskbarRepaint};
-use tairix_wm::{Compositor, Corners, Point, Rect, Scale, Surface, WindowId};
+use tairix_wm::{Compositor, Corners, Point, PointerCatch, Rect, Scale, Surface, WindowId};
 
 /// Presents a taskbar, its program-library popup, its hover window picker,
 /// the notification popover, the Switchboard capsule's instrument readout,
@@ -49,6 +49,8 @@ use tairix_wm::{Compositor, Corners, Point, Rect, Scale, Surface, WindowId};
 pub struct TaskbarPresenter {
     bar: Option<WindowId>,
     popup: Option<WindowId>,
+    /// The rise and strength the popup's window was last placed at.
+    popup_placement: Option<(i32, u8)>,
     picker: Option<WindowId>,
     notifications: Option<WindowId>,
     readout: Option<WindowId>,
@@ -71,6 +73,7 @@ impl TaskbarPresenter {
         Self {
             bar: None,
             popup: None,
+            popup_placement: None,
             picker: None,
             notifications: None,
             readout: None,
@@ -222,9 +225,7 @@ impl TaskbarPresenter {
         {
             self.owed.bar.merge(owed.bar);
         }
-        if due(&owed.library, self.popup)
-            && !self.present_popup(compositor, renderer, taskbar, scale, &owed.library)
-        {
+        if !self.present_popup(compositor, renderer, taskbar, scale, &owed.library) {
             self.owed.library.merge(owed.library);
         }
         if due(&owed.picker, self.picker)
@@ -284,6 +285,7 @@ impl TaskbarPresenter {
         if let Some(id) = self.popup.take() {
             compositor.remove(id);
         }
+        self.popup_placement = None;
         if let Some(id) = self.bar.take() {
             compositor.remove(id);
         }
@@ -316,8 +318,16 @@ impl TaskbarPresenter {
         placed.is_some()
     }
 
-    /// Present the program-library popup while it is open, or remove it once
-    /// closed.
+    /// Present the program-library popup where its motion stands: placed and
+    /// painted while open, moved and faded with the pixels it has while it
+    /// leaves — catching no pointer, since nothing on it acts any more — and
+    /// removed once it has gone.
+    ///
+    /// Placement runs whenever the window owes pixels or its motion stands
+    /// somewhere it was not last placed, because a frame of its rise or fade
+    /// changes where and how strongly it is composited and nothing it draws.
+    /// A present that owes nothing to a window already placed where its
+    /// motion stands lays nothing out.
     fn present_popup(
         &mut self,
         compositor: &mut Compositor,
@@ -326,26 +336,56 @@ impl TaskbarPresenter {
         scale: Scale,
         owed: &Repaint,
     ) -> bool {
-        if !taskbar.library().is_open() {
+        let library = taskbar.library();
+        if !library.is_open() && !library.is_departing() {
             if let Some(id) = self.popup.take() {
                 compositor.remove(id);
             }
+            self.popup_placement = None;
+            return true;
+        }
+        let placement = library.placement();
+        let standing = self.popup.filter(|&id| compositor.window(id).is_some());
+        if library.is_open()
+            && !due(owed, self.popup)
+            && standing.is_some()
+            && self.popup_placement == Some(placement)
+        {
+            // Owing nothing, and placed where its motion stands: nothing moved.
             return true;
         }
         let layout = taskbar.library_layout(scale);
+        let (rise, opacity) = placement;
+        let origin = layout.placed_at(rise);
+        if !library.is_open() {
+            if let Some(id) = standing {
+                compositor.move_window(id, origin);
+                compositor.set_opacity(id, opacity);
+                compositor.set_pointer_catch(id, PointerCatch::None);
+                self.popup_placement = Some(placement);
+            }
+            return true;
+        }
+        if let Some(id) = standing.filter(|_| !due(owed, self.popup)) {
+            compositor.move_window(id, origin);
+            compositor.set_opacity(id, opacity);
+            compositor.set_pointer_catch(id, PointerCatch::Bounds);
+            self.popup_placement = Some(placement);
+            return true;
+        }
         let placed = place(
             compositor,
             self.popup,
-            (
-                layout.panel.origin,
-                (layout.panel.width, layout.panel.height),
-            ),
+            (origin, (layout.panel.width, layout.panel.height)),
             owed,
             Look::popover(layout.corner_radius, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint_library(taskbar, scale, surface, rects),
         );
         if let Some(id) = placed {
+            compositor.set_opacity(id, opacity);
+            compositor.set_pointer_catch(id, PointerCatch::Bounds);
             self.popup = Some(id);
+            self.popup_placement = Some(placement);
         }
         placed.is_some()
     }

@@ -19,6 +19,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::switchboard_ipc::{NetworkReport, TraySummary};
 use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_abi::{Errno, ProcId};
@@ -30,17 +31,19 @@ use tairix_controls::{
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconRequest, Landed};
 use tairix_input::InputEvent;
-use tairix_proglib::EntryId;
+use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::apps::{AppSlot, AppStrip};
-use crate::clock::{clock_room, Clock, ClockFaces};
+use crate::clock::{clock_room, Clock, ClockFaces, ClockLines};
 use crate::clock_menu::ClockPermits;
 use crate::edge::{Edge, Orientation};
 use crate::input::TaskbarResponse;
 use crate::layout::{local_rect, BarLayout, Hit, NotificationsLayout, ReadoutLayout};
-use crate::library::{LibraryIconRequest, LibraryLayout, LibraryPopup};
+use crate::library::{
+    LibraryIconRequest, LibraryLayout, LibraryPopup, LibraryRoute, Place, Routing,
+};
 use crate::menu::{self, MenuRequest, MenuSubject};
 use crate::network::{NetworkStatus, NETWORK_SIGNAL};
 use crate::notifications::{NotificationArea, Raised, StatusSignal, TransientNotification};
@@ -49,7 +52,7 @@ use crate::repaint::TaskbarRepaint;
 use crate::sound::{SoundPanel, SoundPanelLayout, SoundState, RECORDING_SIGNAL, VOLUME_SIGNAL};
 use crate::system::{self, SystemPermits};
 use crate::tasks::TaskList;
-use crate::tray::SwitchboardTray;
+use crate::tray::{CapsuleChange, SwitchboardTray};
 
 /// Main-axis length of an icon slot on the house-style bar, in *logical*
 /// pixels at the reference density.
@@ -241,73 +244,166 @@ impl Taskbar {
         &self.library
     }
 
-    /// The program-library popup, mutably — how the session hands it the
-    /// resolved catalog ([`LibraryPopup::set_catalog`]) — latching the popup
-    /// and the bar.
-    ///
-    /// Handing out a mutable view is indistinguishable from changing it: the
-    /// bar cannot see what the caller does through the borrow, and a missed
-    /// latch leaves stale pixels, so the borrow itself latches. The bar
-    /// latches with the popup because the same view can open or close it,
-    /// which changes how the Library button draws. Callers take this borrow
-    /// to make a real state change — a resolved catalog — never once per
-    /// input sample, so the conservative latch costs nothing on the hot
-    /// path; the input router borrows the popup through a crate-internal
-    /// seam instead and latches from what the popup reports.
-    pub fn library_mut(&mut self) -> &mut LibraryPopup {
-        self.repaint |= TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR;
-        &mut self.library
+    /// Hand the launcher the resolved `catalog`, latching it only when the
+    /// catalog differs: the session re-reads the stores on every open, and
+    /// the same catalog handed again changes no pixel.
+    pub fn set_library_catalog(&mut self, catalog: Catalog) {
+        if self.library.set_catalog(catalog) {
+            self.repaint |= TaskbarRepaint::LIBRARY;
+        }
     }
 
-    /// Fire the program-library popup's one-shot "these rows have been seen"
-    /// witness ([`LibraryPopup::report_newly_shown`]).
+    /// Fire the launcher's one-shot "shown whole" witness
+    /// ([`LibraryPopup::report_newly_shown`]).
     ///
-    /// Its own route rather than [`library_mut`](Self::library_mut), because
-    /// the embedder calls it after **every** published frame and the witness
-    /// changes no pixel: taking the latching borrow for it marked the whole
-    /// bar and the whole popup dirty on each frame, so the next frame
+    /// The embedder calls it after **every** published frame, and the witness
+    /// changes no pixel, so it latches nothing: a latching route marked the
+    /// whole bar and the whole popup dirty on each frame, so the next frame
     /// recomposed them, published, and dirtied them again — a desktop that
-    /// never settled, recomposing a full-width bar per frame for as long as
-    /// the session was up.
+    /// never settled.
     pub fn report_library_shown(&mut self, report: impl FnOnce()) {
         self.library.report_newly_shown(report);
     }
 
     /// The program-library popup, mutably, for routing one input event into
-    /// it.
+    /// it, beside the theme it is drawn in.
     ///
-    /// Unlike [`library_mut`](Self::library_mut) this latches nothing,
-    /// because the router latches from the outcome the popup reports: every
-    /// pointer sample over the open popup routes through here, and a sample
-    /// that changes no pixel must repaint nothing.
-    pub(crate) fn library_routing_mut(&mut self) -> &mut LibraryPopup {
-        &mut self.library
+    /// This latches nothing, because the router latches from the outcome the
+    /// popup reports: every pointer sample over the open popup routes through
+    /// here, and a sample that changes no pixel must repaint nothing. The
+    /// theme is lent rather than copied.
+    pub(crate) fn library_routing_mut(&mut self) -> (&mut LibraryPopup, &Theme) {
+        (&mut self.library, &self.theme)
     }
 
-    /// Hand the popup the owner-resolved icon artwork for one of the rows it
-    /// shows, for the session that resolved it from the entry's own bundle,
-    /// latching that row alone when the picture changed.
+    /// Hand the popup the owner-resolved icon of `entry`, rasterised at
+    /// `side`, latching the programs it is shown on alone when the picture
+    /// changed.
     ///
-    /// Unlike [`library_mut`](Self::library_mut) this cannot latch the whole
-    /// popup: the session re-resolves every shown row immediately *before*
-    /// each paint, so a whole-popup latch here would re-dirty the popup on
-    /// every frame it is drawn and repaint it forever. The comparison in the
-    /// popup is what makes a row-sized latch safe *and* sufficient — a row
-    /// whose decode lands while the popup is up is drawn on the next frame
-    /// rather than waiting for an unrelated change to repaint the panel.
+    /// This cannot latch the whole popup: the session re-resolves every shown
+    /// program immediately *before* each paint, so a whole-popup latch here
+    /// would re-dirty the popup on every frame and repaint it forever. The
+    /// popup's comparison is what makes the narrow latch safe and sufficient.
     ///
     /// `layout` is the popup's current geometry, which the caller already
-    /// holds to know which rows to resolve.
-    pub fn set_library_row_artwork(
+    /// holds to know which programs to resolve.
+    pub fn set_library_artwork(
         &mut self,
-        row: usize,
+        entry: &EntryId,
+        side: u32,
         layout: &LibraryLayout,
         artwork: Option<Surface>,
     ) {
         let mut reported = damage::sink();
         self.library
-            .set_row_artwork(row, layout, artwork, &mut reported);
+            .set_artwork(entry, side, layout, artwork, &mut reported);
         owe(&mut self.repaint.library, &reported, layout.panel);
+    }
+
+    /// Latch the popup's rectangles `reported` names, in screen space, laid out
+    /// as `layout`.
+    pub(crate) fn owe_library(&mut self, reported: &Region, layout: &LibraryLayout) {
+        owe(&mut self.repaint.library, reported, layout.panel);
+    }
+
+    /// Hand the popup each entry's manifest facts, latching it when they
+    /// differ.
+    pub fn set_library_facts(
+        &mut self,
+        facts: alloc::collections::BTreeMap<EntryId, crate::apps::AppIdentity>,
+    ) {
+        if self.library.set_facts(facts) {
+            self.repaint |= TaskbarRepaint::LIBRARY;
+        }
+    }
+
+    /// Hand the popup the account's shelf, latching it when it differs.
+    pub fn set_library_shelf(&mut self, fresh: tairix_proglib::Shelf) {
+        if self.library.set_shelf(fresh) {
+            self.repaint |= TaskbarRepaint::LIBRARY;
+        }
+    }
+
+    /// Hand the popup which bundle directories are running at `scale`, owing
+    /// only the programs whose mark moved and the details strip, and answering
+    /// whether any mark moved.
+    pub fn set_library_running(
+        &mut self,
+        bundles: alloc::collections::BTreeSet<String>,
+        scale: Scale,
+    ) -> bool {
+        if self.library.runs_exactly(&bundles) {
+            return false;
+        }
+        let layout = self.library_layout(scale);
+        let mut reported = damage::sink();
+        let changed = self.library.set_running(bundles, &layout, &mut reported);
+        owe(&mut self.repaint.library, &reported, layout.panel);
+        changed
+    }
+
+    /// Step the popup's motion to `now_ns` at `scale`, latching what the frame
+    /// redraws — the content an entrance moves, the tiles a mark moves between
+    /// — and answering whether the frame changed anything to present: the
+    /// window moved, faded, or finished leaving, or its content moved.
+    pub fn advance_library(&mut self, now_ns: u64, scale: Scale) -> bool {
+        let was_departing = self.library.is_departing();
+        if !self.library.is_open() && !was_departing {
+            return false;
+        }
+        let layout = self.library_layout(scale);
+        let mut reported = damage::sink();
+        let stepped = self.library.advance(now_ns, &layout, &mut reported);
+        owe(&mut self.repaint.library, &reported, layout.panel);
+        let departed = was_departing && !self.library.is_departing();
+        if departed {
+            // Its removal is the presenter's to make, and is owed like a paint.
+            self.repaint |= TaskbarRepaint::LIBRARY;
+        }
+        stepped.placement || stepped.content || stepped.marks || departed
+    }
+
+    /// End the closed popup's departure at once, owing its removal: a window
+    /// the launch opened has taken the screen, and the launcher fading over it
+    /// would only hide what the user asked for.
+    pub fn finish_library_departure(&mut self) {
+        if self.library.finish_departure() {
+            self.repaint |= TaskbarRepaint::LIBRARY;
+        }
+    }
+
+    /// Nanoseconds until the popup's next frame of motion is due on a display
+    /// refreshing at `refresh`, or `None` while nothing moves.
+    #[must_use]
+    pub fn library_next_frame_in(&self, now_ns: u64, refresh: RefreshRate) -> Option<u64> {
+        self.library.next_frame_in(now_ns, refresh)
+    }
+
+    /// Open the popup if it is closed and close it if it is open, as the
+    /// lone tap of the Meta key asks, at `now_ns` on a desktop at `scale`.
+    pub fn toggle_library(&mut self, now_ns: u64, scale: Scale) -> TaskbarResponse {
+        if self.library.is_open() {
+            self.close_library(now_ns, scale);
+            TaskbarResponse::LibraryDismissed
+        } else {
+            self.open_library(now_ns, scale);
+            TaskbarResponse::OpenLibrary
+        }
+    }
+
+    /// The two clicks that reach `entry` on a freshly opened launcher,
+    /// whatever the account's history: its folder's tab, then its picture.
+    #[must_use]
+    pub fn library_route_to(&self, entry: &EntryId, scale: Scale) -> Option<LibraryRoute> {
+        let bar = self.layout(scale);
+        let place = Place {
+            edge: self.config.edge,
+            bar: &bar,
+            screen: (self.config.screen_width, self.config.screen_height),
+            scale,
+            theme: &self.theme,
+        };
+        self.library.route_to(entry, &place)
     }
 
     /// The application strip.
@@ -371,17 +467,12 @@ impl Taskbar {
     }
 
     /// The running-task list, mutably — how the session adds, removes,
-    /// focuses, and minimises task slots — latching the bar.
+    /// focuses, and minimises tasks.
     ///
-    /// Handing out a mutable view is indistinguishable from changing it, so
-    /// the borrow itself latches; the bar cannot see what the caller does
-    /// through it, and a missed latch leaves stale pixels. Task slots draw
-    /// on the bar and nowhere else, so only the bar latches. Callers take
-    /// this borrow to make a real state change — a window opened, closed, or
-    /// focused — never once per input sample, so the conservative latch
-    /// costs nothing on the hot path.
+    /// No surface draws from the list: the capsule's task cycling and which
+    /// slots open a picker read it, and a slot's look comes from
+    /// [`set_apps`](Self::set_apps). So a change to it latches nothing.
     pub fn tasks_mut(&mut self) -> &mut TaskList {
-        self.repaint |= TaskbarRepaint::BAR;
         &mut self.tasks
     }
 
@@ -395,7 +486,7 @@ impl Taskbar {
     /// signal stands for and whether anything is recording. The signals draw
     /// on the bar and the panel on its own surface, so each latches only
     /// when its own pixels moved. Answers whether either did.
-    pub fn set_sound(&mut self, state: SoundState) -> bool {
+    pub fn set_sound(&mut self, state: SoundState, scale: Scale) -> bool {
         let mut signals: Vec<StatusSignal> = self
             .notifications
             .signals()
@@ -404,7 +495,7 @@ impl Taskbar {
             .cloned()
             .collect();
         signals.extend(state.signals());
-        let mut moved = self.replace_signals(signals);
+        let mut moved = self.replace_signals(signals, scale);
         if self.sound.adopt(state.output) {
             self.repaint |= TaskbarRepaint::SOUND;
             moved = true;
@@ -417,7 +508,7 @@ impl Taskbar {
     ///
     /// The signal leads the other status signals and replaces only its own
     /// slot, as the sound feed replaces only its own.
-    pub fn set_network(&mut self, report: Option<NetworkReport>) -> bool {
+    pub fn set_network(&mut self, report: Option<NetworkReport>, scale: Scale) -> bool {
         if !self.network.adopt(report) {
             return false;
         }
@@ -429,7 +520,7 @@ impl Taskbar {
                 .filter(|signal| signal.id != NETWORK_SIGNAL)
                 .cloned(),
         );
-        let _ = self.replace_signals(signals);
+        let _ = self.replace_signals(signals, scale);
         if self.network.signal().is_none() {
             self.network_hover = PointerState::None;
         }
@@ -438,10 +529,15 @@ impl Taskbar {
     }
 
     /// Show `signals` in the notification area, answering whether they
-    /// changed. A change that moves the network signal's slot closes its
-    /// readout: the readout hangs from the slot it opened at, and only the
-    /// pointer's next motion can say whether it still rests on the signal.
-    fn replace_signals(&mut self, signals: Vec<StatusSignal>) -> bool {
+    /// changed.
+    ///
+    /// The bar lays a slot for each signal, so a change in their number
+    /// re-lays every control on it and owes the whole bar; otherwise each
+    /// signal that changed owes its own slot. A change that moves the network
+    /// signal's slot closes its readout: the readout hangs from the slot it
+    /// opened at, and only the pointer's next motion can say whether it still
+    /// rests on the signal.
+    fn replace_signals(&mut self, signals: Vec<StatusSignal>, scale: Scale) -> bool {
         if signals == self.notifications.signals() {
             return false;
         }
@@ -451,9 +547,21 @@ impl Taskbar {
                 .position(|signal| signal.id == NETWORK_SIGNAL);
             (index, signals.len())
         };
-        let moved = place(&signals) != place(self.notifications.signals());
-        self.notifications.set_signals(signals);
-        self.repaint |= TaskbarRepaint::BAR;
+        let previous = self.notifications.set_signals(signals);
+        let shown = self.notifications.signals();
+        let moved = place(&previous) != place(shown);
+        if previous.len() == shown.len() {
+            let layout = self.layout(scale);
+            let mut reported = damage::sink();
+            for ((slot, now), before) in layout.notifications.iter().zip(shown).zip(&previous) {
+                if now != before {
+                    reported.add(*slot);
+                }
+            }
+            owe(&mut self.repaint.bar, &reported, layout.bar);
+        } else {
+            self.repaint |= TaskbarRepaint::BAR;
+        }
         if moved && self.network_hover == PointerState::Hover {
             self.network_hover = PointerState::None;
             self.repaint |= TaskbarRepaint::NETWORK;
@@ -545,8 +653,11 @@ impl Taskbar {
         &self.sound
     }
 
-    pub(crate) fn sound_mut(&mut self) -> &mut SoundPanel {
-        &mut self.sound
+    /// The volume panel, mutably, for routing one input event into it, beside
+    /// the theme it is drawn in — lent rather than copied, so an event
+    /// allocates nothing.
+    pub(crate) fn sound_routing_mut(&mut self) -> (&mut SoundPanel, &Theme) {
+        (&mut self.sound, &self.theme)
     }
 
     /// Whether a popup that takes every input while it is open is open.
@@ -595,11 +706,9 @@ impl Taskbar {
         ))
     }
 
-    /// Raise (or update in place) a transient notification, latching a repaint
-    /// when it changed the shown set — how the session relays a producer's
-    /// raise over the notification IPC. A raise changes both the popover that
-    /// shows the card and the bar's notification-area icon (the count it
-    /// implies), so both latch together. Answers what the raise did.
+    /// Raise (or update in place) a transient notification, latching the
+    /// popover when it changed the shown set — how the session relays a
+    /// producer's raise over the notification IPC. Answers what the raise did.
     ///
     /// # Errors
     ///
@@ -641,11 +750,11 @@ impl Taskbar {
         changed
     }
 
-    /// A change to the notification set moves both the popover and the bar's
-    /// notification-area icon, so both latch together.
+    /// A change to the notification set moves what the popover shows; the bar
+    /// draws no notification, only the status signals.
     fn note_notifications_changed(&mut self, changed: bool) {
         if changed {
-            self.repaint |= TaskbarRepaint::NOTIFICATIONS | TaskbarRepaint::BAR;
+            self.repaint |= TaskbarRepaint::NOTIFICATIONS;
         }
     }
 
@@ -655,19 +764,39 @@ impl Taskbar {
         &self.clock
     }
 
-    /// The clock, mutably, so the caller can update its label — latching the
-    /// bar.
+    /// Show `lines` on the clock, stated in its menu as `heading`, owing the
+    /// clock's own rectangle where what it draws changed.
     ///
-    /// Handing out a mutable view is indistinguishable from changing it, so
-    /// the borrow itself latches; the bar cannot see what the caller does
-    /// through it, and a missed latch leaves stale pixels. The clock draws
-    /// on the bar and nowhere else, so only the bar latches. Callers take
-    /// this borrow to make a real state change — the minute advancing —
-    /// never once per input sample, so the conservative latch costs nothing
-    /// on the hot path.
-    pub fn clock_mut(&mut self) -> &mut Clock {
+    /// The clock keeps room for its widest lines, so a reading moves no other
+    /// control; the heading is drawn only by the menu, which reads it as it
+    /// opens.
+    pub fn set_clock_reading(
+        &mut self,
+        lines: ClockLines,
+        heading: impl Into<String>,
+        scale: Scale,
+    ) {
+        let redraws = self.clock.lines() != &lines;
+        self.clock.set_reading(lines, heading);
+        if redraws {
+            let layout = self.layout(scale);
+            owe(
+                &mut self.repaint.bar,
+                &Region::from(layout.clock),
+                layout.bar,
+            );
+        }
+    }
+
+    /// Keep room on the clock for each of `samples` (see
+    /// [`Clock::set_widest`]). The room is a length along the bar, so a change
+    /// to it re-lays every control and owes the whole bar.
+    pub fn set_clock_widest(&mut self, samples: Vec<ClockLines>) {
+        if self.clock.widest() == samples.as_slice() {
+            return;
+        }
+        self.clock.set_widest(samples);
         self.repaint |= TaskbarRepaint::BAR;
-        &mut self.clock
     }
 
     /// The Switchboard tray capsule.
@@ -684,31 +813,42 @@ impl Taskbar {
     /// Returns whether anything latched, so an embedder re-presents only when
     /// there is something new to show: the service publishes on a cadence,
     /// and most readings move nothing the bar draws.
-    pub fn set_tray_summary(&mut self, summary: Option<TraySummary>) -> bool {
-        let parts = self.tray.set_summary(summary);
-        let latched = parts.any();
-        self.repaint |= parts;
-        latched
+    pub fn set_tray_summary(&mut self, summary: Option<TraySummary>, scale: Scale) -> bool {
+        let change = self.tray.set_summary(summary);
+        self.owe_capsule(change, scale)
     }
 
     /// Adopt the session's count of unresponsive applications, latching a
     /// repaint on the surfaces it redraws. See
     /// [`set_tray_summary`](Self::set_tray_summary) for what is returned.
-    pub fn set_tray_unresponsive(&mut self, count: u16) -> bool {
-        let parts = self.tray.set_unresponsive(count);
-        let latched = parts.any();
-        self.repaint |= parts;
-        latched
+    pub fn set_tray_unresponsive(&mut self, count: u16, scale: Scale) -> bool {
+        let change = self.tray.set_unresponsive(count);
+        self.owe_capsule(change, scale)
     }
 
     /// Adopt the signed-in account's name, from which the trailing capsule's
     /// identity disc takes its mark. See
     /// [`set_tray_summary`](Self::set_tray_summary) for what is returned.
-    pub fn set_account(&mut self, name: &str) -> bool {
-        let parts = self.tray.set_account(name);
-        let latched = parts.any();
-        self.repaint |= parts;
-        latched
+    pub fn set_account(&mut self, name: &str, scale: Scale) -> bool {
+        let change = self.tray.set_account(name);
+        self.owe_capsule(change, scale)
+    }
+
+    /// Latch what `change` redraws — the capsule's own slot, never the bar
+    /// around it, and the readout whole — answering whether anything latched.
+    fn owe_capsule(&mut self, change: CapsuleChange, scale: Scale) -> bool {
+        if change.capsule {
+            let layout = self.layout(scale);
+            owe(
+                &mut self.repaint.bar,
+                &Region::from(layout.switchboard),
+                layout.bar,
+            );
+        }
+        if change.readout {
+            self.repaint |= TaskbarRepaint::READOUT;
+        }
+        change.capsule || change.readout
     }
 
     /// Adopt the session's attestation that its console has a
@@ -727,6 +867,11 @@ impl Taskbar {
     /// changes with it.
     pub fn set_elevation_available(&mut self, available: bool) {
         self.elevation_available = available;
+    }
+
+    /// Whether the session attested a broker that can elevate.
+    pub(crate) const fn elevation_available(&self) -> bool {
+        self.elevation_available
     }
 
     /// Adopt the session's attestation that it can step aside for another
@@ -787,11 +932,14 @@ impl Taskbar {
 
     /// Adopt a new theme, ground and all (see [`theme`](Self::theme)). The rest
     /// of the taskbar's state is unchanged, so a runtime dark/light switch needs
-    /// no relayout of the model. Every surface draws from the theme's palette,
-    /// so every surface repaints.
+    /// no relayout of the model. Every surface draws from the theme, so every
+    /// surface repaints — unless the two [draw alike](Theme::draws_like), as a
+    /// change of motion alone does.
     pub fn apply_theme(&mut self, theme: &Theme) {
+        if !self.theme.draws_like(theme) {
+            self.repaint = TaskbarRepaint::ALL;
+        }
         self.theme = theme.clone();
-        self.repaint = TaskbarRepaint::ALL;
     }
 
     /// Draw everything again: text drawn provisionally has landed
@@ -815,20 +963,17 @@ impl Taskbar {
     /// rest. Reading it clears it.
     ///
     /// The contract every mutator on this type upholds: a change that alters
-    /// what a surface draws latches that surface, and a change touching more
-    /// than one latches all of them. An embedder may therefore present
-    /// strictly from the drained latch — and present nothing at all when it
-    /// is empty. Every site in this crate that sets the latch is reviewed to
-    /// err toward latching a surface it merely might affect rather than
-    /// omitting one it does: a missed latch leaves stale pixels on screen,
-    /// which is a correctness bug, while an extra latch only costs a
-    /// redundant repaint.
+    /// what a surface draws latches the parts of that surface it moved — the
+    /// whole surface only when it re-lays it — and a change touching more
+    /// than one surface latches each. An embedder may therefore present
+    /// strictly from the drained latch, and present nothing at all when it is
+    /// empty. A missed part leaves stale pixels on screen; a part the change
+    /// did not move costs a repaint of pixels nobody can tell apart.
     ///
-    /// The `&mut` accessors ([`tasks_mut`](Self::tasks_mut),
-    /// [`library_mut`](Self::library_mut), [`clock_mut`](Self::clock_mut))
-    /// are no exception: the bar cannot see into a borrow, so each latches
-    /// its surfaces the moment it hands one out, whether or not the caller
-    /// goes on to change anything.
+    /// Every input a surface draws is handed over by value and compared, so no
+    /// borrow has to assume a change. The one `&mut` accessor,
+    /// [`tasks_mut`](Self::tasks_mut), latches nothing because no surface
+    /// draws from the task list.
     ///
     /// One thing stays the caller's to present: the desktop [`Scale`], which
     /// the compositor supplies per layout and render call rather than
@@ -853,8 +998,8 @@ impl Taskbar {
     /// capsule, each falling back to its kind's shipped class master.
     /// Everything else the bar draws a picture for **stores** it — an
     /// application slot's own icon arrives through
-    /// [`set_apps`](Self::set_apps), a launcher row's through
-    /// [`set_library_row_artwork`](Self::set_library_row_artwork) — and each
+    /// [`set_apps`](Self::set_apps), a launcher program's through
+    /// [`set_library_artwork`](Self::set_library_artwork) — and each
     /// of those latches the one item it changed as it is written, so a decode
     /// landing for them costs nothing here. The hover window picker, the
     /// notification popover, and the instrument readout draw no artwork from
@@ -971,8 +1116,7 @@ impl Taskbar {
         self.library.layout(
             self.config.edge,
             &bar,
-            self.config.screen_width,
-            self.config.screen_height,
+            (self.config.screen_width, self.config.screen_height),
             scale,
             &self.theme,
         )
@@ -983,8 +1127,8 @@ impl Taskbar {
     /// surface drawing them is shown.
     ///
     /// One want per (application, side) the bar would resolve if it were
-    /// painted now: the launcher popup's first screenful of rows at the row
-    /// side they draw at — the rows a user sees the instant the popup opens,
+    /// painted now: the launcher's first screenful of programs at the side
+    /// each draws at — what a user sees the instant the launcher opens,
     /// which is the one bar surface whose first paint happens long after
     /// bring-up. The side comes from the same layout the paint uses, so the
     /// two cannot disagree and a warmed icon is never the wrong size.
@@ -1191,18 +1335,22 @@ impl Taskbar {
         {
             return;
         }
-        // What the bars report is the thumb, never the rows a step moved, so
-        // each popup is owed whole and the sink ends here.
-        let mut reported = damage::sink();
         if self.library.is_open() {
             let layout = self.library_layout(scale);
-            if self
-                .library
-                .repeat(now_ns, &layout, &self.theme, scale, &mut reported)
-            {
-                self.repaint |= TaskbarRepaint::LIBRARY;
+            let mut moved = damage::sink();
+            let routing = Routing {
+                layout: &layout,
+                theme: &self.theme,
+                scale,
+                now_ns,
+            };
+            if self.library.repeat(routing, &mut moved) {
+                owe(&mut self.repaint.library, &moved, layout.panel);
             }
         }
+        // What the picker's bar reports is the thumb, never the cells a step
+        // moved, so the picker is owed whole and its sink ends here.
+        let mut reported = damage::sink();
         let Some(layout) = self.picker_layout(scale) else {
             return;
         };
@@ -1279,14 +1427,40 @@ impl Taskbar {
         false
     }
 
-    /// The chain the desktop should open for a program-library entry row,
-    /// anchored at that row.
-    pub(crate) fn entry_menu(&self, entry: EntryId, anchor: Rect, scale: Scale) -> MenuRequest {
-        MenuRequest {
+    /// The chain the desktop should open for a program-library entry, anchored
+    /// at where it is shown, or `None` for an entry the catalog does not list.
+    ///
+    /// Its rows are read from what the bar was told: the account's shelf,
+    /// the entry's manifest facts, and whether the console can authorise an
+    /// account. Every unknown reads as not offered.
+    pub(crate) fn entry_menu(
+        &self,
+        entry: EntryId,
+        anchor: Rect,
+        scale: Scale,
+    ) -> Option<MenuRequest> {
+        let listed = self.library.catalog().entry(&entry)?;
+        let favourites = &self.library.shelf().favourites;
+        let place = favourites.iter().position(|kept| *kept == entry);
+        let state = menu::EntryState {
+            favourite: place.map(|at| menu::Neighbours {
+                earlier: at > 0,
+                later: at + 1 < favourites.len(),
+            }),
+            used: self.library.has_use(&entry),
+            elevation: self.elevation_available,
+        };
+        let model = menu::entry_menu(
+            listed.name().as_str(),
+            state,
+            self.library.facts_of(&entry),
+            listed.bundle().as_str(),
+        );
+        Some(MenuRequest {
             subject: MenuSubject::Entry { entry },
-            model: menu::entry_menu(),
+            model,
             placement: self.menu_placement(anchor, scale),
-        }
+        })
     }
 
     /// The chain the desktop should open for the system quick actions,
@@ -1362,36 +1536,47 @@ impl Taskbar {
         &mut self,
         subject: &MenuSubject,
         item: AppMenuItemId,
+        now_ns: u64,
+        scale: Scale,
     ) -> Option<TaskbarResponse> {
         let response = subject.chosen(item)?;
-        if subject.closes_library() {
-            self.close_library();
+        if subject.closes_library(item) {
+            self.close_library(now_ns, scale);
         }
         Some(response)
     }
 
-    /// Open the program-library popup (fresh: search cleared, folders
-    /// expanded, cursor at the top) and press the Library button in. This
-    /// changes both the popup itself and the bar (the Library button reads
-    /// as visually held open), so both latch.
-    pub(crate) fn open_library(&mut self) {
-        self.library.open();
-        self.library_button.set_state(
-            self.library_button
-                .state()
-                .with_pointer(PointerState::Pressed),
-        );
-        self.repaint |= TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR;
+    /// Open the program-library popup afresh at `now_ns` and press the
+    /// Library button in, so it reads as held open: the popup latches whole,
+    /// and the bar owes the button alone.
+    pub(crate) fn open_library(&mut self, now_ns: u64, scale: Scale) {
+        self.library.open(now_ns, scale, &self.theme);
+        self.press_library_button(PointerState::Pressed, scale);
+        self.repaint |= TaskbarRepaint::LIBRARY;
     }
 
-    /// Close the program-library popup and release the Library button. Both
-    /// the popup and the bar's now-released Library button change, so both
-    /// latch.
-    pub(crate) fn close_library(&mut self) {
-        self.library.close();
-        self.library_button
-            .set_state(self.library_button.state().with_pointer(PointerState::None));
-        self.repaint |= TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR;
+    /// Close the program-library popup at `now_ns` and release the Library
+    /// button. The window begins to leave with the pixels it has; the popup
+    /// owes the presenter its removal, which it takes once the window has
+    /// gone.
+    pub(crate) fn close_library(&mut self, now_ns: u64, scale: Scale) {
+        self.library.close(now_ns, scale, &self.theme);
+        self.press_library_button(PointerState::None, scale);
+        self.repaint |= TaskbarRepaint::LIBRARY;
+    }
+
+    /// Draw the Library button as `pointer`, owing the bar its rectangle when
+    /// that changes how the button looks.
+    fn press_library_button(&mut self, pointer: PointerState, scale: Scale) {
+        let layout = self.layout(scale);
+        let mut reported = damage::sink();
+        set_pointer(
+            &mut self.library_button,
+            pointer,
+            layout.library,
+            &mut reported,
+        );
+        owe(&mut self.repaint.bar, &reported, layout.bar);
     }
 
     /// The application slot under `point` at the desktop `scale`, if any.
@@ -1498,10 +1683,13 @@ impl Taskbar {
             self.repaint |= TaskbarRepaint::NETWORK;
         }
 
-        // The popup's rows follow its own routing while the pointer is on the
-        // bar's surfaces; one that has left them lights nothing there.
-        if point.is_none() && self.library.pointer_left() {
-            self.repaint |= TaskbarRepaint::LIBRARY;
+        // The popup's programs follow its own routing while the pointer is on
+        // the bar's surfaces; one that has left them lights nothing there.
+        if point.is_none() && self.library.is_open() {
+            let layout = self.library_layout(scale);
+            let mut left = damage::sink();
+            self.library.pointer_left(&layout, &mut left);
+            owe(&mut self.repaint.library, &left, layout.panel);
         }
         // The open picker lights a cell for the pointer too, and owes only the
         // cell the highlight left and the one it arrived on.

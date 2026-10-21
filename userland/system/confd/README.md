@@ -32,8 +32,8 @@ store**, and therefore none can reach another application's data. A caller
 running no verified bundle — a kernel principal, a boot-floor program with no
 signed manifest, a parser-sandbox child — has no store and is refused, audited.
 
-The operations are `ConfigRead`, `ConfigSet`, `ConfigUnset`, and `ConfigCommit`
-on the caller's own configuration scopes; `PublicRead` on another application's
+The operations are `ConfigRead`, `ConfigSet`, `ConfigUnset`, `ConfigCommit`, and
+`ConfigDiscard` on the caller's own configuration scopes; `PublicRead` on another application's
 **published** document; `VaultRead`, `VaultSet`, and `VaultUnset` on the
 caller's **sealed** one; and `BlobOpen`, `BlobDelete`, `BlobList`,
 `TempCreate`, `TempRelease`, and `QuotaGet` on its **bulk** ones.

@@ -695,6 +695,35 @@ fn removing_a_secret_the_vault_does_not_hold_costs_no_call() {
     assert_eq!(host.calls(), 1, "only the open");
 }
 
+/// The policy layer answers what the account's own document does not set, an
+/// unset uncovers it, and no commit ever copies it into the account's file.
+#[test]
+fn a_policy_value_shows_through_and_is_never_copied_up() {
+    let mut host = service()
+        .with_policy("look.theme = dark\nlook.scale = 2\n")
+        .with_store("look.theme = light\n");
+    let mut settings = Settings::open_without_defaults(&mut host);
+    assert_eq!(settings.get("look.theme"), Some("light"));
+    assert_eq!(settings.get("look.scale"), Some("2"));
+    settings.unset("look.theme");
+    settings.set("look.size", "large").expect("sets");
+    settings.commit().expect("commits");
+    assert_eq!(
+        settings.get("look.theme"),
+        Some("dark"),
+        "the unset uncovered the policy"
+    );
+    drop(settings);
+    let own = host.committed();
+    assert_eq!(own.get("look.theme"), None);
+    assert_eq!(
+        own.get("look.scale"),
+        None,
+        "the policy never lands in the account's file"
+    );
+    assert_eq!(own.get("look.size"), Some("large"));
+}
+
 /// The sealed scope has no layer beneath it, so a removal leaves the key
 /// absent rather than uncovering a default or a policy value.
 #[test]
@@ -1185,4 +1214,49 @@ fn a_host_that_over_reports_its_reply_is_refused_rather_than_trusted() {
         reply.iter().all(|byte| *byte == 0),
         "the buffer the host did write into is wiped even so"
     );
+}
+
+#[test]
+fn a_failed_commit_left_staged_is_published_by_the_next_unless_abandoned() {
+    // The service keeps a failed commit's edits for a retry, so a caller that
+    // gives up on them and says nothing leaves them for the next commit.
+    let mut host = service();
+    let refusal = host.commit_refusal();
+    {
+        let mut store = Settings::open_without_defaults(&mut host);
+        store.set("left.behind", "1").expect("set");
+        refusal.set(Some(Errno::DeviceOffline));
+        assert_eq!(store.commit(), Err(Errno::DeviceOffline));
+        refusal.set(None);
+    }
+    {
+        let mut other = Settings::open_without_defaults(&mut host);
+        other.set("other", "2").expect("set");
+        other.commit().expect("published");
+    }
+    assert_eq!(host.committed().get("left.behind"), Some("1"));
+
+    let mut host = service();
+    let refusal = host.commit_refusal();
+    {
+        let mut store = Settings::open_without_defaults(&mut host);
+        store.set("given.up", "1").expect("set");
+        refusal.set(Some(Errno::DeviceOffline));
+        assert_eq!(store.commit(), Err(Errno::DeviceOffline));
+        refusal.set(None);
+        store.abandon().expect("withdrawn");
+        assert_eq!(store.get("given.up"), None, "the view is the store's again");
+        assert!(!store.is_dirty());
+    }
+    {
+        let mut other = Settings::open_without_defaults(&mut host);
+        other.set("other", "2").expect("set");
+        other.commit().expect("published");
+    }
+    assert_eq!(
+        host.committed().get("given.up"),
+        None,
+        "nothing abandoned lands with a later commit"
+    );
+    assert_eq!(host.committed().get("other"), Some("2"));
 }

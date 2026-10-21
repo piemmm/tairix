@@ -368,14 +368,14 @@ list drawn inside a child surface would leave the chain standing after the user
 had chosen. A submenu is not that surface — its rows are rows of the chain, so
 choosing one ends the chain exactly as any other row does.
 
-The scroll alone settles the desktop's own launcher. The program-library popup
-is a searchable, scrolled list over as many entries as a user has installed, so
-it is not a menu and keeps its own surface. A plate now *does* take text (the
-quick-entry field above), but a field is one line the desktop commits, not a
-live filter over rows that were fixed when the menu opened — so that is not
-what rescues the launcher either. The genuine menu *inside* it — the context
-menu on one of its rows — is the desktop's chain like every other
-(`plans/NEW-MENUS.md` §6, decision 3).
+The scroll alone settles the desktop's own launcher. The program library is a
+searchable, scrolled surface of pages over as many programs as a user has
+installed, so it is not a menu and keeps its own surface. A plate now *does*
+take text (the quick-entry field above), but a field is one line the desktop
+commits, not a live filter over rows that were fixed when the menu opened — so
+that is not what rescues the launcher either. The genuine menu *inside* it —
+the context menu on one of its programs — is the desktop's chain like every
+other (`plans/NEW-MENUS.md` §6, decision 3).
 
 ## The desktop's own menus
 
@@ -392,7 +392,7 @@ direction it arrives from.
   `pinboard::model`'s rows to the chain. See
   [the pinboard](./pinboard.md#the-backdrop-menu).
 - **The icon bar's four menus** — an application slot's declared menu, a
-  program-library row's context menu, the system quick actions, and the clock. A
+  launcher program's context menu, the system quick actions, and the clock. A
   secondary press answers `TaskbarResponse::OpenMenu`, carrying which menu it
   is, its rows, and where the plate hangs; the bar holds no menu state at all,
   because while a chain is up the grab means no event reaches it. See

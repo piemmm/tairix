@@ -67,8 +67,8 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 
 ## Carve-outs and evidence
 
-One per-control damage gap is deliberately left, and C.7 states it: the
-program-library popup owes its whole panel for every change.
+No per-control damage gap is left: the launcher reports the rectangles each
+change moves, as every other bar surface does (C.7).
 
 **Every published number is taken from a `--release`/installer image.** A dev-profile timing is never quoted as evidence.
 
@@ -185,9 +185,10 @@ C.6's acceptance.
 **A.4's QEMU hover vertical.**
 `tests/integration/desktop_hover_qemu_aarch64` boots the production aarch64
 graphical session on its own `FsDisk::HoverRootDisk` image, launches the
-`framestats` fixture from the program library, sweeps the pointer the length of
-the icon bar, and launches the fixture again. The guest judges the work between
-the two samples. This is the regression gate every later stage tightens.
+`framestats` fixture from the program library, sweeps the icon bar while the
+launch settles, then clicks the fixture's slot on the bar, sweeps the bar again
+and clicks the slot once more. The guest judges the work between the last two
+samples. This is the regression gate every later stage tightens.
 
 - **The reader is a fixture bundle, not the kernel.**
   `tests/integration/framestats_program` is a `command` bundle declaring a
@@ -197,7 +198,9 @@ the two samples. This is the regression gate every later stage tightens.
   reads as one `log_emit` record, within the `abi-v1`
   `LOG_FIELDS_MAX` bound. It requires **one** publishing session and fails
   closed otherwise. A run that cannot sample emits its own failure record and
-  the gate fails the run on sight of it.
+  the gate fails the run on sight of it. Once running it holds a slot on the
+  icon bar and samples at each click on it, so a sample costs the desktop one
+  slot press rather than a launch through a panel half the screen across.
 - **The gate listens on the *diagnostic* trail.** `log_emit` reaches the log
   sink, never the audit sink, so this vertical installs its gate there and
   hands the audit trail straight to serial — the reverse of every sibling's
@@ -207,12 +210,14 @@ the two samples. This is the regression gate every later stage tightens.
 - **The gesture is bracketed, and the epoch is not judged.** The published
   record is cumulative from the session's first frame, so bring-up's
   full-screen frames own both its mean *and* its peak: neither says anything
-  about the gesture that followed. The two launches bracket the sweep, and
-  pointer steps fire strictly in script order, so the sweep provably lies
-  between the samples — no marker has to say when a hover ended, which is just
-  as well, because nothing observable says it. The publisher's 250 ms rate
-  limit only moves the window's edges; every counter inside it is work rather
-  than time.
+  about the gesture that followed. Two clicks on the fixture's slot bracket
+  the sweep, and pointer steps fire strictly in script order, so the sweep
+  provably lies between the samples — no marker has to say when a hover ended,
+  which is just as well, because nothing observable says it. The publisher's
+  250 ms rate limit only moves the window's edges; every counter inside it is
+  work rather than time. A settling sweep between the launch and the first of
+  those clicks lasts longer than that limit, so the launch's own departure is
+  published before the window opens.
 - **The sweep aims at the icon bar.** It walks the bar's own centre line from
   the launcher button to the Switchboard capsule in `SWEEP_MOVES` samples,
   crossing every control the bar draws. The bar is a desktop surface and never
@@ -222,22 +227,26 @@ the two samples. This is the regression gate every later stage tightens.
   frames ≥ `MIN_SWEEP_FRAMES`, which is one (an empty difference must not pass
   by measuring nothing, and a contended guest drains the sweep's waiting moves
   into as few frames as its speed allows, so a higher floor measured the host),
-  total damage ≤ `MAX_SWEEP_SCREENS` screens, blends ≤ 4 per damaged
+  total damage ≤ `MAX_SWEEP_SCREENS` (one) screens, blends ≤ 4 per damaged
   pixel, frost work ≤ one recomputed pixel per damaged pixel, no re-rendered
   furniture, and presents ≤ rectangles + frames. None divides by the frame
   count, so none is met or missed by how many frames the host let through.
-- **Measured** (32-move sweep, `virt` board at 1024×768, five runs): delta
-  frames 37–40, damaged 520 713 – 788 713 px — 0.66 to 1.00 of a screen
-  against a bound of three.
+- **Measured** (32-move sweep, `virt` board at 1024×768, three runs): delta
+  frames 31–41, damaged 170 050 – 207 026 px — 0.22 to 0.26 of a screen
+  against a bound of one. The window holds the sweep, the two slot presses,
+  the Switchboard's periodic reading on the capsule, and one landing of the
+  glyphs the readout's figures need, which redraws the bar, the title bands
+  and the desktop's icon cells.
 - **`PointerPen::hover`** emits the run of motion samples; the enrolled-script
   invariant test covers the new script unchanged, because it still ends on the
   click its guest exits on.
-- **What the gate found on its first run** was C.7 below — a bar hover
-  repainting the whole bar — now fixed. What measuring the fix then found is
-  that **this bracket is not a hover measurement**: the two launches that
-  bracket the sweep dominate what it recomposes, so its mean is a bound on the
-  launch path and stays at `screen/8`. C.7 carries the numbers either side and
-  the deterministic host gate the per-control claim is held to.
+- **What the gate holds the desktop to.** A bar hover repaints its control,
+  not the bar (C.7); a model change on the bar owes the control it moved, the
+  whole bar only when it re-lays it (C.7); and a landing of text drawn
+  provisionally owes the desktop layer its icon cells, never the ground (D.11).
+  Each was found by this window and each fails it: a bar re-damaged every
+  frame from 17 frames, a whole-layer landing at once. C.7 carries the
+  deterministic host gate the per-control claim is also held to.
 
 ---
 
@@ -591,9 +600,12 @@ the sink the rectangles come from, so the desktop's two host-composed surface
 families read one definition (§2.2) and `paint_parts` — the clip-per-rectangle
 walk both paint through — lives there too.
 
-`Whole` is what a change to the *model* owes, because a new clock label or a
-rebuilt application strip has no rectangle smaller than the surface. A change a
-*control* reports owes its own rectangles: `track_hover` reports the library
+`Whole` is what a change that re-lays the bar owes: a slot or signal appearing
+or going, or a new room for the clock. Every other change owes the controls it
+moved — the clock's rectangle for a new reading, the capsule's slot for a new
+tray reading, a status signal's slot, the slots whose `AppSlot` changed — and a
+change to what no surface draws (the task list, a notification the bar does not
+show) owes nothing. A change a *control* reports owes its own rectangles: `track_hover` reports the library
 button through the shared guarded write and the application strip through
 `damage::move_mark` (the slot the hover left and the slot it arrived on), the
 capsule reports its own slot as it always did, and the picker's cell hover joins
@@ -670,32 +682,35 @@ stays under an eighth of one. It fails on the tree before this change with
 `sample 0 recomposed 91840 px, a whole bar being 91680`.
 
 **A.4's guest bracket, same board, `virt` at 1024 × 768** (bar 48 672 px),
-measured over five runs of the settled gesture: delta frames 37–40, damaged
-520 713 – 788 713 px, blur 127 154, dirty rects 56–60, chrome misses 0. A
-sweep sample costs 1 798 px — the same figure the host sweep below measures,
-which is what says the guest and the host now agree about what a hover costs.
+measured over three runs of the settled gesture: delta frames 31–41, damaged
+170 050 – 207 026 px, blur 18 093 – 32 798, dirty rects 59–74, chrome misses 0.
+A sample that moves no control costs the cursor's two rectangles, 1 860 px,
+and one that crosses a slot a few thousand more — the shape the host sweep
+below measures, which is what says the guest and the host agree about what a
+hover costs.
 
-**A.4's bound is a ceiling on the window's *total* damage, three screens, and
-never a per-frame mean.** The bracket is not a hover measurement: the two
-launches that bracket the sweep each open a launcher popup, click a row and
-close it, and that churn is most of what the window recomposes. Averaged over
-a frame count the host chooses, that fixed churn read as a small mean on a
-machine that composed many frames and a large one on a machine that coalesced
-them — the same load dependence the frost bound was reshaped away from. A
-total has no denominator: holding frames only coalesces damage, so a loaded
-host measures less, never more. Tightening the ceiling onto the honest 0.66–1.00
-would gate the launch path with the hover's cost lost inside it, so the
-per-control claim is gated where it is deterministic, host-side, and A.4 keeps
-its job of catching a gesture that starts repainting a window or the screen.
+**A.4's bound is a ceiling on the window's *total* damage, one screen, and
+never a per-frame mean.** Two presses of the fixture's own slot bracket the
+sweep, so the window holds the hover and what the desktop's services answer
+meanwhile, not a launch. Averaged over a frame count the host chooses, a fixed
+cost reads as a small mean on a machine that composed many frames and a large
+one on a machine that coalesced them — the same load dependence the frost
+bound was reshaped away from. A total has no denominator: holding frames only
+coalesces damage, so a loaded host measures less, never more — which is also
+why a guest that coalesces the sweep below 17 frames can hide a per-frame cost
+from it, and why the per-control claim is gated where it is deterministic,
+host-side, too.
 
-**What eroded it.** The embedder fires the library popup's one-shot "seen"
-witness after every published frame, and fired it through `Taskbar::library_mut`
-— a borrow that latches the whole bar and the whole popup, because the bar
+**What eroded it.** The embedder fires the launcher's one-shot "shown"
+witness after every published frame, and fired it through a mutable borrow of
+the popup that latched the whole bar and the whole popup, because the bar
 cannot see into a borrow. So every frame dirtied a full-width strip, the next
 frame recomposed it, published, and dirtied it again: a desktop that never
 settled, spending 48 672 px a frame for as long as the session was up, and
 turning a 1 798-px hover sample into 48 982. `Taskbar::report_library_shown` is
-the witness's own non-latching route, mirroring `library_routing_mut`. Landing
+the witness's own non-latching route, mirroring `library_routing_mut`; the
+launcher's inputs are now handed over by value and compared
+(`set_library_catalog` and its siblings), so no borrow of it latches. Landing
 with it: arriving icon artwork repainted the desktop layer **whole**, a screen
 per delivered batch, where a decode can only change the picture inside the
 tiles that draw through it — `Desktop::mark_artwork` scopes it to those cells,
@@ -708,8 +723,8 @@ each surface repaints what the batch moved. The two that *store* a picture
 compare before they latch: `Taskbar::set_apps` owes the slots whose
 `AppSlot` actually changed — nothing at all for the re-derived strip that
 matched, which is most of them — and the strip's whole region only when the
-slot *count* re-lays every rectangle in it; `set_library_row_artwork` owes the
-row whose picture changed, which is what makes resolving every shown row
+slot *count* re-lays every rectangle in it; `set_library_artwork` owes the
+tiles whose picture changed, which is what makes resolving every shown program
 before every paint free. The pictures with no model change behind them are the
 class artwork a bar control with none of its own resolves *as it paints*
 (the Library button, a slot with no bundle icon, the account capsule):
@@ -734,25 +749,25 @@ the class tier and fails if a pixel moves outside what the adopt named.
   controls they name.
 - `userland/gui/session`: an account owing one control repainting in place
   (same window id) and marking only that control; a refused present keeping
-  what its surface owed; resolving the popup's rows before a paint owing the
-  rows whose picture changed and nothing on the next resolution; and the host
-  sweep above.
+  what its surface owed; resolving the launcher's programs before a paint
+  owing the programs whose picture changed and nothing on the next resolution;
+  and the host sweep above.
 - `lib/icon`: a landing naming only the decode it answered, at only the side
   it answered; a refusal naming its request like a picture; a landed class
   master naming the request that falls back to it; and a teardown dropping the
   batch it wiped.
 
-#### What is deliberately left
+#### The launcher
 
-The **library popup** owes its whole panel for every change. Its
-`PopupOutcome::Changed` reports only "the popup's pixels moved", and the
-changes behind it are not alike — a moved row highlight is two rows, while a
-scroll moves every row and a filter edit rebuilds the list, and neither the
-scrollbar nor the search field reports anything for those. Per-row damage there
-means every site inside the popup reporting its own rectangles, which is a
-change of its own with its own tests; the popup does get the scoped *present*
-path, so it costs a paint rather than a paint plus an allocation. Worth doing
-when a measurement says a popup hover matters.
+The launcher reports what each change moves, never its whole panel: a hover or
+the keyboard's mark the tiles it moves between, a scroll the content column, a
+query or a page the content, the sidebar's tabs it moves and the details strip
+where what it says changed. It lays itself out once per paint and visits, under
+each rectangle, only what reaches it, so a part repainted alone lays exactly
+what a whole paint laid there
+(`a_part_repainted_alone_lays_exactly_what_the_whole_paint_laid_there`, and its
+cascade twin). Its layout stores no rectangle per program: a section is a run of
+rows on the shared grid, so a pointer sample visits only the rows in view.
 
 The one repaint that fired on a cadence rather than on a gesture — the
 Switchboard tray republishing a reading every couple of seconds, of which a
@@ -1023,7 +1038,11 @@ surface clip, and `present_desktop` is now the whole-screen case of the same cal
 — kept for the changes that genuinely alter the whole layer: bring-up, a new
 wallpaper, a theme switch and adopted settings. A re-list reports cells like any
 other change (`Desktop::relist_into`): the column's pitch is fixed, so an index
-keeps its cell whatever the listing.
+keeps its cell whatever the listing. So does text drawn provisionally landing
+(`DesktopShell::present_desktop_text`): the names are the layer's only text and
+each is drawn inside its own tile, so a landing owes the shown cells — repainting
+the layer whole for it recomposed the screen and every frost above it each time
+the font service answered.
 
 **A latent rendering defect closed with it:** the painter used to skip the
 backdrop fill when the wallpaper surface was screen-sized, but `lib/sandbox`

@@ -208,6 +208,13 @@ succeeds, and `store_refusal` says why the view is not fresh; so a caller that
 puts its screen back on a failed commit never shows a value the store — and the
 next start — has already replaced.
 
+A commit that fails leaves its edits staged with the service for a retry, and
+the staging is the process's, not the handle's: a later commit on the same
+scope from any of the process's handles would publish them. A caller that will
+not retry calls `abandon`, which withdraws them (`ConfigDiscard`) and re-reads
+the store, so what it gave up on never lands and its view is the store's
+again.
+
 ## Closed registries, and the open namespace that needs enumeration
 
 Most applications read a **closed** registry: a fixed set of keys they know, so

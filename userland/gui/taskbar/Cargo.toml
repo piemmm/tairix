@@ -45,6 +45,9 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # folder taxonomy — and reports launches by `EntryId`; the taskbar itself
 # never reads the stores.
 tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
+# The one reader's fold and name order: the launcher's search folds case and
+# accents exactly as every other name lookup does, and lists by the same order.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The stable user/kernel ABI (`lib/abi`): the notification-channel severity
 # (`notify_ipc::NotifySeverity`) is the one vocabulary the producer wire, the
 # session relay, and this model share, so a transient notification's severity

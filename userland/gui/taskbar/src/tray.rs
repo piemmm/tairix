@@ -57,8 +57,6 @@ use tairix_input::InputEvent;
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
-use crate::repaint::TaskbarRepaint;
-
 /// Clearance an account disc keeps inside the icon square it is drawn in, per
 /// side, in logical pixels at the reference density.
 ///
@@ -102,19 +100,22 @@ impl SwitchboardTray {
     }
 
     /// Adopt the signed-in account's name, from which the disc takes its
-    /// mark. Returns the surfaces whose pixels the new mark actually moved.
+    /// mark. Answers what the new mark actually redraws.
     ///
     /// Only the embedder knows who is signed in, and the bar holds nothing
     /// but the one character it draws: a name is not an identity the bar can
     /// act on, and keeping only the mark means a live update cannot leak a
     /// name onto a surface that never shows one.
-    pub fn set_account(&mut self, name: &str) -> TaskbarRepaint {
+    pub fn set_account(&mut self, name: &str) -> CapsuleChange {
         let monogram = monogram_of(name);
         if self.monogram == monogram {
-            return TaskbarRepaint::NONE;
+            return CapsuleChange::NONE;
         }
         self.monogram = monogram;
-        TaskbarRepaint::BAR
+        CapsuleChange {
+            capsule: true,
+            readout: false,
+        }
     }
 
     /// The account's circular identity picture for an icon square of `side`,
@@ -140,21 +141,21 @@ impl SwitchboardTray {
     }
 
     /// Adopt the latest published summary — or its absence, when the
-    /// Switchboard service is gone — rebuilding the capsule. Returns the
-    /// surfaces whose pixels the new reading actually moved.
-    pub fn set_summary(&mut self, summary: Option<TraySummary>) -> TaskbarRepaint {
+    /// Switchboard service is gone — rebuilding the capsule. Answers what the
+    /// new reading actually redraws.
+    pub fn set_summary(&mut self, summary: Option<TraySummary>) -> CapsuleChange {
         if self.summary == summary {
-            return TaskbarRepaint::NONE;
+            return CapsuleChange::NONE;
         }
         self.summary = summary;
         self.rebuild()
     }
 
     /// Adopt the session's count of unresponsive applications, rebuilding
-    /// the capsule. Returns the surfaces whose pixels the new count moved.
-    pub fn set_unresponsive(&mut self, count: u16) -> TaskbarRepaint {
+    /// the capsule. Answers what the new count actually redraws.
+    pub fn set_unresponsive(&mut self, count: u16) -> CapsuleChange {
         if self.unresponsive == count {
-            return TaskbarRepaint::NONE;
+            return CapsuleChange::NONE;
         }
         self.unresponsive = count;
         self.rebuild()
@@ -252,31 +253,44 @@ impl SwitchboardTray {
 
     /// Re-derive the capsule from the current facts, carrying over the
     /// pointer and focus interaction state so a live update never drops an
-    /// open hover readout, and report which surfaces the new derive actually
-    /// redraws.
+    /// open hover readout, and report what the new derive actually redraws.
     ///
     /// The two surfaces draw different parts of one signal, so they are
-    /// latched separately. The bar's capsule is the glyph, the composed
-    /// state, and the badge; the readout adds the label, the value line, and
-    /// the action. A calm desktop republishes a fresh CPU reading every
-    /// couple of seconds and *only* the value line moves — so gating the bar
-    /// on the whole signal would repaint the full-width bar, on a cadence, to
-    /// redraw pixels nobody can tell apart. The readout is latched only while
-    /// it is expanded, because that is the only time it is on screen at all.
-    fn rebuild(&mut self) -> TaskbarRepaint {
+    /// reported separately. The capsule is the glyph, the composed state, and
+    /// the badge; the readout adds the label, the value line, and the action.
+    /// A calm desktop republishes a fresh CPU reading every couple of seconds
+    /// and *only* the value line moves, which redraws no capsule pixel. The
+    /// readout is reported only while it is expanded, because that is the
+    /// only time it is on screen at all.
+    fn rebuild(&mut self) -> CapsuleChange {
         let interaction = self.signal.state();
         let next = derive_signal(self.summary.as_ref(), self.unresponsive)
             .into_signal(interaction.pointer, interaction.focus);
-        let mut parts = TaskbarRepaint::NONE;
-        if !self.signal.draws_same_capsule(&next) {
-            parts |= TaskbarRepaint::BAR;
-        }
-        if next.is_expanded() && self.signal != next {
-            parts |= TaskbarRepaint::READOUT;
-        }
+        let change = CapsuleChange {
+            capsule: !self.signal.draws_same_capsule(&next),
+            readout: next.is_expanded() && self.signal != next,
+        };
         self.signal = next;
-        parts
+        change
     }
+}
+
+/// What a change to the capsule's facts redraws: the capsule's own slot on the
+/// bar, the expanded readout, both or neither.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct CapsuleChange {
+    /// The capsule's slot.
+    pub capsule: bool,
+    /// The readout, whole.
+    pub readout: bool,
+}
+
+impl CapsuleChange {
+    /// Nothing redrawn.
+    pub const NONE: Self = Self {
+        capsule: false,
+        readout: false,
+    };
 }
 
 /// What [`derive_signal`] computed for the capsule: the composed furniture

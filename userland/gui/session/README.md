@@ -55,8 +55,9 @@ store (`AGENTS.md` §2.24, §5.4). The merged catalog is handed to the popup
 with `DesktopShell::set_library`; a `LibraryLaunch { entry }` response is
 resolved back through that catalog to the entry's bundle `Run` path.
 
-Both things an entry row can ask for go through the one `catalogued` lookup, so
-a row can never act on two different bundles. The second is
+All three things a program can ask for — to run, to run as an administrator,
+and a shortcut — go through the one `catalogued` lookup, so a program can never
+act on two different bundles. The shortcut is
 `CreateDesktopShortcut { entry }` (`plans/SYMLINKS.md` S5):
 `Desktop::shortcut_to` names a symbolic link in the user's own `Desktop`
 folder after the entry's **display name** and points it at the bundle
@@ -111,17 +112,16 @@ buttons (`AGENTS.md` §2.2).
 - `trim_caches` shrinks it under memory pressure and `teardown` wipes it, on
   the same path as the cursor and glyph caches.
 
-`resolve_library_icons` gives the program-library popup the same treatment,
-driven off the rows the popup says it is showing: it asks for the visible
-rows' icon requests, resolves each row's bundle icon at that row's own pixel
-side, and files the answer back with `set_row_artwork`. A row whose entry
-declares no icon — or whose asset is absent, oversize, or undecodable — falls
-back to the shipped `AppBundle` artwork and then to the row's built-in glyph,
-so a row is never blank. It runs at the top of `present`, before the paint,
-skips a row that already holds right-sized artwork, and does nothing while
-the popup is closed. Filing artwork deliberately does **not** latch a
-repaint: latching from inside the pre-paint resolution would demand another
-present every frame, forever.
+`resolve_library_icons` gives the program-library launcher the same
+treatment, driven off what the launcher says it is showing: it asks for the
+visible programs' icon requests, resolves each program's bundle icon at the
+side it is drawn at, and files the answer back with `set_library_artwork`. A
+program whose entry declares no icon — or whose asset is absent, oversize, or
+undecodable — falls back to the shipped `AppBundle` artwork and then to the
+tile's built-in glyph, so a program is never blank. It runs at the top of
+`present`, before the paint, skips a program that already holds right-sized
+artwork, and does nothing while the launcher is closed. Filing artwork owes
+only the rectangles whose picture changed, which that same present paints.
 
 **Read the pressure band before building the caches.** A reclaimable cache
 admits nothing while the reported band is the fail-closed *unknown* it starts

@@ -15,6 +15,10 @@
 //! draws the library all go through this engine, so a writer and a reader
 //! can never disagree about what a catalog says.
 //!
+//! What each account does with its library — the favourites it keeps and how
+//! it uses each program — is a third, separate record ([`personal`]), kept in
+//! the desktop's private app-data scope rather than in either layer.
+//!
 //! # The two layers, and why only one of them moved
 //!
 //! The **machine** store stays an ordinary `/System/Settings` administrator
@@ -83,13 +87,15 @@ extern crate alloc;
 
 pub mod catalog;
 pub mod entry;
+pub mod personal;
 pub mod store;
 
 pub use catalog::{merge, Catalog, CatalogFull, EntryPatch, Record, MAX_ENTRIES};
 pub use entry::{
     BundlePath, DisplayName, EntryError, EntryId, IconAsset, LibraryEntry, MAX_BUNDLE_PATH_LEN,
-    MAX_DISPLAY_NAME_LEN, MAX_ENTRY_ID_LEN, MAX_ICON_ASSET_LEN,
+    MAX_DISPLAY_NAME_LEN, MAX_ENTRY_ID_LEN, MAX_ENTRY_ID_SEGMENTS, MAX_ICON_ASSET_LEN,
 };
+pub use personal::{Edit, Personal, RecordFull, RecordRefused, Shelf};
 pub use store::{document, load, CatalogError, EntryKey, ParseError};
 pub use tairix_abi::LibraryCategory;
 

@@ -22,14 +22,17 @@
 //! desktop-drawn panel of the bundle's **signed** manifest, so an application
 //! cannot state an identity that is not its own.
 
+use alloc::string::String;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuSymbol};
 use tairix_abi::ProcId;
+
 use tairix_controls::{
-    AboutSheet, ChainModel, ChainRow, Fact, FactList, MenuItem, PlatePlacement, PlateSide,
+    AboutSheet, ChainModel, ChainRow, Fact, FactList, MenuItem, PlatePlacement, PlateSide, RowIcon,
+    INFO_ROW_LABEL,
 };
 use tairix_geometry::Rect;
 use tairix_icon::IconKind;
-use tairix_proglib::EntryId;
+use tairix_proglib::{Edit, EntryId};
 
 use crate::apps::AppIdentity;
 use crate::clock_menu::{self, ClockPermits};
@@ -96,28 +99,24 @@ impl MenuSubject {
                 owner: *owner,
                 item,
             }),
-            Self::Entry { entry } => match EntryRow::at(item.index())? {
-                EntryRow::Open => Some(TaskbarResponse::LibraryLaunch {
-                    entry: entry.clone(),
-                }),
-                EntryRow::Shortcut => Some(TaskbarResponse::CreateDesktopShortcut {
-                    entry: entry.clone(),
-                }),
-            },
+            Self::Entry { entry } => Some(EntryRow::at(item.index())?.response(entry)),
             Self::System => system::response_at(item.index()),
             Self::Clock => clock_menu::response_at(item.index()),
             Self::Network => network_menu::response_at(item.index()),
         }
     }
 
-    /// Whether choosing a row of this menu closes the program-library popup.
+    /// Whether choosing row `item` of this menu closes the program-library
+    /// popup.
     ///
-    /// Only the row menu *inside* that popup does: launching a bundle or
-    /// putting a shortcut on the desktop both act somewhere the popup would
-    /// stand between the user and the result.
+    /// Only an entry row that acts somewhere the popup would stand between the
+    /// user and the result does — launching, or putting a shortcut on the
+    /// desktop. Keeping or arranging a favourite changes the popup itself,
+    /// which stays open to show it.
     #[must_use]
-    pub(crate) const fn closes_library(&self) -> bool {
+    pub(crate) fn closes_library(&self, item: AppMenuItemId) -> bool {
         matches!(self, Self::Entry { .. })
+            && EntryRow::at(item.index()).is_some_and(EntryRow::acts_elsewhere)
     }
 }
 
@@ -135,10 +134,9 @@ pub struct MenuRequest {
 
 /// One row of a program-library entry's context menu.
 ///
-/// Both things the popup can do to a row that its own click cannot: launch the
-/// bundle, and put a shortcut to it on the desktop. The bar performs neither —
-/// each becomes a typed response the session carries out under its own
-/// authority.
+/// What the launcher can do to a program that its own click cannot. The bar
+/// performs none of it — each becomes a typed response the session carries out
+/// under its own authority.
 ///
 /// Public because aiming *at* a row is the same fact as reading one back: an
 /// embedder's own test, or a QEMU pointer script, finds the row by the label
@@ -147,17 +145,64 @@ pub struct MenuRequest {
 pub enum EntryRow {
     /// Launch the entry's bundle.
     Open,
+    /// Launch it as an account that may do more, once that account's
+    /// password is given at the console's authorisation prompt.
+    RunAsAdministrator,
+    /// Keep it among the account's favourites.
+    Favourite,
+    /// Stop keeping it among the favourites.
+    Unfavourite,
+    /// Move a favourite one place earlier.
+    MoveEarlier,
+    /// Move a favourite one place later.
+    MoveLater,
+    /// Forget how it has been used, so it leaves the frequently used.
+    Forget,
+    /// Forget how every program has been used.
+    ForgetAll,
     /// Create a symbolic link to the entry's bundle in the user's own
     /// `Desktop` folder.
     Shortcut,
 }
 
-/// The rows a program-library entry's context menu offers, in row order.
+/// Every row a program-library entry's context menu may offer, in row order.
 ///
-/// The one definition of that menu: the model states these labels and the
-/// chosen id is read back through the same list, so a reordering cannot
-/// silently re-map what a row does.
-const ENTRY_ROWS: [EntryRow; 2] = [EntryRow::Open, EntryRow::Shortcut];
+/// The one definition of that menu: a row's id is its place here, so a menu
+/// that leaves rows out — a program that is not a favourite has nothing to
+/// move — shifts no other row's meaning, and a chosen id reads back through
+/// this same list.
+const ENTRY_ROWS: [EntryRow; 9] = [
+    EntryRow::Open,
+    EntryRow::RunAsAdministrator,
+    EntryRow::Favourite,
+    EntryRow::Unfavourite,
+    EntryRow::MoveEarlier,
+    EntryRow::MoveLater,
+    EntryRow::Forget,
+    EntryRow::ForgetAll,
+    EntryRow::Shortcut,
+];
+
+/// What a program-library entry's menu offers depends on: the account's own
+/// record of the entry, and whether the console can authorise an account.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct EntryState {
+    /// Where the entry stands among the favourites, if it is one.
+    pub(crate) favourite: Option<Neighbours>,
+    /// The account has a record of using it.
+    pub(crate) used: bool,
+    /// The console has an elevation broker to authorise an account.
+    pub(crate) elevation: bool,
+}
+
+/// Whether a favourite has others before and after it, so it can move.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Neighbours {
+    /// A favourite stands before it.
+    pub(crate) earlier: bool,
+    /// A favourite stands after it.
+    pub(crate) later: bool,
+}
 
 impl EntryRow {
     /// The label this row draws with.
@@ -165,6 +210,13 @@ impl EntryRow {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
+            Self::RunAsAdministrator => "Run as Administrator\u{2026}",
+            Self::Favourite => "Add to Favourites",
+            Self::Unfavourite => "Remove from Favourites",
+            Self::MoveEarlier => "Move Earlier",
+            Self::MoveLater => "Move Later",
+            Self::Forget => "Remove from Frequently Used",
+            Self::ForgetAll => "Clear Frequently Used",
             Self::Shortcut => "Create Desktop Shortcut",
         }
     }
@@ -173,7 +225,54 @@ impl EntryRow {
     const fn symbol(self) -> AppMenuSymbol {
         match self {
             Self::Open => AppMenuSymbol::Open,
+            Self::RunAsAdministrator => AppMenuSymbol::RunAsAdministrator,
+            Self::Favourite => AppMenuSymbol::Favourite,
+            Self::Unfavourite | Self::Forget => AppMenuSymbol::Remove,
+            Self::MoveEarlier => AppMenuSymbol::MoveUp,
+            Self::MoveLater => AppMenuSymbol::MoveDown,
+            Self::ForgetAll => AppMenuSymbol::Clear,
             Self::Shortcut => AppMenuSymbol::Shortcut,
+        }
+    }
+
+    /// Whether an entry in `state` offers this row.
+    const fn offered(self, state: EntryState) -> bool {
+        match (self, state.favourite) {
+            (Self::Open | Self::Shortcut, _) => true,
+            (Self::RunAsAdministrator, _) => state.elevation,
+            (Self::Favourite, place) => place.is_none(),
+            (Self::Unfavourite, place) => place.is_some(),
+            (Self::MoveEarlier, Some(place)) => place.earlier,
+            (Self::MoveLater, Some(place)) => place.later,
+            (Self::MoveEarlier | Self::MoveLater, None) => false,
+            (Self::Forget | Self::ForgetAll, _) => state.used,
+        }
+    }
+
+    /// Whether the row acts somewhere the launcher would stand in front of, so
+    /// choosing it closes the launcher.
+    const fn acts_elsewhere(self) -> bool {
+        matches!(self, Self::Open | Self::RunAsAdministrator | Self::Shortcut)
+    }
+
+    /// Whether the row starts the next group on its plate.
+    const fn begins_group(self) -> bool {
+        matches!(self, Self::Favourite | Self::Unfavourite | Self::Shortcut)
+    }
+
+    /// What choosing this row on `entry` asks the embedder for.
+    fn response(self, entry: &EntryId) -> TaskbarResponse {
+        let entry = entry.clone();
+        match self {
+            Self::Open => TaskbarResponse::LibraryLaunch { entry },
+            Self::RunAsAdministrator => TaskbarResponse::LibraryLaunchElevated { entry },
+            Self::Favourite => TaskbarResponse::LibraryEdit(Edit::Favourite(entry)),
+            Self::Unfavourite => TaskbarResponse::LibraryEdit(Edit::Unfavourite(entry)),
+            Self::MoveEarlier => TaskbarResponse::LibraryEdit(Edit::MoveEarlier(entry)),
+            Self::MoveLater => TaskbarResponse::LibraryEdit(Edit::MoveLater(entry)),
+            Self::Forget => TaskbarResponse::LibraryEdit(Edit::Forget(entry)),
+            Self::ForgetAll => TaskbarResponse::LibraryEdit(Edit::ForgetAll),
+            Self::Shortcut => TaskbarResponse::CreateDesktopShortcut { entry },
         }
     }
 
@@ -183,18 +282,32 @@ impl EntryRow {
     }
 }
 
-/// The title the entry menu's plate carries: the surface the rows act on,
-/// named as the user knows it.
-const ENTRY_TITLE: &str = "Program";
-
-/// The model a program-library entry's context menu opens with.
+/// The model a program-library entry's context menu opens with, titled with
+/// the entry's name, offering what `state` allows, and closing with the *Info*
+/// sheet of its signed manifest where `identity` is known.
 #[must_use]
-pub(crate) fn entry_menu() -> ChainModel {
-    let mut model = ChainModel::new(ENTRY_TITLE);
+pub(crate) fn entry_menu(
+    name: &str,
+    state: EntryState,
+    identity: Option<&AppIdentity>,
+    bundle: &str,
+) -> ChainModel {
+    let mut model = ChainModel::new(name);
     for (index, row) in ENTRY_ROWS.into_iter().enumerate() {
-        if let Some(id) = AppMenuItemId::for_index(index) {
-            model.push(ChainRow::item(id, row.symbol(), MenuItem::new(row.label())));
+        if !row.offered(state) {
+            continue;
         }
+        if let Some(id) = AppMenuItemId::for_index(index) {
+            let item = MenuItem::new(row.label()).with_group_break(row.begins_group());
+            model.push(ChainRow::item(id, row.symbol(), item));
+        }
+    }
+    if let Some(identity) = identity {
+        model.push(ChainRow::info(
+            MenuItem::new(INFO_ROW_LABEL).with_group_break(true),
+            about_sheet(identity),
+        ));
+        model.set_info_source(&RowIcon::Bundle(String::from(bundle)));
     }
     model
 }

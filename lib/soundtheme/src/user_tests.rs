@@ -237,3 +237,18 @@ fn the_longest_pushed_document_fits_the_policy() {
         Ok(choices.over(&SoundSettings::default()))
     );
 }
+
+#[test]
+fn a_setting_another_reader_keeps_in_the_same_store_is_passed_over() {
+    let (choices, refused) = stored(
+        "library.os.tairix.calc = favourite=1\nsound.bell.enabled = false\nsoundx.gain = 1\n",
+    );
+    assert!(refused.is_empty(), "{refused:?}");
+    assert_eq!(choices, stored("sound.bell.enabled = false\n").0);
+    let (_, refused) = stored("sound.unknown = 1\n");
+    assert_eq!(
+        refused,
+        ["sound.unknown"],
+        "an unknown sound setting is still said"
+    );
+}

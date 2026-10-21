@@ -25,9 +25,11 @@
 //!
 //! [`TaskbarRenderer::paint_library`] paints the open program-library popup:
 //! the shared [`Panel`](tairix_controls::Panel) chrome anchored back at the
-//! Library button, the search field, one shared list row per folder or
-//! entry, the scrollbar when the rows overflow, and the calm placeholder when
-//! nothing is listed. The theme is the taskbar's own
+//! Library button, the search field, the sidebar's folders, the content's
+//! tiles and captioned rows, the scrollbar when the content overflows, the
+//! details strip, and the calm placeholder when nothing is listed. It lays
+//! the popup out once per paint and visits, under each rectangle, only what
+//! reaches it. The theme is the taskbar's own
 //! ([`Taskbar::theme`]), so the geometry the input router hit-tests and the
 //! pixels painted here can never come from two different themes.
 //!
@@ -63,7 +65,8 @@ use tairix_controls::shell::Notification;
 use tairix_controls::state::{ActivityState, ValidationState};
 use tairix_controls::{
     paint_framed_surface_plate, paint_surface_plate, plate_border, plate_content_inset,
-    ChromeLayer, ControlRole, ControlState, ScrollOrientation, ScrollView,
+    ChromeLayer, ControlRole, ControlState, IconTile, ListRow, PointerState, ScrollOrientation,
+    ScrollView, SelectionState,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
@@ -78,7 +81,10 @@ use tairix_theme::Palette;
 
 use crate::clock::{ClockFaces, ClockLines};
 use crate::layout::{local_rect, BarLayout};
-use crate::library::{chrome_panel, list_row, popup_font, LibraryFocus};
+use crate::library::{
+    chrome_panel, folder_label, footer_font, ItemAt, LibraryItem, LibraryLayout, LibraryPopup,
+    SectionKind,
+};
 use crate::notifications::{NotificationArea, NotifySeverity, TransientNotification};
 use crate::taskbar::Taskbar;
 
@@ -163,6 +169,19 @@ pub struct TaskbarRenderer {
     icons: ReclaimCache<IconKind, Surface, IconEpoch, BuildFastHash>,
     icon_set: IconSet,
     icon_generation: u64,
+    /// The launcher's content painted once while it makes an entrance, so
+    /// each frame of the entrance is a blend of this rather than a repaint.
+    /// Held only while one runs, and repainted only when the content would
+    /// draw differently.
+    library_layer: Option<ContentLayer>,
+}
+
+/// The launcher's content as one picture, and the generation of the content
+/// it was painted from.
+#[derive(Debug)]
+struct ContentLayer {
+    generation: u64,
+    surface: Surface,
 }
 
 impl TaskbarRenderer {
@@ -188,6 +207,7 @@ impl TaskbarRenderer {
             icons: cache,
             icon_set: IconSet::builtin(),
             icon_generation: 0,
+            library_layer: None,
         }
     }
 
@@ -414,19 +434,37 @@ impl TaskbarRenderer {
     /// taskbar's own theme.
     ///
     /// `rects` are the surface's own rectangles to paint; a closed popup
-    /// paints nothing. The window manager places the surface above the bar and
+    /// touches none of them, so a window still leaving the screen keeps what
+    /// it showed. The window manager places the surface above the bar and
     /// rounds it with
     /// [`LibraryLayout::corner_radius`](crate::library::LibraryLayout::corner_radius),
     /// exactly as it rounds the bar.
     pub fn paint_library(
-        &self,
+        &mut self,
         taskbar: &Taskbar,
         scale: Scale,
         surface: &mut Surface,
         rects: &[Rect],
     ) {
-        damage::paint_parts(surface, rects, |surface| {
-            paint_library_panel(taskbar, scale, surface);
+        let popup = taskbar.library();
+        if popup.entrance_frame(0).is_none() {
+            self.library_layer = None;
+        }
+        // A window still leaving the screen keeps the pixels it had.
+        if !popup.is_open() {
+            return;
+        }
+        let layout = taskbar.library_layout(scale);
+        let paint = LibraryPaint {
+            popup,
+            chrome: chrome_panel(local_point(layout.anchor, layout.panel.origin)),
+            layout,
+            scale,
+            theme: taskbar.theme(),
+        };
+        let layer = &mut self.library_layer;
+        damage::paint_parts_within(surface, rects, |surface, part| {
+            paint_library_panel(&paint, surface, part, layer);
         });
     }
 
@@ -586,61 +624,345 @@ fn paint_picker_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
     }
 }
 
-/// The popup's whole recipe, laid across the surface in its own pixels.
-fn paint_library_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
-    let popup = taskbar.library();
-    if !popup.is_open() {
-        return;
-    }
-    let theme = taskbar.theme();
-    let layout = taskbar.library_layout(scale);
+/// What one paint of the launcher draws from, derived once for every
+/// rectangle it repaints.
+struct LibraryPaint<'a> {
+    popup: &'a LibraryPopup,
+    layout: LibraryLayout,
+    chrome: tairix_controls::Panel,
+    scale: Scale,
+    theme: &'a tairix_theme::Theme,
+}
+
+/// The open launcher's whole recipe under the surface-local rectangle `part`,
+/// each piece drawn only where it reaches it.
+fn paint_library_panel(
+    paint: &LibraryPaint<'_>,
+    surface: &mut Surface,
+    part: Rect,
+    layer: &mut Option<ContentLayer>,
+) {
+    let LibraryPaint {
+        popup,
+        ref layout,
+        ref chrome,
+        scale,
+        theme,
+    } = *paint;
     let origin = layout.panel.origin;
-    let font = popup_font(theme, scale);
+    let reaches = |rect: Rect| !local_rect(rect, origin).intersection(&part).is_empty();
+    let hairline = Color::from(theme.palette().border);
+
     let local_bounds = Rect::new(0, 0, layout.panel.width, layout.panel.height);
+    chrome.render(surface, local_bounds, scale, theme);
+    if reaches(layout.search) {
+        popup
+            .search_field()
+            .render(surface, local_rect(layout.search, origin), scale, theme);
+    }
+    if let Some(sidebar) = layout.sidebar.filter(|&sidebar| reaches(sidebar)) {
+        popup.sidebar().render(
+            surface,
+            local_rect(sidebar, origin),
+            scale,
+            theme,
+            &mut tairix_icon::NoArtwork,
+        );
+    }
+    if reaches(layout.divider) {
+        fill_local(surface, local_rect(layout.divider, origin), hairline);
+    }
 
-    chrome_panel(local_point(layout.anchor, origin)).render(surface, local_bounds, scale, theme);
-    popup
-        .search_field()
-        .render(surface, local_rect(layout.search, origin), scale, theme);
+    if reaches(layout.viewport) {
+        let within = unscrolled(part, origin, layout);
+        if popup.entrance_frame(0).is_some() {
+            paint_entering(
+                surface,
+                origin,
+                popup,
+                layout,
+                (scale, theme),
+                layer,
+                within,
+            );
+        } else {
+            paint_content(surface, origin, popup, layout, (scale, theme), within);
+        }
+        if let Some(placeholder) = popup.placeholder() {
+            draw_label(
+                surface,
+                origin,
+                layout.viewport,
+                &placeholder,
+                theme.palette().on_surface_muted.into(),
+                BitmapFont::for_role(theme.fonts(), tairix_theme::TextRole::Body, scale),
+            );
+        }
+    }
+    if let Some(scrollbar) = layout.scrollbar.filter(|&scrollbar| reaches(scrollbar)) {
+        popup
+            .scrollbar_for(layout)
+            .render(surface, local_rect(scrollbar, origin), scale, theme);
+    }
 
-    let row_focus = popup.focus() == LibraryFocus::Rows;
-    let rows = ScrollView::new(
+    if reaches(layout.footer_rule) {
+        fill_local(surface, local_rect(layout.footer_rule, origin), hairline);
+    }
+    if reaches(layout.footer) {
+        let font = footer_font(theme, scale);
+        let footer = local_rect(layout.footer, origin);
+        let details = popup.details(layout);
+        let text = font.elide_to_width(&details, footer.width);
+        let y = font.centred_top(
+            footer
+                .top()
+                .saturating_add(to_i32(layout.footer_rule.height)),
+            footer.height.saturating_sub(layout.footer_rule.height),
+        );
+        tairix_controls::paint_run(
+            surface,
+            font,
+            text,
+            (footer.left(), y),
+            Color::from(theme.palette().on_surface_muted),
+            None,
+        );
+    }
+}
+
+/// The surface-local rectangle `part` of a surface standing at screen
+/// `origin`, in `layout`'s unscrolled content space.
+fn unscrolled(part: Rect, origin: Point, layout: &LibraryLayout) -> Rect {
+    Rect::new(
+        part.left().saturating_add(origin.x),
+        part.top()
+            .saturating_add(origin.y)
+            .saturating_add(to_i32(layout.offset)),
+        part.width,
+        part.height,
+    )
+}
+
+/// Fill a surface-local rectangle, skipping one that starts off the surface.
+fn fill_local(surface: &mut Surface, rect: Rect, color: Color) {
+    if let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) {
+        surface.fill_rect(x, y, rect.width, rect.height, color);
+    }
+}
+
+/// Paint the launcher's content — headings, tiles, rows — that reaches
+/// `within`, in unscrolled content space, through its scrolled viewport, the
+/// surface standing at screen `origin`.
+fn paint_content(
+    surface: &mut Surface,
+    origin: Point,
+    popup: &LibraryPopup,
+    layout: &LibraryLayout,
+    (scale, theme): (Scale, &tairix_theme::Theme),
+    within: Rect,
+) {
+    let view = ScrollView::new(
         ScrollOrientation::Vertical,
         local_rect(layout.viewport, origin),
         u64::from(layout.offset),
     );
-    rows.paint(surface, |surface| {
-        for &(index, rect) in &layout.rows {
-            let Some(row) = popup.rows().get(index) else {
-                continue;
-            };
-            let current = popup.current() == Some(index);
-            let hovered = popup.hover() == Some(index);
-            list_row(row, current, hovered, row_focus).render(
+    let reaches = |rect: Rect| !rect.intersection(&within).is_empty();
+    view.paint(surface, |surface| {
+        for section in layout
+            .sections
+            .iter()
+            .filter(|section| reaches(section.heading))
+        {
+            tairix_controls::block::title(
                 surface,
-                local_rect(rect, origin),
+                local_rect(section.heading, origin),
                 scale,
                 theme,
-                popup.row_artwork(index).map(IconPicture::coloured),
+                &section.kind.heading(),
+            );
+        }
+        for (at, rect) in layout.shown().filter(|&(_, rect)| reaches(rect)) {
+            let (Some(section), Some(program)) = (layout.sections.get(at.section), popup.item(at))
+            else {
+                continue;
+            };
+            paint_program(
+                surface,
+                local_rect(rect, origin),
+                popup,
+                layout,
+                (at, section.kind, program),
+                (scale, theme),
             );
         }
     });
+}
 
-    if let Some(placeholder) = popup.placeholder() {
-        draw_label(
-            surface,
-            origin,
-            layout.viewport,
-            placeholder,
-            theme.palette().on_surface_muted.into(),
-            font,
-        );
+/// Paint one program as its section shows it: a tile, or a captioned row.
+fn paint_program(
+    surface: &mut Surface,
+    bounds: Rect,
+    popup: &LibraryPopup,
+    layout: &LibraryLayout,
+    (at, kind, program): (ItemAt, SectionKind, &LibraryItem),
+    (scale, theme): (Scale, &tairix_theme::Theme),
+) {
+    let mut state = ControlState::idle();
+    if popup.pressed() == Some(at) {
+        state = state.with_pointer(PointerState::Pressed);
+    } else if popup.hover() == Some(at) {
+        state = state.with_pointer(PointerState::Hover);
     }
+    let artwork = popup.artwork(&program.id).map(IconPicture::coloured);
+    let running = popup.is_running(&program.id);
+    if kind.is_list() {
+        let caption = popup
+            .facts_of(&program.id)
+            .and_then(|facts| facts.purpose.clone())
+            .or_else(|| {
+                popup
+                    .catalog()
+                    .entry(&program.id)
+                    .map(|entry| alloc::string::String::from(folder_label(entry.category())))
+            })
+            .unwrap_or_default();
+        let mut row = ListRow::new(program.name.clone())
+            .with_icon(IconKind::AppBundle)
+            .with_caption(caption)
+            .with_emphasis(program.emphasis.clone())
+            .with_state(state);
+        if running {
+            row = row.with_trailing("Running");
+        }
+        row.set_selected(popup.selection() == Some(at));
+        row.render(surface, bounds, scale, theme, artwork);
+        return;
+    }
+    if popup.selection() == Some(at) {
+        state = state.with_selection(SelectionState::Selected);
+    }
+    let mut tile = IconTile::new(program.name.clone(), IconKind::AppBundle)
+        .with_layout(layout.tile)
+        .with_state(state)
+        .with_live_mark(running);
+    if let Some(strength) = popup.mark_strength(kind, &program.id) {
+        tile = tile.with_selection_fade(strength);
+    }
+    tile.render(surface, bounds, scale, theme, artwork);
+}
 
-    if let Some(scrollbar) = layout.scrollbar {
+/// Paint a frame of the content's entrance under `within`, in unscrolled
+/// content space: the content once into `layer` when it would draw
+/// differently from what the layer holds, then each program and heading
+/// reaching `within` blended from it at its own strength and rise.
+///
+/// A layer the heap refuses is no reason to show nothing: the content is
+/// painted in place, at rest.
+fn paint_entering(
+    surface: &mut Surface,
+    origin: Point,
+    popup: &LibraryPopup,
+    layout: &LibraryLayout,
+    looks: (Scale, &tairix_theme::Theme),
+    layer: &mut Option<ContentLayer>,
+    within: Rect,
+) {
+    let viewport = layout.viewport;
+    let size = (viewport.width, viewport.height);
+    let fresh = layer
+        .as_ref()
+        .is_some_and(|held| held.generation == popup.generation());
+    if !fresh {
+        let whole = unscrolled(
+            Rect::new(0, 0, viewport.width, viewport.height),
+            viewport.origin,
+            layout,
+        );
+        // The held surface is drawn over again while it fits, so a cascade the
+        // pointer moves through allocates nothing frame to frame.
+        let reused = layer
+            .take()
+            .filter(|held| (held.surface.width(), held.surface.height()) == size)
+            .map(|held| held.surface)
+            .map(|mut surface| {
+                surface.fill(Color::TRANSPARENT);
+                surface
+            });
+        *layer = reused
+            .or_else(|| Surface::new(size.0, size.1))
+            .map(|mut drawn| {
+                paint_content(&mut drawn, viewport.origin, popup, layout, looks, whole);
+                ContentLayer {
+                    generation: popup.generation(),
+                    surface: drawn,
+                }
+            });
+    }
+    let Some(held) = layer.as_ref() else {
+        paint_content(surface, origin, popup, layout, looks, within);
+        return;
+    };
+    let shown = local_rect(viewport, origin);
+    let view = layout.view();
+    let blend = |surface: &mut Surface, rect: Rect, frame: crate::library::ItemFrame| {
+        // Each piece is drawn where its frame stands, which a rise can carry
+        // into a part its resting place does not reach.
+        let drawn = Rect::new(
+            rect.left(),
+            rect.top().saturating_add(frame.rise),
+            rect.width,
+            rect.height,
+        );
+        if drawn.intersection(&within).is_empty() {
+            return;
+        }
+        let Some(on_screen) = view.to_window(rect) else {
+            return;
+        };
+        let at = local_rect(on_screen, origin);
+        let moved = Rect::new(
+            at.left(),
+            at.top().saturating_add(frame.rise),
+            at.width,
+            at.height,
+        )
+        .intersection(&shown);
+        let (Ok(x), Ok(y)) = (u32::try_from(moved.left()), u32::try_from(moved.top())) else {
+            return;
+        };
+        surface.with_clip(x, y, moved.width, moved.height, |clipped| {
+            clipped.blit_faded(
+                shown.left(),
+                shown.top().saturating_add(frame.rise),
+                &held.surface,
+                frame.strength,
+            );
+        });
+    };
+    let frame_of = |order: usize| {
         popup
-            .scrollbar()
-            .render(surface, local_rect(scrollbar, origin), scale, theme);
+            .entrance_frame(order)
+            .unwrap_or(crate::library::ItemFrame::ARRIVED)
+    };
+    // Every program takes the next step of the cascade in reading order, and a
+    // heading arrives with the first program under it.
+    let lead = |section: usize| -> usize {
+        layout
+            .sections
+            .iter()
+            .take(section)
+            .map(|laid| laid.count)
+            .sum()
+    };
+    for (index, section) in layout.sections.iter().enumerate() {
+        blend(surface, section.heading, frame_of(lead(index)));
+    }
+    for (at, rect) in layout.shown() {
+        blend(
+            surface,
+            rect,
+            frame_of(lead(at.section).saturating_add(at.item)),
+        );
     }
 }
 

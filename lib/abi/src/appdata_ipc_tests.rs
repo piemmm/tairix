@@ -42,7 +42,7 @@ fn frame(request: &AppDataRequest<'_>) -> Frame {
 
 /// Every operation, one representative each; the configuration ones on the
 /// private scope.
-fn every_operation() -> [AppDataRequest<'static>; 14] {
+fn every_operation() -> [AppDataRequest<'static>; 15] {
     [
         AppDataRequest::ConfigRead {
             scope: ConfigScope::Private,
@@ -58,6 +58,9 @@ fn every_operation() -> [AppDataRequest<'static>; 14] {
             key: "recent.0",
         },
         AppDataRequest::ConfigCommit {
+            scope: ConfigScope::Private,
+        },
+        AppDataRequest::ConfigDiscard {
             scope: ConfigScope::Private,
         },
         AppDataRequest::PublicRead {
@@ -113,8 +116,8 @@ fn every_vault_operation() -> [AppDataRequest<'static>; 3] {
     ]
 }
 
-/// The four own-store operations on `scope`.
-fn every_scoped_operation(scope: ConfigScope) -> [AppDataRequest<'static>; 4] {
+/// The five own-store operations on `scope`.
+fn every_scoped_operation(scope: ConfigScope) -> [AppDataRequest<'static>; 5] {
     [
         AppDataRequest::ConfigRead {
             scope,
@@ -127,6 +130,7 @@ fn every_scoped_operation(scope: ConfigScope) -> [AppDataRequest<'static>; 4] {
         },
         AppDataRequest::ConfigUnset { scope, key: "k" },
         AppDataRequest::ConfigCommit { scope },
+        AppDataRequest::ConfigDiscard { scope },
     ]
 }
 
@@ -506,7 +510,7 @@ fn bad_magic_version_and_operation_are_refused() {
     // Zero, one past the highest defined operation, and the far end of the
     // space. Derived rather than written out, so adding an operation cannot
     // quietly turn this case into a live one.
-    for op in [0u16, super::OP_TEMP_RELEASE + 1, 0xFFFF] {
+    for op in [0u16, super::OP_CONFIG_DISCARD + 1, 0xFFFF] {
         let mut encoded = frame(&commit);
         put_u16(&mut encoded.bytes, super::OP_OFFSET, op);
         assert_eq!(

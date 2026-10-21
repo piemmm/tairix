@@ -107,6 +107,14 @@ expects to find, with no field left standing to say anything is missing. A
 reader that cannot fully read a store runs on the empty catalog rather than
 guessing at a partial intent, and a writer refuses the edit outright.
 
+An `EntryId` holds at most `MAX_ENTRY_ID_SEGMENTS` dot-separated segments —
+one fewer than the format's key depth — so `<id>.<field>` here and
+`library.<id>` in an account's record (below) are always keys the
+configuration grammar accepts (`EntryError::IdTooDeep` otherwise). A deeper
+bundle identifier names a valid bundle but is never catalogued; were it
+admitted, the one key it could not spell would make the whole store it was
+written into unreadable.
+
 The bundle-path confinement is the earlier, cheaper refusal — launching an
 entry remains subject to the loader's signature and capability gate. The
 engine performs no I/O and holds no authority: the machine store is read and
@@ -155,6 +163,42 @@ fold the first entry under an identifier wins, so the caller's
 deterministic scan order decides. The fold is refused whole (`CatalogFull`)
 if it would exceed `MAX_ENTRIES`, leaving the catalog unchanged.
 
+## The account's own record
+
+`personal` is what an account keeps about its library — which programs it
+keeps as favourites and in what order, and how much and how lately it uses
+each — which is what puts the right programs first (`plans/NEW-TASKBAR.md`
+T22). It is the desktop's, kept in the session's **private** app-data scope,
+never the published one every application can read.
+
+- **One record per program**, under `library.<entry-id>`: a `Keep` of an
+  optional favourite rank and an optional `Use` of a weight and the wall-clock
+  second it was last launched. The value is a closed token grammar —
+  `favourite=N`, `weight=W last=S`, both, or `none` — read fail-closed per
+  record, so one record the grammar refuses is left out and named rather than
+  costing the rest, and a number is accepted only in its own canonical
+  spelling, so each number has one spelling.
+- **Use decays.** A launch adds `LAUNCH_WEIGHT` to the weight decayed since
+  the last one; the weight halves every `HALF_LIFE_SECS` (fourteen days),
+  interpolated linearly within a half-life in integers, so every target ranks
+  alike, and it is capped at `MAX_WEIGHT`. A launch the clock cannot place
+  still adds to a program already recorded but starts no new record, since
+  one dated by the epoch would decay to nothing once the clock is set.
+- **Bounded.** At most `MAX_RECORDS` records; past it the least-used program
+  that is not a favourite is evicted, and an edit that would need a record
+  when every one is a favourite is refused (`RecordFull`) with nothing changed.
+- **Every change is an `Edit`** — `Launched`, `Favourite`, `Unfavourite`,
+  `MoveEarlier`, `MoveLater`, `Forget`, `ForgetAll` — and `Personal::apply`
+  answers the entries whose stored record changed, so a caller writes exactly
+  those keys.
+- **What a launcher draws** is `Personal::shelf(now)`: the favourites in the
+  account's order, and the frequently used at or above `FREQUENT_FLOOR` that
+  are not favourites, most used first, with every used program's weight for
+  ranking search ties.
+- `none` is the tombstone a removal writes where a machine-policy record would
+  otherwise show through — which is also what lets an administrator seed
+  favourites an account may still remove.
+
 ## API shape
 
 - `load(&Document) -> Result<Catalog, CatalogError>` — the fail-closed
@@ -178,6 +222,9 @@ if it would exceed `MAX_ENTRIES`, leaving the catalog unchanged.
 - `LIBRARY_DIR` / `LIBRARY_FILE` / `LIBRARY_PATH` — the machine layer's
   path spellings, and `LIBRARY_PUBLISHER` the overlay's publisher
   identifier, each defined once here.
+- `Personal::{new, load, adopt, stored, keep, keeps, len, is_empty, apply,
+  shelf}`, `Edit`, `Shelf`, `RecordFull`, `RecordRefused`, and
+  `personal::key_of` — the account's record above.
 
 The crate is `no_std` + `alloc`, performs no I/O, holds no authority, is
 host-unit-tested beside the code, and is fuzzed by `tests/fuzz_proglib.rs`

@@ -61,7 +61,9 @@ mod tests;
 
 pub use cursor::{CursorKind, CursorSet, CursorSetId, CURSOR_KINDS};
 pub use metrics::{edge_weight, Metrics};
-pub use motion::{Contrast, Density, Fade, Motion, MotionInteraction, MotionTheme, Timeline};
+pub use motion::{
+    Contrast, Density, Fade, Glide, Motion, MotionInteraction, MotionTheme, Timeline,
+};
 pub use palette::{Palette, SignalRole};
 pub use registry::{Grounds, ThemeError, ThemeRegistry};
 pub use syntax::{SyntaxPalette, SyntaxRole};

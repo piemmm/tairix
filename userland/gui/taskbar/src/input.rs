@@ -93,10 +93,10 @@ use tairix_abi::{PowerAction, ProcId};
 use tairix_controls::{damage, TraySignalAction};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton, PointerFocus};
-use tairix_proglib::EntryId;
+use tairix_proglib::{Edit, EntryId};
 
 use crate::layout::Hit;
-use crate::library::{LibraryRow, PopupOutcome};
+use crate::library::{PopupOutcome, Routing};
 use crate::menu::MenuRequest;
 use crate::picker::{
     slot_has_picker, PickerEntry, WindowPicker, PICKER_CLOSE_GRACE_NS, PICKER_OPEN_DELAY_NS,
@@ -142,6 +142,19 @@ pub enum TaskbarResponse {
         /// The catalog identifier of the chosen entry.
         entry: EntryId,
     },
+    /// A program-library entry was chosen to run as an administrator —
+    /// `Ctrl+Shift+Enter`, or its menu's *Run as Administrator…* — closing the
+    /// popup. The embedder asks the console's broker to authorise an account
+    /// that may run it; the bar holds no such authority.
+    LibraryLaunchElevated {
+        /// The catalog identifier of the chosen entry.
+        entry: EntryId,
+    },
+    /// An entry's menu changed the account's own record of its library: a
+    /// favourite kept, dropped, or moved, or a program's use forgotten. The
+    /// embedder applies it to the record it keeps and hands the bar the shelf
+    /// that results; the popup stays open to show it.
+    LibraryEdit(Edit),
     /// A program-library entry's context menu asked for a **desktop
     /// shortcut** to its bundle (closing the popup). The embedder — which
     /// holds the filesystem capability — creates the link in the user's own
@@ -618,7 +631,7 @@ impl TaskbarInput {
         };
         match hit {
             Hit::Library => {
-                taskbar.open_library();
+                taskbar.open_library(now_ns, scale);
                 TaskbarResponse::OpenLibrary
             }
             Hit::App(index) => Self::activate_app(taskbar, index),
@@ -1033,11 +1046,6 @@ impl TaskbarInput {
         TaskbarResponse::Ignored
     }
 
-    /// Route one event into the open program-library popup.
-    ///
-    /// A primary press on the Library button toggles the popup shut before
-    /// the popup sees the event — the button is the popup's own invoker, so
-    /// it is the one bar region a modal popup does not swallow.
     /// Route one event to the open volume panel, which takes the whole
     /// stream while it is open: a press on its signal or outside it closes
     /// it, and what its controls report is asked of the embedder.
@@ -1060,21 +1068,19 @@ impl TaskbarInput {
             taskbar.close_sound();
             return TaskbarResponse::Ignored;
         }
-        let theme = taskbar.theme().clone();
         // The panel owes its whole plate on any change, so what its controls
         // report ends here.
         let mut reported = damage::sink();
+        let (panel, theme) = taskbar.sound_routing_mut();
         let outcome = match event {
-            InputEvent::KeyPressed { key, .. } => {
-                taskbar.sound_mut().on_key(key, &layout, &mut reported)
-            }
+            InputEvent::KeyPressed { key, .. } => panel.on_key(key, &layout, &mut reported),
             InputEvent::KeyReleased { .. } => PanelOutcome::Ignored,
-            ref pointer_event => taskbar.sound_mut().on_pointer(
+            ref pointer_event => panel.on_pointer(
                 pointer_event,
                 self.pointer,
                 &layout,
                 scale,
-                &theme,
+                theme,
                 &mut reported,
             ),
         };
@@ -1095,12 +1101,22 @@ impl TaskbarInput {
         }
     }
 
+    /// Route one event into the open program-library popup.
+    ///
+    /// A primary press on the Library button toggles the popup shut before
+    /// the popup sees the event — the button is the popup's own invoker, so
+    /// it is the one bar region a modal popup does not swallow.
+    ///
+    /// The popup reports exactly the rectangles an event changed — the tiles a
+    /// hover moved between, the content a query rebuilt, the sidebar a folder
+    /// was chosen on — and only those are repainted.
     fn route_to_popup(
         &mut self,
         event: InputEvent,
         taskbar: &mut Taskbar,
         scale: Scale,
     ) -> TaskbarResponse {
+        let now_ns = self.now_ns;
         if matches!(
             event,
             InputEvent::PointerPressed {
@@ -1108,89 +1124,73 @@ impl TaskbarInput {
             }
         ) && taskbar.hit_test(self.pointer, scale) == Some(Hit::Library)
         {
-            taskbar.close_library();
+            taskbar.close_library(now_ns, scale);
             return TaskbarResponse::LibraryDismissed;
         }
-        if matches!(
-            event,
-            InputEvent::PointerPressed {
-                button: PointerButton::Secondary
-            }
-        ) {
-            if let Some((entry, anchor)) = Self::entry_row_at(taskbar, self.pointer, scale) {
-                return TaskbarResponse::OpenMenu(taskbar.entry_menu(entry, anchor, scale));
-            }
-        }
-
         let layout = taskbar.library_layout(scale);
-        let theme = taskbar.theme().clone();
-        // The popup's own controls take a damage sink; what they report is not
-        // what the popup owes, because the outcome below cannot tell a moved
-        // row highlight from a rebuilt row list, and a scroll moves every row
-        // while its scrollbar reports only the thumb. So the popup owes its
-        // whole panel and the sink ends here (`plans/FIX-DESKTOP-SPEEDUP.md`).
         let mut reported = damage::sink();
-        let outcome =
-            match event {
-                InputEvent::KeyPressed { key, modifiers } => taskbar
-                    .library_routing_mut()
-                    .route_key(key, modifiers, &layout, &mut reported),
-                InputEvent::KeyReleased { .. } => PopupOutcome::Ignored,
-                ref pointer_event => taskbar.library_routing_mut().route_pointer(
-                    pointer_event,
-                    self.pointer,
-                    &layout,
-                    &theme,
-                    scale,
-                    &mut reported,
-                ),
-            };
-        // A scroll, a reveal or a rebuilt list moves the rows under a pointer
-        // that did not move, so what it lights is re-derived where it rests.
+        let (popup, theme) = taskbar.library_routing_mut();
+        let routing = Routing {
+            layout: &layout,
+            theme,
+            scale,
+            now_ns,
+        };
+        let outcome = match event {
+            InputEvent::KeyPressed { key, modifiers } => {
+                popup.route_key(key, modifiers, routing, &mut reported)
+            }
+            InputEvent::KeyReleased { .. } => PopupOutcome::Ignored,
+            ref pointer_event => {
+                popup.route_pointer(pointer_event, self.pointer, routing, &mut reported)
+            }
+        };
+        // A scroll, a reveal or a rebuilt list moves the programs under a
+        // pointer that did not move, so what it lights is re-derived where it
+        // rests.
         if outcome == PopupOutcome::Changed
             && self.resting
             && !matches!(event, InputEvent::PointerMoved { .. })
         {
             let moved = taskbar.library_layout(scale);
-            taskbar.library_routing_mut().route_pointer(
+            let (popup, theme) = taskbar.library_routing_mut();
+            let routing = Routing {
+                layout: &moved,
+                theme,
+                scale,
+                now_ns,
+            };
+            popup.route_pointer(
                 &InputEvent::PointerMoved { to: self.pointer },
                 self.pointer,
-                &moved,
-                &theme,
-                scale,
+                routing,
                 &mut reported,
             );
         }
+        taskbar.owe_library(&reported, &layout);
         match outcome {
-            PopupOutcome::Ignored => TaskbarResponse::Ignored,
-            PopupOutcome::Changed => {
-                // A scroll, a filter edit, or a fold changes only what the
-                // popup itself draws — the bar's Library button is already
-                // latched once, by the open that made the popup modal.
-                taskbar.request_repaint(TaskbarRepaint::LIBRARY);
-                TaskbarResponse::Ignored
-            }
+            PopupOutcome::Ignored | PopupOutcome::Changed => TaskbarResponse::Ignored,
             PopupOutcome::Launch(entry) => {
-                taskbar.close_library();
+                taskbar.close_library(now_ns, scale);
                 TaskbarResponse::LibraryLaunch { entry }
             }
+            // As the menu hides its row: with no broker to answer, there is
+            // nothing to ask.
+            PopupOutcome::LaunchElevated(_) if !taskbar.elevation_available() => {
+                TaskbarResponse::Ignored
+            }
+            PopupOutcome::LaunchElevated(entry) => {
+                taskbar.close_library(now_ns, scale);
+                TaskbarResponse::LibraryLaunchElevated { entry }
+            }
+            PopupOutcome::Menu(entry, anchor) => match taskbar.entry_menu(entry, anchor, scale) {
+                Some(request) => TaskbarResponse::OpenMenu(request),
+                None => TaskbarResponse::Ignored,
+            },
             PopupOutcome::Dismiss => {
-                taskbar.close_library();
+                taskbar.close_library(now_ns, scale);
                 TaskbarResponse::LibraryDismissed
             }
-        }
-    }
-
-    /// The program-library *entry* row under `point` in the open popup, with
-    /// its screen-space rectangle — the anchor for its context menu. Folder
-    /// rows and misses return `None`.
-    fn entry_row_at(taskbar: &Taskbar, point: Point, scale: Scale) -> Option<(EntryId, Rect)> {
-        let layout = taskbar.library_layout(scale);
-        let row = layout.row_at(point)?;
-        let anchor = layout.row_rect(row)?;
-        match taskbar.library().rows().get(row)? {
-            LibraryRow::Entry { id, .. } => Some((id.clone(), anchor)),
-            LibraryRow::Folder { .. } => None,
         }
     }
 }

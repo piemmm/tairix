@@ -2321,20 +2321,21 @@ fn a_backdrop_edit_asks_for_no_appearance_work() {
 
 #[test]
 fn every_appearance_axis_asks_for_the_re_theme() {
-    // Each of the four is a way the desktop is drawn, so each owes the
-    // republish every open application converges on.
-    let axes: [fn(&mut DesktopSettings); 4] = [
-        |s| s.appearance = Appearance::Dark,
-        |s| s.contrast = Contrast::Monochrome,
-        |s| s.density = Density::Compact,
-        |s| s.motion = Motion::Reduced,
+    // Each of the four reaches every open application through the republish
+    // it converges on; all but the motion are ways the layer is drawn.
+    type Edit = fn(&mut DesktopSettings);
+    let axes: [(Edit, bool); 4] = [
+        (|s| s.appearance = Appearance::Dark, true),
+        (|s| s.contrast = Contrast::Monochrome, true),
+        (|s| s.density = Density::Compact, true),
+        (|s| s.motion = Motion::Reduced, false),
     ];
-    for axis in axes {
+    for (axis, drawn) in axes {
         let mut desktop = desktop_of(vec![file("a.txt")]);
         let mut wanted = desktop.settings().clone();
         axis(&mut wanted);
         let change = desktop.apply_settings(wanted).expect("an axis moved");
         assert!(change.appearance.theme);
-        assert!(change.layer);
+        assert_eq!(change.layer, drawn);
     }
 }

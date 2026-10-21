@@ -30,8 +30,11 @@
 //! two snapshots. [`AppDataRequest::ConfigSet`] and
 //! [`AppDataRequest::ConfigUnset`] stage against the caller's own session and
 //! [`AppDataRequest::ConfigCommit`] publishes one scope, because one document
-//! is what a rename can replace atomically. There is no `VaultCommit`: the
-//! daemon seals a vault write and publishes it before it replies.
+//! is what a rename can replace atomically. A commit that fails keeps what was
+//! staged for a retry, so [`AppDataRequest::ConfigDiscard`] withdraws it for a
+//! caller that will not retry: nothing it gave up on can land with a later
+//! commit from the same process. There is no `VaultCommit`: the daemon seals a
+//! vault write and publishes it before it replies.
 //!
 //! [`AppDataRequest::BlobOpen`] and [`AppDataRequest::TempCreate`] answer an
 //! `fd_grant` handle rather than bytes — the IPC payload ceiling is far below
@@ -297,6 +300,8 @@ const OP_QUOTA_GET: u16 = 12;
 const OP_TEMP_CREATE: u16 = 13;
 /// Wire discriminant of [`AppDataRequest::TempRelease`].
 const OP_TEMP_RELEASE: u16 = 14;
+/// Wire discriminant of [`AppDataRequest::ConfigDiscard`].
+const OP_CONFIG_DISCARD: u16 = 15;
 
 /// Wire discriminant of [`ConfigScope::Private`].
 const SCOPE_PRIVATE: u8 = 1;
@@ -458,6 +463,12 @@ pub enum AppDataRequest<'a> {
         /// Which of the caller's own documents to publish.
         scope: ConfigScope,
     },
+    /// Withdraw every change staged against one scope, publishing nothing.
+    /// Nothing staged is no error.
+    ConfigDiscard {
+        /// Which of the caller's own documents to withdraw the staging of.
+        scope: ConfigScope,
+    },
     /// Read another application's published document.
     ///
     /// The only operation that names an application, and it can name nothing
@@ -611,6 +622,7 @@ impl<'a> AppDataRequest<'a> {
             | Self::TempRelease { name } => (name, "", ""),
             Self::ConfigRead { .. }
             | Self::ConfigCommit { .. }
+            | Self::ConfigDiscard { .. }
             | Self::VaultRead { .. }
             | Self::BlobList { .. }
             | Self::QuotaGet {}
@@ -625,6 +637,7 @@ impl<'a> AppDataRequest<'a> {
             Self::ConfigSet { .. } => OP_CONFIG_SET,
             Self::ConfigUnset { .. } => OP_CONFIG_UNSET,
             Self::ConfigCommit { .. } => OP_CONFIG_COMMIT,
+            Self::ConfigDiscard { .. } => OP_CONFIG_DISCARD,
             Self::PublicRead { .. } => OP_PUBLIC_READ,
             Self::VaultRead { .. } => OP_VAULT_READ,
             Self::VaultSet { .. } => OP_VAULT_SET,
@@ -645,7 +658,8 @@ impl<'a> AppDataRequest<'a> {
             Self::ConfigRead { scope, .. }
             | Self::ConfigSet { scope, .. }
             | Self::ConfigUnset { scope, .. }
-            | Self::ConfigCommit { scope } => scope.as_wire(),
+            | Self::ConfigCommit { scope }
+            | Self::ConfigDiscard { scope } => scope.as_wire(),
             Self::PublicRead { .. }
             | Self::VaultRead { .. }
             | Self::VaultSet { .. }
@@ -668,6 +682,7 @@ impl<'a> AppDataRequest<'a> {
             | Self::ConfigSet { .. }
             | Self::ConfigUnset { .. }
             | Self::ConfigCommit { .. }
+            | Self::ConfigDiscard { .. }
             | Self::PublicRead { .. }
             | Self::VaultRead { .. }
             | Self::VaultSet { .. }
@@ -691,6 +706,7 @@ impl<'a> AppDataRequest<'a> {
             Self::ConfigSet { .. }
             | Self::ConfigUnset { .. }
             | Self::ConfigCommit { .. }
+            | Self::ConfigDiscard { .. }
             | Self::VaultSet { .. }
             | Self::VaultUnset { .. }
             | Self::BlobOpen { .. }
@@ -787,9 +803,8 @@ impl<'a> AppDataRequest<'a> {
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
         let record = Record::split(bytes)?;
         match record.op {
-            OP_CONFIG_READ | OP_CONFIG_SET | OP_CONFIG_UNSET | OP_CONFIG_COMMIT => {
-                Self::configuration(&record)
-            }
+            OP_CONFIG_READ | OP_CONFIG_SET | OP_CONFIG_UNSET | OP_CONFIG_COMMIT
+            | OP_CONFIG_DISCARD => Self::configuration(&record),
             OP_PUBLIC_READ => {
                 record.without_scope()?;
                 record.without_mode()?;
@@ -807,7 +822,7 @@ impl<'a> AppDataRequest<'a> {
         }
     }
 
-    /// Decode one of the four own-scope configuration operations: the family
+    /// Decode one of the five own-scope configuration operations: the family
     /// that carries a scope, and the only one that does.
     fn configuration(record: &Record<'a>) -> Result<Self, Errno> {
         record.without_name()?;
@@ -837,14 +852,18 @@ impl<'a> AppDataRequest<'a> {
                     key: record.key()?,
                 })
             }
-            _ => {
+            OP_CONFIG_COMMIT | OP_CONFIG_DISCARD => {
                 record.without_capacity()?;
                 record.without_key()?;
                 record.without_value()?;
-                Ok(Self::ConfigCommit {
-                    scope: record.scope()?,
+                let scope = record.scope()?;
+                Ok(if record.op == OP_CONFIG_COMMIT {
+                    Self::ConfigCommit { scope }
+                } else {
+                    Self::ConfigDiscard { scope }
                 })
             }
+            _ => Err(Errno::OutOfRange),
         }
     }
 

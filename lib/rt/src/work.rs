@@ -38,7 +38,7 @@
 use alloc::collections::TryReserveError;
 use alloc::sync::Arc;
 
-use tairix_abi::Errno;
+use tairix_abi::{Duration64, Errno};
 use tairix_util::defer::{JobDesk, JobQueue};
 
 use crate::sync::{Condvar, Mutex, WorkerWake};
@@ -206,6 +206,17 @@ impl<S, Req, Ans, D: Desk<Req, Ans>> Worker<S, Req, Ans, D> {
     /// nothing is left outstanding — for an asker with nothing else to do,
     /// such as a program seeing its writes out before it ends.
     pub fn wait(&self) -> Option<Ans> {
+        self.wait_for(None)
+    }
+
+    /// As [`Self::wait`], but give up at the monotonic instant `deadline_ns`,
+    /// answering `None` then with the work still outstanding: for an asker
+    /// that must not let work that stopped answering hold it for ever.
+    pub fn wait_until(&self, deadline_ns: u64) -> Option<Ans> {
+        self.wait_for(Some(deadline_ns))
+    }
+
+    fn wait_for(&self, deadline_ns: Option<u64>) -> Option<Ans> {
         let mut held = self.held.lock();
         let answer = loop {
             if let Some(answer) = held.desk.collect() {
@@ -215,7 +226,18 @@ impl<S, Req, Ans, D: Desk<Req, Ans>> Worker<S, Req, Ans, D> {
                 break None;
             }
             held.awaited = true;
-            held = self.answered.wait(held);
+            held = match deadline_ns {
+                None => self.answered.wait(held),
+                Some(deadline) => {
+                    let left = deadline.saturating_sub(crate::clock_get());
+                    if left == 0 {
+                        break None;
+                    }
+                    self.answered
+                        .wait_timeout(held, Duration64::from_nanos(left))
+                        .0
+                }
+            };
         };
         held.awaited = false;
         answer
@@ -504,6 +526,22 @@ mod tests {
         );
         assert_eq!(worker.collect(), Some(done));
         assert_eq!(worker.collect(), None, "an answer is collected once");
+    }
+
+    /// A deadline already reached gives up at once on work no one has carried
+    /// out, and still hands over an answer that has landed.
+    #[test]
+    fn a_wait_until_a_passed_deadline_takes_only_what_has_landed() {
+        let (job, done) = job();
+        let waiting: Worker<u32, Job, Done> = Worker::new(double, 0, WorkerWake::create());
+        assert!(!waiting.submit(job));
+        assert_eq!(waiting.wait_until(0), None, "nothing landed, and no wait");
+        assert!(waiting.outstanding(), "the job is still owed");
+
+        let landed: Worker<u32, Job, Done> = Worker::new(double, 0, WorkerWake::create());
+        landed.stop();
+        assert!(landed.submit(job));
+        assert_eq!(landed.wait_until(0), Some(done));
     }
 
     /// A running desk defers instead: the loop is told nothing is waiting, and

@@ -10,6 +10,7 @@
 //! silently diverge between two controls.
 
 use core::cell::Cell;
+use core::ops::Range;
 
 use tairix_colour::Rgba;
 use tairix_font::{BitmapFont, Cut, TextLine, TextShadow, ELLIPSIS};
@@ -2483,6 +2484,81 @@ pub fn paint_run<'a>(
     shadow: Option<TextShadow>,
 ) {
     let _ = font.draw_run(surface, at, &run.into().pieces(), color, shadow);
+}
+
+/// Draw `text` from `at` within `width` pixels, the bytes in `strong` set in
+/// the heavier face and the rest in the plain one, cut with the shared mark
+/// where the whole does not fit.
+///
+/// Each face measures by its own advances, so the cut lands where the mixed
+/// line actually reaches. `strong` is ordered, disjoint, and on character
+/// boundaries — the caller checks — and an empty one is the plain run.
+pub(crate) fn paint_emphasised(
+    surface: &mut Surface,
+    (plain, heavy): (BitmapFont, BitmapFont),
+    (text, strong): (&str, &[Range<usize>]),
+    (x, y, width): (i32, i32, u32),
+    color: Color,
+) {
+    if strong.is_empty() {
+        paint_run(
+            surface,
+            plain,
+            plain.elide_to_width(text, width),
+            (x, y),
+            color,
+            None,
+        );
+        return;
+    }
+    let held = |byte: usize| strong.iter().find(|range| range.contains(&byte));
+    let face = |byte: usize| if held(byte).is_some() { heavy } else { plain };
+    let total = text.char_indices().fold(0u32, |sum, (at, ch)| {
+        sum.saturating_add(face(at).advance(ch))
+    });
+    let (end, elided) = if total <= width {
+        (text.len(), false)
+    } else {
+        let mark = plain.text_width(ELLIPSIS);
+        let Some(budget) = width.checked_sub(mark) else {
+            return;
+        };
+        let mut used = 0u32;
+        let mut end = 0;
+        for (at, ch) in text.char_indices() {
+            let advance = face(at).advance(ch);
+            if used.saturating_add(advance) > budget {
+                break;
+            }
+            used = used.saturating_add(advance);
+            end = at + ch.len_utf8();
+        }
+        (end, true)
+    };
+    let mut pen = x;
+    let mut start = 0;
+    while start < end {
+        let (font, stop) = match held(start) {
+            Some(range) => (heavy, range.end),
+            None => (
+                plain,
+                strong
+                    .iter()
+                    .map(|range| range.start)
+                    .find(|&next| next > start)
+                    .unwrap_or(text.len()),
+            ),
+        };
+        let stop = stop.min(end);
+        let Some(piece) = text.get(start..stop) else {
+            return;
+        };
+        pen = font.draw_text(surface, pen, y, piece, color);
+        start = stop;
+    }
+    if elided {
+        plain.draw_text(surface, pen, y, ELLIPSIS, color);
+    }
 }
 
 /// Draw only the shadow [`paint_run`] draws under a fitted run, so text laid

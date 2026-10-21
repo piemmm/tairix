@@ -622,7 +622,8 @@ field the operation does not use left non-zero refuses rather than guessing.
 | `ConfigRead { scope, capacity }` | AD4, scoped AD6 | the caller's **whole** merged document for one own scope, or the length it needs |
 | `ConfigSet { scope, key, value }` | AD4, scoped AD6 | stage a write |
 | `ConfigUnset { scope, key }` | AD4, scoped AD6 | stage a removal |
-| `ConfigCommit { scope }` | AD4, scoped AD6 | publish that scope's staged writes atomically |
+| `ConfigCommit { scope }` | AD4, scoped AD6 | publish that scope's staged writes atomically; a failed commit keeps them staged for a retry |
+| `ConfigDiscard { scope }` | AD4 | withdraw that scope's staged writes, publishing nothing (`Settings::abandon`) |
 | `PublicRead { bundle_id, capacity }` | AD6 | a **foreign** app's published document |
 | `VaultRead { capacity }` | AD7 | the caller's whole **sealed** document |
 | `VaultSet { key, value }` / `VaultUnset { key }` | AD7 | seal or remove one secret, **immediately** |

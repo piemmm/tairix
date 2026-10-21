@@ -109,7 +109,11 @@ pub fn store_choices(
             None => store.unset(name),
         }
     }
-    store.commit()?;
+    if let Err(err) = store.commit() {
+        // Withdrawn, so the next commit this process makes cannot publish it.
+        let _ = store.abandon();
+        return Err(err);
+    }
     let held = store.document().map_err(|_| Errno::OutOfRange)?;
     Ok(UserChoices::load(&held).0)
 }
@@ -249,9 +253,19 @@ struct Flight {
     frame: Option<(String, [u64; EVENTS])>,
 }
 
+/// The most pinboard calls whose answers may wait on the private-store worker
+/// at once.
+///
+/// A containment bound below the worker's room: any process of the account
+/// may call, and each call it keeps unanswered holds a place, so without it a
+/// caller could crowd out the session's own round trips.
+pub const MAX_HELD_CALLS: usize = 4;
+
 /// The session's side of the user's sound choices.
 #[derive(Clone, Debug, Default)]
 pub struct Effects {
+    /// Pinboard calls handed to the worker and not yet answered.
+    held_calls: usize,
     /// What the store holds, once read.
     stored: Option<UserChoices>,
     /// Whether a read of the stored choices is under way.
@@ -289,6 +303,22 @@ impl Effects {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Take a place for one more pinboard call's work on the worker,
+    /// answering whether there was one.
+    pub fn admit_call(&mut self) -> bool {
+        if self.held_calls >= MAX_HELD_CALLS {
+            return false;
+        }
+        self.held_calls += 1;
+        true
+    }
+
+    /// Give back an admitted call's place: it was answered, or its work never
+    /// reached the worker.
+    pub fn release_call(&mut self) {
+        self.held_calls = self.held_calls.saturating_sub(1);
     }
 
     /// Whether a read of the stored choices is owed at `now`, which this then

@@ -11,14 +11,16 @@ publish = false
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
-# optional, on-by-default build feature, mirroring the store command apps and
-# the `memsoak` fixture: host tooling builds only the pure sample *library*, so
-# the host test build never pulls the runtime's `_start` /
-# `#[global_allocator]` / panic handler.
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) and window
+# client (`tairix-window`) are an optional, on-by-default build feature,
+# mirroring the store command apps and the `memsoak` fixture: host tooling and
+# the vertical's guest kernel take only the pure sample *library*, so neither
+# links the runtime's `_start` / `#[global_allocator]` / panic handler — nor,
+# through the window client's worker pool, unifies it into a target batch's
+# other kernels.
 [features]
 default = ["program"]
-program = ["dep:tairix-rt"]
+program = ["dep:tairix-rt", "dep:tairix-window"]
 
 # The package is both the `tairix-test-framestats` sample library (the record
 # vocabulary and the difference arithmetic below, shared with the vertical's
@@ -50,6 +52,9 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",
 ] }
+# The application's half of the window channel: the icon-bar declaration and
+# the event mailbox a click on the fixture's slot arrives in.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", optional = true }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

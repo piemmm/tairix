@@ -336,6 +336,27 @@ impl BundleIndex {
     pub fn holds(&self, path: &str) -> bool {
         self.facts.contains_key(path)
     }
+
+    /// What the signed manifest of the bundle at the directory `path` attests,
+    /// when the walk decoded it.
+    #[must_use]
+    pub fn identity_of(&self, path: &str) -> Option<&AppIdentity> {
+        self.facts_of(path).map(|facts| &facts.identity)
+    }
+
+    /// What every entry of `catalog` whose bundle the walk decoded attests:
+    /// the name, version, purpose and author the launcher searches by and
+    /// states. An entry whose manifest the walk could not read states none.
+    #[must_use]
+    pub fn library_facts(&self, catalog: &Catalog) -> BTreeMap<EntryId, AppIdentity> {
+        catalog
+            .entries()
+            .filter_map(|entry| {
+                let facts = self.facts_of(entry.bundle().as_str())?;
+                Some((entry.id().clone(), facts.identity.clone()))
+            })
+            .collect()
+    }
 }
 
 /// The session's icon-bar service: every application's declaration, the
@@ -923,29 +944,26 @@ pub fn prefetch_bar_icons(
     }
 }
 
-/// Resolve the program-library popup's *visible* rows' icon artwork and set
-/// it on the popup, so each application row shows its own icon.
+/// Resolve the icons of the programs the launcher shows and set them on it, so
+/// each program shows its own.
 ///
-/// The taskbar renders and the session resolves: the popup reports which
-/// shown rows are launchable entries and the pixel side each draws its icon
-/// at ([`tairix_taskbar::LibraryPopup::visible_icon_requests`]), and this
-/// resolves each through the same shared [`ArtworkCache`] every other slot
-/// uses, from the same catalog-entry icon source — one resolution, never
-/// two.
+/// The taskbar renders and the session resolves: the popup reports each shown
+/// entry and the pixel side it draws its icon at
+/// ([`tairix_taskbar::LibraryPopup::visible_icon_requests`]), and this resolves
+/// each through the same shared [`ArtworkCache`] every other slot uses, from
+/// the same catalog-entry icon source — one resolution, never two.
 ///
-/// A row whose entry declares an icon gets that icon; a row whose entry
-/// declares none, or whose asset will not read or decode, falls back to the
-/// shipped application-bundle artwork; and a row for which even that is
-/// absent is left with no artwork, so the shared list-row slot draws its
-/// built-in glyph and a row can never blank.
+/// An entry that declares an icon gets that icon; one that declares none, or
+/// whose asset will not read or decode, falls back to the shipped
+/// application-bundle artwork; and one for which even that is absent is left
+/// with no artwork, so the shared tile or row draws its built-in glyph and a
+/// program can never blank.
 ///
-/// Only the rows the popup actually shows at `scale` are resolved, so
-/// opening a large library never decodes an icon nobody sees, and a row
-/// already holding artwork of the right pixel side is left alone, so
-/// re-resolving before each paint costs a lookup rather than a copy. A
-/// closed popup resolves nothing at all. A row whose picture this changes
-/// latches that row's own rectangle, so a decode landing while the popup is
-/// up is drawn without the panel being repainted whole.
+/// Only what the popup shows at `scale` is resolved, so opening a large
+/// library never decodes an icon nobody sees, and an entry already holding
+/// artwork of the right side is left alone, so re-resolving before each paint
+/// costs a lookup rather than a copy. A closed popup resolves nothing. An entry
+/// whose picture this changes latches only where it is shown.
 pub fn resolve_library_icons(
     taskbar: &mut Taskbar,
     scale: Scale,
@@ -959,10 +977,10 @@ pub fn resolve_library_icons(
     let requests = taskbar
         .library()
         .visible_icon_requests(&layout, scale, taskbar.theme());
-    for LibraryIconRequest { row, side, entry } in requests {
+    for LibraryIconRequest { entry, side } in requests {
         let drawn = taskbar
             .library()
-            .row_artwork(row)
+            .artwork(&entry)
             .is_some_and(|art| art.width() == side);
         if drawn {
             continue;
@@ -979,7 +997,7 @@ pub fn resolve_library_icons(
             .artwork(resolver, request, side)
             .and_then(IconPicture::artwork)
             .cloned();
-        taskbar.set_library_row_artwork(row, &layout, art);
+        taskbar.set_library_artwork(&entry, side, &layout, art);
     }
 }
 

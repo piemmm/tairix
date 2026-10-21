@@ -313,6 +313,11 @@ bundles, under a stable `ThemeId`:
   desktop is still revealing dims from where it had got to instead of
   flashing bright first. The interpolation is linear, like every fade's,
   because the strength is what the eye reads rather than the travel.
+- `Glide` — the same machine for a *place*: a `Timeline` carrying a position
+  from where it started to where it is going, eased out because travel is
+  what the eye follows. `retarget` starts a new span from wherever the glide
+  stands, so a movement reversed half-way — the launcher closed as it rises —
+  turns back rather than jumping to an end.
 - `SceneClock` — the pace of a scene that moves until it is dismissed rather
   than for a span: every screensaver and the login screen's ribbon. A frame
   stands the fewest whole display frames that keep the scene at or below
@@ -329,11 +334,17 @@ bundles, under a stable `ThemeId`:
   interaction would change every call site's arity.
   - `SelectionChange` (`100` ms in both themes) is the cross-fade as a
     selection mark moves between items — the login chooser's account tiles,
-    the file manager's grid, the desktop's icon field. The item being left
-    decays while the item arrived at grows, so nothing jumps.
+    the file manager's grid, the desktop's icon field, the launcher's
+    programs. The item being left decays while the item arrived at grows, so
+    nothing jumps.
+  - `PanelOpen` (`210` ms) is a panel arriving — the launcher rising from the
+    bar and fading in — and `PanelClose` (`140` ms) it leaving: quicker than
+    it came, because a dismissed panel is in the way of what the user turned
+    to next.
   - `StageTransition` (`240` ms) is one whole view giving way to another: the
     login screen stepping between the account chooser and the chosen account's
-    secret prompt, in either direction.
+    secret prompt, in either direction, and a launcher page arriving from the
+    side of the sidebar it lies on.
   - `AttemptRejected` (`420` ms) is the thing an authority refused, shaken to
     say so — the login screen's prompt when a secret is not accepted.
   - `SessionFade` (`1000` ms) is a whole session's screen appearing or
@@ -570,6 +581,15 @@ window furniture are what a control *is*, not how much room it is given.
 Scaling them would make a compact desktop draw different-looking controls
 rather than closer-packed ones, and would change the meaning of a state,
 which density must never do.
+
+Motion is the one axis that moves no resting pixel, and `Theme::draws_like`
+says so: two themes draw alike when they differ, if at all, only in their
+motion. A surface handed a theme asks it before repainting — the taskbar's
+`apply_theme` and the compositor's `set_theme` — and the desktop layer's
+settings adoption leaves motion out of what repaints it, so turning reduced
+motion on or off is taken by everything the session animates and repaints none
+of the session's own surfaces. An application still repaints its own window
+for it (`plans/OPEN-DEFECTS.md` D1257).
 
 ### The light/dark control
 

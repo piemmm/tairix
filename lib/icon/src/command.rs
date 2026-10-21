@@ -194,6 +194,8 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::LevelHard => IconKind::LevelHard,
         S::QuestionMarks => IconKind::AlertQuestion,
         S::LetOut => IconKind::DoorOpen,
+        S::Favourite => IconKind::Star,
+        S::RunAsAdministrator => IconKind::Shield,
     }
 }
 
@@ -331,6 +333,8 @@ pub(crate) const fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::LevelMedium => LEVEL_MEDIUM,
         IconKind::LevelHard => LEVEL_HARD,
         IconKind::DoorOpen => DOOR_OPEN,
+        IconKind::Star => STAR,
+        IconKind::Shield => SHIELD,
         _ => return None,
     })
 }
@@ -1277,6 +1281,17 @@ const DOOR_OPEN: &[Mark] = &[
     ]),
     fill(&[circle(10.4, 12.2, 1.1)]),
 ];
+
+/// A five-pointed star.
+const STAR: &[Mark] = &[line(&[Outline::Path(
+    "M12 3.2L14.6 8.6L20.5 9.4L16.2 13.5L17.3 19.4L12 16.6L6.7 19.4L7.8 13.5L3.5 9.4L9.4 8.6Z",
+)])];
+
+/// A shield with a check across it.
+const SHIELD: &[Mark] = &[line(&[
+    Outline::Path("M12 3L19.5 5.8V11.2C19.5 15.8 16.4 19.6 12 21C7.6 19.6 4.5 15.8 4.5 11.2V5.8Z"),
+    Outline::Path("M8.8 12.2L11 14.4L15.4 9.8"),
+])];
 
 #[cfg(test)]
 #[path = "command_tests.rs"]

@@ -4350,14 +4350,32 @@ fn reduced_motion_renders_furniture_identically() {
     full.composite();
 
     let (mut reduced, _) = decorated_compositor();
-    assert!(reduced.set_theme(with_reduced_motion(&Theme::dark())));
-    // A theme switch re-derives the desktop colour from the new palette,
-    // and this helper composites against a colour of its own; put it back,
-    // because what this compares is the furniture, not the backdrop.
-    reduced.set_background(full.background());
+    assert!(
+        !reduced.set_theme(with_reduced_motion(&Theme::dark())),
+        "a theme drawn alike is taken without marking anything"
+    );
+    assert!(reduced.theme().motion().reduced_motion());
     reduced.composite();
 
     assert_eq!(full.frame(), reduced.frame());
+}
+
+#[test]
+fn a_theme_changing_only_its_motion_recomposes_nothing() {
+    let (mut c, _) = decorated_compositor();
+    let _ = c.composite();
+    let epoch = c.chrome_epoch();
+    assert!(!c.set_theme(with_reduced_motion(&Theme::dark())));
+    assert!(c.composite().is_empty(), "no pixel is owed");
+    assert_eq!(
+        c.chrome_epoch(),
+        epoch,
+        "nothing placed against the look is stale"
+    );
+    assert!(
+        c.set_theme(Theme::light()),
+        "a theme drawn otherwise still is"
+    );
 }
 
 #[test]
@@ -11947,7 +11965,7 @@ fn shadows_stand_still_only_before_a_change_of_focus_and_once_it_has_settled() {
 #[test]
 fn reduced_motion_rests_a_window_on_the_first_step() {
     let (mut c, left, right) = two_framed();
-    assert!(c.set_theme(with_reduced_motion(&Theme::dark())));
+    c.set_theme(with_reduced_motion(&Theme::dark()));
     c.composite();
     let lifted = shadow_under(&c, right);
     c.follow_focus(Some(left));

@@ -42,7 +42,8 @@ audited whichever operation it sent.
 | `ConfigRead { scope, capacity }` | the caller's whole merged document for one of its own scopes, or the length it needs |
 | `ConfigSet { scope, key, value }` | stage a write |
 | `ConfigUnset { scope, key }` | stage a removal |
-| `ConfigCommit { scope }` | publish that scope's staged changes atomically |
+| `ConfigCommit { scope }` | publish that scope's staged changes atomically; a commit that fails keeps them staged for a retry |
+| `ConfigDiscard { scope }` | withdraw that scope's staged changes, publishing nothing — what a caller that will not retry a failed commit sends, so a later commit of the process cannot publish them |
 | `PublicRead { bundle_id, capacity }` | another application's **published** document |
 | `VaultRead { capacity }` | the caller's whole **sealed** document |
 | `VaultSet { key, value }` | seal one secret, immediately |

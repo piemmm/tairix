@@ -563,6 +563,32 @@ impl<'h> Settings<'h> {
         Ok(())
     }
 
+    /// Withdraw every edit this process staged with the service for this
+    /// scope, then re-read the store layers.
+    ///
+    /// What a caller that will not retry a failed [`commit`](Self::commit)
+    /// does: the service keeps a failed commit's edits staged for a retry, so
+    /// without this a later commit on the same scope — from this handle or any
+    /// other of the process's — would publish what was given up on.
+    ///
+    /// # Errors
+    ///
+    /// The service's refusal of the withdrawal, or as [`Self::reload`]. The
+    /// handle never publishes the edits either way; a re-read that fails leaves
+    /// its view as it was.
+    pub fn abandon(&mut self) -> Result<(), Errno> {
+        let mut frame = [0u8; APPDATA_MAX_REQUEST];
+        let mut reply = [0u8; STATUS_REPLY_LEN];
+        let withdrawn = self.status(
+            &AppDataRequest::ConfigDiscard { scope: self.scope },
+            &mut frame,
+            &mut reply,
+        );
+        self.dirty.clear();
+        let reread = self.reload();
+        withdrawn.and(reread)
+    }
+
     /// Discard any unpublished edits and re-read the store layers.
     ///
     /// A reload is a fresh view, not a merge: edits this handle never published

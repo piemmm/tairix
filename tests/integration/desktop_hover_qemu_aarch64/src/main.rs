@@ -6,8 +6,9 @@
 //! driver autoload, the display service and the desktop session — and only the
 //! diagnostic sink is swapped for the gate. The host logs in as the seeded
 //! fixture account, starts the desktop, launches the `framestats` fixture from
-//! the program library, sweeps the pointer across the icon bar's controls, and
-//! launches `framestats` a second time.
+//! the program library, sweeps the pointer across the icon bar while the launch
+//! settles, then clicks the fixture's slot on the bar, sweeps the bar again and
+//! clicks the slot a last time.
 //!
 //! # Why the gate listens on the diagnostic trail, not the audit trail
 //!
@@ -31,7 +32,9 @@
 //!
 //! # What the guest attests
 //!
-//! Two `framestats` samples arrive, and the work the desktop did **between**
+//! After the settling samples
+//! ([`SETTLING_SAMPLES`](tairix_test_desktop_hover_qemu_aarch64::SETTLING_SAMPLES)),
+//! two `framestats` samples arrive, and the work the desktop did **between**
 //! them meets every bound in [`assess`]. The bracketing is what makes the
 //! assertion meaningful: the published accounting is cumulative from the
 //! session's first frame, and bring-up legitimately composes full-screen
@@ -62,14 +65,14 @@
 mod kernel {
     use core::num::NonZeroU16;
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink};
-    use tairix_test_desktop_hover_qemu_aarch64::{assess, Verdict};
+    use tairix_test_desktop_hover_qemu_aarch64::{assess, Verdict, SETTLING_SAMPLES};
     use tairix_test_framestats::{Sample, SAMPLE_FAILED_EVENT};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -173,8 +176,10 @@ mod kernel {
     }
 
     /// Diagnostic observer that replays the whole trail to serial and judges
-    /// the work between the two `framestats` samples.
+    /// the work between the two `framestats` samples after the settling ones.
     struct HoverGate {
+        /// Samples seen so far, so the settling ones are passed over.
+        seen: AtomicU32,
         before: SampleCell,
     }
 
@@ -182,6 +187,7 @@ mod kernel {
         /// A gate that has seen no sample.
         const fn new() -> Self {
             Self {
+                seen: AtomicU32::new(0),
                 before: SampleCell::new(),
             }
         }
@@ -222,8 +228,11 @@ mod kernel {
             let Some(sample) = Sample::from_event(event) else {
                 return;
             };
-            // The first sample opens the bracketed window and the sweep runs
-            // inside it; the second closes it and decides the run.
+            if self.seen.fetch_add(1, Ordering::Relaxed) < SETTLING_SAMPLES {
+                return;
+            }
+            // The next sample opens the bracketed window and the sweep runs
+            // inside it; the one after closes it and decides the run.
             let Some(before) = self.before.held_or_take(&sample) else {
                 return;
             };

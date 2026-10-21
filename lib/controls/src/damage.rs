@@ -141,13 +141,23 @@ impl Repaint {
 /// A rectangle whose corner is not addressable names no pixel of this surface
 /// and is skipped, rather than painted somewhere else.
 pub fn paint_parts(surface: &mut Surface, rects: &[Rect], mut paint: impl FnMut(&mut Surface)) {
+    paint_parts_within(surface, rects, |surface, _| paint(surface));
+}
+
+/// [`paint_parts`], handing `paint` the rectangle each pass repaints, so a
+/// recipe can pass over whatever lies wholly outside it.
+pub fn paint_parts_within(
+    surface: &mut Surface,
+    rects: &[Rect],
+    mut paint: impl FnMut(&mut Surface, Rect),
+) {
     for rect in rects {
         let Some((x, y)) = rect.surface_origin() else {
             continue;
         };
         surface.with_clip(x, y, rect.width, rect.height, |surface| {
             surface.fill(Color::TRANSPARENT);
-            paint(surface);
+            paint(surface, *rect);
         });
     }
 }

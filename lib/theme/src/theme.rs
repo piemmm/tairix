@@ -249,6 +249,39 @@ impl Theme {
         self.motion
     }
 
+    /// Whether `other` draws every resting pixel as this does: the two differ,
+    /// if at all, only in how their movements are timed.
+    ///
+    /// What a surface asks before repainting for a theme it is handed, since a
+    /// change of motion alone moves nothing drawn.
+    #[must_use]
+    pub fn draws_like(&self, other: &Self) -> bool {
+        // Destructured, so a field added to the theme cannot be left out.
+        let Self {
+            id,
+            name,
+            appearance,
+            palette,
+            metrics,
+            fonts,
+            cursors,
+            motion: _,
+            density,
+            contrast,
+            ground,
+        } = self;
+        *id == other.id
+            && *name == other.name
+            && *appearance == other.appearance
+            && *palette == other.palette
+            && *metrics == other.metrics
+            && *fonts == other.fonts
+            && *cursors == other.cursors
+            && *density == other.density
+            && *contrast == other.contrast
+            && *ground == other.ground
+    }
+
     /// The theme's information density.
     #[must_use]
     pub fn density(&self) -> Density {
@@ -585,6 +618,7 @@ fn common_motion() -> MotionTheme {
         75,   // press compress
         110,  // release settle
         210,  // panel open
+        140,  // panel close
         150,  // menu open
         150,  // job progress pulse
         220,  // recovery latch reveal

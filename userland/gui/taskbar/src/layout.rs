@@ -38,7 +38,7 @@ use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use crate::edge::{Edge, Orientation};
-use crate::library::{panel_origin, probe_chrome, room_beside, to_u32};
+use crate::popover::{panel_origin, probe_chrome, room_beside, to_u32};
 use crate::taskbar::TaskbarConfig;
 
 /// The element of the taskbar under a pointer, returned by

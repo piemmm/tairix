@@ -22,6 +22,12 @@ use tairix_abi::{
 /// `AppInfo` id it is derived from can never disagree on width.
 pub const MAX_ENTRY_ID_LEN: usize = BUNDLE_ID_MAX;
 
+/// Maximum number of dot segments an entry identifier may have: one fewer
+/// than a configuration key may, because every key that stores an entry —
+/// `<id>.<field>` in a catalog, `library.<id>` in the launcher's record — adds
+/// one segment to it.
+pub const MAX_ENTRY_ID_SEGMENTS: usize = tairix_appconf::MAX_KEY_DEPTH - 1;
+
 /// Maximum length, in bytes, of the display name an entry shows: the
 /// bundle-name bound the signed manifest already fixes.
 pub const MAX_DISPLAY_NAME_LEN: usize = BUNDLE_NAME_MAX;
@@ -58,6 +64,9 @@ pub enum EntryError {
     /// The identifier held a byte outside the permitted set, or began or
     /// ended with a separator.
     MalformedId,
+    /// The identifier had more than [`MAX_ENTRY_ID_SEGMENTS`] dot segments,
+    /// leaving no room for the segment a stored key adds to it.
+    IdTooDeep,
     /// The display name was empty.
     EmptyName,
     /// The display name exceeded [`MAX_DISPLAY_NAME_LEN`].
@@ -83,6 +92,7 @@ impl fmt::Display for EntryError {
             Self::EmptyId => "entry identifier is empty",
             Self::IdTooLong => "entry identifier is too long",
             Self::MalformedId => "entry identifier has an invalid character",
+            Self::IdTooDeep => "entry identifier has too many dot segments",
             Self::EmptyName => "display name is empty",
             Self::NameTooLong => "display name is too long",
             Self::MalformedName => "display name has an invalid character",
@@ -116,11 +126,13 @@ pub(crate) fn value_is_renderable(value: &str) -> bool {
 /// identifier applies ([`tairix_abi::appinfo::validate_bundle_id`]): dotted
 /// segments of ASCII lowercase letters, digits, `-` and `_`, each segment
 /// non-empty and beginning with a letter or digit, bounded by
-/// [`MAX_ENTRY_ID_LEN`]. That grammar makes an identifier a single token —
-/// it cannot hold whitespace, a comment marker, a quote, or a line break —
-/// so a hostile bundle name can never inject a second setting into a
-/// rendered document, and it is inside the configuration key grammar, so
-/// `<id>.<field>` is always a key a document can hold.
+/// [`MAX_ENTRY_ID_LEN`] and by [`MAX_ENTRY_ID_SEGMENTS`] segments. That
+/// grammar makes an identifier a single token — it cannot hold whitespace, a
+/// comment marker, a quote, or a line break — so a hostile bundle name can
+/// never inject a second setting into a rendered document, and it is inside
+/// the configuration key grammar with a segment to spare, so `<id>.<field>`
+/// is always a key a document can hold. A bundle whose identifier is deeper
+/// is a valid bundle and simply never catalogued.
 ///
 /// A reverse-DNS identifier (`com.example.editor`) is deliberately valid:
 /// the registry splits a key at its **last** `.`, and no field name holds
@@ -133,9 +145,9 @@ impl EntryId {
     ///
     /// # Errors
     ///
-    /// [`EntryError::EmptyId`], [`EntryError::IdTooLong`], or
-    /// [`EntryError::MalformedId`] — the identifier is refused outright
-    /// rather than sanitised.
+    /// [`EntryError::EmptyId`], [`EntryError::IdTooLong`],
+    /// [`EntryError::MalformedId`], or [`EntryError::IdTooDeep`] — the
+    /// identifier is refused outright rather than sanitised.
     pub fn new(id: &str) -> Result<Self, EntryError> {
         if id.is_empty() {
             return Err(EntryError::EmptyId);
@@ -148,6 +160,9 @@ impl EntryId {
         // second character-class loop here — which would be one more chance
         // to disagree about whether `..` is a name.
         tairix_abi::appinfo::validate_bundle_id(id).map_err(|_| EntryError::MalformedId)?;
+        if id.split('.').count() > MAX_ENTRY_ID_SEGMENTS {
+            return Err(EntryError::IdTooDeep);
+        }
         Ok(Self(id.to_string()))
     }
 

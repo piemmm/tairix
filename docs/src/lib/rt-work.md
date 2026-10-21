@@ -63,6 +63,10 @@ program whose last write must land waits it out first: `wait`, on either desk,
 blocks for the next answer and answers `None` once nothing is outstanding —
 the terminal's profile, a game's best time, a companion's mood and Paint's
 settings are each seen out this way before their worker is stopped.
+`wait_until` is the same with a deadline on the monotonic clock, for a waiter
+that must not let a store that stopped answering hold it for ever: the desktop
+sees its launcher record out under one, so a wedged store costs a bounded
+moment of the logout.
 
 ## Reaching the loop: the wake is level-triggered
 

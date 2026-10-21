@@ -50,29 +50,26 @@ owns:
   hover, a popup scroll or edit, a theme switch) set a repaint latch the
   embedder drains with `take_repaint`, so one present follows each visual
   change — never a per-frame busy repaint (`AGENTS.md` §2.16). The latch is a
-  `TaskbarRepaint`: one flag per rendered surface (`bar`, `library`, `menu`,
-  `notifications`, `readout`), composed with `|` / `|=`, never a single
-  "something changed" bit. The five surfaces cost wildly different amounts to
-  produce — measured on the host in release, the bar renders in 1655 µs and
-  the library popup in 1001 µs against the context menu's 104 µs — so one bit
-  forced the embedder to re-render and re-push all five for any change at all:
-  a pointer drifting between two rows of a small open menu cost ~2.8 ms of
-  rendering and a recomposite of five window rectangles where 104 µs and one
-  small rectangle would do. That was the desktop's pointer lag. The contract
-  every mutator upholds is exact: **every change latches every surface it
-  touches**, and a change touching several latches all of them — opening the
-  popup also presses the bar's Library button, a raised or dismissed
-  notification changes the popover *and* the bar's notification icon, a tray
-  summary changes the bar *and* the readout while it is expanded, and a theme
-  swap or a `set_config` edge/resize changes all five. Latch sites **err
-  toward latching more, never less**: an extra latch costs one redundant
-  repaint, while a missing one leaves stale pixels on screen, which is a
-  correctness bug. That holds even for a borrow the bar cannot see into: each
-  `&mut` sub-model accessor latches as it hands the borrow out (`tasks_mut`
-  and `clock_mut` the bar, `library_mut` the popup *and* the bar). The
-  embedder may therefore present strictly from the drained latch, and present
-  nothing at all when it is empty; only the compositor-supplied `Scale` stays
-  the embedder's own.
+  `TaskbarRepaint`: one `Repaint` account per rendered surface (`bar`,
+  `library`, `picker`, `notifications`, `readout`, `sound`, `network`), each
+  clean, whole, or the rectangles it owes, composed with `|` / `|=`, never a
+  single "something changed" bit. The surfaces cost wildly different amounts
+  to produce, so one bit forced the embedder to re-render and re-push every
+  one of them for any change at all — the desktop's pointer lag. The contract
+  every mutator upholds is exact: **every change latches the parts of each
+  surface it moves**, and the whole surface only when it re-lays it — opening
+  the popup also presses the bar's Library button, a raised or dismissed
+  notification changes the popover alone, the clock turning owes the clock's
+  rectangle, a tray summary owes the capsule's slot *and* the readout while it
+  is expanded, a status signal its own slot (the whole bar when one appears or
+  goes), and a theme swap or a `set_config` edge/resize changes all of them. A
+  missed part leaves stale pixels on screen, and an extra one repaints pixels
+  nobody can tell apart. Every drawn input is handed over by value and
+  compared (`set_clock_reading`, `set_tray_summary`, `set_library_catalog`,
+  `set_library_facts`, `set_library_shelf`, `set_library_running`, …), so no
+  borrow has to assume a change; `tasks_mut` latches nothing, because no
+  surface draws the task list. The embedder may therefore present strictly
+  from the drained latch, and present nothing at all when it is empty; only the compositor-supplied `Scale` stays the embedder's own.
 - **Hit-testing** — `BarLayout::hit_test` maps a pointer to the `Hit` element
   under it (the Library button, an application slot, a
   notification icon, the clock, or the Switchboard capsule) for input
@@ -104,26 +101,27 @@ owns:
   **menu** is up the bar sees no input at all: the desktop's chain holds the
   seat. Anything else, or a press that misses every region, is `Ignored` (fail
   closed, `AGENTS.md` §2.9).
-- **The program-library popup** — `LibraryPopup` (`plans/NEW-TASKBAR.md`
-  T5), a pure model over the **resolved** `tairix-proglib` `Catalog` the
-  session hands it (`set_catalog`; the popup never touches the VFS),
-  composed from the shared `lib/controls` vocabulary: a `Panel` anchored
-  back at the Library button, a `SearchField` filter, one `ListRow` per
-  folder or entry, and a `ScrollBar` on overflow. Folders follow the closed
-  taxonomy order with name-sorted entries; empty folders are hidden; an
-  empty library or filter shows a calm placeholder. Opening is
-  deterministic (search cleared, folders expanded, cursor at top). The
-  keyboard model is complete — `Tab` cycles search↔rows, arrows wrap,
-  Home/End/PageUp/PageDown jump with the view following, Enter/space
-  activates, Left/Right fold/climb/descend, typing filters
-  case-insensitively, Enter in the search launches the first match, Escape
-  clears then dismisses. Choosing an entry reports
-  `LibraryLaunch { entry }`; the session resolves the bundle and launches
-  it — the taskbar cannot spawn processes (`AGENTS.md` §16.5).
-  `Taskbar::library_layout` computes the popup geometry (outward from the
-  bar on every edge, clamped along the bar's own span so it cannot enter the
-  wallpaper gap, chrome measured by probing the shared `Panel` rather than
-  re-deriving it, §2.2).
+- **The program-library launcher** — `LibraryPopup` (`plans/NEW-TASKBAR.md`
+  T5, T22–T24; `src/library/`), a pure model over what the session hands it:
+  the resolved `Catalog`, each entry's manifest facts, the account's `Shelf`
+  of favourites and frequently used programs, and the bundles running now. A
+  search field over a sidebar (*Home* and one tab per folder) and a content
+  pane of `IconTile`s — *Favourites*, one row of *Frequently Used*, then
+  *All Programs* — with a details strip at the foot. Typing anywhere searches
+  the name, the manifest's purpose and the folder, ranked (`search.rs`), as
+  captioned `ListRow`s with the match emphasised; the sidebar then narrows
+  the results. Everything is reachable from the keyboard: `Tab` cycles the
+  three parts, arrows move in two dimensions across sections, `Enter` opens,
+  `Ctrl+Shift+Enter` asks to run as an administrator, `Shift+F10` opens the
+  entry menu, `Escape` clears then dismisses. It rises and fades in, cascades
+  its first page, slides pages and cross-fades the keyboard's mark
+  (`motion.rs`), all collapsing to the end state under reduced motion, and
+  every event reports exactly the rectangles it changed. Choosing reports a
+  typed response — `LibraryLaunch`, `LibraryLaunchElevated`, `LibraryEdit`,
+  `CreateDesktopShortcut`, `OpenMenu` — and the session performs it; the
+  taskbar cannot spawn processes. `Taskbar::library_route_to` is the two
+  clicks — folder tab, then picture — that reach an entry whatever the
+  account's history.
 - **Floating chrome** — the bar adopts its theme's floating form once
   (`Theme::floating`, in `Taskbar::new` and `apply_theme`), so the bar, every
   popup it opens — the program-library panel, context menu, notification
@@ -170,13 +168,15 @@ owns:
   declared over the window channel — and nothing at all when it declared none —
   with one row the desktop owns: *Info*, whose child is a `FactList` of the
   bundle's **signed** manifest, so an application cannot state an identity that
-  is not its own. A press on a **library entry row** offers the one `EntryRow`
-  list (*Open* and *Create Desktop Shortcut*, the two things the popup can do to
-  a row that its own click cannot); one on the **Switchboard capsule** the system
-  menu below; one on the **clock** its own.
+  is not its own. A press on a **launcher program** offers the one `EntryRow`
+  list — *Open*, *Run as Administrator…*, keeping and ordering a favourite,
+  forgetting its use, *Create Desktop Shortcut* — each offered only where it
+  applies, then the signed *Info* row; one on the **Switchboard capsule** the
+  system menu below; one on the **clock** its own.
   A chosen row is read back by `Taskbar::menu_chosen` into the typed
   `TaskbarResponse` a click on the bar would have produced (`AppMenuChosen`,
-  `LibraryLaunch`, `CreateDesktopShortcut`, `SetDateTime`, or a system action);
+  `LibraryLaunch`, `LibraryLaunchElevated`, `LibraryEdit`,
+  `CreateDesktopShortcut`, `SetDateTime`, or a system action);
   the session performs it. A row's id is its *command's* own position in its
   table rather than its position on the plate, so a menu that leaves a row out
   shifts no other row's meaning.
@@ -266,9 +266,10 @@ owns:
   desktop cache policy (`tairix_reclaim::desktop::disposable_ui_cache`,
   `plans/SMARTRAM.md` SMART5): owned by the seat, bounded by a budget
   derived from the real framebuffer byte size, dropped under memory
-  pressure, and wiped on release. `render_library` paints the open popup —
-  each entry row drawing the artwork the session resolved for it — and
-  `render_menu` paints the open context menu.
+  pressure, and wiped on release. `paint_library` paints the open launcher —
+  each program drawing the artwork the session resolved for it — and, while
+  its content makes an entrance, paints that content once into a layer it
+  blends per frame, held only while the entrance runs.
 - **Icon artwork** — every icon the bar draws resolves through one rule,
   expressed once in `render`: the application's own artwork when the owner
   supplied it, else the artwork the lookup holds for the slot's `IconKind`,
@@ -279,12 +280,12 @@ owns:
   machine with no `/System/Graphics`, a store under memory pressure —
   therefore renders every element from glyphs rather than leaving a blank
   slot.
-- **The popup's per-row artwork** — `LibraryPopup::visible_icon_requests`
-  reports the rows the viewport actually shows, each with its entry id and
-  pixel side, so the session decodes only icons a user can see;
-  `set_row_artwork` files the answers and `row_artwork` serves them to the
-  renderer. A rebuild clears them, so a stale index can never draw another
-  application's icon.
+- **The launcher's artwork** — `LibraryPopup::visible_icon_requests` reports
+  the programs the viewport shows, once each, with the pixel side each is
+  drawn at, so the session decodes only icons a user can see;
+  `Taskbar::set_library_artwork` files the answers by entry, owing only where
+  a picture changed, and `LibraryPopup::artwork` serves them to the renderer.
+  A different side or a new catalog retires them.
 - **Notification icon set** — the renderer draws each notification glyph from
   a `tairix-icon` `IconSet`: the built-in glyph set until `set_icons` installs
   one decoded from the on-disk `/System/Graphics` SVG assets

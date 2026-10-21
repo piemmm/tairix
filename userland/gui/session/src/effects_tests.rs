@@ -7,7 +7,8 @@ use tairix_appdata::fake::FakeService;
 use tairix_soundtheme::{merge_pushed, SoundSettings, UserChoices};
 
 use super::{
-    load_choices, store_choices, Effects, EffectsWork, ReadAsk, Shown, RETRY_MAX_NS, RETRY_NS,
+    load_choices, store_choices, Effects, EffectsWork, ReadAsk, Shown, MAX_HELD_CALLS,
+    RETRY_MAX_NS, RETRY_NS,
 };
 
 fn service() -> FakeService {
@@ -405,5 +406,56 @@ fn a_push_posts_its_frame_once_its_files_are_delegated() {
     assert_eq!(
         effects.read_ask().map(|ask| ask.unavailable),
         Ok(unavailable)
+    );
+}
+
+#[test]
+fn the_launchers_records_beside_the_choices_draw_no_warning() {
+    let mut host =
+        service().with_store("library.os.tairix.calc = favourite=1\nsound.bell.enabled = false\n");
+    let loaded = load_choices(&mut host);
+    assert_eq!(
+        loaded.choices,
+        Some(choices("sound.bell.enabled = false\n"))
+    );
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+}
+
+#[test]
+fn a_refused_store_is_withdrawn_so_no_later_commit_lands_it() {
+    let mut host = service();
+    let refusal = host.commit_refusal();
+    refusal.set(Some(Errno::DeviceOffline));
+    assert_eq!(
+        store_choices(&mut host, &choices("sound.enabled = false\n")),
+        Err(Errno::DeviceOffline)
+    );
+    refusal.set(None);
+    assert!(crate::launcher::store_personal(
+        &mut host,
+        &[(
+            alloc::string::String::from("library.os.tairix.calc"),
+            Some(alloc::string::String::from("favourite=1"))
+        )]
+    )
+    .is_ok());
+    assert_eq!(host.committed().get("sound.enabled"), None);
+}
+
+#[test]
+fn the_calls_held_on_the_worker_are_bounded_and_each_release_frees_one() {
+    let mut effects = Effects::new();
+    for _ in 0..MAX_HELD_CALLS {
+        assert!(effects.admit_call());
+    }
+    assert!(!effects.admit_call(), "a call past the bound is refused");
+    effects.release_call();
+    assert!(effects.admit_call(), "an answered call frees its place");
+    for _ in 0..=MAX_HELD_CALLS {
+        effects.release_call();
+    }
+    assert!(
+        effects.admit_call(),
+        "a release past none frees nothing extra"
     );
 }

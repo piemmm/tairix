@@ -40,7 +40,8 @@ use crate::state::{
     PressureKind, PressureState, ProgressValue, RecoveryState, SelectionState,
 };
 use crate::testkit::{
-    beyond_round_rect, control_font, has_pixel, high_contrast, marks_elision, premul, region_has,
+    beyond_round_rect, control_font, emphasis_runs, has_pixel, high_contrast, marks_elision,
+    premul, region_has,
 };
 
 const W: u32 = 240;
@@ -138,6 +139,128 @@ fn a_row_is_glass_on_floating_chrome_and_solid_on_a_frosted_window() {
             }
         }
     }
+}
+
+/// The rightmost column `ink` reaches in `surface`, if it appears at all.
+fn ink_reach(surface: &Surface, ink: Pixel) -> Option<u32> {
+    bbox(surface, ink).map(|(_, _, right, _)| right)
+}
+
+#[test]
+fn a_captioned_row_stands_taller_and_sets_its_caption_muted_under_the_label() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let one_line = crate::paint::text_plate_height(&theme, Scale::ONE, TextRole::Body);
+        let height = ListRow::captioned_height(Scale::ONE, &theme);
+        assert!(
+            height > one_line,
+            "{}: {height} <= {one_line}",
+            theme.name()
+        );
+        let row = ListRow::new("Terminal").with_caption("A command line");
+        let mut surface = Surface::new(W, height).expect("surface");
+        row.render(
+            &mut surface,
+            Rect::new(0, 0, W, height),
+            Scale::ONE,
+            &theme,
+            None,
+        );
+        let label = bbox(&surface, premul(theme.palette().on_surface)).expect("label ink");
+        let caption = bbox(&surface, premul(theme.palette().on_surface_muted)).expect("caption");
+        assert!(
+            caption.1 > label.1,
+            "{}: the caption sits below",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn a_captioned_rows_icon_spans_both_lines() {
+    let theme = Theme::dark();
+    let height = ListRow::captioned_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, height);
+    let plain = ListRow::new("Paint").with_icon(IconKind::AppBundle);
+    let captioned = plain.clone().with_caption("Draw and edit pictures");
+    assert!(
+        captioned.icon_side(bounds, Scale::ONE, &theme)
+            > plain.icon_side(bounds, Scale::ONE, &theme)
+    );
+    // And the row lays out exactly what it reports, so artwork sized off the
+    // query fills the slot it is drawn in.
+    let side = captioned.icon_side(bounds, Scale::ONE, &theme);
+    let mut surface = Surface::new(W, height).expect("surface");
+    let art = artwork(side, ART);
+    captioned.render(
+        &mut surface,
+        bounds,
+        Scale::ONE,
+        &theme,
+        Some(IconPicture::coloured(&art)),
+    );
+    let (x0, y0, x1, y1) = bbox(&surface, ART.premultiply()).expect("artwork drawn");
+    assert_eq!((x1 - x0 + 1, y1 - y0 + 1), (side, side));
+}
+
+#[test]
+fn emphasis_sets_the_matched_characters_heavier_in_the_labels_own_ink() {
+    let theme = Theme::dark();
+    let ink = premul(theme.palette().on_surface);
+    let plain = row_surface(&ListRow::new("Terminal"), &theme, Scale::ONE);
+    let emphasised = row_surface(
+        &ListRow::new("Terminal").with_emphasis(emphasis_runs(&[(0, 4)])),
+        &theme,
+        Scale::ONE,
+    );
+    let (plain, emphasised) = (
+        ink_reach(&plain, ink).expect("plain ink"),
+        ink_reach(&emphasised, ink).expect("emphasised ink"),
+    );
+    assert!(
+        emphasised > plain,
+        "the heavier face is wider: {emphasised} <= {plain}"
+    );
+    assert!(
+        !has_pixel(
+            &row_surface(
+                &ListRow::new("Terminal").with_emphasis(emphasis_runs(&[(0, 4)])),
+                &theme,
+                Scale::ONE
+            ),
+            premul(theme.palette().accent)
+        ),
+        "emphasis is never the accent selection wears"
+    );
+}
+
+#[test]
+fn emphasis_that_is_not_well_formed_is_ignored_whole() {
+    let theme = Theme::dark();
+    let plain = row_surface(&ListRow::new("Café au lait"), &theme, Scale::ONE);
+    let malformed: [&[(usize, usize)]; 5] = [
+        &[(4, 2)],
+        &[(0, 3), (2, 5)],
+        &[(4, 6)],
+        &[(0, 400)],
+        &[(5, 5)],
+    ];
+    for broken in malformed.map(emphasis_runs) {
+        let surface = row_surface(
+            &ListRow::new("Café au lait").with_emphasis(broken.clone()),
+            &theme,
+            Scale::ONE,
+        );
+        assert_eq!(surface, plain, "{broken:?} drew emphasis");
+    }
+}
+
+#[test]
+fn an_emphasised_label_too_long_for_its_row_still_ends_with_the_mark() {
+    let theme = Theme::dark();
+    assert!(marks_elision(|label: &str| {
+        let row = ListRow::new(label).with_emphasis(emphasis_runs(&[(0, 1)]));
+        row_surface(&row, &theme, Scale::ONE)
+    }));
 }
 
 #[test]
@@ -2638,6 +2761,41 @@ fn a_denied_or_unhealthy_tile_shows_its_signal_bead() {
         None,
     );
     assert!(has_pixel(&hung, premul(theme.palette().recovery)));
+}
+
+/// A live item — a running program — wears a small disc under its picture in
+/// the name's ink, drawn between the picture and the name and nowhere else.
+#[test]
+fn a_live_tile_marks_itself_under_its_picture_in_its_names_ink() {
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let resting = tile_with(&IconTile::new("Terminal", IconKind::AppBundle), &theme);
+        let live = tile_with(
+            &IconTile::new("Terminal", IconKind::AppBundle).with_live_mark(true),
+            &theme,
+        );
+        let changed: Vec<(u32, u32)> = (0..TH)
+            .flat_map(|y| (0..TW).map(move |x| (x, y)))
+            .filter(|&(x, y)| resting.get(x, y) != live.get(x, y))
+            .collect();
+        assert!(!changed.is_empty(), "{}: no mark drawn", theme.name());
+        let picture = ONE_LINE
+            .parts(TILE, Scale::ONE, &theme, "Terminal", Cut::End)
+            .and_then(|parts| parts.picture)
+            .expect("a picture part");
+        for &(x, y) in &changed {
+            assert!(
+                picture.contains(Point::new(to_i32(x), to_i32(y))),
+                "{}: the mark strayed to ({x},{y})",
+                theme.name()
+            );
+        }
+        let ink = premul(theme.palette().on_surface);
+        assert!(
+            changed.iter().any(|&(x, y)| live.get(x, y) == Some(ink)),
+            "{}: the mark is not in the name's ink",
+            theme.name()
+        );
+    }
 }
 
 /// A disabled tile mutes its label rather than vanishing.

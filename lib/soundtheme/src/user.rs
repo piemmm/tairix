@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_appconf::{bool_text, merge_admitting, Document, Refusal, Registry, SettingPath};
 
+use crate::settings::in_namespace;
 use crate::{SoundEvent, SoundKey, SoundSettings};
 
 /// Whether a user's own choices reach `event`'s sound.
@@ -98,14 +99,19 @@ impl Default for UserChoices {
 }
 
 impl UserChoices {
-    /// The choices a stored `document` holds, and the name of every setting
-    /// left out of them: one outside the registry, one no user's choices
-    /// reach, or one whose value its key does not accept.
+    /// The choices a stored `document` holds, and the name of every sound
+    /// setting left out of them: one outside the registry, one no user's
+    /// choices reach, or one whose value its key does not accept. A setting
+    /// outside the sound namespace belongs to another reader of the same store
+    /// and is passed over.
     #[must_use]
     pub fn load(document: &Document) -> (Self, Vec<String>) {
         let mut choices = Self::default();
         let mut refused = Vec::new();
-        for setting in document.settings() {
+        for setting in document
+            .settings()
+            .filter(|setting| in_namespace(setting.key))
+        {
             let kept = key_named(setting.key).is_some_and(|key| {
                 let settable = match key {
                     SoundKey::EventFile(event) => layered(event),

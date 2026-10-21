@@ -48,7 +48,7 @@ use tairix_proglib::{
 };
 use tairix_reclaim::{CacheLedger, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_taskbar::{
-    icon_cache, Edge, EntryRow, IconEpoch, LibraryRow, TaskId, TaskbarConfig, TaskbarRenderer,
+    icon_cache, Edge, EntryRow, IconEpoch, ItemAt, TaskId, TaskbarConfig, TaskbarRenderer,
     TaskbarRepaint, TaskbarResponse, PICKER_CLOSE_GRACE_NS, PICKER_OPEN_DELAY_NS,
 };
 use tairix_theme::{
@@ -57,8 +57,8 @@ use tairix_theme::{
 };
 use tairix_wm::{
     chrome_cache, cursor_cache, frost_cache, ChromeEpoch, Color, Compositor, Corners, FrostEpoch,
-    FrostedBackdrop, InputEvent, InputResponse, Key, NamedKey, Point, PointerButton, Rect, Scale,
-    Surface, WindowActivationState, WindowChrome, WindowControlKind, WindowId,
+    FrostedBackdrop, InputEvent, InputResponse, Key, NamedKey, Point, PointerButton, PointerCatch,
+    Rect, Scale, Surface, WindowActivationState, WindowChrome, WindowControlKind, WindowId,
 };
 
 use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind};
@@ -591,6 +591,10 @@ fn office_and_games() -> Catalog {
     ])
 }
 
+/// Long past every movement the launcher makes after the instant the fixtures
+/// open and close it at, so a step this late lands it at its end.
+const SETTLED_NS: u64 = 10_000_000_000;
+
 /// Toggle the open program-library popup shut with a press on the Library
 /// button, through the taskbar's own router. The counterpart of
 /// [`open_library`], and asserted the same way.
@@ -778,8 +782,7 @@ fn presenting_one_latched_surface_leaves_the_others_alone() {
     let mut session = session();
     session
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(office_and_games());
+        .set_library_catalog(office_and_games());
     let mut comp = compositor();
     open_library(session.taskbar_mut());
 
@@ -871,7 +874,8 @@ fn an_account_owing_one_control_repaints_it_in_place_and_marks_nothing_wider() {
 /// The host-side twin of the A.4 hover vertical, and the deterministic one:
 /// the samples are injected singly and every bound is over counted pixels, so
 /// the reading is the same on any machine under any load, where the guest's own
-/// bracket also carries two launcher popups opening and closing.
+/// bracket also carries the slot presses around it and whatever the desktop's
+/// services answer meanwhile.
 #[test]
 fn sweeping_the_bar_repaints_the_controls_crossed_and_never_the_strip() {
     const MOVES: i32 = 32;
@@ -921,6 +925,89 @@ fn sweeping_the_bar_repaints_the_controls_crossed_and_never_the_strip() {
     assert!(
         mean <= bar_px / 8,
         "the sweep averaged {mean} px per frame against a bar of {bar_px}"
+    );
+}
+
+/// One launch through the launcher under reduced motion — open it, turn to a
+/// program's folder, open the program — costs the launcher's footprint to
+/// open and again to close, and less than one panel for the page and the
+/// pointer's marks between: the fixed work the A.4 hover vertical carries,
+/// with every event composed on its own, the most any host can split it into.
+/// While it is open, handing it again what it already shows composes nothing.
+#[test]
+fn a_launch_through_the_launcher_costs_its_footprint_twice_and_one_page() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.set_library(&mut comp, office_and_games());
+    shell
+        .session_mut()
+        .set_accessibility(tairix_theme::Accessibility {
+            contrast: tairix_theme::Contrast::Normal,
+            density: tairix_theme::Density::Normal,
+            motion: tairix_theme::Motion::Reduced,
+        });
+    shell.sync_theme(&mut comp);
+    shell.present(&mut comp);
+    comp.composite();
+    let taskbar = shell.session().taskbar();
+    let route = taskbar
+        .library_route_to(&EntryId::new("os.tairix.chess").expect("id"), Scale::ONE)
+        .expect("chess is on its folder's first screen");
+    let button = centre(taskbar.layout(Scale::ONE).library);
+    let area = |rect: Rect| u64::from(rect.width) * u64::from(rect.height);
+    let cost = |event: InputEvent, shell: &mut DesktopShell, comp: &mut Compositor| {
+        shell.handle(event, comp, 0);
+        let drew = comp.composite().bounds();
+        (comp.frame_stats().damaged_px, drew)
+    };
+
+    cost(moved(button.x, button.y), &mut shell, &mut comp);
+    let (opened, footprint) = cost(PRIMARY_PRESS, &mut shell, &mut comp);
+    let panel = shell.session().taskbar().library_layout(Scale::ONE).panel;
+    assert_eq!(
+        footprint.intersection(&panel),
+        panel,
+        "opening drew the panel"
+    );
+    assert!(opened <= area(footprint));
+
+    shell.set_library(&mut comp, office_and_games());
+    shell.set_library_facts(alloc::collections::BTreeMap::new());
+    shell.set_library_running(&mut comp, alloc::collections::BTreeSet::new());
+    shell.present(&mut comp);
+    assert!(
+        comp.composite().is_empty(),
+        "handing the launcher what it already shows composes nothing"
+    );
+
+    let (folder, picture) = (centre(route.folder), centre(route.picture));
+    let between: u64 = [
+        PRIMARY_RELEASE,
+        moved(folder.x, folder.y),
+        PRIMARY_PRESS,
+        PRIMARY_RELEASE,
+        moved(picture.x, picture.y),
+        PRIMARY_PRESS,
+    ]
+    .into_iter()
+    .map(|event| cost(event, &mut shell, &mut comp).0)
+    .sum();
+    assert!(
+        between < area(panel),
+        "the page and the pointer's marks repaint less than one panel: {between}"
+    );
+    let outcome = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    assert_eq!(
+        outcome,
+        ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunch {
+            entry: EntryId::new("os.tairix.chess").expect("id")
+        })
+    );
+    comp.composite();
+    let closed = comp.frame_stats().damaged_px;
+    assert!(
+        closed <= area(footprint),
+        "closing costs the footprint: {closed}"
     );
 }
 
@@ -1071,8 +1158,7 @@ fn opening_the_popup_presents_a_popup_window() {
     let mut session = session();
     session
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(office_and_games());
+        .set_library_catalog(office_and_games());
     let mut comp = compositor();
     open_library(session.taskbar_mut());
 
@@ -1091,10 +1177,136 @@ fn opening_the_popup_presents_a_popup_window() {
     assert_eq!(comp.window_count(), 2, "bar and popup are both present");
 
     let layout = session.taskbar().library_layout(Scale::ONE);
+    let (rise, strength) = session.taskbar().library().placement();
+    assert!(rise > 0, "it opens a little below its place");
     let window = comp.window(popup).expect("the popup window exists");
-    assert_eq!(window.origin(), layout.panel.origin);
+    assert_eq!(window.origin(), layout.placed_at(rise));
+    assert_eq!(window.opacity(), strength);
     assert_eq!(window.corners(), Corners::painted(layout.corner_radius));
     assert!(window.casts_shadow(), "the popup floats over the desktop");
+
+    // Each frame of the rise moves the window it painted once.
+    assert!(session
+        .taskbar_mut()
+        .advance_library(SETTLED_NS, Scale::ONE));
+    let owed = session.taskbar_mut().take_repaint();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        owed,
+        &mut NoArtwork,
+    );
+    assert_eq!(presenter.popup_window(), Some(popup), "the same window");
+    let window = comp.window(popup).expect("the popup window exists");
+    assert_eq!(window.origin(), layout.panel.origin, "risen into place");
+    assert_eq!(window.opacity(), u8::MAX);
+}
+
+/// The step that ends the rise owes no pixel, and the present after it still
+/// lands the window at rest: placement follows the motion, not the repaint.
+#[test]
+fn the_frame_that_ends_the_rise_lands_the_window_owing_nothing() {
+    let mut session = session();
+    session
+        .taskbar_mut()
+        .set_library_catalog(office_and_games());
+    let mut comp = compositor();
+    open_library(session.taskbar_mut());
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let mut presenter = TaskbarPresenter::new();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+        &mut NoArtwork,
+    );
+    let popup = presenter.popup_window().expect("the popup was presented");
+    assert!(session.taskbar().library().placement().0 > 0, "rising");
+
+    assert!(session
+        .taskbar_mut()
+        .advance_library(SETTLED_NS, Scale::ONE));
+    let _ = session.taskbar_mut().take_repaint();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::NONE,
+        &mut NoArtwork,
+    );
+    let layout = session.taskbar().library_layout(Scale::ONE);
+    let window = comp.window(popup).expect("the popup window exists");
+    assert_eq!(window.origin(), layout.panel.origin, "risen into place");
+    assert_eq!(window.opacity(), u8::MAX);
+}
+
+/// The window a launch opens takes the screen from the launcher still leaving
+/// it: the frame that first carries the window carries no launcher.
+#[test]
+fn a_window_opening_ends_the_launchers_departure_in_the_same_frame() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .set_library_catalog(office_and_games());
+    open_library_on(&mut shell, &mut comp);
+    let popup = shell
+        .presenter()
+        .popup_window()
+        .expect("the launcher is presented");
+    shell.handle(moved(24, 1060), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert!(shell.session().taskbar().library().is_departing());
+    assert!(comp.window(popup).is_some(), "it is still leaving");
+
+    let surface =
+        Surface::filled(200, 100, Color::rgb(0x20, 0x20, 0x24).premultiply()).expect("surface");
+    let window = shell
+        .open_window(&mut comp, Point::new(300, 300), surface, "Write")
+        .expect("the window opens");
+    assert!(!shell.session().taskbar().library().is_departing());
+    assert_eq!(shell.presenter().popup_window(), None);
+    assert!(
+        comp.window(popup).is_none(),
+        "gone in the frame that shows the window"
+    );
+    assert!(comp.window(window).is_some());
+}
+
+/// The same for an application's window, which a launch opens: its first
+/// present maps it, and the frame that does carries no launcher.
+#[test]
+fn a_served_windows_first_frame_ends_the_launchers_departure() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .set_library_catalog(office_and_games());
+    open_library_on(&mut shell, &mut comp);
+    let popup = shell
+        .presenter()
+        .popup_window()
+        .expect("the launcher is presented");
+    shell.handle(moved(24, 1060), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert!(shell.session().taskbar().library().is_departing());
+    let window = shell
+        .open_unpresented_window(&mut comp, Point::new(300, 300), (200, 100), "Write")
+        .expect("the window opens");
+    assert!(
+        shell.session().taskbar().library().is_departing(),
+        "a window not yet on screen takes nothing from it"
+    );
+    assert!(shell.map_window(&mut comp, window));
+    assert!(!shell.session().taskbar().library().is_departing());
+    assert!(
+        comp.window(popup).is_none(),
+        "gone in the frame that shows it"
+    );
 }
 
 #[test]
@@ -1102,8 +1314,7 @@ fn closing_the_popup_removes_the_popup_window() {
     let mut session = session();
     session
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(office_and_games());
+        .set_library_catalog(office_and_games());
     let mut comp = compositor();
     open_library(session.taskbar_mut());
 
@@ -1124,11 +1335,30 @@ fn closing_the_popup_removes_the_popup_window() {
     close_library(session.taskbar_mut());
     assert!(!session.taskbar().library().is_open());
 
+    // The window sinks away with the pixels it had, and the pointer passes
+    // through it to whatever lies beneath.
     presenter.present(
         &mut comp,
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
+    );
+    assert_eq!(presenter.popup_window(), Some(popup), "still leaving");
+    assert_eq!(
+        comp.window(popup).map(Window::pointer_catch),
+        Some(PointerCatch::None)
+    );
+
+    assert!(session
+        .taskbar_mut()
+        .advance_library(SETTLED_NS, Scale::ONE));
+    let owed = session.taskbar_mut().take_repaint();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        owed,
         &mut NoArtwork,
     );
 
@@ -1147,8 +1377,7 @@ fn teardown_removes_every_window() {
     let mut comp = compositor();
     session
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(office_and_games());
+        .set_library_catalog(office_and_games());
     open_library(session.taskbar_mut());
 
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
@@ -1533,8 +1762,7 @@ fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
     let mut seat = Seat::new();
     seat.session
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(office_and_games());
+        .set_library_catalog(office_and_games());
     // A window beneath the popup's click-away press; it must stay unfocused.
     let _window = seat.window(Point::new(200, 200), 300, 300);
     let library = seat.centre_of(|layout| layout.library);
@@ -1570,7 +1798,13 @@ fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
         }),
         SessionInputResponse::Ignored
     );
-    assert_eq!(seat.session.taskbar().library().current(), Some(0));
+    assert_eq!(
+        seat.session.taskbar().library().selection(),
+        Some(ItemAt {
+            section: 0,
+            item: 0
+        })
+    );
 
     // Escape closes the popup.
     assert_eq!(
@@ -2074,8 +2308,7 @@ fn pump_opens_the_popup_and_presents_it() {
     shell
         .session_mut()
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(office_and_games());
+        .set_library_catalog(office_and_games());
     let mut comp = compositor();
     // The bar is placed before any input, exactly as the desktop places it:
     // a press is the bar's because the bar is what is drawn under it, so a bar
@@ -2270,6 +2503,35 @@ fn sync_theme_relays_a_programmatic_switch_to_the_compositor() {
     // Retained furniture keys on the epoch, so the switch must move it or
     // every window would re-composite its old chrome from the cache.
     assert_ne!(comp.chrome_epoch(), before);
+}
+
+/// Reduced motion changes how long things take, never how they rest: the
+/// whole desktop takes it, and nothing is composed or restyled for it.
+#[test]
+fn a_change_of_motion_alone_composes_nothing_and_restyles_nothing() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.set_library(&mut comp, office_and_games());
+    shell.present(&mut comp);
+    comp.composite();
+    let (epoch, style) = (comp.chrome_epoch(), shell.style_generation());
+    let theme = shell.session().active_theme().clone();
+    assert!(shell
+        .session_mut()
+        .set_accessibility(tairix_theme::Accessibility {
+            contrast: theme.contrast(),
+            density: theme.density(),
+            motion: tairix_theme::Motion::Reduced,
+        }));
+    assert!(!shell.sync_theme(&mut comp), "the look did not change");
+    shell.present(&mut comp);
+    assert!(comp.composite().is_empty());
+    assert_eq!(
+        (comp.chrome_epoch(), shell.style_generation()),
+        (epoch, style)
+    );
+    assert!(comp.theme().motion().reduced_motion());
+    assert!(shell.session().taskbar().theme().motion().reduced_motion());
 }
 
 /// An appearance switch — the taskbar's light/dark toggle — is the same
@@ -3475,8 +3737,7 @@ fn teardown_removes_the_presented_windows() {
     shell
         .session_mut()
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(office_and_games());
+        .set_library_catalog(office_and_games());
     // Move onto the library button and press.
     shell.handle(moved(24, 1060), &mut comp, 0);
     shell.handle(PRIMARY_PRESS, &mut comp, 0);
@@ -3942,8 +4203,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
     shell
         .session_mut()
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(catalog(&[("files", "Files", LibraryCategory::Office)]));
+        .set_library_catalog(catalog(&[("files", "Files", LibraryCategory::Office)]));
     let mode = DisplayMode {
         width_px: WIDTH,
         height_px: HEIGHT,
@@ -3964,23 +4224,6 @@ fn aw3_click_through_produces_the_staged_outcomes() {
         rect.center()
     };
     let start = centre(shell.session().taskbar().layout(Scale::ONE).library);
-    let row = |shell: &DesktopShell, label: &str| -> Point {
-        let layout = shell.session().taskbar().library_layout(Scale::ONE);
-        let index = shell
-            .session()
-            .taskbar()
-            .library()
-            .rows()
-            .iter()
-            .position(|r| matches!(r, LibraryRow::Entry { name, .. } if name.as_str() == label))
-            .expect("labelled row");
-        let (_, rect) = layout
-            .rows
-            .iter()
-            .find(|(i, _)| *i == index)
-            .expect("row rect");
-        centre(*rect)
-    };
 
     let click = |shell: &mut DesktopShell, comp: &mut Compositor, at: Point| -> Vec<ShellOutcome> {
         vec![
@@ -4003,15 +4246,15 @@ fn aw3_click_through_produces_the_staged_outcomes() {
         "library click must open the popup, got {outcomes:?}"
     );
 
-    // The "Files" row: the launcher fires and the popup closes.
-    let files_row = row(&shell, "Files");
-    let outcomes = click(&mut shell, &mut comp, files_row);
+    // The "Files" tile: the launcher fires and the popup closes.
+    let files = library_program_at(&shell, "Files");
+    let outcomes = click(&mut shell, &mut comp, files);
     assert!(
         outcomes.iter().any(|o| matches!(
             o,
             ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunch { entry }) if entry.as_str() == "os.tairix.files"
         )),
-        "files-row click must launch, got {outcomes:?}"
+        "a click on the Files tile must launch, got {outcomes:?}"
     );
     assert!(!shell.session().taskbar().library().is_open());
 
@@ -4059,8 +4302,15 @@ fn aw3_click_through_produces_the_staged_outcomes() {
         "second library click must reopen the popup, got {outcomes:?}"
     );
 
-    // A click away (outside the popup) dismisses it.
-    let outcomes = click(&mut shell, &mut comp, in_window);
+    // A click away — on the window, clear of the popup — dismisses it.
+    let away = Point::new(origin.x + 240, origin.y + 20);
+    assert!(!shell
+        .session()
+        .taskbar()
+        .library_layout(Scale::ONE)
+        .panel
+        .contains(away));
+    let outcomes = click(&mut shell, &mut comp, away);
     assert!(
         outcomes.contains(&ShellOutcome::Taskbar(TaskbarResponse::LibraryDismissed)),
         "click away must dismiss the popup, got {outcomes:?}"
@@ -4119,24 +4369,31 @@ impl DirectorySource for TreeSource {
     }
 }
 
-/// The centre of the open program-library popup's row for the entry shown as
-/// `label`.
-fn library_row_at(shell: &DesktopShell, label: &str) -> Point {
-    let layout = shell.session().taskbar().library_layout(Scale::ONE);
-    let index = shell
-        .session()
-        .taskbar()
+/// A point on the program the open launcher lists as `label` — its tile's
+/// picture, or anywhere on its row — where a click opens it.
+fn library_program_at(shell: &DesktopShell, label: &str) -> Point {
+    let bar = shell.session().taskbar();
+    let layout = bar.library_layout(Scale::ONE);
+    let at = bar
         .library()
-        .rows()
+        .sections()
         .iter()
-        .position(|r| matches!(r, LibraryRow::Entry { name, .. } if name.as_str() == label))
-        .expect("labelled row");
-    let (_, rect) = layout
-        .rows
-        .iter()
-        .find(|(i, _)| *i == index)
-        .expect("row rect");
-    centre(*rect)
+        .enumerate()
+        .find_map(|(section, listed)| {
+            let item = listed.items.iter().position(|item| item.name == label)?;
+            Some(ItemAt { section, item })
+        })
+        .expect("the program is listed");
+    let shown = layout.item_rect(at).expect("the program is shown");
+    if layout.sections[at.section].kind.is_list() {
+        return centre(shown);
+    }
+    centre(
+        layout
+            .tile
+            .core_rect(shown, Scale::ONE, bar.theme())
+            .expect("the tile has a picture"),
+    )
 }
 
 /// The geometry a chain on `comp` is placed against, over `theme`.
@@ -4213,10 +4470,11 @@ fn choose_bar_menu_row(
     let ChainOutcome::Chosen(item) = outcome else {
         panic!("expected a chosen row, got {outcome:?}");
     };
+    let scale = comp.scale();
     shell
         .session_mut()
         .taskbar_mut()
-        .menu_chosen(&subject, item)
+        .menu_chosen(&subject, item, 0, scale)
 }
 
 /// A source refusing every listing, standing in for a session whose
@@ -6007,7 +6265,17 @@ fn shell_set_library_hands_catalog_to_popup_and_refreshes_open_one() {
     shell.handle(moved(24, 1060), &mut comp, 0);
     shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert!(shell.session().taskbar().library().is_open());
-    assert_eq!(shell.session().taskbar().library().rows().len(), 2); // 1 folder + 1 entry
+    let listed = |shell: &DesktopShell| -> usize {
+        shell
+            .session()
+            .taskbar()
+            .library()
+            .sections()
+            .iter()
+            .map(|section| section.items.len())
+            .sum()
+    };
+    assert_eq!(listed(&shell), 1);
 
     // Refresh in place.
     let cat2 = office_and_games();
@@ -6017,8 +6285,7 @@ fn shell_set_library_hands_catalog_to_popup_and_refreshes_open_one() {
         shell.session().taskbar().library().is_open(),
         "popup stays open"
     );
-    // 2 folders + 3 entries = 5 rows
-    assert_eq!(shell.session().taskbar().library().rows().len(), 5);
+    assert_eq!(listed(&shell), 3, "and lists what was handed over");
 }
 
 #[test]
@@ -6079,16 +6346,15 @@ fn full_launch_flow() {
     shell
         .session_mut()
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(catalog(&[("calc", "Calc", LibraryCategory::Office)]));
+        .set_library_catalog(catalog(&[("calc", "Calc", LibraryCategory::Office)]));
 
     // Open popup.
     shell.handle(moved(24, 1060), &mut comp, 0);
     shell.handle(PRIMARY_PRESS, &mut comp, 0);
 
-    // A press on a program row arms the click; the launch is the release
-    // that follows without the pointer leaving the row.
-    let at = library_row_at(&shell, "Calc");
+    // A press on a program arms the click; the launch is the release that
+    // follows without the pointer leaving it.
+    let at = library_program_at(&shell, "Calc");
     let outcome = shell.handle(moved(at.x, at.y), &mut comp, 0);
     assert_eq!(outcome, ShellOutcome::Ignored);
     assert_eq!(
@@ -6110,18 +6376,17 @@ fn the_entry_menus_shortcut_row_asks_the_embedder_to_make_one() {
     shell
         .session_mut()
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(catalog(&[("chess", "Chess", LibraryCategory::Games)]));
+        .set_library_catalog(catalog(&[("chess", "Chess", LibraryCategory::Games)]));
 
-    // Open the popup, then ask for the row's own context menu.
+    // Open the popup, then ask for the program's own context menu.
     shell.handle(moved(24, 1060), &mut comp, 0);
     shell.handle(PRIMARY_PRESS, &mut comp, 0);
-    let at = library_row_at(&shell, "Chess");
+    let at = library_program_at(&shell, "Chess");
     shell.handle(moved(at.x, at.y), &mut comp, 0);
     let ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) =
         shell.handle(SECONDARY_PRESS, &mut comp, 0)
     else {
-        panic!("a secondary press on a library row asked for no menu");
+        panic!("a secondary press on a library program asked for no menu");
     };
 
     // The shortcut row, found by the label its one definition gives it.
@@ -11938,36 +12203,29 @@ fn shipped_app_bundle_master(assets: MemoryAssets) -> MemoryAssets {
 /// A session showing an open library popup over `catalog`.
 fn open_library_over(catalog: Catalog) -> (DesktopSession, Compositor) {
     let mut session = session();
-    session.taskbar_mut().library_mut().set_catalog(catalog);
+    session.taskbar_mut().set_library_catalog(catalog);
     let comp = compositor();
     open_library(session.taskbar_mut());
     (session, comp)
 }
 
-/// The rows the open popup currently shows that are launchable entries —
-/// exactly the rows that may carry an application's own artwork.
-fn shown_entry_rows(session: &DesktopSession) -> Vec<usize> {
-    let bar = session.taskbar();
-    bar.library_layout(Scale::ONE)
-        .rows
-        .iter()
-        .filter(|&&(index, _)| {
-            matches!(
-                bar.library().rows().get(index),
-                Some(LibraryRow::Entry { .. })
-            )
-        })
-        .map(|&(index, _)| index)
+/// The programs the open popup currently shows: exactly the places that may
+/// carry an application's own artwork.
+fn shown_programs(session: &DesktopSession) -> Vec<ItemAt> {
+    session
+        .taskbar()
+        .library_layout(Scale::ONE)
+        .shown()
+        .map(|(at, _)| at)
         .collect()
 }
 
-/// The opaque tint a resolved row was painted in, or `None` when the row
+/// The opaque tint the program at `at` was painted in, or `None` when it
 /// carries no artwork at all and the shared slot draws its built-in glyph.
-fn row_tint(session: &DesktopSession, row: usize) -> Option<u8> {
-    session
-        .taskbar()
-        .library()
-        .row_artwork(row)
+fn program_tint(session: &DesktopSession, at: ItemAt) -> Option<u8> {
+    let popup = session.taskbar().library();
+    popup
+        .artwork(&popup.item(at)?.id)
         .and_then(|art| art.pixels().first().copied())
         .map(|pixel| pixel.r)
 }
@@ -12046,12 +12304,12 @@ fn a_library_row_draws_its_own_applications_icon() {
         &mut cache,
     );
 
-    let rows = shown_entry_rows(&session);
-    assert_eq!(rows.len(), 1, "one entry, one row");
+    let shown = shown_programs(&session);
+    assert_eq!(shown.len(), 1, "one entry, one tile");
     assert_eq!(
-        row_tint(&session, rows[0]),
+        program_tint(&session, shown[0]),
         Some(BUNDLE_TINT),
-        "the row shows the application's own icon, not the shipped master"
+        "the tile shows the application's own icon, not the shipped master"
     );
 }
 
@@ -12125,10 +12383,10 @@ fn the_launcher_has_its_icons_before_it_is_first_drawn() {
     open_library_on(&mut shell, &mut comp);
     shell.present(&mut comp);
 
-    let rows = shown_entry_rows(shell.session());
-    assert_eq!(rows.len(), 1, "one entry, one row");
+    let shown = shown_programs(shell.session());
+    assert_eq!(shown.len(), 1, "one entry, one tile");
     assert_eq!(
-        row_tint(shell.session(), rows[0]),
+        program_tint(shell.session(), shown[0]),
         Some(BUNDLE_TINT),
         "the first frame of the popup shows the application's own icon"
     );
@@ -12157,14 +12415,9 @@ fn resolving_the_popups_rows_owes_the_rows_whose_picture_changed() {
     )));
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
     let layout = session.taskbar().library_layout(Scale::ONE);
-    let rows = shown_entry_rows(&session);
-    assert_eq!(rows.len(), 1, "one entry, one row");
-    let rect = layout
-        .rows
-        .iter()
-        .find(|&&(index, _)| index == rows[0])
-        .map(|&(_, rect)| rect)
-        .expect("the row is laid out");
+    let shown = shown_programs(&session);
+    assert_eq!(shown.len(), 1, "one entry, one tile");
+    let rect = layout.item_rect(shown[0]).expect("the tile is laid out");
     let _ = session.taskbar_mut().take_repaint();
 
     let mut resolve = |session: &mut DesktopSession, cache: &mut _| {
@@ -12178,16 +12431,16 @@ fn resolving_the_popups_rows_owes_the_rows_whose_picture_changed() {
     };
 
     let owed = resolve(&mut session, &mut cache);
-    let mut rows = tairix_controls::damage::sink();
-    rows.add(rect);
-    rows.translate(-layout.panel.left(), -layout.panel.top());
+    let mut tiles = tairix_controls::damage::sink();
+    tiles.add(rect);
+    tiles.translate(-layout.panel.left(), -layout.panel.top());
     assert_eq!(
         owed,
         TaskbarRepaint {
-            library: Repaint::Parts(rows),
+            library: Repaint::Parts(tiles),
             ..TaskbarRepaint::NONE
         },
-        "the one row that gained a picture is the one that repaints"
+        "the one tile that gained a picture is the one that repaints"
     );
     assert_eq!(
         resolve(&mut session, &mut cache),
@@ -12228,13 +12481,13 @@ fn a_library_row_whose_asset_will_not_serve_falls_back_and_never_blanks() {
         &mut cache,
     );
 
-    let rows = shown_entry_rows(&session);
-    assert_eq!(rows.len(), 3, "three entries, three rows");
-    for row in rows {
+    let shown = shown_programs(&session);
+    assert_eq!(shown.len(), 3, "three entries, three tiles");
+    for at in shown {
         assert_eq!(
-            row_tint(&session, row),
+            program_tint(&session, at),
             Some(SHIPPED_TINT),
-            "row {row} falls back to the shipped artwork rather than blanking"
+            "{at:?} falls back to the shipped artwork rather than blanking"
         );
     }
 }
@@ -12257,9 +12510,9 @@ fn a_library_row_with_no_declared_icon_falls_back_to_the_shipped_artwork() {
         &mut cache,
     );
 
-    let rows = shown_entry_rows(&session);
+    let shown = shown_programs(&session);
     assert_eq!(
-        row_tint(&session, rows[0]),
+        program_tint(&session, shown[0]),
         Some(SHIPPED_TINT),
         "an application that declares no icon still shows one"
     );
@@ -12291,12 +12544,22 @@ fn the_library_resolves_artwork_only_for_the_rows_it_shows() {
     let mut reader = ArtworkFileReader(CountingAssets::new(shipped_app_bundle_master(assets)));
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
 
-    let shown = shown_entry_rows(&session);
-    let total = session.taskbar().library().rows().len();
+    let shown = shown_programs(&session);
+    let listed: Vec<ItemAt> = session
+        .taskbar()
+        .library()
+        .sections()
+        .iter()
+        .enumerate()
+        .flat_map(|(section, listed)| {
+            (0..listed.items.len()).map(move |item| ItemAt { section, item })
+        })
+        .collect();
     assert!(
-        shown.len() < total,
-        "the fixture must overflow its viewport: {} shown of {total}",
-        shown.len()
+        shown.len() < listed.len(),
+        "the fixture must overflow its viewport: {} shown of {}",
+        shown.len(),
+        listed.len()
     );
 
     resolve_library_icons(
@@ -12309,16 +12572,20 @@ fn the_library_resolves_artwork_only_for_the_rows_it_shows() {
     assert_eq!(
         rasteriser.0.calls,
         shown.len(),
-        "one decode per shown row, none for the rest"
+        "one decode per shown program, none for the rest"
     );
-    assert_eq!(reader.0.reads, shown.len(), "and one read per shown row");
-    for row in 0..total {
-        let resolved = row_tint(&session, row).is_some();
+    assert_eq!(
+        reader.0.reads,
+        shown.len(),
+        "and one read per shown program"
+    );
+    for at in listed {
+        let resolved = program_tint(&session, at).is_some();
         assert_eq!(
             resolved,
-            shown.contains(&row),
-            "row {row} resolved={resolved} but shown={}",
-            shown.contains(&row)
+            shown.contains(&at),
+            "{at:?} resolved={resolved} but shown={}",
+            shown.contains(&at)
         );
     }
 }
@@ -12364,8 +12631,8 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
         &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         &mut cache,
     );
-    for row in shown_entry_rows(&session) {
-        assert_eq!(row_tint(&session, row), None, "row {row} has no artwork");
+    for at in shown_programs(&session) {
+        assert_eq!(program_tint(&session, at), None, "{at:?} has no artwork");
     }
 
     // Present the whole bar and popup twice: once through the seams that
@@ -12534,6 +12801,54 @@ fn any_pixel_differs(comp: &Compositor, area: Rect, colour: [u8; 4]) -> bool {
         }
     }
     false
+}
+
+/// Text drawn provisionally landing owes the desktop layer its icons' cells
+/// — the only text it draws — and never the ground between them. Repainting
+/// the layer whole recomposed the screen for every landing, and every frost
+/// above it, so a readout's first figures cost a screen.
+#[test]
+fn landing_text_repaints_the_icons_and_never_the_ground() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut desktop = pinboard_desktop();
+    with_backdrop(&mut desktop, Rgb::new(10, 20, 30));
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    let whole: Vec<u8> = comp.frame().to_vec();
+
+    shell.present_desktop_text(&mut comp, &desktop);
+    let composed = comp.composite();
+    let layout = shell.desktop_layout(&comp, &desktop);
+    assert!(!composed.is_empty(), "the names are drawn again");
+    let mut outside = composed;
+    for index in 0..2 {
+        outside.subtract(layout.shown_rect(0, index).expect("a shown icon"));
+    }
+    assert!(
+        outside.is_empty(),
+        "{:?} lies outside the icons' cells",
+        outside.rects()
+    );
+    assert_eq!(
+        comp.frame(),
+        whole.as_slice(),
+        "and the cells repainted alone land what the whole layer laid"
+    );
+
+    let mut bare = Desktop::new(
+        TreeSource {
+            dirs: alloc::collections::BTreeMap::new(),
+        },
+        Vec::new(),
+    );
+    bare.relist();
+    shell.present_desktop(&mut comp, &bare);
+    comp.composite();
+    shell.present_desktop_text(&mut comp, &bare);
+    assert!(
+        comp.composite().is_empty(),
+        "a desktop showing no icon draws no text to redraw"
+    );
 }
 
 #[test]
@@ -13772,8 +14087,7 @@ fn the_bar_and_its_library_popup_frost_what_is_behind_them() {
     shell
         .session_mut()
         .taskbar_mut()
-        .library_mut()
-        .set_catalog(office_and_games());
+        .set_library_catalog(office_and_games());
     let library = centre(shell.session().taskbar().layout(Scale::ONE).library);
     shell.handle(moved(library.x, library.y), &mut comp, 0);
     shell.handle(PRIMARY_PRESS, &mut comp, 0);

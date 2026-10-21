@@ -36,17 +36,27 @@
 
 use tairix_test_framestats::{Delta, Sample};
 
-/// Bare name of the fixture bundle whose two launches bracket the sweep.
+/// Bare name of the fixture bundle whose samples bracket the sweep.
 ///
 /// A command app in the system store, listed in the desktop's program library
-/// so a click launches it: the desktop owns the screen, so a click is the only
+/// so a click launches it, and holding a slot on the icon bar that samples at
+/// each click on it: the desktop owns the screen, so a click is the only
 /// gesture that reaches a program, and a pointer script's steps fire strictly
-/// in script order — which is what puts the sweep between the two samples.
+/// in script order — which is what puts the sweep between two samples.
 pub const SAMPLE_APP_NAME: &str = "framestats";
 
-/// Pointer moves the sweep injects between the two samples.
+/// Samples taken before the bracketed window opens: the one the launch takes.
 ///
-/// The runner sends one each poll tick, so the sweep lasts some 0.8 s however
+/// A sample reads the totals the session last published, and it publishes at
+/// most once per `MIN_FRAME_PUBLISH_INTERVAL_NS`, so the launch's own sample can
+/// read short of the program library's departure. A settling sweep, longer than
+/// that interval, runs before the click that opens the window, so the window
+/// holds the gesture and nothing of the launch.
+pub const SETTLING_SAMPLES: u32 = 1;
+
+/// Pointer moves each sweep injects.
+///
+/// The runner sends one each poll tick, so a sweep lasts some 0.8 s however
 /// fast the guest runs: several of the publisher's rate-limited submissions.
 pub const SWEEP_MOVES: u32 = 32;
 
@@ -56,56 +66,52 @@ pub const SWEEP_MOVES: u32 = 32;
 /// One, because a frame is all the gesture guarantees: the desktop drains
 /// every move waiting before it paints, and the runner sends the sweep at its
 /// own cadence, so a guest slower than that cadence composes the sweep in
-/// fewer frames — under eight on a contended runner, 36 on an idle host. Every
-/// other bound is a total or a ratio of work, which merging frames can only
-/// shrink, so the window is judged on the work it did; a window that composed
-/// nothing still fails.
+/// fewer frames — under eight on a contended runner, 31 to 41 on an idle
+/// host. Every other bound is a total or a ratio of work, which merging frames
+/// can only shrink, so the window is judged on the work it did; a window that
+/// composed nothing still fails.
 pub const MIN_SWEEP_FRAMES: u64 = 1;
 
 /// The most screens' worth of pixels the **whole** bracketed window may
 /// recompose.
 ///
-/// A total rather than a per-frame mean, and that is the point. The window's
-/// cost is overwhelmingly *fixed* work — the two launcher popups opening,
-/// showing a row and closing — with the sweep's own per-control repaints a
-/// few per cent of it. Divided by a frame count the host chooses, that fixed
-/// cost reads as a small mean on a machine that composed many frames and a
-/// large one on a machine that coalesced them, so the bound was met or
-/// missed by how busy the host was rather than by what the desktop did. It
-/// is the same defect [`MAX_BLUR_PX_PER_DAMAGED_PX`] was reshaped away from,
-/// and a total has no denominator to be gamed by: holding frames can only
-/// *coalesce* damage, never multiply it, so a loaded host measures less.
+/// A total rather than a per-frame mean: the guest chooses how many frames
+/// the sweep is composed in, and a mean over that count is met or missed by
+/// how busy the host was — the defect [`MAX_BLUR_PX_PER_DAMAGED_PX`] was
+/// reshaped away from. A total has no denominator to be gamed by: holding
+/// frames can only *coalesce* damage, never multiply it, so a loaded host
+/// measures less.
 ///
-/// Three screens, against a measured 0.66–1.00 over five runs of the settled
-/// gesture (520 713 – 788 713 px of a 786 432-px screen). One further whole
-/// screen is allowed on top of that, because a relist, an arriving ground,
-/// or a settings change legitimately repaints the desktop layer whole and
-/// can fall inside the window on a slow boot — so an honest run reaches at
-/// most about two. It refuses by a screen the regression it was re-derived
-/// against: a desktop that re-damaged its whole icon bar after every
-/// published frame spent 3.69–4.72 screens on the same gesture.
+/// One screen, against a measured 0.22 to 0.26 (170 050 – 207 026 px over
+/// 31 – 41 frames, three runs). The window holds the sweep, the slot presses
+/// that bracket it, and what the desktop's services answer meanwhile: the
+/// Switchboard's periodic reading, which owes the capsule, and the font
+/// service's glyphs for the figures the readout shows as the sweep opens it,
+/// which owe the bar, the title bands and the icon cells that carry text. The
+/// launch is settled out of it ([`SETTLING_SAMPLES`]) and the reveal the
+/// script starts from waits for the backdrop.
 ///
-/// **It is deliberately not tightened onto the per-control cost, because
-/// this window does not measure one.** The launcher churn dominates it, so a
-/// tighter figure here would be a bound on the launch path with the hover's
-/// own cost lost inside it. The per-control claim is gated where it is
-/// deterministic: the host-side sweep in `userland/gui/session` asserts that
-/// no frame of the gesture recomposes a whole bar's worth of pixels and that
-/// the mean stays under an eighth of one
+/// It refuses the two regressions it was derived against: a bar re-damaged
+/// whole on every frame, 48 672 px a frame on this screen, whenever the sweep
+/// takes 17 frames or more; and a landing of text that repaints the desktop
+/// layer whole, a screen at once. A guest that coalesces the sweep further
+/// hides a per-frame cost from any total, so the per-control claim is also
+/// gated where it is deterministic: the host-side sweep in
+/// `userland/gui/session` asserts that no frame of the gesture recomposes a
+/// whole bar's worth of pixels and that the mean stays under an eighth of one
 /// (`plans/FIX-DESKTOP-SPEEDUP.md` C.7).
-pub const MAX_SWEEP_SCREENS: u64 = 3;
+pub const MAX_SWEEP_SCREENS: u64 = 1;
 
 /// Recomputed frost pixels one damaged pixel in the bracketed window may
 /// cost.
 ///
 /// A hover changes no window's backdrop, so every frost already on screen must
 /// be served from the retained one; what a frame may legitimately re-frost is
-/// what it *damaged* — a newly-shown frosted surface (the second sample's own
-/// launch popup) is damaged over its whole area and frosted over it, and a
-/// pointer crossing a frosted surface invalidates the strip it uncovers. So
-/// one recomputed frost pixel per damaged pixel is the honest ceiling, and a
-/// frost recomputed while nothing beneath it changed breaks it by the whole
-/// area of the surface.
+/// what it *damaged* — a newly-shown frosted surface is damaged over its whole
+/// area and frosted over it, and a pointer crossing a frosted surface
+/// invalidates the strip it uncovers. So one recomputed frost pixel per damaged
+/// pixel is the honest ceiling, and a frost recomputed while nothing beneath it
+/// changed breaks it by the whole area of the surface.
 ///
 /// Bounded against the damage rather than against the screen because the
 /// bracketed epoch's length is not fixed: an absolute share of one screen is
@@ -239,19 +245,20 @@ mod tests {
     };
     use tairix_test_framestats::{Delta, Sample};
 
-    /// A window a per-control hover would plausibly produce: every sweep move
-    /// repainting one bar control and the pointer's own rectangles.
+    /// The icon bar's reach on this screen: what the regression the damage
+    /// bound was derived against re-damaged on every frame.
+    const BAR_PX: u64 = 48_672;
+
+    /// The window the settled gesture measured on the running guest.
     fn hovering() -> Delta {
         Delta {
             screen_px: EXPECTED_SCREEN_PX,
-            frames: 40,
-            damaged_px: 40 * 4_000,
-            blended_px: 40 * 6_000,
-            // One newly-shown frosted surface, which is what the second
-            // sample's own launch popup costs.
-            blur_px: 40_560,
-            dirty_rects: 84,
-            present_calls: 40,
+            frames: 41,
+            damaged_px: 207_026,
+            blended_px: 277_661,
+            blur_px: 32_798,
+            dirty_rects: 74,
+            present_calls: 41,
             chrome_misses: 0,
         }
     }
@@ -284,38 +291,45 @@ mod tests {
         );
     }
 
-    /// The regression the bound was re-derived against: the desktop
-    /// re-damaged its whole icon bar after every published frame, so a
-    /// gesture that should cost one control a sample cost a full-width strip
-    /// instead.
+    /// The regression the bound was derived against: the desktop re-damaged
+    /// its whole icon bar after every published frame, so a gesture that should
+    /// cost one control a sample cost a full-width strip instead.
     ///
-    /// Measured on the running guest either side of the fix — 2 901 320 to
-    /// 3 711 067 px before, 520 713 to 788 713 after — and the figures are
-    /// entered here rather than described, so the bound cannot be loosened
-    /// past the defect, or tightened onto the honest cost, without this
-    /// failing.
+    /// It must fail on the guest the honest window was measured on, and from
+    /// the frame count the bound's own documentation names; the figures are
+    /// entered rather than described, so the bound cannot be loosened past the
+    /// defect, or tightened onto the honest cost, without this failing.
     #[test]
-    fn a_bar_re_damaged_every_frame_fails_however_many_frames_it_took() {
-        for (damaged, frames) in [(2_901_320u64, 39u64), (3_711_067, 39), (2_937_975, 36)] {
+    fn a_bar_re_damaged_every_frame_fails_from_seventeen_frames() {
+        let first_caught = EXPECTED_SCREEN_PX * MAX_SWEEP_SCREENS / BAR_PX + 1;
+        assert_eq!(first_caught, 17, "the frame count the bound documents");
+        for frames in [first_caught, hovering().frames, 40] {
             let mut regressed = hovering();
             regressed.frames = frames;
-            regressed.damaged_px = damaged;
+            regressed.damaged_px = frames * BAR_PX;
             assert_eq!(
                 judge(&regressed),
                 Verdict::DamageTotal,
-                "{damaged} px over {frames} frames must fail"
+                "a bar a frame over {frames} frames must fail"
             );
         }
-        for (damaged, frames) in [(520_713u64, 38u64), (586_950, 37), (788_713, 40)] {
-            let mut fixed = hovering();
-            fixed.frames = frames;
-            fixed.damaged_px = damaged;
-            assert_eq!(
-                judge(&fixed),
-                Verdict::Held,
-                "the measured cost after the fix must pass"
-            );
-        }
+        assert_eq!(
+            judge(&hovering()),
+            Verdict::Held,
+            "the measured honest cost must pass"
+        );
+    }
+
+    /// The other regression the bound was derived against: a landing of text
+    /// drawn provisionally repainted the desktop layer whole rather than the
+    /// icon cells that carry its text, so the figures the readout shows as the
+    /// sweep opens it cost a screen. One such frame inside an honest window
+    /// must fail.
+    #[test]
+    fn a_landing_that_repaints_the_desktop_layer_whole_fails() {
+        let mut regressed = hovering();
+        regressed.damaged_px += EXPECTED_SCREEN_PX;
+        assert_eq!(judge(&regressed), Verdict::DamageTotal);
     }
 
     /// The load dependence the total replaces: the same work judged the same
@@ -327,10 +341,9 @@ mod tests {
     /// cannot rise with a busy host.
     #[test]
     fn the_damage_bound_does_not_move_with_the_windows_length() {
-        for frames in [MIN_SWEEP_FRAMES, 16, 37, 61, 119] {
+        for frames in [MIN_SWEEP_FRAMES, 16, 28, 61, 119] {
             let mut epoch = hovering();
             epoch.frames = frames;
-            epoch.damaged_px = 788_713;
             assert_eq!(
                 judge(&epoch),
                 Verdict::Held,
@@ -338,7 +351,7 @@ mod tests {
             );
 
             let mut regressed = epoch;
-            regressed.damaged_px = 3_711_067;
+            regressed.damaged_px = hovering().frames * BAR_PX;
             assert_eq!(
                 judge(&regressed),
                 Verdict::DamageTotal,
@@ -365,7 +378,7 @@ mod tests {
         assert_eq!(judge(&coalesced), Verdict::Held);
 
         let mut regressed = coalesced;
-        regressed.damaged_px = 3_711_067;
+        regressed.damaged_px = hovering().frames * BAR_PX;
         assert_eq!(judge(&regressed), Verdict::DamageTotal);
     }
 
@@ -389,7 +402,7 @@ mod tests {
         let mut per_frame = hovering();
         // A bar-sized frost recomputed on every frame of the sweep, while the
         // sweep damaged only what the pointer moved over.
-        per_frame.blur_px = per_frame.frames * 40_560;
+        per_frame.blur_px = per_frame.frames * BAR_PX;
         assert_eq!(judge(&per_frame), Verdict::FrostWork);
     }
 
@@ -401,13 +414,11 @@ mod tests {
     /// unchanged, so a busy host failed a desktop that had done nothing wrong.
     #[test]
     fn the_frost_bound_does_not_move_with_the_epochs_length() {
-        for frames in [40u64, 61, 119, 296, 590] {
+        for frames in [28u64, 61, 119, 296, 590] {
             let mut epoch = hovering();
             epoch.frames = frames;
-            // The ratio the failing and passing runs both measured, over a
-            // total the gesture can actually produce: what varies here is
-            // how many frames the host let that same work be spread over.
-            epoch.damaged_px = 788_713;
+            // The ratio the failing and passing runs both measured: what
+            // varies here is how many frames the host spread that work over.
             epoch.blur_px = epoch.damaged_px / 6;
             assert_eq!(
                 judge(&epoch),

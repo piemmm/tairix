@@ -116,6 +116,24 @@ fn an_identifier_obeys_the_one_bundle_identifier_grammar() {
 }
 
 #[test]
+fn an_identifier_always_leaves_room_for_the_segment_a_key_adds() {
+    // A valid bundle identifier as deep as a key may be: catalogued, its
+    // `<id>.<field>` key would be one segment past the key grammar, and the
+    // whole store it was written into would refuse to load.
+    let deepest = "a.b.c.d.e.f.g";
+    let too_deep = "a.b.c.d.e.f.g.h";
+    assert_eq!(tairix_abi::appinfo::validate_bundle_id(too_deep), Ok(()));
+    assert_eq!(EntryId::new(too_deep), Err(EntryError::IdTooDeep));
+    let id = EntryId::new(deepest).expect("one segment to spare");
+    for key in [
+        alloc::format!("{}.name", id.as_str()),
+        alloc::format!("library.{}", id.as_str()),
+    ] {
+        assert_eq!(tairix_appconf::validate_key(&key), Ok(()), "{key}");
+    }
+}
+
+#[test]
 fn a_display_name_admits_ordinary_text() {
     let name = DisplayName::new("Text Editor").expect("plain name");
     assert_eq!(name.as_str(), "Text Editor");

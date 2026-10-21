@@ -297,8 +297,9 @@ impl AppearanceWork {
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct PinboardChange {
     /// The desktop layer is drawn differently — its backdrop colour, the
-    /// icons' arrangement or order, or the theme or scale they are drawn at —
-    /// so it must be repainted whole. Most of the settings document moves no
+    /// icons' arrangement or order, or the theme or scale they are drawn at,
+    /// though never the motion, which moves no resting pixel — so it must be
+    /// repainted whole. Most of the settings document moves no
     /// pixel of it: the seat's input, the pointer aids and the idle policy are
     /// all adopted elsewhere, and a new wallpaper repaints the layer when it
     /// lands.
@@ -509,13 +510,13 @@ impl<S: DirectorySource> Desktop<S> {
         }
         let relayout = settings.icons != self.settings.icons;
         let resorted = settings.sort != self.settings.sort;
+        let restyled = settings.appearance != self.settings.appearance
+            || settings.contrast != self.settings.contrast
+            || settings.density != self.settings.density
+            || settings.text_family != self.settings.text_family
+            || settings.text_size != self.settings.text_size;
         let appearance = AppearanceWork {
-            theme: settings.appearance != self.settings.appearance
-                || settings.contrast != self.settings.contrast
-                || settings.density != self.settings.density
-                || settings.motion != self.settings.motion
-                || settings.text_family != self.settings.text_family
-                || settings.text_size != self.settings.text_size,
+            theme: restyled || settings.motion != self.settings.motion,
             scale: settings.scale != self.settings.scale,
             cursor: settings.cursor_set != self.settings.cursor_set
                 || settings.cursor_size != self.settings.cursor_size
@@ -524,7 +525,7 @@ impl<S: DirectorySource> Desktop<S> {
         let change = PinboardChange {
             layer: relayout
                 || resorted
-                || appearance.theme
+                || restyled
                 || appearance.scale
                 || settings.backdrop != self.settings.backdrop,
             backdrop: BackdropWork {
@@ -630,6 +631,17 @@ impl<S: DirectorySource> Desktop<S> {
                 }
             },
         );
+    }
+
+    /// Add to `damage` the cell of every shown icon: all the text the layer
+    /// draws, since a name is drawn inside its own tile and nowhere else.
+    pub fn mark_text(&self, layout: &GridView, damage: &mut Region) {
+        for index in layout
+            .visible_range(DESKTOP_SCROLL)
+            .take_while(|&index| index < self.entries.len())
+        {
+            Self::mark_cell(layout, Some(index), damage);
+        }
     }
 
     /// Add the part of the cell the icon at `index` occupies that shows to

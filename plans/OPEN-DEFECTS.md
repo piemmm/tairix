@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 422 open, 829 closed, 1251 total.
+**closed**, and a partial fix stays **open**. 423 open, 829 closed, 1252 total.
 
-### Open (422)
+### Open (423)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -450,6 +450,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1252 | patience's loop has three smaller lapses: reopening from the icon bar presents from inside the event handler, so a burst with it presents twice (sapper does the same); `see_out` waits on an untimed store call, so a store that never answers keeps the program from ending after Quit; and with no worker thread every move runs a 60 000-position search on the loop and a deal up to 24 × 120 000, where skipping the optional analysis would keep it responsive | **low**; noticed reviewing the merge of `0fb46feb7`, not absorbed. `userland/apps/patience/src/run.rs`, `userland/apps/sapper/src/run.rs` |
 | D1253 | the merged commit's comments and docs break the comment rule or misstate the code: decorative section banners (`lib/appdata/src/publish_tests.rs`; patience `game.rs` ×7, `table.rs` ×5, `input.rs` ×2, `run.rs` ×4); comments narrating what the code does (patience `game.rs`, `paint.rs`, `art.rs`); `rt.rs`'s claim that opening the store costs a single read, though `Opening::Defaults` reads the shipped layer too; the solver's collision odds, about one in six billion at 80 000 positions rather than below one in ten billion; an unmeasured "fraction of a second"; and the help's Rewind promise, which returns the latest position the solver proved rather than the last one still winnable | **low**; noticed reviewing the merge of `0fb46feb7`, not absorbed. |
 | D1256 | `docs/src/userland/wintersun-world.md` says the reference digest folds the realm's coarse field and then six chunks, but the fold also takes two far patches (`digest::FAR_PROBES`), so the page understates what the determinism verticals check | **low**; noticed fixing the world-determinism verticals' budgets, not absorbed: WinterSun's pages are its owner's to keep. `docs/src/userland/wintersun-world.md` |
+| D1257 | a change of motion alone repainted the whole desktop, though motion moves no resting pixel: the bar latched every surface, the compositor marked the screen and moved the chrome epoch, closing any open menu, the desktop layer repainted whole, and every application window repaints itself | partial — the session's own surfaces closed (`Theme::draws_like`; `a_change_of_motion_alone_composes_nothing_and_restyles_nothing`, `a_theme_changing_only_its_motion_recomposes_nothing`, `a_theme_changing_only_its_motion_is_adopted_without_a_repaint`, `every_appearance_axis_asks_for_the_re_theme`); applications still repaint whole, because `tairix_window::Desktop::adopt` answers a redraw for it and sapper and patience adopt their own motion state only on that answer. Left: answer taken and redraw apart, follow the themes on either, move each app's motion adoption off the redraw branch, a regression test per app holding motion state. `lib/window/src/{desktop,app}.rs`, the 25 `adopt_desktop` callers |
 
 ### Closed (829)
 
@@ -1421,17 +1422,18 @@ The open items, in priority order:
   library popup — FIXED.** `ArtworkDesk::take_landed` answers a
   `tairix_icon::Landed` naming the decodes that came back, and each surface
   latches only what the batch moved: the slots whose `AppSlot` changed (the
-  strip whole only when the slot count re-lays it), the popup row whose picture
-  changed, and the bar controls that resolve class artwork as they paint.
+  strip whole only when the slot count re-lays it), the launcher tile whose
+  picture changed, and the bar controls that resolve class artwork as they
+  paint.
   `plans/FIX-DESKTOP-SPEEDUP.md` C.7.
 - **D148 — the hover gate's damage bound was exhausted by a desktop that
   re-damaged its whole icon bar after every published frame — FIXED.** The
-  library popup's one-shot "seen" witness fired through
-  `Taskbar::library_mut`, a borrow that latches the whole bar and popup, so a
-  calm desktop recomposed a full-width strip every frame. It now reports
+  library popup's one-shot "seen" witness fired through a mutable borrow of the
+  popup that latched the whole bar and popup, so a calm desktop recomposed a
+  full-width strip every frame. It now reports
   through `Taskbar::report_library_shown`, which latches nothing, and arriving
-  desktop-icon artwork marks its cells (`Desktop::mark_icons`) rather than the
-  layer. The hover vertical bounds total damage rather than a per-frame mean,
+  desktop-icon artwork marks its cells (`Desktop::mark_artwork`) rather than
+  the layer. The hover vertical bounds total damage rather than a per-frame mean,
   so a host's frame count cannot move it. `plans/FIX-DESKTOP-SPEEDUP.md` C.7.
 - **D147 — host tests hand-picked the task ids they keyed process-global
   registry state on — FIXED.** The call-endpoint registry, the wait-set table

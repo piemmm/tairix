@@ -38,6 +38,19 @@ and the session that draws the library all go through this engine, so a
 writer and a reader can never disagree about what a catalog says. An absent
 store means "no catalogued applications", not an error.
 
+An entry identifier holds at most `MAX_ENTRY_ID_SEGMENTS` dot segments, one
+fewer than the format's key depth, so every key this crate spells is one the
+grammar accepts.
+
+## The account's own record
+
+`personal` is what an account keeps about its library: favourites in its own
+order, and how much and how lately it uses each program, decaying with a
+fourteen-day half-life. One `library.<entry-id>` record per program in the
+desktop's **private** scope, a closed token grammar read fail-closed per
+record, bounded by `MAX_RECORDS`; every change is an `Edit`, and
+`Personal::shelf` is what the launcher draws first.
+
 A catalog is untrusted input, including one a hostile or corrupted installer
 wrote. The document's length, line, key and value bounds are the format
 engine's; on top of them `load` bounds the record count (`MAX_ENTRIES`,

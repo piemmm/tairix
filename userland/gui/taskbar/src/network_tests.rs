@@ -218,35 +218,41 @@ fn kinds(bar: &Taskbar) -> Vec<StatusKind> {
 #[test]
 fn the_network_signal_leads_and_leaves_the_sound_signals_alone() {
     let mut bar = bar();
-    let _ = bar.set_sound(SoundState {
-        output: Some(OutputState {
-            device_id: 3,
-            name: String::from("Speakers"),
-            level: AudioGain::new(-600).expect("attenuation"),
-            muted: false,
-            may_change: true,
-        }),
-        recording: false,
-    });
+    let _ = bar.set_sound(
+        SoundState {
+            output: Some(OutputState {
+                device_id: 3,
+                name: String::from("Speakers"),
+                level: AudioGain::new(-600).expect("attenuation"),
+                muted: false,
+                may_change: true,
+            }),
+            recording: false,
+        },
+        Scale::ONE,
+    );
     let _ = bar.take_repaint();
 
-    assert!(bar.set_network(Some(connected())));
+    assert!(bar.set_network(Some(connected()), Scale::ONE));
     assert_eq!(kinds(&bar), [StatusKind::Network, StatusKind::Volume]);
     let owed = bar.take_repaint();
     assert!(!owed.bar.is_clean(), "the signal is drawn on the bar");
     assert_eq!(owed.network, Repaint::Whole);
 
-    assert!(!bar.set_network(Some(connected())), "the same report");
+    assert!(
+        !bar.set_network(Some(connected()), Scale::ONE),
+        "the same report"
+    );
     assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
 
-    assert!(bar.set_network(None));
+    assert!(bar.set_network(None, Scale::ONE));
     assert_eq!(kinds(&bar), [StatusKind::Volume], "no publisher, no signal");
 }
 
 #[test]
 fn the_readout_holds_open_all_the_way_from_the_signal_onto_itself() {
     let mut bar = bar();
-    assert!(bar.set_network(Some(connected())));
+    assert!(bar.set_network(Some(connected()), Scale::ONE));
     let mut input = TaskbarInput::new();
     let slot = bar.layout(Scale::ONE).notifications[0];
     assert!(bar.is_network_slot(0));
@@ -296,7 +302,7 @@ fn the_readout_fits_what_it_states_inside_its_rim() {
         crate::tests::dark_with_contrast(Contrast::High),
     ] {
         let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
-        assert!(bar.set_network(Some(connected())));
+        assert!(bar.set_network(Some(connected()), Scale::ONE));
         let mut input = TaskbarInput::new();
         hover_signal(&mut input, &mut bar);
         let facts = bar.network_facts();
@@ -335,7 +341,7 @@ fn a_readout_taller_than_the_room_beside_the_bar_stops_at_the_bar() {
         interface("eth1", true, &addrs),
         interface("eth2", true, &addrs),
     ];
-    assert!(bar.set_network(Some(NetworkReport::measured(&many))));
+    assert!(bar.set_network(Some(NetworkReport::measured(&many)), Scale::ONE));
     let mut input = TaskbarInput::new();
     hover_signal(&mut input, &mut bar);
     let layout = bar.layout(Scale::ONE);
@@ -361,14 +367,14 @@ fn a_readout_taller_than_the_room_beside_the_bar_stops_at_the_bar() {
 #[test]
 fn a_signal_arriving_beside_the_network_signal_takes_its_readout_down() {
     let mut bar = bar();
-    assert!(bar.set_network(Some(connected())));
+    assert!(bar.set_network(Some(connected()), Scale::ONE));
     let mut input = TaskbarInput::new();
     hover_signal(&mut input, &mut bar);
     let before = bar.layout(Scale::ONE).notifications[0];
     assert!(bar.network_readout_layout(Scale::ONE).is_some());
     let _ = bar.take_repaint();
 
-    assert!(bar.set_sound(crate::sound::tests::speakers(-600, false, true)));
+    assert!(bar.set_sound(crate::sound::tests::speakers(-600, false, true), Scale::ONE));
     assert_ne!(
         bar.layout(Scale::ONE).notifications[0],
         before,
@@ -386,12 +392,12 @@ fn a_signal_arriving_beside_the_network_signal_takes_its_readout_down() {
 #[test]
 fn a_report_that_leaves_the_signal_in_place_keeps_its_readout_open() {
     let mut bar = bar();
-    assert!(bar.set_network(Some(connected())));
+    assert!(bar.set_network(Some(connected()), Scale::ONE));
     let mut input = TaskbarInput::new();
     hover_signal(&mut input, &mut bar);
     let open = bar.network_readout_layout(Scale::ONE).expect("open");
     let offline = NetworkReport::measured(&[interface("eth0", false, &[])]);
-    assert!(bar.set_network(Some(offline)));
+    assert!(bar.set_network(Some(offline), Scale::ONE));
     let now = bar
         .network_readout_layout(Scale::ONE)
         .expect("still open")
@@ -407,11 +413,11 @@ fn a_report_that_leaves_the_signal_in_place_keeps_its_readout_open() {
 #[test]
 fn losing_the_signal_takes_its_readout_down() {
     let mut bar = bar();
-    assert!(bar.set_network(Some(connected())));
+    assert!(bar.set_network(Some(connected()), Scale::ONE));
     let mut input = TaskbarInput::new();
     hover_signal(&mut input, &mut bar);
     assert!(bar.network_readout_layout(Scale::ONE).is_some());
-    assert!(bar.set_network(Some(NetworkReport::UNMEASURED)));
+    assert!(bar.set_network(Some(NetworkReport::UNMEASURED), Scale::ONE));
     assert!(bar.network_readout_layout(Scale::ONE).is_none());
     assert_eq!(bar.take_repaint().network, Repaint::Whole);
 }
@@ -419,7 +425,7 @@ fn losing_the_signal_takes_its_readout_down() {
 #[test]
 fn a_secondary_press_on_the_signal_asks_for_the_network_menu() {
     let mut bar = bar();
-    assert!(bar.set_network(Some(connected())));
+    assert!(bar.set_network(Some(connected()), Scale::ONE));
     let mut input = TaskbarInput::new();
     hover_signal(&mut input, &mut bar);
     let TaskbarResponse::OpenMenu(request) = input.handle(
@@ -441,6 +447,8 @@ fn a_secondary_press_on_the_signal_asks_for_the_network_menu() {
         bar.menu_chosen(
             &request.subject,
             AppMenuItemId::for_index(index).expect("a numbered row"),
+            0,
+            Scale::ONE,
         )
     };
     assert_eq!(
@@ -458,7 +466,7 @@ fn a_secondary_press_on_the_signal_asks_for_the_network_menu() {
 #[test]
 fn a_primary_press_on_the_signal_is_claimed_and_inert() {
     let mut bar = bar();
-    assert!(bar.set_network(Some(connected())));
+    assert!(bar.set_network(Some(connected()), Scale::ONE));
     let mut input = TaskbarInput::new();
     hover_signal(&mut input, &mut bar);
     assert_eq!(
