@@ -37,7 +37,7 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags, FS_SYMLINK_MAX};
+    use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::time::Time64;
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
@@ -80,23 +80,7 @@ mod program {
         }
 
         fn read_link(&self, path: &str) -> Result<String, Errno> {
-            // One call, one buffer: `fs_readlink` refuses an undersized
-            // buffer rather than truncating a target — a truncated one would
-            // name somewhere else entirely — and a target is bounded by
-            // `FS_SYMLINK_MAX`, so a buffer of that size always suffices.
-            let mut buf = alloc::vec![0u8; FS_SYMLINK_MAX];
-            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
-            let target = buf.get(..len).ok_or(Errno::OutOfRange)?;
-            // A stored target is UTF-8 by the grammar the kernel checked
-            // before storing it; anything else is a corrupt or hostile
-            // volume, refused rather than lossily shown.
-            core::str::from_utf8(target)
-                .map(String::from)
-                .map_err(|_| Errno::OutOfRange)
+            tairix_rt::readlink(path)
         }
 
         fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno> {

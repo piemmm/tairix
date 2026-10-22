@@ -5,6 +5,7 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_procinfo::{CallError, ListError};
+use tairix_util::quote::quote_if_needed;
 
 /// Why an `unmount` invocation did not complete.
 ///
@@ -63,9 +64,13 @@ impl fmt::Display for UnmountError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => f.write_str("invalid usage"),
-            Self::NotFound(name) => write!(f, "{name}: not mounted"),
+            Self::NotFound(name) => write!(f, "{name}: not mounted", name = quote_if_needed(name)),
             Self::NotDetachable(name) => {
-                write!(f, "{name}: not a detachable volume")
+                write!(
+                    f,
+                    "{name}: not a detachable volume",
+                    name = quote_if_needed(name)
+                )
             }
             Self::Detach {
                 errno,

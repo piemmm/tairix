@@ -4,6 +4,7 @@ use alloc::string::String;
 use core::fmt;
 
 use tairix_abi::Errno;
+use tairix_util::quote::quote;
 
 /// Why an `ln` invocation did not complete.
 ///
@@ -53,17 +54,33 @@ impl fmt::Display for LnError {
             Self::RelativeNeedsSymbolic => f.write_str("cannot do --relative without --symbolic"),
             Self::MissingOperand => f.write_str("missing file operand"),
             Self::MissingDestination(target) => {
-                write!(f, "missing destination file operand after '{target}'")
+                write!(
+                    f,
+                    "missing destination file operand after {target}",
+                    target = quote(target)
+                )
             }
-            Self::ExtraOperand(operand) => write!(f, "extra operand '{operand}'"),
-            Self::NotADirectory(path) => write!(f, "target '{path}' is not a directory"),
-            Self::Stat(path, errno) => write!(f, "cannot access '{path}': {errno}"),
+            Self::ExtraOperand(operand) => {
+                write!(f, "extra operand {operand}", operand = quote(operand))
+            }
+            Self::NotADirectory(path) => {
+                write!(f, "target {path} is not a directory", path = quote(path))
+            }
+            Self::Stat(path, errno) => {
+                write!(f, "cannot access {path}: {errno}", path = quote(path))
+            }
             Self::Canonicalize(path, errno) => {
-                write!(f, "cannot canonicalize '{path}': {errno}")
+                write!(f, "cannot canonicalize {path}: {errno}", path = quote(path))
             }
-            Self::Remove(path, errno) => write!(f, "cannot remove '{path}': {errno}"),
+            Self::Remove(path, errno) => {
+                write!(f, "cannot remove {path}: {errno}", path = quote(path))
+            }
             Self::Create(link, errno) => {
-                write!(f, "failed to create symbolic link '{link}': {errno}")
+                write!(
+                    f,
+                    "failed to create symbolic link {link}: {errno}",
+                    link = quote(link)
+                )
             }
             Self::Prompt(errno) => write!(f, "cannot read the reply: {errno}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),

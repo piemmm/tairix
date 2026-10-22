@@ -34,7 +34,8 @@ use alloc::vec::Vec;
 
 use tairix_complete::common_prefix;
 use tairix_curses::Event;
-use tairix_vt::{EraseMode, Op};
+use tairix_util::utf8::shown;
+use tairix_vt::{str_width, EraseMode, Op};
 
 use crate::complete::Completion;
 use crate::host::Console;
@@ -606,18 +607,17 @@ impl<'a> Session<'a> {
     /// Write the candidate listing on its own lines; the caller's render
     /// then repaints the prompt and line below it.
     fn list_candidates(&self, console: &dyn Console, candidates: &[crate::complete::Candidate]) {
-        let displays = candidates
-            .iter()
-            .map(|candidate| candidate.display.as_str());
         let mut out = String::from("\r\n");
         let mut col = 0usize;
-        for display in displays {
-            let cell = display.chars().count() + 2;
+        for candidate in candidates {
+            // A name may hold what the terminal would act on.
+            let display = shown(&candidate.display);
+            let cell = str_width(&display) + 2;
             if col > 0 && col + cell > self.width {
                 out.push_str("\r\n");
                 col = 0;
             }
-            out.push_str(display);
+            out.push_str(&display);
             out.push_str("  ");
             col += cell;
         }
@@ -960,6 +960,24 @@ mod tests {
         assert_eq!(outcome, Some(ReadOutcome::Line("note".to_string())));
         assert!(out.contains("notebooks/"), "listing shown: {out:?}");
         assert!(out.contains("notes.txt"), "listing shown: {out:?}");
+    }
+
+    #[test]
+    fn a_listing_shows_what_a_name_hides_and_spaces_names_by_their_columns() {
+        let mut editor = Editor::new();
+        let completer = FixedCompleter::with(0, &["a\u{1b}[2J", "b"], None);
+        let (_, out) = drive(&mut editor, [Event::Tab, Event::Enter], &completer);
+        assert!(out.contains("\r\na\u{fffd}[2J  b  \r\n"), "{out:?}");
+        assert!(!out.contains("\u{1b}[2J"), "{out:?}");
+
+        // Four names eight columns wide fill the forty-column line.
+        let wide = ["一二三四", "五六七八", "九十百千", "甲乙丙丁", "春夏秋冬"];
+        let completer = FixedCompleter::with(0, &wide, None);
+        let (_, out) = drive(&mut editor, [Event::Tab, Event::Enter], &completer);
+        assert!(
+            out.contains("\r\n一二三四  五六七八  九十百千  甲乙丙丁  \r\n春夏秋冬  \r\n"),
+            "{out:?}"
+        );
     }
 
     #[test]

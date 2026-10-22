@@ -4,7 +4,7 @@ cp — copy files and directories
 
 ## SYNOPSIS
 
-`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -40,6 +40,12 @@ reported in one warning when the run ends, and in an `omission` record on
 the standard information stream; `--preserve=xattr` makes such a copy fail
 instead.
 
+A directory is never copied into itself: a destination inside the source
+— however it is spelled, through a link, a `..` or another name for the
+volume — is refused before anything is written, and a directory moved
+into the source while the copy runs stops the copy where the walk meets
+it.
+
 ## OPTIONS
 
 - `-r, -R, --recursive` — copy directories and their contents.
@@ -54,10 +60,16 @@ instead.
   later write. A directory source still needs `-r`.
 - `-s, --symbolic-link` — make a symbolic link naming the source instead
   of copying it.
-- `-P, --no-dereference` — reproduce a symbolic-link source as a link
-  storing the same target, verbatim, rather than copying what it names
-  (so a relative or dangling link survives the copy). Without it a link
-  source is followed.
+- `-P, --no-dereference` — reproduce every symbolic-link source as a
+  link storing the same target, verbatim, rather than copying what it
+  names (so a relative or dangling link survives the copy).
+- `-L, --dereference` — follow every symbolic-link source and copy what
+  it names.
+- `-H` — follow a symbolic link named as an operand, but reproduce those
+  met inside a tree. Without `-H`, `-L` or `-P`, a recursive copy
+  reproduces every link, its operands' included, and any other copy
+  follows its operands' links, as GNU's does; `-l` links what a followed
+  link names.
 - `--preserve=links` — two sources naming one node get two names at the
   destination rather than two copies, so the copy does not silently
   double the storage.

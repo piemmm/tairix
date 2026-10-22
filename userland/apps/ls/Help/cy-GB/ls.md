@@ -38,7 +38,8 @@ caled eto; ymddengys pan wnaiff.
 
 Pan roddir mwy nag un operand — a bob amser o dan `-R` — rhagflaenir
 rhestriad pob cyfeiriadur gan bennawd `path:`, a gwahenir y blociau â
-llinell wag.
+llinell wag. Dyfynnir y llwybr mewn pennawd yn arddull y rhestriad, a
+phob `:` sydd ynddo hefyd.
 
 Mae cysylltiad symbolaidd yn ymddangos â'r llythyren deip `l` ac, yn y
 fformat hir, fel `enw -> targed` — y targed yn union fel y'i cedwir, heb

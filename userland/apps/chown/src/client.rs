@@ -9,6 +9,7 @@ use crate::command::{Command, Options, Owner, Verbosity};
 use crate::error::ChownError;
 use crate::io::{Entry, EntryKind, FileSystem, Output};
 use tairix_path::join;
+use tairix_util::quote::quote;
 
 /// The usage banner printed by [`Command::Help`].
 pub const USAGE: &str = "\
@@ -134,24 +135,39 @@ fn report(
         (Some(uid), Some(gid)) => {
             if changed {
                 format!(
-                    "changed ownership of '{path}' from {user_before}:{group_before} to {uid}:{gid}\n"
+                    "changed ownership of {path} from {user_before}:{group_before} to {uid}:{gid}\n", path = quote(path)
                 )
             } else {
-                format!("ownership of '{path}' retained as {user_before}:{group_before}\n")
+                format!(
+                    "ownership of {path} retained as {user_before}:{group_before}\n",
+                    path = quote(path)
+                )
             }
         }
         (Some(uid), None) => {
             if changed {
-                format!("changed ownership of '{path}' from {user_before} to {uid}\n")
+                format!(
+                    "changed ownership of {path} from {user_before} to {uid}\n",
+                    path = quote(path)
+                )
             } else {
-                format!("ownership of '{path}' retained as {user_before}\n")
+                format!(
+                    "ownership of {path} retained as {user_before}\n",
+                    path = quote(path)
+                )
             }
         }
         (None, Some(gid)) => {
             if changed {
-                format!("changed group of '{path}' from {group_before} to {gid}\n")
+                format!(
+                    "changed group of {path} from {group_before} to {gid}\n",
+                    path = quote(path)
+                )
             } else {
-                format!("group of '{path}' retained as {group_before}\n")
+                format!(
+                    "group of {path} retained as {group_before}\n",
+                    path = quote(path)
+                )
             }
         }
         // At least one field is always set in a parsed owner spec.

@@ -12,6 +12,7 @@ use tairix_path::join;
 use crate::command::{Command, Interactive, Options};
 use crate::error::RmError;
 use crate::io::{Entry, EntryKind, Output, Prompt, Removal};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `rm`'s own Help tree is unavailable.
@@ -148,9 +149,9 @@ fn report(options: Options, out: &dyn Output, path: &str, directory: bool) -> Re
         return Ok(());
     }
     let line = if directory {
-        format!("removed directory '{path}'\n")
+        format!("removed directory {path}\n", path = quote(path))
     } else {
-        format!("removed '{path}'\n")
+        format!("removed {path}\n", path = quote(path))
     };
     out.write_all(line.as_bytes()).map_err(RmError::Output)
 }
@@ -167,7 +168,11 @@ fn remove_known(
 ) -> Result<(), RmError> {
     match kind {
         EntryKind::Other => {
-            if !confirmed(options, prompt, &format!("remove file '{path}'?"))? {
+            if !confirmed(
+                options,
+                prompt,
+                &format!("remove file {path}?", path = quote(path)),
+            )? {
                 return Ok(());
             }
             fs.remove_file(path).map_err(RmError::Remove)?;
@@ -180,7 +185,11 @@ fn remove_known(
                 }
                 // `-d`: remove the (empty) directory itself; a non-empty
                 // one surfaces the filesystem's own refusal.
-                if !confirmed(options, prompt, &format!("remove directory '{path}'?"))? {
+                if !confirmed(
+                    options,
+                    prompt,
+                    &format!("remove directory {path}?", path = quote(path)),
+                )? {
                     return Ok(());
                 }
                 fs.remove_dir(path).map_err(RmError::Remove)?;
@@ -189,7 +198,7 @@ fn remove_known(
             if !confirmed(
                 options,
                 prompt,
-                &format!("descend into directory '{path}'?"),
+                &format!("descend into directory {path}?", path = quote(path)),
             )? {
                 return Ok(());
             }
@@ -197,7 +206,11 @@ fn remove_known(
                 let child = join(path, &entry.name);
                 remove_known(&child, entry.kind, options, fs, prompt, out)?;
             }
-            if !confirmed(options, prompt, &format!("remove directory '{path}'?"))? {
+            if !confirmed(
+                options,
+                prompt,
+                &format!("remove directory {path}?", path = quote(path)),
+            )? {
                 return Ok(());
             }
             fs.remove_dir(path).map_err(RmError::Remove)?;

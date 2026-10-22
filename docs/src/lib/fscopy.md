@@ -3,14 +3,15 @@
 The one file copy every copying tool runs: `cp`, `mv` across volumes,
 `fstree`, the file manager's paste, and the runtime's `replace_file`. A copy
 moves a file's bytes with its holes, carries its extended attributes as far as
-the destination can keep them, and reports once what it could not. The
+the destination can keep them, reports once what it could not, and never
+copies a directory into itself. The
 engine reaches files only through three seams — `Source`, `Target` and
 `AttributeStore` — so it is host-tested against fixtures. A tool that reaches
 files by path offers them as `PathFiles` (read, size, region, write, length,
 each by path), and `PathFile::new(files, path)` is one of them as a `Source`
 and a `Target`, so no tool carries an adapter of its own. `tairix_rt::copy`
-implements the seams over the running system (`RtFile`, `RtAttributes`, and
-`OpenFiles`, the per-path handle cache a path-based tool keeps between
+implements the seams over the running system (`RtFile`, `RtAttributes`,
+`RtAncestry`, and `OpenFiles`, the per-path handle cache a path-based tool keeps between
 chunks, which is its `PathFiles`).
 
 ## Bytes and holes: `DataCopy`
@@ -76,5 +77,47 @@ answers a `Report` holding
   `fs.attributes_not_kept`, whose `ai` object lists the refusal codes, the
   file count, the keys named and whether that list is exhaustive.
 
-The crate is `no_std` + `alloc`, forbids `unsafe`, and depends on `lib/abi`
-and `lib/fsmeta`.
+## No copy of itself: `landing` and `Descent`
+
+A tree copy whose destination lies inside its source would copy each new copy
+again without end. `landing(fs, source, source_id, target)` answers before
+anything is written whether `target` is `Apart` from the directory `source`,
+the `Same` directory, or `Within` it. It reads the filesystem through the
+`Ancestry` seam — a path as the kernel resolves it (`fs_realpath`, the last
+component allowed absent) and a node's identity — and compares the two
+resolved paths, then the identity of each directory on the target's resolved
+path with the source's, so neither a link, a `..` nor a second spelling of a
+volume hides the source. A volume that offers no identity (`FileId::NONE`) is
+judged by the paths alone.
+
+`Descent` keeps the copy honest while it runs: `enter(source, made)` records
+the source directory being copied and the directory made for it, `refuses(id)`
+tells the walk a directory it is already inside, and `leave()` pops the level.
+A directory moved into the source meanwhile, or a link leading back up the
+tree, is therefore refused where the walk meets it. It holds two identities a
+level, so it costs the walk's depth, never the tree's size. `cp`, `mv`,
+`fstree` and the file manager's paste refuse through both, and
+`tairix_rt::copy::RtAncestry` is the seam over the running system.
+
+## One run, one destination: `Created`
+
+`mv a/x b/x d/` would put `b/x` over the `a/x` it had just moved there, whose
+source is already gone. `Created` records the nodes a run's operands put in
+place — by identity, so another spelling of the name or a case-folding volume
+does not hide one, and by path on a backing that offers no identity — and
+`cp` and `mv` refuse a later non-directory operand whose destination it holds,
+in GNU's words ("will not overwrite just-created 'd/x' with 'b/x'"). A
+directory still merges into, or replaces the empty, directory an earlier
+operand made. The record is two fallible hash sets under the process's keyed
+hasher, since a name can be a hostile volume's to choose; a heap that cannot
+grow it stops the run rather than let an operand through unguarded.
+
+## Test support
+
+The `test-support` feature carries `fixture::resolve`, the kernel's path
+resolution in miniature — each link on the way followed, each `..` applied,
+a cycle cut off as `LinkLoop` — which the copying tools' in-memory test
+filesystems answer the containment check with, so none carries its own copy.
+
+The crate is `no_std` + `alloc`, forbids `unsafe`, and depends on `lib/abi`,
+`lib/fsmeta`, `lib/path`, `lib/collections` and `lib/hash`.

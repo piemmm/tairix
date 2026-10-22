@@ -38,9 +38,10 @@ d'entrées de répertoire nomment le fichier, telle que le système de
 fichiers lui-même l'enregistre ; un format qui n'en tient pas le compte
 répond `1`.
 
-Quand plusieurs opérandes sont donnés — et toujours sous `-R` — la
-liste de chaque répertoire est précédée d'un en-tête `chemin:`, et les
-blocs sont séparés par une ligne vide.
+Quand plusieurs opérandes sont donnés — et toujours sous `-R` — la liste
+de chaque répertoire est précédée d'un en-tête `chemin:`, et les blocs
+sont séparés par une ligne vide. Le chemin d'un en-tête est mis entre
+guillemets dans le style de la liste, tout `:` qu'il contient compris.
 
 Un lien symbolique s'affiche avec la lettre de type `l` et, au format
 long, sous la forme `nom -> cible` — la cible exactement telle qu'elle est

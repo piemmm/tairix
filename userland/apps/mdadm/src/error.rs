@@ -10,6 +10,7 @@ use core::fmt;
 
 use alloc::string::String;
 use tairix_abi::Errno;
+use tairix_util::quote::quote;
 
 /// Why a device or array name did not resolve to exactly one target.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,19 +40,28 @@ impl fmt::Display for ResolveError {
         match self {
             Self::BadArrayName(value) => write!(
                 f,
-                "'{value}' is not an array identity (a hexadecimal identity or a prefix of one)"
+                "{value} is not an array identity (a hexadecimal identity or a prefix of one)",
+                value = quote(value)
             ),
-            Self::ArrayNotFound(value) => write!(f, "no array matches identity '{value}'"),
+            Self::ArrayNotFound(value) => {
+                write!(f, "no array matches identity {value}", value = quote(value))
+            }
             Self::AmbiguousArray(value) => write!(
                 f,
-                "identity '{value}' matches more than one array; use more digits"
+                "identity {value} matches more than one array; use more digits",
+                value = quote(value)
             ),
             Self::BadDeviceName(value) => write!(
                 f,
-                "'{value}' is not a device; name a device by its node id as 'node:<id>'"
+                "{value} is not a device; name a device by its node id as 'node:<id>'",
+                value = quote(value)
             ),
             Self::DuplicateDevice(value) => {
-                write!(f, "device '{value}' was named more than once")
+                write!(
+                    f,
+                    "device {value} was named more than once",
+                    value = quote(value)
+                )
             }
             Self::TooManyDevices { got, max } => {
                 write!(f, "{got} devices named; an array holds at most {max}")

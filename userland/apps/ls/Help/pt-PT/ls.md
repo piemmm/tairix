@@ -39,7 +39,8 @@ ficheiros o regista; um formato que não guarda essa contagem responde
 
 Quando é dado mais de um operando — e sempre com `-R` — a listagem de
 cada diretório é precedida por um cabeçalho `path:` e os blocos são
-separados por uma linha em branco.
+separados por uma linha em branco. O caminho de um cabeçalho leva as
+aspas no estilo da listagem, tal como qualquer `:` que contenha.
 
 Uma ligação simbólica aparece com a letra de tipo `l` e, no formato longo,
 como `nome -> alvo` — o alvo exactamente como está guardado, não

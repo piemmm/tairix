@@ -12,6 +12,7 @@ use tairix_path::{join, leaf_name};
 use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::LnError;
 use crate::io::{FileSystem, Occupant, Output, Prompt};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ln`'s own Help tree is unavailable.
@@ -177,8 +178,15 @@ fn link_all(
             continue;
         }
         if options.verbose {
-            out.write_all(format!("'{link}' -> '{stored}'\n").as_bytes())
-                .map_err(LnError::Output)?;
+            out.write_all(
+                format!(
+                    "{link} -> {stored}\n",
+                    link = quote(&link),
+                    stored = quote(&stored)
+                )
+                .as_bytes(),
+            )
+            .map_err(LnError::Output)?;
         }
     }
     Ok(())
@@ -284,7 +292,7 @@ fn link_one(
             }
             Clobber::Ask => {
                 if !prompt
-                    .confirm(&format!("replace '{link}'?"))
+                    .confirm(&format!("replace {link}?", link = quote(link)))
                     .map_err(LnError::Prompt)?
                 {
                     return Ok(false);

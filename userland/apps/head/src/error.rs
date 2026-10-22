@@ -3,6 +3,7 @@
 use alloc::string::String;
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_util::quote::{quote, quote_if_needed};
 
 /// Why a `head` invocation did not complete.
 ///
@@ -36,13 +37,31 @@ pub enum HeadError {
 impl fmt::Display for HeadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => write!(f, "unrecognized option '{token}'"),
-            Self::UnknownShort(flag) => write!(f, "invalid option -- '{flag}'"),
-            Self::InvalidLines(text) => write!(f, "invalid number of lines: '{text}'"),
-            Self::InvalidBytes(text) => write!(f, "invalid number of bytes: '{text}'"),
-            Self::InvalidTrailing(flag) => write!(f, "invalid trailing option -- {flag}"),
+            Self::UnknownLong(token) => {
+                write!(f, "unrecognized option {token}", token = quote(token))
+            }
+            Self::UnknownShort(flag) => write!(
+                f,
+                "invalid option -- {}",
+                quote(flag.encode_utf8(&mut [0; 4]))
+            ),
+            Self::InvalidLines(text) => {
+                write!(f, "invalid number of lines: {text}", text = quote(text))
+            }
+            Self::InvalidBytes(text) => {
+                write!(f, "invalid number of bytes: {text}", text = quote(text))
+            }
+            Self::InvalidTrailing(flag) => write!(
+                f,
+                "invalid trailing option -- {}",
+                quote_if_needed(flag.encode_utf8(&mut [0; 4]))
+            ),
             Self::MissingValue(option) => {
-                write!(f, "option '{option}' requires an argument")
+                write!(
+                    f,
+                    "option {option} requires an argument",
+                    option = quote(option)
+                )
             }
             Self::Output(errno) => write!(f, "write error: {errno}"),
         }

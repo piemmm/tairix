@@ -14,8 +14,8 @@ use core::cell::{Cell as CoreCell, RefCell};
 use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
 use tairix_abi::{
-    CapabilityId, Errno, FileKind, LoadHeader, ManifestHeader, RenameFlags, RxePermission, Segment,
-    LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
+    CapabilityId, Errno, FileId, FileKind, LoadHeader, ManifestHeader, RenameFlags, RxePermission,
+    Segment, LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
 };
 use tairix_appdata::fake::FakeService;
 use tairix_appdata::Settings as SettingsStore;
@@ -396,6 +396,23 @@ impl Fs for FakeFs {
         Ok(())
     }
 
+    fn canonical(&mut self, path: &str) -> Result<String, Errno> {
+        tairix_fscopy::fixture::resolve(path, |here| self.links.get(here).cloned())
+    }
+
+    fn identity(&mut self, path: &str) -> Result<FileId, Errno> {
+        let node = if let Some(original) = self.names.get(path) {
+            original.as_str()
+        } else if path == "/" || self.dirs.contains_key(path) || self.files.contains_key(path) {
+            path
+        } else if self.links.contains_key(path) {
+            return Ok(FileId::NONE);
+        } else {
+            return Err(Errno::NotFound);
+        };
+        Ok(path_identity(node))
+    }
+
     fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno> {
         if self.denied.iter().any(|denied| denied == path) {
             return Err(Errno::PermissionDenied);
@@ -687,6 +704,18 @@ impl Fs for FakeFs {
             return Ok(RenameOutcome::Renamed);
         }
         Err(Errno::NotFound)
+    }
+}
+
+/// A node's identity in the fakes: FNV-1a over its path, stable for a path
+/// and distinct between paths, however the tree around it changes.
+fn path_identity(path: &str) -> FileId {
+    let hash = path.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    FileId {
+        volume: [3; 16],
+        node: hash | 1,
     }
 }
 
@@ -2772,6 +2801,14 @@ impl Fs for SparseFs {
         Err(Errno::NotSupported)
     }
 
+    fn canonical(&mut self, path: &str) -> Result<String, Errno> {
+        Ok(String::from(path))
+    }
+
+    fn identity(&mut self, _path: &str) -> Result<FileId, Errno> {
+        Ok(FileId::NONE)
+    }
+
     fn stat_kind(&mut self, _path: &str) -> Result<FileKind, Errno> {
         Ok(FileKind::Regular)
     }
@@ -4462,4 +4499,36 @@ fn the_file_pane_shows_a_link_as_a_link() {
     // length of the path it stores, which is not a size a reader wants.
     let text = painted_text(&m);
     assert!(text.contains("<link>"), "{text}");
+}
+
+#[test]
+fn a_link_on_the_way_does_not_hide_a_copy_into_its_own_source() {
+    use crate::ops::{plan_target, OpError};
+    let mut fs = FakeFs::new()
+        .dir("/", vec![dir("a"), dir("b")])
+        .dir("/a", vec![file("f", 3, 0)])
+        .dir("/b", Vec::new())
+        .link("/b/to-a", "/a");
+    assert_eq!(
+        plan_target(&mut fs, "/a", FileKind::Directory, "/b/to-a/c"),
+        Err(OpError::IntoItself)
+    );
+    assert_eq!(
+        plan_target(&mut fs, "/a", FileKind::Directory, "/b/c"),
+        Ok(String::from("/b/c"))
+    );
+}
+
+#[test]
+fn a_copy_that_meets_its_own_copy_stops_there_rather_than_without_end() {
+    // Planned past the check, as a directory renamed in meanwhile would be.
+    let mut fs = FakeFs::new()
+        .dir("/", vec![dir("a")])
+        .dir("/a", vec![file("f", 3, 0)]);
+    let mut op = FileOp::copy("/a", FileKind::Directory, "/a/inner");
+    assert_eq!(
+        op.advance(&mut fs),
+        OpProgress::Failed(crate::ops::OpError::IntoItself)
+    );
+    assert!(!fs.dirs.contains_key("/a/inner/inner"));
 }

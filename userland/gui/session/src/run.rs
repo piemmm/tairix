@@ -206,7 +206,7 @@ mod program {
     use tairix_parallel::Pool;
     use tairix_procinfo::IpcTransport;
     use tairix_proglib::Edit;
-    use tairix_rt::io::{self, Stderr, Write};
+    use tairix_rt::io;
     use tairix_rt::work::Worker;
     use tairix_rt::ServedCall;
     use tairix_sandbox::imagerender::{
@@ -5002,9 +5002,7 @@ mod program {
                             None
                         }
                     },
-                    |line| {
-                        let _ = write!(Stderr, "{line}");
-                    },
+                    app::report_line,
                     |pid| {
                         if let Some(client) = identity.take_by_pid(pid) {
                             let mut bridge = ShellWindowHost {
@@ -8499,7 +8497,7 @@ mod program {
     ) -> PinboardPanel {
         let loaded = read_pinboard_store(&mut RtHost);
         for warning in &loaded.warnings {
-            let _ = write!(Stderr, "{warning}");
+            app::report_line(warning);
         }
         let wanted = loaded.settings.clone();
         if let Some(change) = desktop.apply_settings(loaded.settings) {
@@ -9808,11 +9806,13 @@ mod program {
                     Ok(chosen) => {
                         let Some(attested) = programs.bundles.identity_of(chosen.bundle().as_str())
                         else {
-                            let _ = writeln!(
-                                Stderr,
-                                "desktop: {} was not run as an administrator: no signed manifest \
-                                 vouches for what it would run",
-                                chosen.name().as_str()
+                            app::report(
+                                APP_NAME,
+                                format_args!(
+                                    "{} was not run as an administrator: no signed manifest \
+                                     vouches for what it would run",
+                                    chosen.name().as_str()
+                                ),
                             );
                             return Routed::Continue;
                         };
@@ -9824,7 +9824,7 @@ mod program {
                         }
                     }
                     Err(reason) => {
-                        let _ = write!(Stderr, "{reason}");
+                        app::report_line(&reason);
                     }
                 }
             }
@@ -10361,7 +10361,7 @@ mod program {
         worker.collect_landed(|answer| match answer {
             PrivateAnswer::LauncherLoaded(loaded) => {
                 for warning in &loaded.warnings {
-                    let _ = write!(Stderr, "{warning}");
+                    app::report_line(warning);
                 }
                 memory.loaded(now, loaded.personal);
             }
@@ -10381,7 +10381,7 @@ mod program {
             }
             PrivateAnswer::Loaded(loaded) => {
                 for warning in &loaded.warnings {
-                    let _ = write!(Stderr, "{warning}");
+                    app::report_line(warning);
                 }
                 effects.loaded(now, loaded.choices);
             }
@@ -10927,7 +10927,7 @@ mod program {
         programs: &mut Programs,
     ) {
         for warning in &loaded.warnings {
-            let _ = write!(Stderr, "{warning}");
+            app::report_line(warning);
         }
         // Read in the same scan as the catalog, so a program's stated purpose
         // can never be another bundle's.
@@ -11435,7 +11435,7 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) {
-        let _ = write!(Stderr, "{}", refusal.line());
+        app::report_line(&refusal.line());
         let Ok(spec) =
             AlertSpec::acknowledged(AlertSeverity::Error, refusal.headline(), refusal.detail())
         else {
@@ -11648,7 +11648,7 @@ mod program {
             }
         };
         for warning in &landed.warnings {
-            let _ = write!(Stderr, "{warning}");
+            app::report_line(warning);
         }
         let wanted = landed.settings.clone();
         let Some(change) = desktop.apply_settings(landed.settings) else {
@@ -11799,7 +11799,7 @@ mod program {
         let chosen = match catalogued(catalog, entry) {
             Ok(chosen) => chosen,
             Err(reason) => {
-                let _ = write!(Stderr, "{reason}");
+                app::report_line(&reason);
                 return;
             }
         };

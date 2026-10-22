@@ -33,45 +33,21 @@ mod program {
     use alloc::format;
     use alloc::string::String;
 
-    use tairix_abi::fs::{FS_PATH_MAX, FS_SYMLINK_MAX};
     use tairix_abi::{Errno, RealpathMode};
     use tairix_help::BundleHelp;
     use tairix_readlink::{parse, run, Filesystem, USAGE};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
     /// The production [`Filesystem`] over `fs_readlink` and `fs_realpath`.
-    ///
-    /// Each buffer is the ABI's own bound for what it receives, so one call
-    /// always suffices and no growth loop is needed: neither a stored target
-    /// nor a canonical path can be longer.
     struct RtFilesystem;
 
     impl Filesystem for RtFilesystem {
         fn read_link(&self, path: &str) -> Result<String, Errno> {
-            let mut buf = alloc::vec![0u8; FS_SYMLINK_MAX];
-            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
-            let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
-            // A target is stored as bytes; the ABI contract makes it UTF-8,
-            // and a target that is not is a corrupt or hostile record —
-            // refused rather than printed as replacement characters.
-            let target = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
-            Ok(String::from(target))
+            tairix_rt::readlink(path)
         }
 
         fn realpath(&self, path: &str, mode: RealpathMode) -> Result<String, Errno> {
-            let mut buf = alloc::vec![0u8; FS_PATH_MAX];
-            let ret = tairix_rt::fs_realpath(path.as_bytes(), &mut buf, mode);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
-            let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
-            let canonical = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
-            Ok(String::from(canonical))
+            tairix_rt::realpath(path, mode)
         }
     }
 

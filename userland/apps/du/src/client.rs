@@ -12,6 +12,7 @@ use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_
 use crate::command::{Command, Options};
 use crate::error::DuError;
 use crate::io::{Entry, Metadata, Output, Walk};
+use tairix_util::quote::quote;
 
 /// The one-line usage banner, printed on a usage error and as the
 /// fallback when the bundled help document is unavailable.
@@ -342,7 +343,7 @@ impl Reporter<'_> {
     /// stream that itself fails is fatal.
     fn diagnose(&mut self, path: &str, errno: Errno) -> Result<(), DuError> {
         self.clean = false;
-        let line = format!("du: cannot access '{path}': {errno}\n");
+        let line = format!("du: cannot access {path}: {errno}\n", path = quote(path));
         self.err.write_all(line.as_bytes()).map_err(DuError::Output)
     }
 }

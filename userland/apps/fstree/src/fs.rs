@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
-use tairix_abi::{Errno, FileKind, RenameFlags};
+use tairix_abi::{Errno, FileId, FileKind, RenameFlags};
 use tairix_procinfo::VolumeBytes;
 
 /// One directory entry as the listing reports it: exactly the fields the
@@ -153,6 +153,22 @@ pub trait Fs {
     /// Any [`Errno`] the filesystem raises; [`Errno::NotFound`] means the
     /// path is absent, which the operations treat as "free to create".
     fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno>;
+
+    /// `path` as the kernel resolves it — each link followed and each `..`
+    /// applied to the directories walked — its last component allowed to be
+    /// absent, so a copy can tell whether it lands inside its own source.
+    ///
+    /// # Errors
+    ///
+    /// The resolution's refusal.
+    fn canonical(&mut self, path: &str) -> Result<String, Errno>;
+
+    /// The identity of the node `path` names, a final link not followed.
+    ///
+    /// # Errors
+    ///
+    /// The probe's refusal.
+    fn identity(&mut self, path: &str) -> Result<FileId, Errno>;
 
     /// The target the symbolic link at `path` stores, verbatim.
     ///

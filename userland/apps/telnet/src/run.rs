@@ -50,6 +50,7 @@ mod program {
         TelnetIo,
     };
     use tairix_telnet::{parse, run, Command, FALLBACK_TERM, USAGE};
+    use tairix_util::quote::quote;
 
     /// Wait-set token for the stack's delivery port.
     const DELIVER_TOKEN: u64 = 1;
@@ -395,7 +396,10 @@ mod program {
             Command::Session { config, .. } => match config.bind.as_deref() {
                 Some(text) => {
                     let Some(address) = bind_address(text) else {
-                        write_stderr_line(&format!("telnet: '{text}' is not a local address"));
+                        write_stderr_line(&format!(
+                            "telnet: {text} is not a local address",
+                            text = quote(text)
+                        ));
                         return 2;
                     };
                     Some(address)

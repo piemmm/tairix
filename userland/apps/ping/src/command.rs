@@ -32,6 +32,7 @@ use core::fmt;
 
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_util::argv::option_value;
+use tairix_util::quote::quote;
 
 /// Default payload size in bytes (the classic `ping` 56, which with the
 /// 8-byte ICMP header reads as "64 bytes from").
@@ -153,13 +154,20 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option '{opt}'"),
-            Self::MissingValue(opt) => write!(f, "option '{opt}' requires a value"),
+            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
+            Self::MissingValue(opt) => write!(f, "option {opt} requires a value", opt = quote(opt)),
             Self::InvalidValue { option, value } => {
-                write!(f, "invalid value '{value}' for option '{option}'")
+                write!(
+                    f,
+                    "invalid value {value} for option {option}",
+                    value = quote(value),
+                    option = quote(option)
+                )
             }
             Self::MissingTarget => f.write_str("no target address given"),
-            Self::ExtraOperand(word) => write!(f, "unexpected extra operand '{word}'"),
+            Self::ExtraOperand(word) => {
+                write!(f, "unexpected extra operand {word}", word = quote(word))
+            }
         }
     }
 }

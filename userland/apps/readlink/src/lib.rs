@@ -70,6 +70,7 @@ use core::fmt;
 
 use tairix_abi::{Errno, RealpathMode};
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::quote::quote_if_needed;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `readlink`'s own Help tree is
@@ -316,8 +317,11 @@ pub fn run(
             Err(errno) => {
                 clean = false;
                 if options.verbose {
-                    err.write_all(format!("readlink: {path}: {errno}\n").as_bytes())
-                        .map_err(ReadlinkError::Output)?;
+                    err.write_all(
+                        format!("readlink: {path}: {errno}\n", path = quote_if_needed(path))
+                            .as_bytes(),
+                    )
+                    .map_err(ReadlinkError::Output)?;
                 }
             }
         }

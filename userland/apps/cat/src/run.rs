@@ -42,6 +42,7 @@ mod program {
     use tairix_help::BundleHelp;
     use tairix_procinfo::{NamedSource, OpenError};
     use tairix_rt::io::{self, write_stderr_line, Read, Stdin, Stdout};
+    use tairix_util::quote::quote_if_needed;
 
     /// The production [`FileSource`]: the shared open-by-name view of a
     /// readable source. It adds no authority — every path check stays
@@ -90,7 +91,10 @@ mod program {
     /// path refusal needs no extra line — the errno says it.
     fn report_open_refusal(path: &str, err: OpenError) {
         if let OpenError::Value(value) = err {
-            write_stderr_line(&format!("cat: {path}: {value}"));
+            write_stderr_line(&format!(
+                "cat: {path}: {value}",
+                path = quote_if_needed(path)
+            ));
         }
     }
 

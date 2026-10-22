@@ -60,12 +60,11 @@
 //! non-directory destination is a [`CpError::Usage`] that copies nothing; a
 //! directory source named without `-r` is a [`CpError::IsDirectory`]; a
 //! directory source whose destination already exists as a non-directory is a
-//! [`CpError::NotADirectory`]; an operand that cannot be inspected surfaces
-//! the underlying [`Errno`](tairix_abi::Errno) as [`CpError::Stat`]; a file or
-//! directory that cannot be read is [`CpError::Read`]; a destination that
-//! cannot be created is [`CpError::Create`]; a failed write is
-//! [`CpError::Write`]. The first failure stops the run before any later
-//! operand, and there is no panic.
+//! [`CpError::NotADirectory`]; a path that cannot be inspected is
+//! [`CpError::Stat`], one that cannot be read [`CpError::Read`], a destination
+//! that cannot be made [`CpError::Create`] and a failed write
+//! [`CpError::Write`], each naming the path and the kernel's reason. The first
+//! failure stops the run before any later operand, and there is no panic.
 //!
 //! # Module map
 //!
@@ -93,9 +92,10 @@ pub mod command;
 pub mod error;
 pub mod io;
 
-pub use client::{run, USAGE};
-pub use command::{parse, Clobber, Command, Contents, Options, TargetMode};
+pub use client::{run, Seams, USAGE};
+pub use command::{parse, Clobber, Command, Contents, Dereference, Options, TargetMode};
 pub use error::CpError;
 pub use io::{
-    AttributeStore, Entry, EntryKind, FileSystem, Follow, Output, PathFiles, Probe, Prompt,
+    Ancestry, AttributeStore, Entry, EntryKind, FileSystem, Follow, Output, PathFiles, Probe,
+    Prompt,
 };

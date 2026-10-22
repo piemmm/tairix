@@ -17,14 +17,16 @@ use tairix_fsmeta::calendar::month_abbreviation;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::join;
 use tairix_termcap::{ColorChoice, ColorDepth};
+use tairix_util::quote::{Quoted, Style as QuotingStyle};
 use tairix_vt::{encode_into, str_width, Op, Role, Sgr};
 
 use crate::command::{
-    Command, Dereference, Filters, Format, Hidden, Indicator, Options, QuotingStyle, SizeFormat,
-    Sort, TimeField, TimeStyle,
+    Command, Dereference, Filters, Format, Hidden, Indicator, Options, SizeFormat, Sort, TimeField,
+    TimeStyle,
 };
 use crate::error::LsError;
 use crate::io::{Entry, FinalLink, Listing, Metadata, Output, Terminal};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ls`'s own Help tree is unavailable.
@@ -419,7 +421,8 @@ fn list_directories(
         let mut rows = listed.rows;
         outcome = outcome.worse(listed.outcome);
         sort_rows(&mut rows, options);
-        open_block(buf, first, headered.then_some(path.as_str()));
+        let heading = headered.then(|| ctx.quoting.heading(&path));
+        open_block(buf, first, heading.as_deref());
         if options.size || options.is_long() {
             render_total(buf, &rows, options);
         }
@@ -507,13 +510,17 @@ fn operand_meta(path: &str, deref: Dereference, fs: &dyn Listing) -> Result<Meta
 
 /// Report that a path could not be inspected, in the GNU shape.
 fn report(out: &dyn Terminal, path: &str, errno: Errno) {
-    out.error(&format!("{OWN_WORD}: cannot access '{path}': {errno}"));
+    out.error(&format!(
+        "{OWN_WORD}: cannot access {path}: {errno}",
+        path = quote(path)
+    ));
 }
 
 /// Report that a directory could not be read, in the GNU shape.
 fn report_unreadable(out: &dyn Terminal, path: &str, errno: Errno) {
     out.error(&format!(
-        "{OWN_WORD}: cannot open directory '{path}': {errno}"
+        "{OWN_WORD}: cannot open directory {path}: {errno}",
+        path = quote(path)
     ));
 }
 
@@ -521,7 +528,8 @@ fn report_unreadable(out: &dyn Terminal, path: &str, errno: Errno) {
 /// chain, in the GNU shape.
 fn report_cycle(out: &dyn Terminal, path: &str) {
     out.error(&format!(
-        "{OWN_WORD}: not listing already-listed directory: '{path}'"
+        "{OWN_WORD}: not listing already-listed directory: {path}",
+        path = quote(path)
     ));
 }
 
@@ -1443,15 +1451,17 @@ impl Painter {
     }
 }
 
-/// A resolved name-quoting decision: the concrete [`QuotingStyle`] and
-/// whether nongraphic characters are shown as `?` (the resolved `-q` /
-/// `--show-control-chars` axis). Built once per listing from the options and
+/// A resolved name-quoting decision: the concrete [`QuotingStyle`], whether
+/// nongraphic characters are shown as `?` (the resolved `-q` /
+/// `--show-control-chars` axis), and the characters a name must keep apart
+/// from the listing around it. Built once per listing from the options and
 /// the attested console, then threaded through rendering so the arithmetic is
 /// done in one place.
 #[derive(Clone, Copy)]
 struct Quoting {
     style: QuotingStyle,
     hide_control: bool,
+    marks: &'static str,
 }
 
 impl Quoting {
@@ -1460,205 +1470,49 @@ impl Quoting {
     /// with shown control characters otherwise. An explicit flag overrides
     /// either axis. `--zero` forces the `literal` / show-control defaults (the
     /// GNU `--zero` posture), still overridable by an explicit quoting flag.
+    ///
+    /// GNU's marks: `-b` escapes a space, where nothing else separates two
+    /// names, and an indicator style the characters a suffix could be taken
+    /// for. GNU leaves `*` out of `-F`'s set, so a name ending in one passes
+    /// for an executable there; it is marked here.
     fn resolve(options: Options, terminal: Option<usize>) -> Self {
         let at_terminal = terminal.is_some() && !options.zero;
+        let style = options.quoting.unwrap_or(if at_terminal {
+            QuotingStyle::ShellEscape
+        } else {
+            QuotingStyle::Literal
+        });
+        let indicates = matches!(options.indicator, Indicator::FileType | Indicator::Classify);
         Self {
-            style: options.quoting.unwrap_or(if at_terminal {
-                QuotingStyle::ShellEscape
-            } else {
-                QuotingStyle::Literal
-            }),
+            style,
             hide_control: options.hide_control_chars.unwrap_or(at_terminal),
+            marks: match (style == QuotingStyle::Escape, indicates) {
+                (true, true) => " *=>@|",
+                (true, false) => " ",
+                (false, true) => "*=>@|",
+                (false, false) => "",
+            },
         }
     }
 
     /// Render `name` in the resolved style.
     fn render(self, name: &str) -> String {
-        match self.style {
-            QuotingStyle::Literal => literal_name(name, self.hide_control),
-            QuotingStyle::C => c_name(name),
-            QuotingStyle::Escape => escape_name(name),
-            QuotingStyle::Shell => shell_name(name, false, false, self.hide_control),
-            QuotingStyle::ShellAlways => shell_name(name, false, true, self.hide_control),
-            QuotingStyle::ShellEscape => shell_name(name, true, false, self.hide_control),
-            QuotingStyle::ShellEscapeAlways => shell_name(name, true, true, self.hide_control),
-        }
-    }
-}
-
-/// Whether `ch` is a nongraphic (control) character: an ASCII control or
-/// DEL. Valid multibyte UTF-8 characters are graphic and pass through, as
-/// they do for GNU `ls` in a UTF-8 locale.
-fn is_control(ch: char) -> bool {
-    let c = ch as u32;
-    c < 0x20 || c == 0x7f
-}
-
-/// The C named backslash escape letter for a control character, where one
-/// exists (`\a \b \t \n \v \f \r`); otherwise `None`, and the caller uses
-/// three-digit octal.
-fn named_escape(ch: char) -> Option<char> {
-    Some(match ch {
-        '\u{07}' => 'a',
-        '\u{08}' => 'b',
-        '\t' => 't',
-        '\n' => 'n',
-        '\u{0b}' => 'v',
-        '\u{0c}' => 'f',
-        '\r' => 'r',
-        _ => return None,
-    })
-}
-
-/// Append the C backslash escape for the control character `ch`: its named
-/// escape where one exists, else three-digit octal (`is_control` guarantees
-/// a value below `0o200`, so three digits always suffice).
-fn push_control_escape(out: &mut String, ch: char) {
-    out.push('\\');
-    match named_escape(ch) {
-        Some(esc) => out.push(esc),
-        None => {
-            let _ = write!(out, "{:03o}", ch as u32);
-        }
-    }
-}
-
-/// `literal` quoting: the name verbatim, with nongraphic characters shown as
-/// `?` when control characters are hidden (`-q`).
-fn literal_name(name: &str, hide_control: bool) -> String {
-    if !hide_control {
-        return String::from(name);
-    }
-    name.chars()
-        .map(|ch| if is_control(ch) { '?' } else { ch })
-        .collect()
-}
-
-/// `c` quoting: the name as a C string literal — always double-quoted, with
-/// `\"` and `\\` for the quote and backslash and C escapes (named or octal)
-/// for control characters.
-fn c_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() + 2);
-    out.push('"');
-    for ch in name.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            _ if is_control(ch) => push_control_escape(&mut out, ch),
-            _ => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// `escape` quoting: like [`c_name`] but without the surrounding quotes, so
-/// spaces are escaped (`\ `) and the double quote needs no escaping.
-fn escape_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for ch in name.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            ' ' => out.push_str("\\ "),
-            _ if is_control(ch) => push_control_escape(&mut out, ch),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-/// Whether `ch` at position `index` in a name of `len` characters forces
-/// shell quoting on its own — a shell metacharacter or a nongraphic
-/// character. `#` and `~` are special only leading, and `{`/`}` only as the
-/// whole name; the space and the single quote are handled by the caller.
-fn is_shell_special(ch: char, index: usize, len: usize) -> bool {
-    match ch {
-        '!' | '"' | '$' | '&' | '(' | ')' | '*' | ';' | '<' | '=' | '>' | '?' | '[' | '\\'
-        | '^' | '`' | '|' => true,
-        '#' | '~' => index == 0,
-        '{' | '}' => len == 1,
-        _ => is_control(ch),
-    }
-}
-
-/// The shell quoting styles. `escape` splices nongraphic characters as `$'…'`
-/// ANSI-C escapes; otherwise they stay literal (or become `?` under `-q`).
-/// `always` quotes even a name that needs no quoting.
-///
-/// A name whose only awkward characters are single quotes (with otherwise
-/// safe characters or spaces) takes the more concise C double-quoted form
-/// (`"it's"`); every other quoted name takes the single-quoted form, with a
-/// literal single quote written `'\''`.
-fn shell_name(name: &str, escape: bool, always: bool, hide_control: bool) -> String {
-    // The non-escaping shell styles show control characters as `?` under
-    // `-q`; the escaping styles render them with `$'…'`, so `-q` is moot.
-    let mapped: String = if !escape && hide_control {
-        name.chars()
-            .map(|ch| if is_control(ch) { '?' } else { ch })
-            .collect()
-    } else {
-        String::from(name)
-    };
-
-    let chars: Vec<char> = mapped.chars().collect();
-    let len = chars.len();
-    let mut needs_quote = always || len == 0;
-    let mut has_single_quote = false;
-    // Any character other than a space or single quote that forces quoting;
-    // such a character rules out the concise double-quote form.
-    let mut hard = false;
-    for (index, &ch) in chars.iter().enumerate() {
-        if ch == '\'' {
-            has_single_quote = true;
-            needs_quote = true;
-        } else if ch == ' ' {
-            needs_quote = true;
-        } else if is_shell_special(ch, index, len) {
-            needs_quote = true;
-            hard = true;
-        }
+        self.format(Quoted::new(name, self.style).marking(self.marks))
     }
 
-    if !needs_quote {
-        return mapped;
+    /// Render a directory's `path:` heading, the path's own `:` kept apart
+    /// from the one ending the heading, as GNU does.
+    fn heading(self, path: &str) -> String {
+        self.format(Quoted::new(path, self.style).marking(":"))
     }
 
-    if has_single_quote && !hard {
-        // Nothing inside needs escaping: `hard` being false guarantees no
-        // `"`, `$`, backtick, backslash, or control character.
-        return format!("\"{mapped}\"");
-    }
-
-    let mut out = String::with_capacity(mapped.len() + 2);
-    out.push('\'');
-    let mut open = true;
-    for &ch in &chars {
-        if ch == '\'' {
-            if open {
-                out.push('\'');
-                open = false;
-            }
-            out.push_str("\\'");
-        } else if escape && is_control(ch) {
-            if open {
-                out.push('\'');
-                open = false;
-            }
-            out.push_str("$'");
-            push_control_escape(&mut out, ch);
-            out.push('\'');
+    fn format(self, quoted: Quoted<'_>) -> String {
+        if self.hide_control {
+            format!("{}", quoted.hiding())
         } else {
-            if !open {
-                out.push('\'');
-                open = true;
-            }
-            out.push(ch);
+            format!("{quoted}")
         }
     }
-    if open {
-        out.push('\'');
-    }
-    out
 }
 
 /// `size` in the GNU human-readable form for the given `base`: plain bytes
@@ -1958,10 +1812,10 @@ mod version {
 
 #[cfg(test)]
 mod tests {
-    use super::{run, Outcome, USAGE};
+    use super::{run, Outcome, QuotingStyle, USAGE};
     use crate::command::{
-        Command, Dereference, Filters, Format, Hidden, Indicator, Options, QuotingStyle,
-        SizeFormat, Sort, TimeField, TimeStyle,
+        Command, Dereference, Filters, Format, Hidden, Indicator, Options, SizeFormat, Sort,
+        TimeField, TimeStyle,
     };
     use crate::error::LsError;
     use crate::io::{Entry, FinalLink, Listing, Metadata, Output, Terminal};
@@ -3594,6 +3448,92 @@ mod tests {
         assert_eq!(quoted("\tlead", opts), "''$'\\t''lead'");
         assert_eq!(quoted("trail\t", opts), "'trail'$'\\t'");
         assert_eq!(quoted("a\u{1b}b", opts), "'a'$'\\033''b'");
+    }
+
+    #[test]
+    fn a_terminal_listing_escapes_a_c1_control_and_groups_a_run_of_escapes() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a\u{9b}[2J", FileKind::Regular, 0o644, 0)
+            .entry(".", "\r\n", FileKind::Regular, 0o644, 0);
+        let out = Recorder::terminal(80);
+        let one_per_line = Options {
+            format: Some(Format::OnePerLine),
+            ..Options::DEFAULT
+        };
+        run_ls(list_with(one_per_line, &["."]), &fs, &out).expect("listing succeeds");
+        assert_eq!(out.text(), "''$'\\r\\n'\n'a'$'\\302\\233''[2J'\n");
+    }
+
+    /// Pinned against GNU coreutils 9.4 `ls -R`, at a terminal and under `-b`.
+    #[test]
+    fn a_recursive_heading_is_quoted_in_the_listing_style_with_its_colon_kept_apart() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .dir("./a:b")
+            .dir("./h\u{1b}i")
+            .entry(".", "a:b", FileKind::Directory, 0o755, 0)
+            .entry(".", "h\u{1b}i", FileKind::Directory, 0o755, 0);
+        let recursive = Options {
+            recursive: true,
+            format: Some(Format::OnePerLine),
+            ..Options::DEFAULT
+        };
+        let out = Recorder::terminal(80);
+        run_ls(list_with(recursive, &["."]), &fs, &out).expect("listing succeeds");
+        assert_eq!(
+            out.text(),
+            ".:\na:b\n'h'$'\\033''i'\n\n'./a:b':\n\n'./h'$'\\033''i':\n"
+        );
+        let escaped = Recorder::new();
+        let escape = Options {
+            quoting: Some(QuotingStyle::Escape),
+            ..recursive
+        };
+        run_ls(list_with(escape, &["."]), &fs, &escaped).expect("listing succeeds");
+        assert_eq!(
+            escaped.text(),
+            ".:\na:b\nh\\033i\n\n./a\\:b:\n\n./h\\033i:\n"
+        );
+    }
+
+    /// Pinned against GNU coreutils 9.4 `ls -1b` under `--file-type` and `-F`,
+    /// save that `-F` escapes a `*` too.
+    #[test]
+    fn an_indicator_style_escapes_what_a_suffix_could_be_taken_for() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a b", FileKind::Regular, 0o644, 0)
+            .entry(".", "a*b", FileKind::Regular, 0o644, 0)
+            .entry(".", "a:b", FileKind::Regular, 0o644, 0)
+            .entry(".", "a=b", FileKind::Regular, 0o644, 0)
+            .entry(".", "a@b", FileKind::Regular, 0o644, 0)
+            .entry(".", "a|b", FileKind::Regular, 0o644, 0);
+        for indicator in [Indicator::FileType, Indicator::Classify] {
+            let out = Recorder::new();
+            let options = Options {
+                indicator,
+                ..styled(QuotingStyle::Escape)
+            };
+            run_ls(list_with(options, &["."]), &fs, &out).expect("listing succeeds");
+            assert_eq!(
+                out.text(),
+                "a\\ b\na\\*b\na:b\na\\=b\na\\@b\na\\|b\n",
+                "{indicator:?}"
+            );
+        }
+        let plain = Recorder::new();
+        run_ls(list_with(styled(QuotingStyle::Escape), &["."]), &fs, &plain)
+            .expect("listing succeeds");
+        assert_eq!(plain.text(), "a\\ b\na*b\na:b\na=b\na@b\na|b\n");
+        let terminal = Recorder::terminal(80);
+        let shell = Options {
+            indicator: Indicator::Classify,
+            format: Some(Format::OnePerLine),
+            ..Options::DEFAULT
+        };
+        run_ls(list_with(shell, &["."]), &fs, &terminal).expect("listing succeeds");
+        assert!(terminal.text().contains("'a@b'\n"), "{}", terminal.text());
     }
 
     #[test]

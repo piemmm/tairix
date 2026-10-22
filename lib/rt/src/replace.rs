@@ -144,15 +144,42 @@ fn stage<F: ReplaceFs>(
     fs.sync(file)
 }
 
-/// `<path>.<tag>.new`, the tag in lowercase hex.
+/// A fresh name beside `path`, in its own directory, for building `path`'s
+/// replacement under and renaming it from: the rule [`replace_file`] stages
+/// by, so every staged replacement on the system is spelled alike.
+///
+/// # Errors
+///
+/// The random draw's refusal, or [`Errno::OutOfMemory`].
+pub fn staging_name(path: &str) -> Result<alloc::string::String, Errno> {
+    let mut tag = [0u8; TAG_LEN];
+    crate::random_fill(&mut tag)?;
+    let staged = staged_path(path.as_bytes(), tag)?;
+    alloc::string::String::from_utf8(staged).map_err(|_| Errno::OutOfRange)
+}
+
+/// `<path>.<tag>.new`, the tag in lowercase hex; a name too long to carry the
+/// tag is staged as `.<tag>.new` in the same directory instead, so a name of
+/// any length can be replaced.
 fn staged_path(path: &[u8], tag: [u8; TAG_LEN]) -> Result<Vec<u8>, Errno> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     const SUFFIX: &[u8] = b".new";
+    let tagged = 1 + 2 * TAG_LEN + SUFFIX.len();
+    let leaf = path.len()
+        - path
+            .iter()
+            .rposition(|&b| b == b'/')
+            .map_or(0, |slash| slash + 1);
+    let stem = if leaf + tagged <= tairix_abi::fs::FS_NAME_MAX {
+        path
+    } else {
+        &path[..path.len() - leaf]
+    };
     let mut staged = Vec::new();
     staged
-        .try_reserve_exact(path.len() + 1 + 2 * TAG_LEN + SUFFIX.len())
+        .try_reserve_exact(stem.len() + tagged)
         .map_err(|_| Errno::OutOfMemory)?;
-    staged.extend_from_slice(path);
+    staged.extend_from_slice(stem);
     staged.push(b'.');
     for byte in tag {
         staged.push(HEX[usize::from(byte >> 4)]);

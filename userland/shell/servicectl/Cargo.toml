@@ -27,6 +27,8 @@ name = "tairix-servicectl-run"
 path = "src/run.rs"
 
 [dependencies]
+# The one quoting of a name in a message.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The control-endpoint wire contract, the lifecycle vocabulary, and the
 # stable `Errno` set: the tool encodes through these ABI types and invents no
 # parallel format or error set.

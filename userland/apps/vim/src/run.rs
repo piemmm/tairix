@@ -51,6 +51,7 @@ mod program {
     use tairix_rt::io::write_stderr_line;
     use tairix_rt::File;
     use tairix_termcap::from_term;
+    use tairix_util::quote::quote_if_needed;
     use tairix_vim::{parse, run, Command, Editor, FileIo, USAGE};
 
     /// The conventional fallback terminal grid — 80 columns by 24 rows —
@@ -132,7 +133,10 @@ mod program {
             }) => (readonly, start, files),
             Ok(Command::Help) => return tairix_help::print_own_short_help("vim", Some(USAGE)),
             Err(err) => {
-                write_stderr_line(&alloc::format!("vim: unknown argument: {}", err.argument));
+                write_stderr_line(&alloc::format!(
+                    "vim: unknown argument: {}",
+                    quote_if_needed(&err.argument)
+                ));
                 write_stderr_line(USAGE);
                 return 2;
             }

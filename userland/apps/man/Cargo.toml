@@ -29,6 +29,8 @@ name = "tairix-man-run"
 path = "src/run.rs"
 
 [dependencies]
+# The one quoting of a name in a message.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The frozen `Errno` and the `stdinfo` record types for the locale-fallback
 # advisory; `man` invents no parallel error set and never links a kernel or
 # driver crate.

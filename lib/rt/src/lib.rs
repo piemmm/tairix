@@ -96,7 +96,7 @@ pub mod net;
 pub mod pressure;
 
 mod replace;
-pub use replace::{replace_file, ParentDir};
+pub use replace::{replace_file, staging_name, ParentDir};
 
 pub mod servicenotice;
 
@@ -5800,6 +5800,61 @@ pub fn fs_realpath(path: &[u8], out: &mut [u8], mode: tairix_abi::RealpathMode) 
         )
     };
     ret as i64
+}
+
+/// `path` canonicalised by the kernel ([`fs_realpath`]), as text.
+///
+/// # Errors
+///
+/// The kernel's refusal; [`Errno::OutOfMemory`] when the heap cannot hold
+/// the answer; [`Errno::OutOfRange`] for an answer that is not UTF-8 — a path
+/// the ABI hands back is UTF-8 by contract, so one that is not is a corrupt
+/// record, refused rather than shown with replacement characters.
+pub fn realpath(
+    path: &str,
+    mode: tairix_abi::RealpathMode,
+) -> Result<alloc::string::String, Errno> {
+    // The ABI's own path bound, so one call always suffices.
+    let mut buf = answer_buffer(tairix_abi::fs::FS_PATH_MAX)?;
+    let ret = fs_realpath(path.as_bytes(), &mut buf, mode);
+    text_answer(ret, &buf)
+}
+
+/// The stored target of the symbolic link at `path` ([`fs_readlink`]), as
+/// text.
+///
+/// # Errors
+///
+/// The kernel's refusal; [`Errno::OutOfMemory`] when the heap cannot hold
+/// the answer; [`Errno::OutOfRange`] for a target that is not UTF-8 — the
+/// kernel checks a target's grammar before storing it, so one that is not is
+/// a corrupt or hostile volume, refused rather than copied onward lossily.
+pub fn readlink(path: &str) -> Result<alloc::string::String, Errno> {
+    // The ABI's own target bound, so one call always suffices.
+    let mut buf = answer_buffer(tairix_abi::fs::FS_SYMLINK_MAX)?;
+    let ret = fs_readlink(path.as_bytes(), &mut buf);
+    text_answer(ret, &buf)
+}
+
+/// A buffer for an answer of at most `len` bytes, reserved without aborting.
+fn answer_buffer(len: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
+    let mut buf = alloc::vec::Vec::new();
+    if tairix_util::fallible::grow_to(&mut buf, len, 0) {
+        Ok(buf)
+    } else {
+        Err(Errno::OutOfMemory)
+    }
+}
+
+/// The text a `(length, else -errno)` syscall wrote into `buf`.
+fn text_answer(ret: i64, buf: &[u8]) -> Result<alloc::string::String, Errno> {
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
+    let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
+    let text = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
+    Ok(alloc::string::String::from(text))
 }
 
 /// Set the permission bits of the file or directory at the absolute `path`

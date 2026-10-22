@@ -20,6 +20,7 @@ use crate::env::{is_valid_name, Environment};
 use crate::host::{Console, Elevator, LimitStore, ProcessHost};
 use crate::job::{JobId, JobState, JobTable, Signal};
 use crate::ulimit;
+use tairix_util::quote::quote_if_needed;
 
 /// Status returned by a builtin that completed without error.
 const OK: i32 = 0;
@@ -92,7 +93,10 @@ fn cd(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
             OK
         }
         Err(err) => {
-            ctx.console.write_stderr(&format!("cd: {target}: {err}\n"));
+            ctx.console.write_stderr(&format!(
+                "cd: {target}: {err}\n",
+                target = quote_if_needed(&target)
+            ));
             USAGE_ERROR
         }
     }
@@ -106,8 +110,10 @@ fn pwd(ctx: &mut BuiltinContext<'_>) -> i32 {
 fn exit(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
     let code = match args.first() {
         Some(text) => text.parse::<i32>().unwrap_or_else(|_| {
-            ctx.console
-                .write_stderr(&format!("exit: {text}: numeric argument required\n"));
+            ctx.console.write_stderr(&format!(
+                "exit: {text}: numeric argument required\n",
+                text = quote_if_needed(text)
+            ));
             255
         }),
         None => ctx.env.last_status(),
@@ -131,8 +137,10 @@ fn export(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
             if is_valid_name(name) {
                 ctx.env.export(name, &arg[eq + 1..]);
             } else {
-                ctx.console
-                    .write_stderr(&format!("export: {arg}: not a valid identifier\n"));
+                ctx.console.write_stderr(&format!(
+                    "export: {arg}: not a valid identifier\n",
+                    arg = quote_if_needed(arg)
+                ));
                 status = USAGE_ERROR;
             }
         } else if is_valid_name(arg) {
@@ -140,8 +148,10 @@ fn export(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
                 ctx.env.export(arg, "");
             }
         } else {
-            ctx.console
-                .write_stderr(&format!("export: {arg}: not a valid identifier\n"));
+            ctx.console.write_stderr(&format!(
+                "export: {arg}: not a valid identifier\n",
+                arg = quote_if_needed(arg)
+            ));
             status = USAGE_ERROR;
         }
     }
@@ -154,8 +164,10 @@ fn unset(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
         if is_valid_name(arg) {
             ctx.env.unset(arg);
         } else {
-            ctx.console
-                .write_stderr(&format!("unset: {arg}: not a valid identifier\n"));
+            ctx.console.write_stderr(&format!(
+                "unset: {arg}: not a valid identifier\n",
+                arg = quote_if_needed(arg)
+            ));
             status = USAGE_ERROR;
         }
     }

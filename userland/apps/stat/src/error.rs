@@ -4,6 +4,7 @@ use alloc::string::String;
 use core::fmt;
 
 use tairix_abi::Errno;
+use tairix_util::quote::quote_if_needed;
 
 /// Why a `stat` invocation did not complete.
 ///
@@ -34,7 +35,11 @@ impl fmt::Display for StatError {
             Self::Usage => f.write_str("invalid usage"),
             Self::MissingOperand => f.write_str("missing operand"),
             Self::UnknownSpecifier(letter) => {
-                write!(f, "%{letter}: invalid directive")
+                write!(
+                    f,
+                    "{}: invalid directive",
+                    quote_if_needed(&alloc::format!("%{letter}"))
+                )
             }
             Self::Unsupported(letter, reason) => {
                 write!(f, "%{letter} is not available: {reason}")

@@ -21,6 +21,7 @@ use crate::nvt;
 use crate::option::{self, option_name};
 use crate::session::Session;
 use crate::subneg::{Environ, EnvironFault};
+use tairix_util::quote::quote;
 
 /// What a command asks the caller to do. Everything the interpreter can do
 /// itself — printing, editing the session's state, queueing bytes for the wire
@@ -156,11 +157,17 @@ pub fn execute(line: &str, session: &mut Session, connected: bool) -> Action {
     let name = match lookup(word, COMMANDS.iter().map(|&(name, _)| name)) {
         Matched::One(name) => name,
         Matched::Ambiguous => {
-            print_line(session, &alloc::format!("?Ambiguous command \"{word}\""));
+            print_line(
+                session,
+                &alloc::format!("?Ambiguous command {word}", word = quote(word)),
+            );
             return Action::Prompt;
         }
         Matched::Unknown => {
-            print_line(session, &alloc::format!("?Invalid command \"{word}\""));
+            print_line(
+                session,
+                &alloc::format!("?Invalid command {word}", word = quote(word)),
+            );
             return Action::Prompt;
         }
     };
@@ -332,14 +339,18 @@ fn send(session: &mut Session, args: &[&str], connected: bool) -> Action {
                     }
                     None => print_line(
                         session,
-                        &alloc::format!("?\"{text}\" is not an option number or name."),
+                        &alloc::format!(
+                            "?{text} is not an option number or name.",
+                            text = quote(text)
+                        ),
                     ),
                 }
             }
             other => print_line(
                 session,
                 &alloc::format!(
-                    "?\"{other}\" is not a valid send argument (\"send ?\" lists them)."
+                    "?{other} is not a valid send argument (\"send ?\" lists them).",
+                    other = quote(other)
                 ),
             ),
         }
@@ -384,7 +395,10 @@ fn set(session: &mut Session, args: &[&str]) {
             }
             None => print_line(
                 session,
-                &alloc::format!("?\"{value}\" is not a character or \"^X\" spelling."),
+                &alloc::format!(
+                    "?{value} is not a character or \"^X\" spelling.",
+                    value = quote(value)
+                ),
             ),
         }
         return;
@@ -403,14 +417,17 @@ fn set(session: &mut Session, args: &[&str]) {
                 session,
                 "?This client has no echo-toggle character; use \"toggle ...\" instead.",
             ),
-            None => print_line(session, &alloc::format!("?\"{value}\" is not a character.")),
+            None => print_line(
+                session,
+                &alloc::format!("?{value} is not a character.", value = quote(value)),
+            ),
         }
         return;
     }
     let Some(function) = slc_function(var) else {
         print_line(
             session,
-            &alloc::format!("?\"{var}\" is not a settable variable."),
+            &alloc::format!("?{var} is not a settable variable.", var = quote(var)),
         );
         return;
     };
@@ -430,7 +447,10 @@ fn set(session: &mut Session, args: &[&str]) {
             &alloc::format!("?The remote host pinned the {var} character."),
         ),
         Some(None) => print_line(session, &alloc::format!("usage: set {var} <character>")),
-        None => print_line(session, &alloc::format!("?\"{value}\" is not a character.")),
+        None => print_line(
+            session,
+            &alloc::format!("?{value} is not a character.", value = quote(value)),
+        ),
     }
 }
 
@@ -459,7 +479,7 @@ fn unset(session: &mut Session, args: &[&str]) {
         ),
         None => print_line(
             session,
-            &alloc::format!("?\"{var}\" is not a settable variable."),
+            &alloc::format!("?{var} is not a settable variable.", var = quote(var)),
         ),
     }
 }
@@ -491,11 +511,17 @@ fn toggle(session: &mut Session, args: &[&str]) {
         let name = match lookup(arg, TOGGLES.iter().copied()) {
             Matched::One(name) => name,
             Matched::Ambiguous => {
-                print_line(session, &alloc::format!("?Ambiguous argument \"{arg}\""));
+                print_line(
+                    session,
+                    &alloc::format!("?Ambiguous argument {arg}", arg = quote(arg)),
+                );
                 continue;
             }
             Matched::Unknown => {
-                print_line(session, &alloc::format!("?\"{arg}\" is not a toggle."));
+                print_line(
+                    session,
+                    &alloc::format!("?{arg} is not a toggle.", arg = quote(arg)),
+                );
                 continue;
             }
         };
@@ -605,11 +631,17 @@ fn set_mode(session: &mut Session, args: &[&str], connected: bool) {
         let name = match lookup(arg, MODES.iter().copied()) {
             Matched::One(name) => name,
             Matched::Ambiguous => {
-                print_line(session, &alloc::format!("?Ambiguous argument \"{arg}\""));
+                print_line(
+                    session,
+                    &alloc::format!("?Ambiguous argument {arg}", arg = quote(arg)),
+                );
                 continue;
             }
             Matched::Unknown => {
-                print_line(session, &alloc::format!("?\"{arg}\" is not a mode."));
+                print_line(
+                    session,
+                    &alloc::format!("?{arg} is not a mode.", arg = quote(arg)),
+                );
                 continue;
             }
         };
@@ -638,7 +670,10 @@ fn set_mode(session: &mut Session, args: &[&str], connected: bool) {
         if !matches!(name, "line" | "character") {
             print_line(
                 session,
-                &alloc::format!("?\"{name}\" needs the LINEMODE option, which is not in force."),
+                &alloc::format!(
+                    "?{name} needs the LINEMODE option, which is not in force.",
+                    name = quote(name)
+                ),
             );
             continue;
         }
@@ -669,13 +704,16 @@ fn environ(session: &mut Session, args: &[&str]) {
     let sub = match lookup(word, SUBCOMMANDS.iter().copied()) {
         Matched::One(name) => name,
         Matched::Ambiguous => {
-            print_line(session, &alloc::format!("?Ambiguous argument \"{word}\""));
+            print_line(
+                session,
+                &alloc::format!("?Ambiguous argument {word}", word = quote(word)),
+            );
             return;
         }
         Matched::Unknown => {
             print_line(
                 session,
-                &alloc::format!("?\"{word}\" is not an environ command."),
+                &alloc::format!("?{word} is not an environ command.", word = quote(word)),
             );
             return;
         }
@@ -774,13 +812,16 @@ fn slc(session: &mut Session, args: &[&str], connected: bool) {
     let sub = match lookup(word, SUBCOMMANDS.iter().copied()) {
         Matched::One(name) => name,
         Matched::Ambiguous => {
-            print_line(session, &alloc::format!("?Ambiguous argument \"{word}\""));
+            print_line(
+                session,
+                &alloc::format!("?Ambiguous argument {word}", word = quote(word)),
+            );
             return;
         }
         Matched::Unknown => {
             print_line(
                 session,
-                &alloc::format!("?\"{word}\" is not an slc command."),
+                &alloc::format!("?{word} is not an slc command.", word = quote(word)),
             );
             return;
         }

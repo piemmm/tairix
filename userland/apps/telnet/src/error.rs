@@ -4,6 +4,7 @@ use alloc::string::String;
 use core::fmt;
 
 use tairix_abi::Errno;
+use tairix_util::quote::quote_if_needed;
 
 /// Why a `telnet` invocation did not complete.
 ///
@@ -40,7 +41,7 @@ impl fmt::Display for TelnetError {
                 "opening a network connection requires CAP_NET, which this session lacks",
             ),
             Self::Socket(errno) => write!(f, "cannot open a socket: {errno}"),
-            Self::Resolve(host) => write!(f, "cannot resolve {host}"),
+            Self::Resolve(host) => write!(f, "cannot resolve {host}", host = quote_if_needed(host)),
             Self::Connect(errno) => write!(f, "cannot connect: {errno}"),
             Self::Send(errno) => write!(f, "cannot send to the remote host: {errno}"),
             Self::Receive(errno) => write!(f, "cannot receive from the remote host: {errno}"),

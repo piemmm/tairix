@@ -1094,6 +1094,7 @@ dependencies = [
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1118,6 +1119,7 @@ dependencies = [
  "tairix-help",
  "tairix-path",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1407,8 +1409,10 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
+ "tairix-collections",
  "tairix-fscopy",
  "tairix-fsmeta",
+ "tairix-hash",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -2407,6 +2411,7 @@ dependencies = [
  "tairix-help",
  "tairix-rt",
  "tairix-termcap",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -2570,7 +2575,11 @@ name = "tairix-fscopy"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
+ "tairix-fscopy",
  "tairix-fsmeta",
+ "tairix-hash",
+ "tairix-path",
 ]
 
 [[package]]
@@ -3439,6 +3448,7 @@ dependencies = [
  "tairix-rt",
  "tairix-sandbox",
  "tairix-termcap",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -3549,6 +3559,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-fscopy",
  "tairix-fsmeta",
+ "tairix-hash",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -4260,6 +4271,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -8533,6 +8545,7 @@ dependencies = [
  "tairix-help",
  "tairix-rt",
  "tairix-termcap",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -8610,6 +8623,7 @@ dependencies = [
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]

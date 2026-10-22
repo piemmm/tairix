@@ -29,6 +29,7 @@ use crate::lexer::{FdSpec, Segment, Word};
 use crate::parser::{
     parse, Command, CommandList, ListEntry, OpenMode, Pipeline, Redirection, RunCondition,
 };
+use tairix_util::quote::quote_if_needed;
 
 /// Standard output's descriptor — the target of a combined `&>` open.
 const STDOUT_FD: u32 = 1;
@@ -504,8 +505,10 @@ impl<'a> Shell<'a> {
             Ok(pid) => pid,
             Err(err) => {
                 let (status, reason) = launch_failure(err);
-                self.console
-                    .write_stderr(&format!("shell: {}: {reason}\n", program_name(commands)));
+                self.console.write_stderr(&format!(
+                    "shell: {}: {reason}\n",
+                    quote_if_needed(&program_name(commands))
+                ));
                 self.env.set_last_status(status);
                 return;
             }
@@ -529,8 +532,10 @@ impl<'a> Shell<'a> {
                 // status: turn that into a loud, named diagnosis instead of a
                 // silent, opaque `$?`.
                 if let Some((reason, shell_status)) = async_load_failure(status) {
-                    self.console
-                        .write_stderr(&format!("shell: {}: {reason}\n", program_name(commands)));
+                    self.console.write_stderr(&format!(
+                        "shell: {}: {reason}\n",
+                        quote_if_needed(&program_name(commands))
+                    ));
                     self.env.set_last_status(shell_status);
                 } else {
                     // A child the kernel killed for an unresolvable memory
@@ -571,8 +576,10 @@ impl<'a> Shell<'a> {
             }
             Err(err) => {
                 let (status, reason) = launch_failure(err);
-                self.console
-                    .write_stderr(&format!("shell: {}: {reason}\n", program_name(commands)));
+                self.console.write_stderr(&format!(
+                    "shell: {}: {reason}\n",
+                    quote_if_needed(&program_name(commands))
+                ));
                 self.env.set_last_status(status);
             }
         }
@@ -597,13 +604,17 @@ impl<'a> Shell<'a> {
             // the failure is never silent (fail loud).
             if let JobState::Done(ExitStatus::Exited(code)) = job.state {
                 if let Some((reason, _)) = async_load_failure(code) {
-                    self.console
-                        .write_stderr(&format!("shell: {}: {reason}\n", job.command));
+                    self.console.write_stderr(&format!(
+                        "shell: {}: {reason}\n",
+                        quote_if_needed(&job.command)
+                    ));
                 } else if let Some(reason) = fault_kill_reason(code) {
                     // A background child killed by a memory fault: state it
                     // on stderr so the failure is never silent (fail loud).
-                    self.console
-                        .write_stderr(&format!("shell: {}: {reason}\n", job.command));
+                    self.console.write_stderr(&format!(
+                        "shell: {}: {reason}\n",
+                        quote_if_needed(&job.command)
+                    ));
                 }
             }
         }

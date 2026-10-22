@@ -13,6 +13,7 @@ use tairix_abi::{
 };
 
 use crate::command::{Command, UsageError, USAGE};
+use tairix_util::quote::quote_if_needed;
 
 /// Exit status of a `servicectl` run.
 ///
@@ -169,9 +170,17 @@ fn enrolled_message(
     changed: bool,
 ) -> alloc::string::String {
     if changed {
-        alloc::format!("{service} is now {}", enrolment.as_str())
+        alloc::format!(
+            "{service} is now {}",
+            enrolment.as_str(),
+            service = quote_if_needed(service)
+        )
     } else {
-        alloc::format!("{service} was already {}", enrolment.as_str())
+        alloc::format!(
+            "{service} was already {}",
+            enrolment.as_str(),
+            service = quote_if_needed(service)
+        )
     }
 }
 
@@ -192,9 +201,19 @@ fn enrol_refused_message(op: ServiceEnrolOp, service: &str, err: Errno) -> alloc
         Errno::PermissionDenied | Errno::BufferTooSmall | Errno::NoSpace => {
             "the manager could not write the enrolment record"
         }
-        other => return alloc::format!("servicectl: {} {service}: {other}", enrol_verb(op)),
+        other => {
+            return alloc::format!(
+                "servicectl: {} {service}: {other}",
+                enrol_verb(op),
+                service = quote_if_needed(service)
+            )
+        }
     };
-    alloc::format!("servicectl: {} {service}: {reason}", enrol_verb(op))
+    alloc::format!(
+        "servicectl: {} {service}: {reason}",
+        enrol_verb(op),
+        service = quote_if_needed(service)
+    )
 }
 
 /// One line stating that a recorded enrolment could not be made true of the
@@ -207,13 +226,15 @@ fn unapplied_message(op: ServiceEnrolOp, service: &str, err: Errno) -> alloc::st
         (_, other) => {
             return alloc::format!(
                 "servicectl: {} {service}: recorded, but {other}",
-                enrol_verb(op)
+                enrol_verb(op),
+                service = quote_if_needed(service)
             )
         }
     };
     alloc::format!(
         "servicectl: {} {service}: recorded, but {reason}",
-        enrol_verb(op)
+        enrol_verb(op),
+        service = quote_if_needed(service)
     )
 }
 
@@ -232,7 +253,12 @@ fn applied_message(
     service: &str,
     state: ServiceState,
 ) -> alloc::string::String {
-    alloc::format!("{}: {service} is now {}", verb(op), state_name(state))
+    alloc::format!(
+        "{}: {service} is now {}",
+        verb(op),
+        state_name(state),
+        service = quote_if_needed(service)
+    )
 }
 
 /// One line stating that a reachable request was refused, and why.
@@ -244,9 +270,19 @@ fn refused_message(op: ServiceControlOp, service: &str, err: Errno) -> alloc::st
         Errno::PermissionDenied => "permission denied",
         // The stable ABI already spells every other code; restating them
         // here would be a second copy that could drift.
-        other => return alloc::format!("servicectl: {} {service}: {other}", verb(op)),
+        other => {
+            return alloc::format!(
+                "servicectl: {} {service}: {other}",
+                verb(op),
+                service = quote_if_needed(service)
+            )
+        }
     };
-    alloc::format!("servicectl: {} {service}: {reason}", verb(op))
+    alloc::format!(
+        "servicectl: {} {service}: {reason}",
+        verb(op),
+        service = quote_if_needed(service)
+    )
 }
 
 /// One line stating that the endpoint itself could not be reached.

@@ -10,25 +10,21 @@
 
 use alloc::string::String;
 use tairix_abi::{Errno, RenameFlags};
-pub use tairix_fscopy::{AttributeStore, PathFiles};
+pub use tairix_fscopy::{Ancestry, AttributeStore, PathFiles};
 
 /// What kind of object a path or directory entry is, as far as `mv` cares.
 ///
-/// The distinction `mv` needs only matters on the cross-device fallback: a
-/// directory is reproduced by [`FileSystem::mkdir`] and a recursive descent,
-/// a symbolic link is reproduced as a link, and everything else is copied as
-/// a stream of bytes. An in-filesystem rename moves every kind atomically
-/// without caring which it is.
+/// The distinction matters on the move across volumes, and to the rule a
+/// rename keeps: a directory replaces only an empty directory, and nothing
+/// else replaces a directory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntryKind {
-    /// A directory, whose entries the cross-device fallback reproduces under
-    /// the destination before removing the source.
+    /// A directory, whose entries a move across volumes reproduces.
     Directory,
-    /// Any other non-link object, copied as a byte stream on the fallback.
+    /// Any other non-link object, copied as a byte stream across volumes.
     File,
-    /// A symbolic link, moved as itself: the fallback stores the same target
-    /// in a link at the destination and unlinks the source link, never
-    /// touching what it names.
+    /// A symbolic link, moved as itself: across volumes the same target is
+    /// stored in a new link, never touching what it names.
     Symlink,
 }
 
@@ -36,18 +32,15 @@ pub enum EntryKind {
 ///
 /// A rename within a single filesystem is atomic and is the whole move. A
 /// rename whose source and destination live on different filesystems cannot
-/// be atomic; rather than overload an [`Errno`], the seam reports
-/// [`RenameOutcome::CrossDevice`] so the engine can fall back to the POSIX
-/// copy-then-remove relocation. This keeps the boundary case an explicit,
-/// non-error outcome rather than a magic error code.
+/// be; rather than overload an [`Errno`], the seam reports
+/// [`RenameOutcome::CrossDevice`] so the engine moves the source across.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenameOutcome {
     /// The source was renamed onto the destination atomically; the move is
     /// complete.
     Renamed,
-    /// The source and destination are on different filesystems, so an atomic
-    /// rename is impossible. The engine must copy the source to the
-    /// destination and then remove the source.
+    /// The source and destination are on different filesystems, so the
+    /// engine must copy the source across and then remove it.
     CrossDevice,
 }
 
@@ -61,20 +54,33 @@ pub struct Entry {
     pub kind: EntryKind,
 }
 
-/// Inspects paths, renames them, and — for the cross-device fallback — reads
-/// sources, creates destinations, and removes sources.
+/// Who owns a node, and its permission bits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Owner {
+    /// The permission bits, within `tairix_abi::FS_MODE_MASK`.
+    pub mode: u32,
+    /// The owning user.
+    pub uid: u32,
+    /// The owning group.
+    pub gid: u32,
+}
+
+/// Inspects paths, renames them, and — to move a source across volumes —
+/// reads it, builds its replacement, and removes it.
 ///
 /// The client first asks [`kind`](FileSystem::kind) what a source is, then
 /// tries [`rename`](FileSystem::rename). A [`RenameOutcome::Renamed`] is the
-/// whole move. A [`RenameOutcome::CrossDevice`] drives the fallback: a
-/// non-directory source is copied, through the files it reaches by path
-/// ([`PathFiles`]), into a destination created with
-/// [`create`](FileSystem::create); a directory source is reproduced with
-/// [`mkdir`](FileSystem::mkdir) and a recursive walk
-/// ([`read_dir`](FileSystem::read_dir)); then the source is removed depth-first
-/// with [`remove_file`](FileSystem::remove_file) and
-/// [`remove_dir`](FileSystem::remove_dir).
-pub trait FileSystem: AttributeStore + PathFiles {
+/// whole move. A [`RenameOutcome::CrossDevice`] builds the source's copy
+/// under a [`staging_name`](FileSystem::staging_name) beside the destination
+/// — a file through [`create`](FileSystem::create) and the files it reaches
+/// by path ([`PathFiles`]), a directory through [`mkdir`](FileSystem::mkdir)
+/// and a walk of [`read_dir`](FileSystem::read_dir), each node given the
+/// source's [`Owner`] — [`sync`](FileSystem::sync)s it, renames it onto the
+/// destination, syncs again, and only then removes the source with
+/// [`remove_file`](FileSystem::remove_file) and
+/// [`remove_dir`](FileSystem::remove_dir). Before moving a directory its
+/// [`Ancestry`] says whether the destination lies inside it.
+pub trait FileSystem: AttributeStore + PathFiles + Ancestry {
     /// Return the [`EntryKind`] of the object `path` names itself: a final
     /// symbolic link reports [`EntryKind::Symlink`]. A missing path reports
     /// [`Errno::NotFound`], which the client treats as "absent" when probing a
@@ -116,14 +122,15 @@ pub trait FileSystem: AttributeStore + PathFiles {
     ///
     /// Returns [`RenameOutcome::Renamed`] when the rename completed
     /// atomically, or [`RenameOutcome::CrossDevice`] when `source` and `dest`
-    /// live on different filesystems and the caller must relocate by copying
-    /// and removing instead.
+    /// live on different filesystems.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`]
-    /// for an unwritable destination directory, or [`Errno::AlreadyExists`]
-    /// for an occupied one under [`RenameFlags::NO_REPLACE`].
+    /// The kernel's refusal: [`Errno::AlreadyExists`] for an occupied `dest`
+    /// under [`RenameFlags::NO_REPLACE`], [`Errno::IsADirectory`] and
+    /// [`Errno::NotADirectory`] for a kind that cannot replace the other,
+    /// [`Errno::NotEmpty`] for a directory onto a directory holding anything,
+    /// [`Errno::OutOfRange`] for a directory into its own subtree.
     fn rename(&self, source: &str, dest: &str, flags: RenameFlags) -> Result<RenameOutcome, Errno>;
 
     /// Return the entry at position `index` in the directory `path`, or
@@ -140,19 +147,20 @@ pub trait FileSystem: AttributeStore + PathFiles {
 
     /// Create the directory `path`.
     ///
-    /// The client calls this only after observing that `path` does not exist.
-    ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`].
+    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
+    /// taken name.
     fn mkdir(&self, path: &str) -> Result<(), Errno>;
 
-    /// Create (or truncate to empty) the regular file `path`, ready to be
-    /// written from offset `0`.
+    /// Create the empty regular file `path`, ready to be written from offset
+    /// `0`. A taken name is refused, never truncated, and a final link is not
+    /// followed: the move only ever creates under a fresh staging name.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`].
+    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
+    /// taken name.
     fn create(&self, path: &str) -> Result<(), Errno>;
 
     /// Remove the non-directory object at `path` (unlink one link).
@@ -168,6 +176,46 @@ pub trait FileSystem: AttributeStore + PathFiles {
     ///
     /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`].
     fn remove_dir(&self, path: &str) -> Result<(), Errno>;
+
+    /// The [`Owner`] of the node `path` names itself.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises while inspecting it.
+    fn owner(&self, path: &str) -> Result<Owner, Errno>;
+
+    /// Set the permission bits of `path`.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal — [`Errno::NotSupported`] on a format that keeps
+    /// no permission bits.
+    fn set_mode(&self, path: &str, mode: u32) -> Result<(), Errno>;
+
+    /// Give `path` to `uid` and `gid`.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal — [`Errno::PermissionDenied`] when the caller may
+    /// not give a node away, [`Errno::NotSupported`] on a format that keeps
+    /// no owners.
+    fn set_owner(&self, path: &str, uid: u32, gid: u32) -> Result<(), Errno>;
+
+    /// A fresh name beside `target`, in its own directory, that `target`'s
+    /// replacement is built under and renamed from.
+    ///
+    /// # Errors
+    ///
+    /// The refusal to draw one.
+    fn staging_name(&self, target: &str) -> Result<String, Errno>;
+
+    /// Put every write made so far on the medium. `path`, which must exist,
+    /// is how the caller reaches the kernel; the kernel commits every volume.
+    ///
+    /// # Errors
+    ///
+    /// The commit's refusal.
+    fn sync(&self, path: &str) -> Result<(), Errno>;
 }
 
 pub use tairix_util::output::Output;

@@ -220,6 +220,24 @@ and panic-free throughout.
   keeping the kernel's reason for a refused write and routing either stream's
   advisory to fd 3, so a `Run` binary hands its engine the standard streams
   themselves. `lib/procinfo` reads every byte stream as a line sink.
+* `quote` — GNU coreutils' quoting styles. `quote` is how a diagnostic, a `-v`
+  report or a prompt names a file or an operand (GNU's `quoteaf`: always
+  quoted, hidden characters as `$'…'`); `quote_if_needed` is `printf`'s `%q`
+  and the bare names some messages carry (`quotef`); a `Quoted` in any `Style`
+  is `ls`'s `--quoting-style`, `hiding` is its `-q`, and `marking` names the
+  characters a context must keep apart from the text around the name (GNU's
+  `quote_these_too`: the `:` of an `ls -R` heading, `-b`'s space, an indicator
+  style's suffixes), which force the shell styles to quote and take a backslash
+  in the C ones. Each formats into its destination without allocating. The
+  hidden characters are `utf8::is_hidden`'s,
+  so a name holding a bidirectional or zero-width character is escaped where
+  GNU leaves it raw; and the shell styles always write the minimal quoting,
+  where GNU 9.4 prefixes `''` to a name holding a `'` that ends in an escape
+  and, when such a name also begins with one, answers with a word that no
+  longer reads back as the name, and backslashes a marked character inside
+  `"…"`, where a shell keeps the backslash. Every command app's messages, `ls` and
+  `printf` write names through it, so a name a foreign volume carries never
+  reaches a terminal raw.
 * `report` — a file's structure as a person reads it: `Builder` writes heading
   lines and records (offset, name, length, what it declares) with facts
   beneath them, and holds a report to `MAX_REPORT_LINES` lines of at most
@@ -242,7 +260,11 @@ and panic-free throughout.
   selectors, tags). TextEdit draws them as `[U+202E]` tokens, `lib/net`'s
   `DisplayLabel` escapes them in what a peer names itself, and `lib/devids`
   refuses a database that holds one, so text from elsewhere is escaped by one
-  rule. `fold` and `folded` are the letters a reader looks a name up by — a
+  rule. `shown` answers a name as a surface shows it, each hidden character
+  U+FFFD, and `Shown` formats any `Display` that way without allocating: the
+  rows `procinfo::field_lossy` decodes (process names, volume labels, mount
+  targets) and a GUI application's `stderr` reports (`app::report`) pass
+  through them. `fold` and `folded` are the letters a reader looks a name up by — a
   Latin-1 letter folded to the letter it is written on, every letter in lower
   case — and `reader_order` the order a list of names is read in: the folded
   letters, then the bytes, so distinct names never compare equal. The place

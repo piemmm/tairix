@@ -13,6 +13,7 @@ use crate::command::{Command, Job, Operand, Selection, TotalMode};
 use crate::counter::{Counter, Counts};
 use crate::error::WcError;
 use crate::io::{FileSource, Input, Output, SizeProbe};
+use tairix_util::quote::{quote, quote_if_needed};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `wc`'s own Help tree is unavailable.
@@ -123,7 +124,10 @@ pub fn run(
             }
             Entry::Named(name) => match count_file(files, name) {
                 FileCount::OpenFailed(errno) => {
-                    diagnose(err, &format!("{name}: {errno}"))?;
+                    diagnose(
+                        err,
+                        &format!("{name}: {errno}", name = quote_if_needed(name)),
+                    )?;
                     all_ok = false;
                     continue;
                 }
@@ -151,7 +155,10 @@ pub fn run(
         if let Some(errno) = read_error {
             diagnose(
                 err,
-                &format!("{}: {errno}", label.unwrap_or("standard input")),
+                &format!(
+                    "{}: {errno}",
+                    quote_if_needed(label.unwrap_or("standard input"))
+                ),
             )?;
             all_ok = false;
         }
@@ -228,9 +235,17 @@ fn read_list(list: &str, files: &dyn FileSource, stdin: &dyn Input) -> Result<Ve
                 offset += n as u64;
             }
             Err(errno) if offset == 0 => {
-                return Err(format!("cannot open '{list}' for reading: {errno}"))
+                return Err(format!(
+                    "cannot open {list} for reading: {errno}",
+                    list = quote(list)
+                ))
             }
-            Err(errno) => return Err(format!("{list}: read error: {errno}")),
+            Err(errno) => {
+                return Err(format!(
+                    "{list}: read error: {errno}",
+                    list = quote_if_needed(list)
+                ))
+            }
         }
     }
 }
@@ -262,7 +277,11 @@ fn records(raw: &[u8]) -> Vec<Entry> {
 /// `list:record:` prefixed for a `--files0-from` record, as in GNU `wc`.
 fn bad_record_message(job: &Job, position: usize, what: &str) -> String {
     match &job.files0_from {
-        Some(list) => format!("{list}:{}: {what}", position + 1),
+        Some(list) => format!(
+            "{list}:{}: {what}",
+            position + 1,
+            list = quote_if_needed(list)
+        ),
         None => String::from(what),
     }
 }

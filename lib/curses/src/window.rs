@@ -65,6 +65,16 @@ pub struct Window {
     scrolling: bool,
 }
 
+/// `ch` as a cell shows it: a control character is no glyph, and a NUL would
+/// pass for the [`CONTINUATION`] half of a wide one, so either shows U+FFFD.
+fn glyph(ch: char) -> char {
+    if ch.is_control() {
+        char::REPLACEMENT_CHARACTER
+    } else {
+        ch
+    }
+}
+
 impl Window {
     /// A blank window of `size` whose top-left sits at the screen `origin`.
     #[must_use]
@@ -163,13 +173,14 @@ impl Window {
         Ok(())
     }
 
-    /// Write `cell` at `pos` without moving the cursor.
+    /// Write `cell` at `pos` without moving the cursor, a control character
+    /// in it as U+FFFD.
     ///
     /// # Errors
     ///
     /// [`CursesError::OutOfBounds`] if `pos` lies outside the window.
     pub fn put_cell(&mut self, pos: Pos, cell: Cell) -> Result<()> {
-        if self.buf.set(pos, cell) {
+        if self.buf.set(pos, Cell::styled(glyph(cell.ch), cell.attrs)) {
             Ok(())
         } else {
             Err(CursesError::OutOfBounds)
@@ -182,13 +193,14 @@ impl Window {
     /// A double-width glyph (see [`char_width`]) occupies two cells: it is
     /// written into the cursor cell and the cell to its right is set to the
     /// [`CONTINUATION`] marker. If only one column remains on the line the
-    /// glyph wraps to the next line whole rather than being split.
+    /// glyph wraps to the next line whole rather than being split. A control
+    /// character is written as U+FFFD, as every cell this window writes is.
     pub fn add_char(&mut self, ch: char) {
         if char_width(ch) == 2 {
             self.add_wide_char(ch);
         } else {
             let cursor = self.cursor;
-            let _ = self.buf.set(cursor, Cell::styled(ch, self.attrs));
+            let _ = self.buf.set(cursor, self.styled(ch));
             self.advance_cursor();
         }
     }
@@ -203,7 +215,7 @@ impl Window {
             self.wrap_line();
         }
         let lead = self.cursor;
-        let _ = self.buf.set(lead, Cell::styled(ch, self.attrs));
+        let _ = self.buf.set(lead, self.styled(ch));
         let _ = self.buf.set(
             Pos::new(lead.row, lead.col.saturating_add(1)),
             Cell::styled(CONTINUATION, self.attrs),
@@ -261,19 +273,19 @@ impl Window {
     /// Draw `count` horizontal cells of `ch` rightward from the cursor (curses
     /// `whline`), clipping at the right edge. The cursor does not move.
     pub fn horizontal_line(&mut self, ch: char, count: u16) {
-        let blank = Cell::styled(ch, self.attrs);
+        let cell = self.styled(ch);
         let row = self.cursor.row;
         let cols = self.buf.size().cols;
         let end = self.cursor.col.saturating_add(count).min(cols);
         for col in self.cursor.col..end {
-            let _ = self.buf.set(Pos::new(row, col), blank);
+            let _ = self.buf.set(Pos::new(row, col), cell);
         }
     }
 
     /// Draw `count` vertical cells of `ch` downward from the cursor (curses
     /// `wvline`), clipping at the bottom edge. The cursor does not move.
     pub fn vertical_line(&mut self, ch: char, count: u16) {
-        let cell = Cell::styled(ch, self.attrs);
+        let cell = self.styled(ch);
         let col = self.cursor.col;
         let rows = self.buf.size().rows;
         let end = self.cursor.row.saturating_add(count).min(rows);
@@ -296,8 +308,8 @@ impl Window {
         }
         let last_row = size.rows - 1;
         let last_col = size.cols - 1;
-        let horizontal_cell = Cell::styled(chars.horizontal, self.attrs);
-        let vertical_cell = Cell::styled(chars.vertical, self.attrs);
+        let horizontal_cell = self.styled(chars.horizontal);
+        let vertical_cell = self.styled(chars.vertical);
         for col in 1..last_col {
             let _ = self.buf.set(Pos::new(0, col), horizontal_cell);
             let _ = self.buf.set(Pos::new(last_row, col), horizontal_cell);
@@ -306,20 +318,16 @@ impl Window {
             let _ = self.buf.set(Pos::new(row, 0), vertical_cell);
             let _ = self.buf.set(Pos::new(row, last_col), vertical_cell);
         }
+        let _ = self.buf.set(Pos::ORIGIN, self.styled(chars.top_left));
         let _ = self
             .buf
-            .set(Pos::ORIGIN, Cell::styled(chars.top_left, self.attrs));
-        let _ = self.buf.set(
-            Pos::new(0, last_col),
-            Cell::styled(chars.top_right, self.attrs),
-        );
-        let _ = self.buf.set(
-            Pos::new(last_row, 0),
-            Cell::styled(chars.bottom_left, self.attrs),
-        );
+            .set(Pos::new(0, last_col), self.styled(chars.top_right));
+        let _ = self
+            .buf
+            .set(Pos::new(last_row, 0), self.styled(chars.bottom_left));
         let _ = self.buf.set(
             Pos::new(last_row, last_col),
-            Cell::styled(chars.bottom_right, self.attrs),
+            self.styled(chars.bottom_right),
         );
     }
 
@@ -345,6 +353,11 @@ impl Window {
         self.cursor = Pos::new(self.cursor.row.min(max_row), self.cursor.col.min(max_col));
         self.scroll_top = self.scroll_top.min(max_row);
         self.scroll_bottom = max_row;
+    }
+
+    /// `ch` in the current attributes, as a cell holds it.
+    fn styled(&self, ch: char) -> Cell {
+        Cell::styled(glyph(ch), self.attrs)
     }
 
     /// A blank cell carrying only the current background colour (so an erase

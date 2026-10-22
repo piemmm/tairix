@@ -11,6 +11,7 @@ use tairix_path::join;
 use crate::command::{Command, Mode, Options, Verbosity};
 use crate::error::ChmodError;
 use crate::io::{Entry, EntryKind, FileSystem, Output};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `chmod`'s own Help tree is unavailable.
@@ -150,14 +151,16 @@ fn report(
     }
     let line = if changed {
         format!(
-            "mode of '{path}' changed from {old_mode:04o} ({}) to {new_mode:04o} ({})\n",
+            "mode of {path} changed from {old_mode:04o} ({}) to {new_mode:04o} ({})\n",
             perm_string(old_mode),
-            perm_string(new_mode)
+            perm_string(new_mode),
+            path = quote(path)
         )
     } else {
         format!(
-            "mode of '{path}' retained as {old_mode:04o} ({})\n",
-            perm_string(old_mode)
+            "mode of {path} retained as {old_mode:04o} ({})\n",
+            perm_string(old_mode),
+            path = quote(path)
         )
     };
     out.write_all(line.as_bytes()).map_err(ChmodError::Output)

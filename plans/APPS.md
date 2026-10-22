@@ -885,8 +885,10 @@ platform floor).
   line, `-w`/`--width` overriding the width — when stdout is an attested
   console, decided against the kernel's fail-closed geometry attestation
   and falling back to one-per-line otherwise, cell widths measured
-  through the shared `tairix_vt::str_width` table; names are quoted by a
-  faithful GNU `quotearg` port — `-N` literal, `-Q` C, `-b` escape, and
+  through the shared `tairix_vt::str_width` table; names are quoted by the
+  shared `tairix_util::quote` engine every command app names files with —
+  GNU's `quotearg` styles, `-R` headings and indicator styles marking what
+  GNU marks (`-F` its own `*` too) — `-N` literal, `-Q` C, `-b` escape, and
   `--quoting-style` selecting the full `literal`/`shell`/`shell-always`/
   `shell-escape`/`shell-escape-always`/`c`/`escape` set (`locale`/`clocale`
   refused, fail closed, like `--time-style=+FORMAT`), defaulting to
@@ -919,7 +921,11 @@ platform floor).
   `rm` `-d -f -i -I -r -v
   --preserve-root`/`--no-preserve-root` (prompt seam, GNU `removed …`
   wording); `cp` `-f -i -n -r -t -T -v`; `mv` `-f -i -n -t -T -v`
-  (`-f`/`-i`/`-n` last-wins, `renamed 'a' -> 'b'` wording); `chmod` and
+  (`-f`/`-i`/`-n` last-wins, `renamed 'a' -> 'b'` wording; a move across
+  volumes is atomic — built beside the destination under a staging name,
+  committed, renamed into place, committed, and only then the source removed
+  — and keeps the rename's rules, owner and mode; `-f` never removes a
+  destination); `chmod` and
   `chown` `-c -f -v` (GNU changed/retained wording; `-f` suppresses
   per-operand diagnostics, continues, and still fails the run via the
   message-less `Silenced` error). Each tool's `Prompt`/`Output` seams stay
@@ -1043,7 +1049,7 @@ platform floor).
   rather than `%La`'s `0xcp-3`). `printf` implements the full GNU
   surface — the escape set (`\NNN`/`\xHH`/`\uHHHH`/`\UHHHHHHHH`, `\c`
   ending all output), every conversion (`diouxX`, `eEfFgGaA`, `%c`,
-  `%s`, `%b` with `\0NNN` octal, `%q` quotearg-style shell quoting,
+  `%s`, `%b` with `\0NNN` octal, `%q` shell quoting through `tairix_util::quote`,
   `%%`) with the C flags and `*`-settable width/precision, format
   reuse, base-0/char-constant argument reading, and the GNU
   diagnostics and exit model (conversion errors continue and exit `1`;
@@ -1188,9 +1194,11 @@ platform floor).
   stores no target to make relative.
 
   `cp` gained the link options too: `-l` (a second name for the source's
-  node instead of a copy of its bytes), `-s` (a symbolic link naming the
-  source), `-P`/`--no-dereference` (reproduce a link source as a link
-  storing the same target, verbatim), and `--preserve=links` (two sources
+  node instead of a copy of its bytes, a followed link's by its resolved
+  path), `-s` (a symbolic link naming the source), `-P`/`--no-dereference`
+  (reproduce a link source as a link storing the same target, verbatim — the
+  default under `-r`), `-L`/`--dereference` and `-H` (follow every link, or
+  the operands' only; the last of the three wins), and `--preserve=links` (two sources
   naming one node get two *names* at the destination, keyed on the identity
   the `fs_stat`/`fs_readdir` record now carries, remembering only nodes
   whose name count exceeds one). `-d` is exactly `-P --preserve=links`,
@@ -1204,7 +1212,8 @@ platform floor).
   and `fs_set_owner` exist; no `fs_set_times` does), so honouring `-a`
   would report a preservation that did not happen. `-dR` is the rest of it.
   Lifting the refusal means adding that call — an ABI + VFS + per-driver
-  change, its own entry, not a corner of this stage.
+  change, its own entry (`plans/OPEN-DEFECTS.md` D1264), not a corner of
+  this stage; `mv`'s cross-volume move waits on the same call to keep times.
 
   `cp`, `mv`'s cross-volume copy, `fstree` and the file manager's paste copy
   through one engine (`lib/fscopy`): a file's bytes with its holes kept over

@@ -4,7 +4,7 @@ cp — copier des fichiers et des répertoires
 
 ## SYNOPSIS
 
-`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -37,6 +37,12 @@ avertissement à la fin de l'exécution, et par un enregistrement `omission`
 sur le flux d'information standard ; avec `--preserve=xattr`, une telle
 copie échoue à la place.
 
+Un répertoire n'est jamais copié dans lui-même : une destination à
+l'intérieur de la source — quelle que soit son écriture, par un lien, un
+`..` ou un autre nom du volume — est refusée avant que rien ne soit
+écrit, et un répertoire déplacé dans la source pendant la copie arrête
+la copie là où le parcours le rencontre.
+
 ## OPTIONS
 
 - `-r, -R, --recursive` — copier les répertoires et leur contenu.
@@ -52,10 +58,16 @@ copie échoue à la place.
   toujours `-r`.
 - `-s, --symbolic-link` — créer un lien symbolique désignant la source au
   lieu de la copier.
-- `-P, --no-dereference` — reproduire un lien symbolique source comme un
-  lien stockant la même cible, mot pour mot, au lieu de copier ce qu'il
-  désigne (ainsi un lien relatif ou cassé survit à la copie). Sans cette
-  option, un lien source est suivi.
+- `-P, --no-dereference` — reproduire chaque lien symbolique parmi les
+  sources comme un lien de même cible, mot pour mot, au lieu de copier
+  ce qu'il désigne (ainsi un lien relatif ou pendant survit à la copie).
+- `-L, --dereference` — suivre chaque lien symbolique parmi les sources
+  et copier ce qu'il désigne.
+- `-H` — suivre un lien symbolique nommé comme opérande, mais reproduire
+  ceux rencontrés dans une arborescence. Sans `-H`, `-L` ni `-P`, une
+  copie récursive reproduit chaque lien, ceux de ses opérandes compris,
+  et toute autre copie suit les liens de ses opérandes, comme celle de
+  GNU ; `-l` lie ce que désigne un lien suivi.
 - `--preserve=links` — deux sources désignant un même nœud obtiennent
   deux noms à la destination plutôt que deux copies, de sorte que la
   copie ne double pas silencieusement le stockage.

@@ -37,6 +37,7 @@ use alloc::string::{String, ToString};
 use tairix_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
 
 use crate::builtin::BuiltinContext;
+use tairix_util::quote::quote_if_needed;
 
 /// Status returned on success.
 const OK: i32 = 0;
@@ -105,14 +106,18 @@ pub(crate) fn ulimit(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
     match rest {
         [] => report_all(ctx, flags.report_bound()),
         [name] if flags.all => {
-            ctx.console
-                .write_stderr(&format!("ulimit: {name}: -a takes no resource\n"));
+            ctx.console.write_stderr(&format!(
+                "ulimit: {name}: -a takes no resource\n",
+                name = quote_if_needed(name)
+            ));
             USAGE_ERROR
         }
         [name] => report_one(ctx, name, flags.report_bound()),
         [name, _value] if flags.all => {
-            ctx.console
-                .write_stderr(&format!("ulimit: {name}: -a cannot set a limit\n"));
+            ctx.console.write_stderr(&format!(
+                "ulimit: {name}: -a cannot set a limit\n",
+                name = quote_if_needed(name)
+            ));
             USAGE_ERROR
         }
         [name, value] => set_one(ctx, name, value, flags.set_bound()),
@@ -183,8 +188,10 @@ fn report_all(ctx: &mut BuiltinContext<'_>, bound: Bound) -> i32 {
 /// Report `bound` for the single resource named `name`.
 fn report_one(ctx: &mut BuiltinContext<'_>, name: &str, bound: Bound) -> i32 {
     let Some(kind) = LimitKind::from_name(name) else {
-        ctx.console
-            .write_stderr(&format!("ulimit: {name}: unknown resource\n"));
+        ctx.console.write_stderr(&format!(
+            "ulimit: {name}: unknown resource\n",
+            name = quote_if_needed(name)
+        ));
         return USAGE_ERROR;
     };
     match ctx.limits.get(kind) {
@@ -195,8 +202,10 @@ fn report_one(ctx: &mut BuiltinContext<'_>, name: &str, bound: Bound) -> i32 {
             OK
         }
         Err(err) => {
-            ctx.console
-                .write_stderr(&format!("ulimit: {name}: {err}\n"));
+            ctx.console.write_stderr(&format!(
+                "ulimit: {name}: {err}\n",
+                name = quote_if_needed(name)
+            ));
             USAGE_ERROR
         }
     }
@@ -205,13 +214,17 @@ fn report_one(ctx: &mut BuiltinContext<'_>, name: &str, bound: Bound) -> i32 {
 /// Set `bound` of resource `name` to `value`.
 fn set_one(ctx: &mut BuiltinContext<'_>, name: &str, value: &str, bound: Bound) -> i32 {
     let Some(kind) = LimitKind::from_name(name) else {
-        ctx.console
-            .write_stderr(&format!("ulimit: {name}: unknown resource\n"));
+        ctx.console.write_stderr(&format!(
+            "ulimit: {name}: unknown resource\n",
+            name = quote_if_needed(name)
+        ));
         return USAGE_ERROR;
     };
     let Some(parsed) = parse_value(value) else {
-        ctx.console
-            .write_stderr(&format!("ulimit: {value}: invalid limit value\n"));
+        ctx.console.write_stderr(&format!(
+            "ulimit: {value}: invalid limit value\n",
+            value = quote_if_needed(value)
+        ));
         return USAGE_ERROR;
     };
     // The current limit supplies the bound the command does not change, so a
@@ -219,8 +232,10 @@ fn set_one(ctx: &mut BuiltinContext<'_>, name: &str, value: &str, bound: Bound) 
     let current = match ctx.limits.get(kind) {
         Ok(limit) => limit,
         Err(err) => {
-            ctx.console
-                .write_stderr(&format!("ulimit: {name}: {err}\n"));
+            ctx.console.write_stderr(&format!(
+                "ulimit: {name}: {err}\n",
+                name = quote_if_needed(name)
+            ));
             return USAGE_ERROR;
         }
     };
@@ -232,21 +247,26 @@ fn set_one(ctx: &mut BuiltinContext<'_>, name: &str, value: &str, bound: Bound) 
     let Ok(limit) = ResourceLimit::new(soft, hard) else {
         // `soft > hard`: a soft bound above its hard ceiling. POSIX rejects
         // it rather than guessing which the user meant.
-        ctx.console
-            .write_stderr(&format!("ulimit: {name}: soft limit exceeds hard limit\n"));
+        ctx.console.write_stderr(&format!(
+            "ulimit: {name}: soft limit exceeds hard limit\n",
+            name = quote_if_needed(name)
+        ));
         return USAGE_ERROR;
     };
     match ctx.limits.set(kind, limit) {
         Ok(()) => OK,
         Err(Errno::PermissionDenied) => {
             ctx.console.write_stderr(&format!(
-                "ulimit: {name}: cannot raise hard limit (requires CAP_RLIMIT_RAISE)\n"
+                "ulimit: {name}: cannot raise hard limit (requires CAP_RLIMIT_RAISE)\n",
+                name = quote_if_needed(name)
             ));
             DENIED_STATUS
         }
         Err(err) => {
-            ctx.console
-                .write_stderr(&format!("ulimit: {name}: {err}\n"));
+            ctx.console.write_stderr(&format!(
+                "ulimit: {name}: {err}\n",
+                name = quote_if_needed(name)
+            ));
             USAGE_ERROR
         }
     }

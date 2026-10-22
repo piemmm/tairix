@@ -12,10 +12,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_util::cfloat::{FloatConversion, FloatDirective};
+use tairix_util::quote::{quote, quote_if_needed};
 
 use crate::error::PrintfError;
 use crate::number::{to_float, to_signed, to_unsigned, Note};
-use crate::quote::shell_quote;
 
 /// How serious a conversion diagnostic is: an error sets the run's exit
 /// status to `1`; a warning leaves it untouched (both GNU behaviours).
@@ -135,20 +135,21 @@ impl<'a> Cursor<'a, '_> {
         let (severity, message) = match note {
             Note::ExpectedNumeric => (
                 Severity::Error,
-                format!("'{arg}': expected a numeric value"),
+                format!("{arg}: expected a numeric value", arg = quote(arg)),
             ),
             Note::NotCompletelyConverted => (
                 Severity::Error,
-                format!("'{arg}': value not completely converted"),
+                format!("{arg}: value not completely converted", arg = quote(arg)),
             ),
             Note::OutOfRange => (
                 Severity::Error,
-                format!("'{arg}': Numerical result out of range"),
+                format!("{arg}: Numerical result out of range", arg = quote(arg)),
             ),
             Note::TrailingCharacters(tail) => (
                 Severity::Warning,
                 format!(
-                    "warning: {tail}: character(s) following character constant have been ignored"
+                    "warning: {tail}: character(s) following character constant have been ignored",
+                    tail = quote_if_needed(&tail)
                 ),
             ),
         };
@@ -225,7 +226,7 @@ fn render_directive(
         }
         b'b' => push_b_argument(cursor.take(), out)?,
         b'q' => {
-            out.extend_from_slice(shell_quote(cursor.take()).as_bytes());
+            out.extend_from_slice(format!("{}", quote_if_needed(cursor.take())).as_bytes());
             false
         }
         // Only an immediate `%%` is the literal (`%5%` is invalid), and
@@ -784,6 +785,28 @@ mod tests {
         assert!(result.halted, "\\c in a %b argument halts everything");
         assert_eq!(output("%q|", &["a b"]), "'a b'|");
         assert_eq!(output("%q|", &[""]), "''|");
+    }
+
+    /// Each as GNU coreutils' `printf '%q'` writes it in a UTF-8 locale.
+    #[test]
+    fn q_quotes_for_shell_reuse_as_gnu_does() {
+        let cases: &[(&str, &str)] = &[
+            ("plain", "plain"),
+            ("a,b.c/d-e:f@g_h%i+j", "a,b.c/d-e:f@g_h%i+j"),
+            ("a{b}c~d", "a{b}c~d"),
+            ("a=b", "'a=b'"),
+            ("~ab", "'~ab'"),
+            ("#ab", "'#ab'"),
+            ("it's", "\"it's\""),
+            ("a'b\"c", "'a'\\''b\"c'"),
+            ("a\t\nb", "'a'$'\\t\\n''b'"),
+            ("\x01", "''$'\\001'"),
+            ("é é", "'é é'"),
+            ("\u{9b}2J", "''$'\\302\\233''2J'"),
+        ];
+        for &(arg, expected) in cases {
+            assert_eq!(output("%q", &[arg]), expected, "{arg:?}");
+        }
     }
 
     #[test]

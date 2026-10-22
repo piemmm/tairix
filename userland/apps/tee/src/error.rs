@@ -3,6 +3,7 @@
 use alloc::string::String;
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_util::quote::quote;
 
 /// Why a `tee` invocation did not complete.
 ///
@@ -30,10 +31,22 @@ pub enum TeeError {
 impl fmt::Display for TeeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => write!(f, "unrecognized option '{token}'"),
-            Self::UnknownShort(flag) => write!(f, "invalid option -- '{flag}'"),
+            Self::UnknownLong(token) => {
+                write!(f, "unrecognized option {token}", token = quote(token))
+            }
+            Self::UnknownShort(flag) => {
+                write!(
+                    f,
+                    "invalid option -- {}",
+                    quote(flag.encode_utf8(&mut [0; 4]))
+                )
+            }
             Self::InvalidMode(text) => {
-                write!(f, "invalid argument '{text}' for '--output-error'")
+                write!(
+                    f,
+                    "invalid argument {text} for '--output-error'",
+                    text = quote(text)
+                )
             }
             Self::Output(errno) => write!(f, "write error: {errno}"),
         }

@@ -34,7 +34,7 @@ mod program {
     use alloc::format;
     use alloc::string::String;
 
-    use tairix_abi::fs::{OpenFlags, FS_PATH_MAX};
+    use tairix_abi::fs::OpenFlags;
     use tairix_abi::{Errno, FileKind, LinkFlags, RealpathMode, UnlinkFlags};
     use tairix_help::BundleHelp;
     use tairix_ln::{parse, run, FileSystem, Occupant, Prompt, USAGE};
@@ -92,17 +92,8 @@ mod program {
             // The kernel's own resolution, never a second walk here: `-r`
             // spells the difference between two canonical paths, and a
             // difference computed against a different reading of the tree
-            // would name a different node. The buffer is the ABI's own path
-            // bound, so one call always suffices.
-            let mut buf = alloc::vec![0u8; FS_PATH_MAX];
-            let ret = tairix_rt::fs_realpath(path.as_bytes(), &mut buf, mode);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
-            let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
-            let canonical = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
-            Ok(String::from(canonical))
+            // would name a different node.
+            tairix_rt::realpath(path, mode)
         }
 
         fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {

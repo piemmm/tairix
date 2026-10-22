@@ -6,6 +6,7 @@ use core::fmt;
 use tairix_abi::Errno;
 
 use tairix_resolver::TargetFailure;
+use tairix_util::quote::quote_if_needed;
 
 /// Why a `ping` invocation did not complete.
 ///
@@ -39,7 +40,9 @@ pub enum PingError {
 impl fmt::Display for PingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Resolve { host, reason } => write!(f, "{host}: {reason}"),
+            Self::Resolve { host, reason } => {
+                write!(f, "{host}: {reason}", host = quote_if_needed(host))
+            }
             Self::Denied => f.write_str(
                 "opening an ICMP echo socket requires CAP_NET and CAP_NET_RAW, \
                  which this session lacks",

@@ -15,6 +15,7 @@ use tairix_audio::target::AudioTarget;
 use tairix_audio::volume::{typed_level, LevelError};
 use tairix_player::{Extent, List, Passes, Settings, Span};
 use tairix_util::argv::option_value;
+use tairix_util::quote::quote;
 
 /// The synopsis a usage error is answered with.
 pub const USAGE: &str = "Usage: play [OPTION]... FILE...";
@@ -125,9 +126,19 @@ pub enum UsageError {
 impl fmt::Display for UsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown(option) => write!(f, "unrecognized option '{option}'"),
-            Self::Missing(option) => write!(f, "option '{option}' requires an argument"),
-            Self::Unwanted(option) => write!(f, "option '{option}' doesn't allow an argument"),
+            Self::Unknown(option) => {
+                write!(f, "unrecognized option {option}", option = quote(option))
+            }
+            Self::Missing(option) => write!(
+                f,
+                "option {option} requires an argument",
+                option = quote(option)
+            ),
+            Self::Unwanted(option) => write!(
+                f,
+                "option {option} doesn't allow an argument",
+                option = quote(option)
+            ),
             Self::Invalid { option, why } => write!(f, "{option}: {why}"),
             Self::NoFiles => f.write_str("missing file operand"),
             Self::StandardInput => f.write_str("'-': standard input cannot be played"),

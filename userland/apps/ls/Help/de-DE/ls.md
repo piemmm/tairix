@@ -40,8 +40,9 @@ weil der Dateisystem-Vertrag noch keine harten Links trägt; sie
 erscheint, sobald er es tut.
 
 Bei mehreren Operanden — und stets unter `-R` — wird jeder
-Verzeichnisliste eine `pfad:`-Kopfzeile vorangestellt, und Blöcke
-werden durch eine Leerzeile getrennt.
+Verzeichnisliste eine `pfad:`-Kopfzeile vorangestellt, und Blöcke werden
+durch eine Leerzeile getrennt. Der Pfad einer Kopfzeile erhält die
+Anführung im Stil der Auflistung, ebenso jeder `:` darin.
 
 Eine symbolische Verknüpfung erscheint mit dem Typbuchstaben `l` und im
 Langformat als `Name -> Ziel` — das Ziel genau so, wie es gespeichert ist,

@@ -4,7 +4,7 @@ cp — copïo ffeiliau a chyfeiriaduron
 
 ## SYNOPSIS
 
-`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -34,6 +34,12 @@ eu cadw mewn un rhybudd pan ddaw'r rhediad i ben, ac mewn cofnod `omission`
 ar y ffrwd wybodaeth safonol; gyda `--preserve=xattr` mae copi o'r fath yn
 methu yn lle hynny.
 
+Nid yw cyfeiriadur byth yn cael ei gopïo i mewn iddo'i hun: gwrthodir
+cyrchfan y tu mewn i'r ffynhonnell — sut bynnag y'i sillefir, drwy
+ddolen, `..` neu enw arall ar y gyfrol — cyn i ddim gael ei ysgrifennu,
+ac mae cyfeiriadur a symudir i'r ffynhonnell tra bo'r copi'n rhedeg yn
+atal y copi lle mae'r daith yn ei gyfarfod.
+
 ## OPTIONS
 
 - `-r, -R, --recursive` — copïo cyfeiriaduron a'u cynnwys.
@@ -48,10 +54,17 @@ methu yn lle hynny.
   ddiweddarach. Mae angen `-r` ar ffynhonnell sy'n gyfeiriadur o hyd.
 - `-s, --symbolic-link` — creu cyswllt symbolaidd sy'n enwi'r ffynhonnell
   yn lle ei chopïo.
-- `-P, --no-dereference` — atgynhyrchu ffynhonnell sy'n gyswllt
-  symbolaidd fel cyswllt sy'n storio'r un targed, air am air, yn lle
-  copïo'r hyn y mae'n ei enwi (felly mae cyswllt cymharol neu grog yn
-  goroesi'r copi). Hebddi, dilynir cyswllt ffynhonnell.
+- `-P, --no-dereference` — atgynhyrchu pob dolen symbolaidd ymhlith y
+  ffynonellau fel dolen sy'n storio'r un targed, air am air, yn hytrach
+  na chopïo'r hyn y mae'n ei enwi (felly mae dolen berthynol neu ddolen
+  sy'n pwyntio i unman yn goroesi'r copi).
+- `-L, --dereference` — dilyn pob dolen symbolaidd ymhlith y ffynonellau
+  a chopïo'r hyn y mae'n ei enwi.
+- `-H` — dilyn dolen symbolaidd a enwir fel operand, ond atgynhyrchu'r
+  rhai a geir y tu mewn i goeden. Heb `-H`, `-L` na `-P`, mae copi
+  ailadroddus yn atgynhyrchu pob dolen, gan gynnwys rhai ei operandau,
+  ac mae unrhyw gopi arall yn dilyn dolenni ei operandau, fel un GNU;
+  mae `-l` yn cysylltu'r hyn y mae dolen a ddilynwyd yn ei enwi.
 - `--preserve=links` — mae dwy ffynhonnell sy'n enwi un nod yn cael dau
   enw yn y cyrchfan yn lle dau gopi, fel nad yw'r copi'n dyblu'r storfa'n
   ddistaw.

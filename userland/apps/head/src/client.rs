@@ -10,6 +10,7 @@ use tairix_util::tailwindow::{ByteWindow, LineWindow};
 use crate::command::{Command, Count, HeaderMode, Job, Source};
 use crate::error::HeadError;
 use crate::io::{FileSource, Input, Output};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `head`'s own Help tree is unavailable.
@@ -227,7 +228,13 @@ fn serve_path(
     let first = match files.read(path, 0, &mut buf) {
         Ok(n) => n,
         Err(errno) => {
-            diagnose(err, &format!("cannot open '{path}' for reading: {errno}"))?;
+            diagnose(
+                err,
+                &format!(
+                    "cannot open {path} for reading: {errno}",
+                    path = quote(path)
+                ),
+            )?;
             return Ok(false);
         }
     };
@@ -247,7 +254,10 @@ fn serve_path(
                     offset += n as u64;
                 }
                 Err(errno) => {
-                    diagnose(err, &format!("error reading '{path}': {errno}"))?;
+                    diagnose(
+                        err,
+                        &format!("error reading {path}: {errno}", path = quote(path)),
+                    )?;
                     return Ok(false);
                 }
             }

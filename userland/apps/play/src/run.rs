@@ -59,6 +59,7 @@ mod program {
     use tairix_sandbox::audiodecode::AudioDecodeService;
     use tairix_sandbox::rt::{serve_session_stdio, session_worker_role};
     use tairix_termcap::{from_term, TermType};
+    use tairix_util::quote::quote_if_needed;
 
     const DECODER_READ: u64 = 1;
     const DECODER_WRITE: u64 = 2;
@@ -377,7 +378,11 @@ mod program {
                 format!(" / {}", Span::of_frames(frames, hz).clock())
             });
             let name = list.item(*entry).unwrap_or("");
-            let line = format!("\r{}{total}  {name}\x1b[K", here.clock());
+            let line = format!(
+                "\r{}{total}  {name}\x1b[K",
+                here.clock(),
+                name = quote_if_needed(name)
+            );
             let _ = Stderr.write_all(line.as_bytes());
             self.shown = true;
         }
@@ -656,7 +661,7 @@ mod program {
                 Note::Skipped { why, .. } | Note::Cut { why, .. } => {
                     let whole = matches!(note, Note::Skipped { .. });
                     let _ = StdInfo.write_all(&report::left_out(&file, why, whole));
-                    let line = format!("play: {file}: {why}");
+                    let line = format!("play: {file}: {why}", file = quote_if_needed(&file));
                     if !deferred {
                         self.clear_progress();
                         write_stderr_line(&line);

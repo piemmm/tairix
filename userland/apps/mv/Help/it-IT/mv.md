@@ -16,12 +16,14 @@ ogni sorgente è spostata *dentro* quella directory con il proprio
 nome base.
 
 Uno spostamento all'interno di un volume è una rinomina atomica che
-conserva l'identità del nodo. Uno spostamento la cui sorgente e la
-cui destinazione stanno su volumi diversi non può essere atomico:
-ripiega sulla copia della sorgente verso la destinazione seguita
-dalla rimozione della sorgente (le directory sono riprodotte
-ricorsivamente).
-Un file la cui copia non riesce viene rimosso, e la sorgente resta.
+conserva l'identità del nodo. Uno spostamento tra volumi mantiene la
+stessa promessa: la copia viene costruita accanto alla destinazione,
+scritta sul disco e rinominata al suo posto in un solo passo, e solo
+allora la sorgente viene rimossa — così la destinazione conserva ciò che
+conteneva finché lo spostamento non è completo, e né un errore né un
+arresto anomalo perdono qualcosa. In entrambi i casi una directory
+sostituisce solo una directory vuota, nient'altro sostituisce una
+directory e nessuna directory viene spostata nel proprio sottoalbero.
 
 Una destinazione esistente è sovrascritta per impostazione
 predefinita, saltata con `-n` e richiesta sul flusso di errore
@@ -31,25 +33,30 @@ Il primo fallimento ferma l'esecuzione prima di ogni operando
 successivo. `--` termina l'analisi delle opzioni: ogni argomento
 successivo è un percorso.
 
-La copia porta con sé i buchi e gli attributi estesi di ogni file — un tipo
-di file RISC OS, il tipo e il creatore di un Mac — ovunque la destinazione
-possa conservarli, e sposta un collegamento simbolico come un collegamento con
-la stessa destinazione, mai ciò a cui punta. Gli attributi che la destinazione
-non può conservare vengono segnalati in un unico avviso al termine
-dell'esecuzione, e in un record `omission` sul flusso di informazioni standard.
+La copia conserva i buchi di ogni file, i suoi attributi estesi — un
+tipo di file RISC OS, un tipo e un creatore Mac —, i permessi e il
+proprietario ovunque la destinazione li mantenga, e sposta un
+collegamento simbolico come un collegamento con la stessa destinazione,
+mai ciò a cui punta. Un file che chi lo sposta non può restituire al suo
+proprietario diventa suo, senza i bit set-ID. Le marche temporali non
+vengono conservate: nessuna chiamata di questo sistema le imposta. Gli
+attributi che la destinazione non può mantenere vengono segnalati in un
+unico avviso al termine dell'esecuzione, e in un record `omission` sul
+flusso di informazioni standard, prima che le sorgenti scompaiano per
+sempre.
 
 ## OPTIONS
 
-- `-f, --force` — rimuovere una destinazione che blocca e ritentare
-  la rinomina; non chiedere mai. Vince l'ultimo tra `-f`, `-i` e
-  `-n`.
+- `-f, --force` — non chiedere mai prima di sovrascrivere. Vale l'ultimo
+  tra `-f`, `-i` e `-n`.
 - `-i, --interactive` — chiedere prima di sovrascrivere una
   destinazione esistente; acconsente solo una risposta che inizia con
   `y`/`Y`.
 - `-n, --no-clobber` — non sovrascrivere mai una destinazione
   esistente.
-- `-v, --verbose` — riferire ogni spostamento come
-  `renamed 'source' -> 'dest'`.
+- `-v, --verbose` — riportare ogni spostamento come
+  `renamed 'source' -> 'dest'`, e uno spostamento tra volumi come
+  `copied 'source' -> 'dest'` e poi `removed 'source'`.
 - `-t dir, --target-directory=dir` — spostare ogni sorgente dentro
   `dir`, che deve essere una directory esistente. Il valore segue
   attaccato (`-tdir`, `--target-directory=dir`) o come argomento

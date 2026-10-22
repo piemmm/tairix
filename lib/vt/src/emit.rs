@@ -4,7 +4,8 @@
 //! The emitter writes the canonical encoding of each operation over the same
 //! control bytes ([`crate::control`]) and SGR table ([`crate::attr`]) the
 //! [`crate::Parser`] reads, so the two agree by construction: parsing the
-//! emitter's output reproduces the original [`Op`].
+//! emitter's output reproduces the original [`Op`]. The one exception is an
+//! [`Op::Print`] of a control character, which prints U+FFFD.
 //!
 //! Movement counts are clamped up to `1` (ANSI's default), so even a degenerate
 //! `CursorUp(0)` emits the well-formed `CSI 1 A` and round-trips as `CursorUp(1)`.
@@ -23,10 +24,16 @@ use crate::op::Op;
 /// Append the byte encoding of `op` to `out`.
 pub fn encode_into(op: &Op, out: &mut impl Extend<u8>) {
     match op {
+        // A control is no glyph, and each one a terminal acts on is an `Op`
+        // of its own, so text from elsewhere never reaches it as a command.
         Op::Print(ch) => {
+            let glyph = if ch.is_control() {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                *ch
+            };
             let mut buf = [0u8; 4];
-            let encoded = ch.encode_utf8(&mut buf);
-            out.extend(encoded.bytes());
+            out.extend(glyph.encode_utf8(&mut buf).bytes());
         }
         Op::Bell => byte(out, control::BEL),
         Op::Backspace => byte(out, control::BS),

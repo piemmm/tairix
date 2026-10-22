@@ -11,6 +11,7 @@ use alloc::string::{String, ToString};
 use core::fmt;
 
 use tairix_abi::net_ipc::NetAddrFamily;
+use tairix_util::quote::quote;
 
 /// The default port when the command line names none: the assigned telnet port.
 pub const DEFAULT_PORT: u16 = 23;
@@ -105,16 +106,18 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unknown option '{opt}'"),
-            Self::MissingValue(opt) => write!(f, "option '{opt}' requires a value"),
+            Self::UnknownOption(opt) => write!(f, "unknown option {opt}", opt = quote(opt)),
+            Self::MissingValue(opt) => write!(f, "option {opt} requires a value", opt = quote(opt)),
             Self::BadPort(port) => write!(
                 f,
-                "'{port}' is not a port number (a service name cannot be resolved)"
+                "{port} is not a port number (a service name cannot be resolved)",
+                port = quote(port)
             ),
             Self::TooManyOperands => f.write_str("only 'host [port]' may be given"),
             Self::BadEscape(value) => write!(
                 f,
-                "'{value}' is not an escape character (give one character, or '^X')"
+                "{value} is not an escape character (give one character, or '^X')",
+                value = quote(value)
             ),
             Self::FamilyConflict => f.write_str("'-4' and '-6' cannot both be given"),
         }

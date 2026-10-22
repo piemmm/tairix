@@ -120,6 +120,9 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features =
 # the client over: it speaks the real `appdata-v1` codec, so a test exercises
 # the wire the service actually answers rather than a mock of it.
 [dev-dependencies]
+# The shared miniature of the kernel's path resolution the test filesystem
+# answers the containment check with.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
     "test-util",
 ] }

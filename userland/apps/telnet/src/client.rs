@@ -20,6 +20,7 @@ use crate::interp::{self, Action};
 use crate::net::{CloseReason, Endpoint, IoEvent, TelnetIo};
 use crate::session::Session;
 use crate::Output;
+use tairix_util::quote::quote_if_needed;
 
 /// The one-line usage banner, printed on a usage error and as the fallback when
 /// the bundled help document is unavailable.
@@ -377,7 +378,10 @@ fn connect(
     out: &dyn Output,
     err: &dyn Output,
 ) -> Result<(), TelnetError> {
-    session.print(&alloc::format!("Trying {}...\r\n", target.host));
+    session.print(&alloc::format!(
+        "Trying {}...\r\n",
+        quote_if_needed(&target.host)
+    ));
     flush(session, io, out, err)?;
     let endpoint: Endpoint = io
         .resolve(&target.host, target.port, config.family)
@@ -389,7 +393,7 @@ fn connect(
     session.reset_connection();
     session.print(&alloc::format!(
         "Connected to {}.\r\nEscape character is {}.\r\n",
-        target.host,
+        quote_if_needed(&target.host),
         interp::render_char_opt(session.escape())
     ));
     session.begin(config);

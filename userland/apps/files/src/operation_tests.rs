@@ -226,6 +226,9 @@ fn a_refusal_names_its_cause_and_a_failing_device_reads_alike() {
         move_refusal(Errno::AlreadyExists),
         "an item with that name appeared at the destination"
     );
+    // The kernel's rename refuses a folder into its own subtree as out of
+    // range; the user is told so, not that it "could not be moved".
+    assert_eq!(move_refusal(Errno::OutOfRange), super::INTO_ITSELF);
     assert_eq!(read_refusal(Errno::MediumError), "its device failed");
     assert_eq!(change_refusal(Errno::ReadOnly), "its volume is read-only");
     assert_eq!(

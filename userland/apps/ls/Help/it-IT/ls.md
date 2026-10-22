@@ -38,9 +38,10 @@ fissa il formato. Non c'è ancora una colonna per il numero di
 collegamenti perché il contratto del file system non porta ancora
 collegamenti fisici; comparirà quando lo farà.
 
-Quando sono dati più operandi — e sempre sotto `-R` — l'elenco di
-ogni directory è preceduto da un'intestazione `percorso:`, e i
-blocchi sono separati da una riga vuota.
+Quando sono dati più operandi — e sempre sotto `-R` — l'elenco di ogni
+directory è preceduto da un'intestazione `percorso:`, e i blocchi sono
+separati da una riga vuota. Il percorso di un'intestazione segue la
+virgolettatura dell'elenco, compreso ogni `:` che contiene.
 
 Un collegamento simbolico appare con la lettera di tipo `l` e, nel formato
 lungo, come `nome -> destinazione` — la destinazione esattamente come è

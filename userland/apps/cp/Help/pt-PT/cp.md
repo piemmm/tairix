@@ -4,7 +4,7 @@ cp — copiar ficheiros e diretórios
 
 ## SYNOPSIS
 
-`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -35,6 +35,12 @@ atributos que um destino não pode guardar são comunicados num único aviso no
 fim da execução, e num registo `omission` no fluxo de informação padrão; com
 `--preserve=xattr` essa cópia falha em vez disso.
 
+Um diretório nunca é copiado para dentro de si próprio: um destino
+dentro da origem — seja como for escrito, através de uma ligação, de um
+`..` ou de outro nome do volume — é recusado antes de se escrever o que
+quer que seja, e um diretório movido para a origem durante a cópia para
+a cópia onde o percurso o encontra.
+
 ## OPTIONS
 
 - `-r, -R, --recursive` — copiar diretórios e o seu conteúdo.
@@ -49,10 +55,18 @@ fim da execução, e num registo `omission` no fluxo de informação padrão; co
   escrita posterior. Uma origem que é directório continua a exigir `-r`.
 - `-s, --symbolic-link` — criar uma ligação simbólica que nomeia a origem
   em vez de a copiar.
-- `-P, --no-dereference` — reproduzir uma origem que é ligação simbólica
-  como uma ligação que guarda o mesmo destino, literalmente, em vez de
-  copiar aquilo que nomeia (assim uma ligação relativa ou pendente
-  sobrevive à cópia). Sem ela, uma ligação de origem é seguida.
+- `-P, --no-dereference` — reproduzir cada ligação simbólica entre as
+  origens como uma ligação com o mesmo destino, literalmente, em vez de
+  copiar aquilo para que aponta (assim uma ligação relativa ou pendente
+  sobrevive à cópia).
+- `-L, --dereference` — seguir cada ligação simbólica entre as origens e
+  copiar aquilo para que aponta.
+- `-H` — seguir uma ligação simbólica indicada como operando, mas
+  reproduzir as encontradas dentro de uma árvore. Sem `-H`, `-L` nem
+  `-P`, uma cópia recursiva reproduz cada ligação, incluindo as dos seus
+  operandos, e qualquer outra cópia segue as ligações dos seus
+  operandos, como a do GNU; `-l` liga aquilo para que aponta uma ligação
+  seguida.
 - `--preserve=links` — duas origens que nomeiam um só nó obtêm dois nomes
   no destino em vez de duas cópias, pelo que a cópia não duplica o
   armazenamento em silêncio.

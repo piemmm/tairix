@@ -43,8 +43,8 @@
 //! * [`number`] — C-locale numeric argument conversion over the shared
 //!   `tairix_util::cnum` scanner.
 //! * [`template`] — the FORMAT walk: escapes and directives, rendering
-//!   floats through the shared `tairix_util::cfloat` engine.
-//! * [`quote`] — `%q` shell quoting.
+//!   floats through the shared `tairix_util::cfloat` engine and `%q` through
+//!   the shared `tairix_util::quote` styles.
 //! * [`client`] — the [`run`] loop: format reuse, diagnostics, status.
 //!
 //! The bundle's `Help/` documents are **not** embedded in this crate:
@@ -71,7 +71,6 @@ pub mod client;
 pub mod command;
 pub mod error;
 pub mod number;
-pub mod quote;
 pub mod template;
 
 pub use client::{run, Output, USAGE};

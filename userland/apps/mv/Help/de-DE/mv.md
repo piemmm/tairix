@@ -14,13 +14,16 @@ auf genau diesen Pfad umbenannt. Benennt das Ziel ein bestehendes
 Verzeichnis — und immer bei mehr als einer Quelle — wird jede Quelle
 unter ihrem eigenen Basisnamen *in* dieses Verzeichnis verschoben.
 
-Ein Verschieben innerhalb eines Volumes ist ein atomares Umbenennen,
-das die Identität des Knotens bewahrt. Liegen Quelle und Ziel auf
-verschiedenen Volumes, kann es nicht atomar sein: es fällt auf das
-Kopieren der Quelle zum Ziel und das anschließende Entfernen der
-Quelle zurück (Verzeichnisse werden rekursiv nachgebildet).
-Eine Datei, deren Kopie fehlschlägt, wird wieder entfernt, und die
-Quelle bleibt erhalten.
+Eine Verschiebung innerhalb eines Datenträgers ist ein atomares
+Umbenennen, das die Identität des Knotens bewahrt. Eine Verschiebung
+über Datenträger hinweg hält dasselbe Versprechen: Die Kopie wird neben
+dem Ziel aufgebaut, auf den Datenträger geschrieben und in einem Schritt
+an ihren Platz umbenannt, und erst dann wird die Quelle entfernt — so
+enthält das Ziel, was es enthielt, bis die Verschiebung vollständig ist,
+und weder ein Fehler noch ein Absturz verliert etwas. In beiden Fällen
+ersetzt ein Verzeichnis nur ein leeres Verzeichnis, nichts anderes
+ersetzt ein Verzeichnis, und kein Verzeichnis wird in seinen eigenen
+Teilbaum verschoben.
 
 Ein bestehendes Ziel wird standardmäßig überschrieben, mit `-n`
 übersprungen und mit `-i` über die Standardfehlerausgabe erfragt
@@ -29,23 +32,28 @@ eine unlesbare Antwort gilt nie als Zustimmung). Der erste Fehlschlag
 beendet den Lauf vor jedem späteren Operanden. `--` beendet die
 Optionsauswertung: jedes spätere Argument ist ein Pfad.
 
-Die Kopie überträgt die Lücken und erweiterten Attribute jeder Datei — einen
-RISC-OS-Dateityp, Typ und Ersteller eines Mac — überall dort, wo das Ziel sie
-speichern kann, und verschiebt einen symbolischen Link als Link mit demselben
-Ziel, nie das, worauf er zeigt. Attribute, die das Ziel nicht speichern kann,
-werden am Ende des Laufs in einer einzigen Warnung gemeldet und in einem
-`omission`-Datensatz auf dem Standard-Informationsstrom.
+Die Kopie übernimmt die Löcher jeder Datei, ihre erweiterten Attribute —
+einen RISC OS-Dateityp, einen Mac-Typ und -Ersteller —, ihre
+Zugriffsrechte und ihren Eigentümer, wo immer das Ziel sie aufbewahrt,
+und verschiebt eine symbolische Verknüpfung als Verknüpfung mit
+demselben Ziel, nie das, worauf sie zeigt. Eine Datei, die der
+Verschiebende ihrem Eigentümer nicht zurückgeben darf, gehört danach
+ihm, ohne ihre Set-ID-Bits. Zeitstempel werden nicht übernommen: Kein
+Aufruf dieses Systems setzt sie. Attribute, die das Ziel nicht
+aufbewahren kann, werden am Ende des Laufs in einer Warnung gemeldet und
+in einem `omission`-Eintrag im Standard-Informationsstrom, bevor die
+Quellen endgültig verschwunden sind.
 
 ## OPTIONS
 
-- `-f, --force` — ein blockierendes Ziel entfernen und das Umbenennen
-  wiederholen; nie fragen. Das spätere von `-f`, `-i` und `-n`
-  gewinnt.
+- `-f, --force` — vor dem Überschreiben nie nachfragen. Von `-f`, `-i`
+  und `-n` gilt das zuletzt angegebene.
 - `-i, --interactive` — vor dem Überschreiben eines bestehenden Ziels
   fragen; nur eine mit `y`/`Y` beginnende Antwort stimmt zu.
 - `-n, --no-clobber` — ein bestehendes Ziel nie überschreiben.
-- `-v, --verbose` — jedes Verschieben als `renamed 'source' -> 'dest'`
-  melden.
+- `-v, --verbose` — jede Verschiebung als `renamed 'source' -> 'dest'`
+  melden, eine über Datenträger hinweg als `copied 'source' -> 'dest'`
+  und danach `removed 'source'`.
 - `-t dir, --target-directory=dir` — jede Quelle nach `dir`
   verschieben, das ein bestehendes Verzeichnis sein muss. Der Wert
   folgt angehängt (`-tdir`, `--target-directory=dir`) oder als

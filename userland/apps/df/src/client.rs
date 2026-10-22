@@ -15,6 +15,7 @@ use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_
 use crate::command::{Command, Options};
 use crate::error::DfError;
 use crate::io::{Output, PathProbe};
+use tairix_util::quote::quote_if_needed;
 
 /// The one-line usage banner, printed on a usage error and as the
 /// fallback when the bundled help document is unavailable.
@@ -192,7 +193,10 @@ fn select_operands(
     let mut reported: Vec<&ViewBindingRecord> = Vec::new();
     for path in &options.paths {
         if let Err(errno) = probe.probe(path) {
-            diagnose(err, &format!("{path}: {errno}"))?;
+            diagnose(
+                err,
+                &format!("{path}: {errno}", path = quote_if_needed(path)),
+            )?;
             *clean = false;
             continue;
         }
@@ -201,7 +205,10 @@ fn select_operands(
             // a relative operand cannot be matched honestly.
             diagnose(
                 err,
-                &format!("{path}: cannot resolve a relative path to its mount point"),
+                &format!(
+                    "{path}: cannot resolve a relative path to its mount point",
+                    path = quote_if_needed(path)
+                ),
             )?;
             *clean = false;
             continue;
@@ -212,7 +219,13 @@ fn select_operands(
         else {
             // A live namespace always binds `/`, so this is a service
             // anomaly worth diagnosing, never a silent skip.
-            diagnose(err, &format!("{path}: no listed volume holds this path"))?;
+            diagnose(
+                err,
+                &format!(
+                    "{path}: no listed volume holds this path",
+                    path = quote_if_needed(path)
+                ),
+            )?;
             *clean = false;
             continue;
         };

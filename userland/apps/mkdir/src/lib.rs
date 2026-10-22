@@ -55,6 +55,7 @@ use core::fmt;
 
 use tairix_abi::{Errno, FileKind};
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `mkdir`'s own Help tree is unavailable.
@@ -98,7 +99,11 @@ impl fmt::Display for MkdirError {
         match self {
             Self::Usage => f.write_str("invalid usage"),
             Self::Create { path, errno } => {
-                write!(f, "cannot create directory '{path}': {errno}")
+                write!(
+                    f,
+                    "cannot create directory {path}: {errno}",
+                    path = quote(path)
+                )
             }
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }
@@ -309,7 +314,7 @@ fn report(out: &dyn Output, verbose: bool, path: &str) -> Result<(), MkdirError>
     if !verbose {
         return Ok(());
     }
-    out.write_all(format!("mkdir: created directory '{path}'\n").as_bytes())
+    out.write_all(format!("mkdir: created directory {path}\n", path = quote(path)).as_bytes())
         .map_err(MkdirError::Output)
 }
 

@@ -4,7 +4,7 @@ cp — copiar archivos y directorios
 
 ## SYNOPSIS
 
-`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -35,6 +35,12 @@ atributos que un destino no puede guardar se notifican en un único aviso al
 terminar la ejecución, y en un registro `omission` en el flujo de
 información estándar; con `--preserve=xattr` esa copia falla en su lugar.
 
+Un directorio nunca se copia dentro de sí mismo: un destino dentro del
+origen — se escriba como se escriba, a través de un enlace, un `..` u
+otro nombre del volumen — se rechaza antes de escribir nada, y un
+directorio movido al origen mientras dura la copia detiene la copia
+donde el recorrido lo encuentra.
+
 ## OPTIONS
 
 - `-r, -R, --recursive` — copiar directorios y su contenido.
@@ -50,10 +56,17 @@ información estándar; con `--preserve=xattr` esa copia falla en su lugar.
   necesitando `-r`.
 - `-s, --symbolic-link` — crear un enlace simbólico que nombre la fuente
   en lugar de copiarla.
-- `-P, --no-dereference` — reproducir una fuente que es enlace simbólico
-  como un enlace que almacena el mismo destino, literalmente, en lugar de
-  copiar lo que nombra (así un enlace relativo o roto sobrevive a la
-  copia). Sin ella se sigue un enlace de origen.
+- `-P, --no-dereference` — reproducir cada enlace simbólico de las
+  fuentes como un enlace con el mismo destino, literalmente, en lugar de
+  copiar aquello a lo que apunta (así un enlace relativo o colgante
+  sobrevive a la copia).
+- `-L, --dereference` — seguir cada enlace simbólico de las fuentes y
+  copiar aquello a lo que apunta.
+- `-H` — seguir un enlace simbólico nombrado como operando, pero
+  reproducir los que aparecen dentro de un árbol. Sin `-H`, `-L` ni
+  `-P`, una copia recursiva reproduce cada enlace, también los de sus
+  operandos, y cualquier otra copia sigue los enlaces de sus operandos,
+  como la de GNU; `-l` enlaza aquello a lo que apunta un enlace seguido.
 - `--preserve=links` — dos fuentes que nombran un mismo nodo obtienen dos
   nombres en el destino en lugar de dos copias, de modo que la copia no
   duplica el almacenamiento en silencio.

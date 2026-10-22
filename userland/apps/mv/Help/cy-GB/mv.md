@@ -14,12 +14,15 @@ lwybr hwnnw. Pan fo'r gyrchfan yn enwi cyfeiriadur sy'n bodoli — a bob
 amser pan fo mwy nag un ffynhonnell — symudir pob ffynhonnell *i mewn*
 i'r cyfeiriadur hwnnw o dan ei henw sail ei hun.
 
-Ailenwad atomig sy'n cadw hunaniaeth y nod yw symudiad o fewn un
-gyfrol. Ni all symudiad y mae ei ffynhonnell a'i gyrchfan ar gyfrolau
-gwahanol fod yn atomig: mae'n syrthio'n ôl ar gopïo'r ffynhonnell i'r
-gyrchfan ac yna dileu'r ffynhonnell (atgynhyrchir cyfeiriaduron yn
-ailadroddus).
-Caiff ffeil y mae ei chopïo'n methu ei dileu, a chedwir y ffynhonnell.
+Mae symudiad o fewn un gyfrol yn ailenwi atomig sy'n cadw hunaniaeth y
+nod. Mae symudiad ar draws cyfrolau yn cadw'r un addewid: caiff y copi
+ei adeiladu wrth ochr y gyrchfan, ei ysgrifennu i'r ddisg a'i ailenwi
+i'w le mewn un cam, a dim ond wedyn y caiff y ffynhonnell ei dileu —
+felly mae'r gyrchfan yn dal yr hyn a ddaliai nes bod y symudiad yn
+gyfan, ac nid yw methiant na chwalfa yn colli dim. Yn y naill achos
+neu'r llall, dim ond cyfeiriadur gwag y mae cyfeiriadur yn ei ddisodli,
+nid oes dim arall yn disodli cyfeiriadur, ac nid oes cyfeiriadur yn
+symud i'w is-goeden ei hun.
 
 Trosysgrifir cyrchfan sy'n bodoli yn ragosodedig, fe'i hepgorir o dan
 `-n`, a gofynnir amdani ar ffrwd y gwall safonol o dan `-i` (mae
@@ -28,23 +31,27 @@ ateb annarllenadwy byth fel cydsyniad). Mae'r methiant cyntaf yn atal
 y rhediad cyn unrhyw operand diweddarach. Mae `--` yn gorffen dosrannu
 opsiynau: mae pob ymresymiad diweddarach yn llwybr.
 
-Mae'r copi'n cario tyllau a phriodoleddau estynedig pob ffeil — math ffeil
-RISC OS, math a chrëwr Mac — lle bynnag y gall y cyrchfan eu cadw, ac mae'n
-symud dolen symbolaidd fel dolen sy'n storio'r un targed, byth yr hyn y mae'n
-ei henwi. Adroddir y priodoleddau na all y cyrchfan eu cadw mewn un rhybudd pan
-ddaw'r rhediad i ben, ac mewn cofnod `omission` ar y ffrwd wybodaeth safonol.
+Mae'r copi'n cario tyllau pob ffeil, ei phriodoleddau estynedig — math
+ffeil RISC OS, math a chrëwr Mac — ei did caniatâd a'i pherchennog lle
+bynnag y mae'r gyrchfan yn eu cadw, ac mae'n symud dolen symbolaidd fel
+dolen sy'n storio'r un targed, byth yr hyn y mae'n ei enwi. Daw ffeil na
+chaiff y symudwr ei rhoi'n ôl i'w pherchennog yn eiddo i'r symudwr, heb
+ei didau set-ID. Ni chaiff stampiau amser eu cario: nid oes galwad ar y
+system hon sy'n eu gosod. Adroddir y priodoleddau na all y gyrchfan eu
+cadw mewn un rhybudd pan ddaw'r rhediad i ben, ac mewn cofnod `omission`
+ar y ffrwd wybodaeth safonol, cyn i'r ffynonellau ddiflannu am byth.
 
 ## OPTIONS
 
-- `-f, --force` — dileu cyrchfan sy'n rhwystro a cheisio'r ailenwad
-  eto; peidio byth â holi. Y diweddaraf o `-f`, `-i` ac `-n` sy'n
-  ennill.
+- `-f, --force` — peidio byth â gofyn cyn trosysgrifo. Mae'r olaf o
+  `-f`, `-i` a `-n` yn ennill.
 - `-i, --interactive` — gofyn cyn trosysgrifo cyrchfan sy'n bodoli;
   dim ond ateb yn dechrau ag `y`/`Y` sy'n cydsynio.
 - `-n, --no-clobber` — peidio byth â throsysgrifo cyrchfan sy'n
   bodoli.
-- `-v, --verbose` — adrodd am bob symudiad fel
-  `renamed 'source' -> 'dest'`.
+- `-v, --verbose` — adrodd pob symudiad fel
+  `renamed 'source' -> 'dest'`, a symudiad ar draws cyfrolau fel
+  `copied 'source' -> 'dest'` ac yna `removed 'source'`.
 - `-t dir, --target-directory=dir` — symud pob ffynhonnell i `dir`, y
   mae'n rhaid iddo fod yn gyfeiriadur sy'n bodoli. Daw'r gwerth
   ynghlwm (`-tdir`, `--target-directory=dir`) neu fel yr ymresymiad

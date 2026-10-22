@@ -231,7 +231,10 @@ thin `fs_open`/`fs_close`/`fs_read`/`fs_write`/`fs_readdir`/`fs_stat_raw`/
 `fs_truncate`/`fs_sync`/`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_symlink`/
 `fs_readlink` wrappers over the `abi-v1` syscalls, the working-directory pair (`fs_chdir`/`fs_getcwd`, against
 which relative paths resolve, `plans/SHELL.md` P2), plus the
-ergonomic `File` and `Dir` handles a program normally uses.
+ergonomic `File` and `Dir` handles a program normally uses. `realpath` and
+`readlink` answer a path's resolution and a link's stored target as owned
+text, growing the answer buffer fallibly to the kernel's bound, so no tool
+sizes one of its own.
 `File` is the one **owning** descriptor handle, whatever its backing (a path, a
 resource reference, a pipe end, a pty end — the close trap releases any of
 them), and it releases the descriptor on `Drop`, so a handle is never leaked.
@@ -260,6 +263,10 @@ or torn file: the bytes go to a sibling temporary named for that replace alone,
 which takes the original's extended attributes (through the copy engine, every
 one or the replace is refused), owner, group and mode, is synced, and is
 renamed over the original, and a second sync puts the rename on the medium.
+`staging_name` draws that sibling's name — `<name>.<16 hex digits>.new`, or
+`.<16 hex digits>.new` in the same directory when the name would outgrow a
+component — for any program that builds a replacement itself, as `mv` builds
+a cross-volume move, so every staged replacement is spelled alike.
 `ParentDir::CreatedIfMissing` creates the document's directory only when the
 replace finds it missing. A file's ACL and capability gate are not visible to
 a program, so neither survives a replace: it is not for a file carrying
@@ -267,9 +274,10 @@ either.
 
 The `copy` module is the shared copy engine's seams (`lib/fscopy`) over this
 runtime: `RtFile` reads and writes an open `File` with its holes,
-`RtAttributes` reads and sets a path's extended attributes, and `OpenFiles`
+`RtAttributes` reads and sets a path's extended attributes, `OpenFiles`
 keeps one source and one destination open by path between a copying tool's
-chunks.
+chunks, and `RtAncestry` answers the containment check's resolutions and
+identities.
 
 `File::open` is the one **open-by-name** path, and it applies the shared
 `lib/resref` spelling rule (`names_resource_reference`) before any lookup: a

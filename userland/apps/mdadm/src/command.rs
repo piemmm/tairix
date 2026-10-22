@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::raid::RaidLevel;
+use tairix_util::quote::quote;
 
 /// A fully parsed `mdadm` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -151,30 +152,46 @@ impl fmt::Display for ParseError {
                 "no mode given: use one of --create, --detail, --examine, --add, --remove, --stop",
             ),
             Self::ConflictingModes => f.write_str("only one mode may be given"),
-            Self::UnknownOption(opt) => write!(f, "unknown option '{opt}'"),
-            Self::MissingValue(opt) => write!(f, "option '{opt}' requires a value"),
-            Self::BadLevel(value) => write!(f, "'{value}' is not a RAID level"),
+            Self::UnknownOption(opt) => write!(f, "unknown option {opt}", opt = quote(opt)),
+            Self::MissingValue(opt) => write!(f, "option {opt} requires a value", opt = quote(opt)),
+            Self::BadLevel(value) => write!(f, "{value} is not a RAID level", value = quote(value)),
             Self::LevelNotSupported(value) => {
-                write!(f, "RAID level '{value}' is not supported")
+                write!(
+                    f,
+                    "RAID level {value} is not supported",
+                    value = quote(value)
+                )
             }
             Self::BadRaidDevices(value) => {
-                write!(f, "'{value}' is not a positive device count")
+                write!(
+                    f,
+                    "{value} is not a positive device count",
+                    value = quote(value)
+                )
             }
-            Self::BadChunk(value) => write!(f, "'{value}' is not a block count"),
+            Self::BadChunk(value) => {
+                write!(f, "{value} is not a block count", value = quote(value))
+            }
             Self::MissingLevel => f.write_str("--create requires --level"),
             Self::MissingRaidDevices => f.write_str("--create requires --raid-devices"),
             Self::ChunkNotAllowed => {
                 f.write_str("--chunk applies only to a striped level (raid0/5/6/10/tp)")
             }
             Self::OptionNotAllowed { option, mode } => {
-                write!(f, "option '{option}' is not valid with {mode}")
+                write!(
+                    f,
+                    "option {option} is not valid with {mode}",
+                    option = quote(option)
+                )
             }
             Self::DeviceCountMismatch { expected, got } => write!(
                 f,
                 "--raid-devices={expected} but {got} device(s) were given"
             ),
             Self::MissingOperand(what) => write!(f, "missing {what}"),
-            Self::UnexpectedOperand(value) => write!(f, "unexpected operand '{value}'"),
+            Self::UnexpectedOperand(value) => {
+                write!(f, "unexpected operand {value}", value = quote(value))
+            }
         }
     }
 }

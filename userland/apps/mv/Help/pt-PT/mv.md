@@ -14,12 +14,14 @@ caminho exato. Quando o destino nomeia um diretório existente — e
 sempre que há mais de uma origem — cada origem é movida *para dentro*
 desse diretório sob o seu próprio nome base.
 
-Um movimento dentro de um volume é um renomeamento atómico que
-preserva a identidade do nó. Um movimento cuja origem e destino estão
-em volumes diferentes não pode ser atómico: recorre a copiar a origem
-para o destino e depois remover a origem (os diretórios são
-reproduzidos recursivamente).
-Um ficheiro cuja cópia falha é removido, e a origem mantém-se.
+Um movimento dentro de um volume é uma mudança de nome atómica que
+preserva a identidade do nó. Um movimento entre volumes cumpre a mesma
+promessa: a cópia é construída ao lado do destino, escrita no disco e
+renomeada para o seu lugar num só passo, e só então a origem é removida
+— assim o destino guarda o que continha até o movimento estar completo,
+e nem uma falha nem uma queda perdem nada. Em ambos os casos, um
+diretório só substitui um diretório vazio, nada mais substitui um
+diretório e nenhum diretório é movido para a sua própria subárvore.
 
 Um destino existente é sobrescrito por omissão, saltado com `-n`, e
 perguntado no fluxo de erro padrão com `-i` (uma pergunta recusada
@@ -28,23 +30,27 @@ como consentimento). A primeira falha para a execução antes de
 qualquer operando posterior. `--` termina a análise de opções: cada
 argumento posterior é um caminho.
 
-A cópia leva os buracos e os atributos estendidos de cada ficheiro — um tipo
-de ficheiro RISC OS, o tipo e o criador de um Mac — onde quer que o destino os
-possa guardar, e move uma ligação simbólica como uma ligação com o mesmo
-destino, nunca aquilo que ela designa. Os atributos que o destino não pode
-guardar são comunicados num único aviso no fim da execução, e num registo
-`omission` no fluxo de informação padrão.
+A cópia preserva os buracos de cada ficheiro, os seus atributos
+estendidos — um tipo de ficheiro RISC OS, um tipo e um criador Mac —, as
+permissões e o dono sempre que o destino os guarde, e move uma ligação
+simbólica como uma ligação com o mesmo destino, nunca aquilo para que
+aponta. Um ficheiro que quem o move não pode devolver ao seu dono passa
+a ser seu, sem os bits set-ID. As marcas temporais não são preservadas:
+nenhuma chamada deste sistema as define. Os atributos que o destino não
+consegue guardar são relatados num único aviso no fim da execução, e num
+registo `omission` no fluxo de informação padrão, antes de as origens
+desaparecerem de vez.
 
 ## OPTIONS
 
-- `-f, --force` — remover um destino que bloqueia e tentar o
-  renomeamento de novo; nunca perguntar. O mais tardio de `-f`, `-i` e
-  `-n` vence.
+- `-f, --force` — nunca perguntar antes de substituir. Prevalece o
+  último de `-f`, `-i` e `-n`.
 - `-i, --interactive` — perguntar antes de sobrescrever um destino
   existente; só uma resposta a começar por `y`/`Y` consente.
 - `-n, --no-clobber` — nunca sobrescrever um destino existente.
-- `-v, --verbose` — reportar cada movimento como
-  `renamed 'source' -> 'dest'`.
+- `-v, --verbose` — relatar cada movimento como
+  `renamed 'source' -> 'dest'`, e um movimento entre volumes como
+  `copied 'source' -> 'dest'` e depois `removed 'source'`.
 - `-t dir, --target-directory=dir` — mover todas as origens para
   `dir`, que tem de ser um diretório existente. O valor segue colado
   (`-tdir`, `--target-directory=dir`) ou como o argumento seguinte.

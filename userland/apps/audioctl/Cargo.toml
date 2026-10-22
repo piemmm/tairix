@@ -31,6 +31,8 @@ tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The bundle's own help, rendered by the one help engine.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The one quoting of an operand in a message.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # The freestanding `Run` binary alone links the runtime and the live seams:
 # the audio service's transport, the System Information API's, and the

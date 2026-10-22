@@ -19,14 +19,17 @@ use crate::request::{call, CallError};
 use crate::transport::Transport;
 
 /// Decode an inline byte field for display, substituting `U+FFFD` for any
-/// invalid byte rather than failing.
+/// invalid byte rather than failing, and for any character that would hide or
+/// rewrite what is shown around it ([`tairix_util::utf8::shown`]): a volume's
+/// label or a process's name is not the system's to vouch for, and must never
+/// reach a terminal as a command.
 ///
 /// Shared by the process and mount row renderers (and consumers such as
 /// `top`'s own row layout) so none re-implements lossy decoding; a display
 /// routine never panics on hostile bytes.
 #[must_use]
 pub fn field_lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+    tairix_util::utf8::shown(&String::from_utf8_lossy(bytes)).into_owned()
 }
 
 /// Why a paged sysinfo list walk did not complete.
@@ -195,13 +198,20 @@ pub fn walk_pages_with<const N: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::{walk_pages, walk_pages_with, ListError, WalkStep};
+    use super::{field_lossy, walk_pages, walk_pages_with, ListError, WalkStep};
     use crate::request::CallError;
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{PageRequest, SysinfoQueryId, SysinfoRequestHeader};
     use tairix_abi::Errno;
+
+    #[test]
+    fn a_field_shows_what_would_hide_or_command_the_terminal() {
+        assert_eq!(field_lossy(b"STICK\x1b[2J\xff"), "STICK\u{fffd}[2J\u{fffd}");
+        assert_eq!(field_lossy("a\u{202e}b".as_bytes()), "a\u{fffd}b");
+        assert_eq!(field_lossy(b"/Storage/USB"), "/Storage/USB");
+    }
 
     /// One record per byte value, so a page's worth of records is trivially
     /// countable and the paging arithmetic is what is under test.

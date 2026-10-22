@@ -68,6 +68,7 @@ use tairix_help::{own_short_help, HelpSource};
 use tairix_net::addr::IpAddr;
 use tairix_net::dns::{LookupType, Name, Resolution, ResolveStatus};
 use tairix_resolver::ResolveError;
+use tairix_util::quote::quote;
 
 /// The one-line usage banner, printed on a usage error and as the fallback
 /// when the bundled help document is unavailable.
@@ -140,11 +141,12 @@ impl fmt::Display for ParseError {
         match self {
             Self::MissingName => f.write_str("a name to look up is required"),
             Self::TooManyOperands => f.write_str("only one name may be given"),
-            Self::UnknownOption(opt) => write!(f, "unknown option '{opt}'"),
+            Self::UnknownOption(opt) => write!(f, "unknown option {opt}", opt = quote(opt)),
             Self::UnknownType(ty) => {
                 write!(
                     f,
-                    "unsupported record type '{ty}' (only A, AAAA, and PTR are supported)"
+                    "unsupported record type {ty} (only A, AAAA, and PTR are supported)",
+                    ty = quote(ty)
                 )
             }
             Self::MissingTypeValue => f.write_str("option '-t' requires a record type"),
@@ -358,7 +360,10 @@ fn render_resolution(
 /// Render a hard resolver failure as a diagnostic on standard error.
 fn render_error(name: &str, error: ResolveError, err: &dyn Output) -> Result<(), Errno> {
     let line = match error {
-        ResolveError::InvalidName(_) => format!("host: '{name}' is not a valid domain name\n"),
+        ResolveError::InvalidName(_) => format!(
+            "host: {name} is not a valid domain name\n",
+            name = quote(name)
+        ),
         other => format!("host: {other}\n"),
     };
     err.write_all(line.as_bytes())

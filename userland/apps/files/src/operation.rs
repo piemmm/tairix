@@ -247,11 +247,17 @@ pub const fn remove_refusal(error: Errno) -> &'static str {
     }
 }
 
+/// Why a folder could not be pasted where its own copy, or itself, would
+/// land inside it.
+pub const INTO_ITSELF: &str = "a folder cannot be put inside itself";
+
 /// Why an item could not be renamed into place, from the kernel's answer.
 #[must_use]
 pub const fn move_refusal(error: Errno) -> &'static str {
     match error {
         Errno::AlreadyExists => "an item with that name appeared at the destination",
+        // A rename's only range refusal: a folder into its own subtree.
+        Errno::OutOfRange => INTO_ITSELF,
         Errno::PermissionDenied => "it may not be moved",
         Errno::ReadOnly => "its volume is read-only",
         Errno::NotFound => "it was no longer there",

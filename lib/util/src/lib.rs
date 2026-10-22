@@ -75,6 +75,10 @@
 //! * [`output`] — the byte stream a command engine writes through, consumed
 //!   by the command apps' engines and implemented for the standard streams
 //!   by `lib/rt`.
+//! * [`quote`] — GNU coreutils' quoting styles, consumed by `ls`'s listing,
+//!   `printf`'s `%q` and every command app that names a file in a message,
+//!   so a name a foreign volume carries is written by one rule and never
+//!   reaches a terminal raw.
 //! * [`report`] — a file's structure as a person reads it, bounded against the
 //!   untrusted bytes it is built from, consumed by the picture reports
 //!   (`lib/image`) and the executable reports (`lib/binfmt`), so every report a
@@ -126,6 +130,7 @@ pub mod join;
 pub mod lanes;
 pub mod mathf;
 pub mod output;
+pub mod quote;
 pub mod report;
 pub mod retry;
 pub mod seconds;

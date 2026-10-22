@@ -33,7 +33,11 @@ Stability tier: **experimental** (the surface grows stage by stage under
 
 Each `Op` and `Sgr` has exactly one canonical byte encoding, so parsing the
 emitter's output reproduces the original operation. This is the §2.2 "one
-vocabulary" guarantee made testable:
+vocabulary" guarantee made testable. The one exception is `Op::Print` of a
+control character: a control is no glyph, every one a terminal acts on has an
+`Op` of its own, and a UTF-8 terminal obeys a C1 control as it obeys its
+escape, so the emitter prints U+FFFD and text from elsewhere — a TUI's cells, a
+help document, the shell's line — never reaches a terminal as a command:
 
 ```rust
 use tairix_vt::{encode, BasicColor, Color, Op, Parser, Sgr};

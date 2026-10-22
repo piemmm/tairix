@@ -87,24 +87,42 @@ pub fn shown(text: &str) -> alloc::borrow::Cow<'_, str> {
     if !text.chars().any(is_hidden) {
         return alloc::borrow::Cow::Borrowed(text);
     }
-    alloc::borrow::Cow::Owned(
-        text.chars()
-            .map(|ch| {
-                if is_hidden(ch) {
-                    char::REPLACEMENT_CHARACTER
-                } else {
-                    ch
-                }
-            })
-            .collect(),
-    )
+    alloc::borrow::Cow::Owned(alloc::format!("{}", Shown(text)))
+}
+
+/// `T` displayed as [`shown`] shows text, formatted straight into its
+/// destination: a diagnostic quoting text from elsewhere needs no allocation
+/// to be safe to print.
+#[derive(Clone, Copy, Debug)]
+pub struct Shown<T>(pub T);
+
+impl<T: core::fmt::Display> core::fmt::Display for Shown<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Write::write_fmt(&mut Replacing(f), format_args!("{}", self.0))
+    }
+}
+
+struct Replacing<'a, 'b>(&'a mut core::fmt::Formatter<'b>);
+
+impl core::fmt::Write for Replacing<'_, '_> {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let mut run = 0;
+        for (at, ch) in text.char_indices() {
+            if is_hidden(ch) {
+                self.0.write_str(&text[run..at])?;
+                self.0.write_char(char::REPLACEMENT_CHARACTER)?;
+                run = at + ch.len_utf8();
+            }
+        }
+        self.0.write_str(&text[run..])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use core::cmp::Ordering;
 
-    use super::{fold, folded, is_hidden, reader_order, sequence_len, shown};
+    use super::{fold, folded, is_hidden, reader_order, sequence_len, shown, Shown};
 
     #[test]
     fn a_name_is_shown_with_what_hides_in_it_made_visible() {
@@ -119,6 +137,16 @@ mod tests {
             shown("a\u{200b}b"),
             "two names that differ never look alike"
         );
+    }
+
+    #[test]
+    fn a_formatted_reason_shows_what_hides_in_any_of_its_parts() {
+        let name = "a\u{1b}[2Jb";
+        assert_eq!(
+            alloc::format!("{}", Shown(format_args!("cannot open {name}: {}", 7))),
+            "cannot open a\u{fffd}[2Jb: 7"
+        );
+        assert_eq!(alloc::format!("{}", Shown("plain")), "plain");
     }
 
     #[test]

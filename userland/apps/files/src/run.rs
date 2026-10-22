@@ -211,7 +211,7 @@ mod program {
         attribute_refusal, change_refusal, completion_closes_at, confirmation_may_open,
         create_refusal, empty_confirmation_may_open, item_refusal, mode_flip_allowed, move_refusal,
         progress_control, progress_due, read_refusal, remove_refusal, trash_read_refusal, BarPace,
-        ProgressControl,
+        ProgressControl, INTO_ITSELF,
     };
     use crate::operations::{run_slice, Ending, Finished, OperationDesk, Reading, Refusal, Step};
     use crate::preferences::Preferences;
@@ -222,7 +222,7 @@ mod program {
     use tairix_fscopy::{
         copy_attributes, DataCopy, DataError, Omissions, Refusal as Unkept, Sparse,
     };
-    use tairix_rt::copy::{RtAttributes, RtFile};
+    use tairix_rt::copy::{RtAncestry, RtAttributes, RtFile};
 
     /// Exit code when the initial directory listing was refused (no
     /// filesystem reach, or a corrupt stream). A reserved, fail-closed
@@ -4052,13 +4052,9 @@ mod program {
     fn recreate_link(source: &[String], dest: &[String]) -> Result<(), &'static str> {
         let from = spell_path(source)?;
         let to = spell_path(dest)?;
-        let mut buf = alloc::vec![0u8; tairix_abi::fs::FS_SYMLINK_MAX];
-        let read = tairix_rt::fs_readlink(from.as_bytes(), &mut buf);
-        let len = usize::try_from(read).map_err(|_| "a shortcut's target could not be read")?;
-        let target = buf
-            .get(..len)
-            .ok_or("a shortcut's target could not be read")?;
-        if tairix_rt::fs_symlink(target, to.as_bytes()) != 0 {
+        let target =
+            tairix_rt::readlink(&from).map_err(|_| "a shortcut's target could not be read")?;
+        if tairix_rt::fs_symlink(target.as_bytes(), to.as_bytes()) != 0 {
             return Err("a shortcut could not be recreated");
         }
         Ok(())
@@ -8222,6 +8218,10 @@ mod program {
         writing: Option<String>,
         /// The extended attributes its copies' destinations could not keep.
         omissions: Omissions,
+        /// The folder the item in hand was copied to first. Every folder the
+        /// copy makes lies beneath it, so a walk that would enter it as a
+        /// source would copy its own copy, and stops there instead.
+        own_copy: Option<tairix_abi::FileId>,
     }
 
     /// The stage of the item a [`Paste`] is currently carrying out.
@@ -8388,6 +8388,7 @@ mod program {
                 buf: alloc::vec::Vec::new(),
                 writing: None,
                 omissions: Omissions::default(),
+                own_copy: None,
             }
         }
 
@@ -8520,7 +8521,23 @@ mod program {
             let Some(dest_vol) = self.dest_vol else {
                 return StepOutcome::Failed("the destination folder could not be read");
             };
-            match paste_strategy(self.op, source_vol, dest_vol) {
+            let strategy = paste_strategy(self.op, source_vol, dest_vol);
+            // The plan's test is of the paths as navigated; this one is of
+            // what the kernel resolves them to, so a link on the way to the
+            // destination cannot hide the source.
+            if is_directory && strategy != PasteStrategy::Rename {
+                let (Ok(from), Ok(to)) = (spell_path(&source), spell_path(&dest)) else {
+                    return StepOutcome::Failed("a path could not be spelled");
+                };
+                match tairix_fscopy::landing(&RtAncestry, &from, stat.id, &to) {
+                    Ok(tairix_fscopy::Landing::Apart) => {}
+                    Ok(_) => return StepOutcome::Failed(INTO_ITSELF),
+                    Err(_) => {
+                        return StepOutcome::Failed("the destination folder could not be read");
+                    }
+                }
+            }
+            match strategy {
                 PasteStrategy::Rename => match rename_item(&source, &dest) {
                     Ok(()) => {
                         self.done += 1;
@@ -8544,6 +8561,7 @@ mod program {
             then_delete: Option<(alloc::vec::Vec<String>, bool)>,
         ) -> StepOutcome {
             self.writing = spell_path(&dest).ok();
+            self.own_copy = None;
             match CopyWalk::from_items(alloc::vec![(source, dest, kind)]) {
                 Some(walk) => {
                     self.stage = PasteStage::Copying {
@@ -8612,9 +8630,19 @@ mod program {
                         (Ok(spelled), Ok(from)) => (spelled, from),
                         (Err(reason), _) | (_, Err(reason)) => return StepOutcome::Failed(reason),
                     };
+                    if let Some(own) = self.own_copy {
+                        if stat_name(&source).is_some_and(|met| met.id == own) {
+                            return StepOutcome::Failed(INTO_ITSELF);
+                        }
+                    }
                     let made = tairix_rt::fs_mkdir(spelled.as_bytes());
                     if made != 0 {
                         return StepOutcome::Failed(create_refusal(Errno::from_syscall(made)));
+                    }
+                    if self.own_copy.is_none() {
+                        self.own_copy = stat_name(&dest)
+                            .map(|made| made.id)
+                            .filter(|id| !id.is_none());
                     }
                     match carry_attributes(&from, &spelled) {
                         Ok(left) => self.omissions.note(&left),

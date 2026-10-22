@@ -268,9 +268,18 @@ fn bracketed_paste_ops_round_trip() {
 #[test]
 fn printable_and_unicode_chars_round_trip() {
     for ch in [
-        'A', 'z', '0', ' ', '~', '!', 'é', 'ß', '€', '中', '🦀', '\u{85}',
+        'A', 'z', '0', ' ', '~', '!', 'é', 'ß', '€', '中', '🦀', '\u{a0}',
     ] {
         assert_round_trip(Op::Print(ch));
+    }
+}
+
+/// A UTF-8 terminal acts on a C1 control as on its escape, so neither may
+/// be printed as itself.
+#[test]
+fn a_control_character_is_never_printed_as_itself() {
+    for ch in ['\u{0}', '\u{7}', '\u{1b}', '\u{7f}', '\u{85}', '\u{9b}'] {
+        assert_eq!(encode(&Op::Print(ch)), "\u{fffd}".as_bytes(), "{ch:?}");
     }
 }
 

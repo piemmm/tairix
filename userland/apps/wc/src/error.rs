@@ -3,6 +3,7 @@
 use alloc::string::String;
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_util::quote::quote;
 
 /// Why a `wc` invocation did not complete.
 ///
@@ -34,13 +35,27 @@ pub enum WcError {
 impl fmt::Display for WcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => write!(f, "unrecognized option '{token}'"),
-            Self::UnknownShort(flag) => write!(f, "invalid option -- '{flag}'"),
-            Self::InvalidTotal(text) => write!(f, "invalid argument '{text}' for '--total'"),
+            Self::UnknownLong(token) => {
+                write!(f, "unrecognized option {token}", token = quote(token))
+            }
+            Self::UnknownShort(flag) => write!(
+                f,
+                "invalid option -- {}",
+                quote(flag.encode_utf8(&mut [0; 4]))
+            ),
+            Self::InvalidTotal(text) => write!(
+                f,
+                "invalid argument {text} for '--total'",
+                text = quote(text)
+            ),
             Self::Files0Conflict => {
                 f.write_str("file operands cannot be combined with --files0-from")
             }
-            Self::MissingValue(option) => write!(f, "option '{option}' requires an argument"),
+            Self::MissingValue(option) => write!(
+                f,
+                "option {option} requires an argument",
+                option = quote(option)
+            ),
             Self::Output(errno) => write!(f, "write error: {errno}"),
         }
     }

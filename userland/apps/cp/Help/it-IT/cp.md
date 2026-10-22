@@ -4,7 +4,7 @@ cp — copiare file e directory
 
 ## SYNOPSIS
 
-`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -36,6 +36,12 @@ unico avviso al termine dell'esecuzione, e in un record `omission` sul
 flusso di informazioni standard; con `--preserve=xattr` una copia del genere
 fallisce invece.
 
+Una directory non viene mai copiata dentro sé stessa: una destinazione
+dentro la sorgente — comunque sia scritta, attraverso un collegamento,
+un `..` o un altro nome del volume — viene rifiutata prima che si scriva
+alcunché, e una directory spostata nella sorgente durante la copia ferma
+la copia dove la visita la incontra.
+
 ## OPTIONS
 
 - `-r, -R, --recursive` — copiare le directory e il loro contenuto.
@@ -51,11 +57,18 @@ fallisce invece.
   richiede comunque `-r`.
 - `-s, --symbolic-link` — creare un collegamento simbolico che nomina la
   sorgente invece di copiarla.
-- `-P, --no-dereference` — riprodurre una sorgente che è collegamento
-  simbolico come un collegamento che memorizza lo stesso bersaglio, alla
-  lettera, invece di copiare ciò che nomina (così un collegamento
-  relativo o pendente sopravvive alla copia). Senza di essa un
-  collegamento sorgente è seguito.
+- `-P, --no-dereference` — riprodurre ogni collegamento simbolico tra le
+  sorgenti come un collegamento con la stessa destinazione, alla
+  lettera, invece di copiare ciò a cui punta (così un collegamento
+  relativo o pendente sopravvive alla copia).
+- `-L, --dereference` — seguire ogni collegamento simbolico tra le
+  sorgenti e copiare ciò a cui punta.
+- `-H` — seguire un collegamento simbolico indicato come operando, ma
+  riprodurre quelli incontrati dentro un albero. Senza `-H`, `-L` o
+  `-P`, una copia ricorsiva riproduce ogni collegamento, compresi quelli
+  dei suoi operandi, e ogni altra copia segue i collegamenti dei suoi
+  operandi, come quella di GNU; `-l` collega ciò a cui punta un
+  collegamento seguito.
 - `--preserve=links` — due sorgenti che nominano un solo nodo ottengono
   due nomi alla destinazione invece di due copie, così la copia non
   raddoppia in silenzio lo spazio.

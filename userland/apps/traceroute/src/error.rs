@@ -6,6 +6,7 @@ use core::fmt;
 use tairix_abi::Errno;
 use tairix_net::trace::TraceConfigError;
 use tairix_resolver::TargetFailure;
+use tairix_util::quote::quote_if_needed;
 
 /// A failure that defeats the trace, reported with its reason on standard
 /// error.
@@ -35,7 +36,9 @@ pub enum TraceError {
 impl fmt::Display for TraceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Resolve { host, reason } => write!(f, "{host}: {reason}"),
+            Self::Resolve { host, reason } => {
+                write!(f, "{host}: {reason}", host = quote_if_needed(host))
+            }
             Self::Config(error) => write!(f, "the probes cannot be configured: {error}"),
             Self::Denied => f.write_str(
                 "opening an ICMP echo socket requires CAP_NET and CAP_NET_RAW, \

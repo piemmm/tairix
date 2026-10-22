@@ -386,3 +386,21 @@ fn the_temporary_is_a_tagged_sibling() {
         "two replaces never share a temporary"
     );
 }
+
+#[test]
+fn a_name_too_long_to_carry_the_tag_is_staged_under_the_tag_alone() {
+    let mut long = b"/Settings/".to_vec();
+    long.resize(long.len() + tairix_abi::fs::FS_NAME_MAX, b'n');
+    assert_eq!(
+        staged_path(&long, TAG).expect("fits"),
+        b"/Settings/.0f0f0f0f0f0f0f0f.new".to_vec()
+    );
+    let mut fitting = b"/Settings/".to_vec();
+    fitting.resize(fitting.len() + tairix_abi::fs::FS_NAME_MAX - 21, b'n');
+    let staged = staged_path(&fitting, TAG).expect("fits");
+    assert!(staged.starts_with(&fitting) && staged.ends_with(b".0f0f0f0f0f0f0f0f.new"));
+    assert_eq!(
+        staged.len() - b"/Settings/".len(),
+        tairix_abi::fs::FS_NAME_MAX
+    );
+}

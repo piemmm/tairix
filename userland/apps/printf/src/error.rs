@@ -2,6 +2,7 @@
 
 use alloc::string::String;
 use core::fmt;
+use tairix_util::quote::quote_if_needed;
 
 /// Why a `printf` invocation stopped instead of completing.
 ///
@@ -35,7 +36,11 @@ impl fmt::Display for PrintfError {
         match self {
             Self::MissingOperand => write!(f, "missing operand"),
             Self::InvalidConversion(directive) => {
-                write!(f, "{directive}: invalid conversion specification")
+                write!(
+                    f,
+                    "{directive}: invalid conversion specification",
+                    directive = quote_if_needed(directive)
+                )
             }
             Self::MissingHexEscape => write!(f, "missing hexadecimal number in escape"),
             Self::InvalidUniversal(escape) => {

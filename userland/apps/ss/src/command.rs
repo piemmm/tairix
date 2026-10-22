@@ -18,6 +18,7 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use core::fmt;
+use tairix_util::quote::quote;
 
 /// A parsed `ss` invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,8 +79,10 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option '{opt}'"),
-            Self::UnexpectedOperand(word) => write!(f, "unexpected operand '{word}'"),
+            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
+            Self::UnexpectedOperand(word) => {
+                write!(f, "unexpected operand {word}", word = quote(word))
+            }
         }
     }
 }

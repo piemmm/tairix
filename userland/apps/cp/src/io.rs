@@ -9,7 +9,7 @@
 
 use alloc::string::String;
 use tairix_abi::{Errno, FileId};
-pub use tairix_fscopy::{AttributeStore, PathFiles};
+pub use tairix_fscopy::{Ancestry, AttributeStore, PathFiles};
 
 /// What kind of object a path or directory entry is, as far as `cp` cares.
 ///
@@ -91,8 +91,9 @@ pub struct Entry {
 /// until it returns [`None`] — and recursing.
 /// [`remove_file`](FileSystem::remove_file)
 /// backs `-f`: a destination that cannot be created is removed and the create
-/// retried once.
-pub trait FileSystem: AttributeStore + PathFiles {
+/// retried once. Before a directory is copied, its [`Ancestry`] says whether
+/// the destination lies inside it.
+pub trait FileSystem: AttributeStore + PathFiles + Ancestry {
     /// Describe `path` under the given follow posture.
     ///
     /// Under [`Follow::Target`] a final symbolic link is resolved, so a link

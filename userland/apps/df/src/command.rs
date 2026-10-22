@@ -17,6 +17,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_util::quote::quote;
 use tairix_util::size::{parse_block_size, SizeScale};
 
 /// A parsed `df` invocation.
@@ -91,9 +92,15 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option '{opt}'"),
-            Self::MissingValue(opt) => write!(f, "option '{opt}' requires an argument"),
-            Self::BadBlockSize(value) => write!(f, "invalid --block-size argument '{value}'"),
+            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
+            Self::MissingValue(opt) => {
+                write!(f, "option {opt} requires an argument", opt = quote(opt))
+            }
+            Self::BadBlockSize(value) => write!(
+                f,
+                "invalid --block-size argument {value}",
+                value = quote(value)
+            ),
         }
     }
 }

@@ -10,6 +10,7 @@ use tairix_abi::net::SOCKET_MAX_DATAGRAM;
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_net::trace::{MAX_IN_FLIGHT, MAX_PROBES_PER_HOP};
 use tairix_util::argv::option_value;
+use tairix_util::quote::quote;
 use tairix_util::seconds::parse_seconds;
 
 /// Hops probed by default.
@@ -79,18 +80,26 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option '{opt}'"),
-            Self::MissingValue(opt) => write!(f, "option '{opt}' requires a value"),
+            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
+            Self::MissingValue(opt) => write!(f, "option {opt} requires a value", opt = quote(opt)),
             Self::InvalidValue { option, value } => {
-                write!(f, "invalid value '{value}' for '{option}'")
+                write!(
+                    f,
+                    "invalid value {value} for {option}",
+                    value = quote(value),
+                    option = quote(option)
+                )
             }
             Self::UnsupportedMethod(opt) => write!(
                 f,
-                "option '{opt}' selects a probe method this traceroute does not send; \
-                 it probes with ICMP echo (-I)"
+                "option {opt} selects a probe method this traceroute does not send; \
+                 it probes with ICMP echo (-I)",
+                opt = quote(opt)
             ),
             Self::MissingTarget => f.write_str("no target host given"),
-            Self::ExtraOperand(word) => write!(f, "unexpected extra operand '{word}'"),
+            Self::ExtraOperand(word) => {
+                write!(f, "unexpected extra operand {word}", word = quote(word))
+            }
         }
     }
 }

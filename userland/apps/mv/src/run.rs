@@ -42,14 +42,15 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion};
-    use tairix_abi::{Errno, FileKind, RenameFlags};
+    use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion, FS_MODE_MASK};
+    use tairix_abi::{Errno, FileId, FileKind, RenameFlags};
+    use tairix_hash::{BuildSipHash13, HashSeed};
     use tairix_help::BundleHelp;
     use tairix_mv::{
-        parse, run, AttributeStore, Entry, EntryKind, FileSystem, PathFiles, Prompt, RenameOutcome,
-        USAGE,
+        parse, run, Ancestry, AttributeStore, Entry, EntryKind, FileSystem, Owner, PathFiles,
+        Prompt, RenameOutcome, Seams, USAGE,
     };
-    use tairix_rt::copy::{OpenFiles, RtAttributes};
+    use tairix_rt::copy::{OpenFiles, RtAncestry, RtAttributes};
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_rt::File;
 
@@ -188,17 +189,7 @@ mod program {
         }
 
         fn read_link(&self, path: &str) -> Result<String, Errno> {
-            // The buffer is the ABI's own target bound, so one call always
-            // suffices: a longer target cannot exist.
-            let mut buf = alloc::vec![0u8; tairix_abi::fs::FS_SYMLINK_MAX];
-            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
-            let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
-            let target = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
-            Ok(String::from(target))
+            tairix_rt::readlink(path)
         }
 
         fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {
@@ -255,9 +246,9 @@ mod program {
         }
 
         fn create(&self, path: &str) -> Result<(), Errno> {
-            // Create-or-truncate, then close: the engine writes through
-            // `write`, which re-opens the destination for the stream.
-            let file = tairix_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
+            // An exclusive, no-follow create, then close: the engine writes
+            // through `write`, which re-opens the file for the stream.
+            let file = tairix_rt::create_new(path.as_bytes()).map_err(Errno::from_syscall)?;
             drop(file);
             self.forget(path);
             Ok(())
@@ -284,6 +275,53 @@ mod program {
             }
             self.forget(path);
             Ok(())
+        }
+
+        fn owner(&self, path: &str) -> Result<Owner, Errno> {
+            let file =
+                File::open(path.as_bytes(), OpenFlags::NO_FOLLOW).map_err(Errno::from_syscall)?;
+            let stat = file.stat().map_err(Errno::from_syscall)?;
+            Ok(Owner {
+                mode: stat.mode & FS_MODE_MASK,
+                uid: stat.uid,
+                gid: stat.gid,
+            })
+        }
+
+        fn set_mode(&self, path: &str, mode: u32) -> Result<(), Errno> {
+            match tairix_rt::fs_set_mode(path.as_bytes(), mode) {
+                0 => Ok(()),
+                ret => Err(Errno::from_syscall(ret)),
+            }
+        }
+
+        fn set_owner(&self, path: &str, uid: u32, gid: u32) -> Result<(), Errno> {
+            match tairix_rt::fs_set_owner(path.as_bytes(), uid, gid) {
+                0 => Ok(()),
+                ret => Err(Errno::from_syscall(ret)),
+            }
+        }
+
+        fn staging_name(&self, target: &str) -> Result<String, Errno> {
+            tairix_rt::staging_name(target)
+        }
+
+        fn sync(&self, path: &str) -> Result<(), Errno> {
+            File::open(path.as_bytes(), OpenFlags::NO_FOLLOW)
+                .and_then(|file| file.sync())
+                .map_err(Errno::from_syscall)
+        }
+    }
+
+    /// The kernel's own resolution and identities, through the shared
+    /// runtime-backed seam.
+    impl Ancestry for RtFileSystem {
+        fn canonical(&self, path: &str) -> Result<String, Errno> {
+            RtAncestry.canonical(path)
+        }
+
+        fn identity(&self, path: &str) -> Result<FileId, Errno> {
+            RtAncestry.identity(path)
         }
     }
 
@@ -360,15 +398,16 @@ mod program {
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
-        match run(
-            command,
-            locale,
-            &RtFileSystem::new(),
-            &RtPrompt,
-            &BundleHelp::new("mv"),
-            &Stdout,
-            &Stderr,
-        ) {
+        let seams = Seams {
+            fs: &RtFileSystem::new(),
+            prompt: &RtPrompt,
+            help: &BundleHelp::new("mv"),
+            out: &Stdout,
+            diagnostics: &Stderr,
+            // Without a key the record is predictable, never absent.
+            keys: BuildSipHash13::with_seed(tairix_rt::hash_seed().unwrap_or(HashSeed::UNKEYED)),
+        };
+        match run(command, locale, seams) {
             Ok(()) => 0,
             Err(err) => {
                 write_stderr_line(&format!("mv: {err}"));

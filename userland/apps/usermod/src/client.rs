@@ -13,6 +13,7 @@ use tairix_useradmin::{account, parse_grants, refusal, submit, Account, AdminCha
 use crate::command::{Changes, Command, Lock};
 
 pub use tairix_util::output::Output;
+use tairix_util::quote::quote;
 
 /// Which operation a run was on when it stopped.
 ///
@@ -78,7 +79,7 @@ impl fmt::Display for RunError {
                 Ok(())
             }
             Self::NoSuchAccount => f.write_str("no such account"),
-            Self::UnknownGrant(name) => write!(f, "unknown capability `{name}`"),
+            Self::UnknownGrant(name) => write!(f, "unknown capability {}", quote(name)),
             Self::TooLarge => f.write_str("the change does not fit one request"),
             Self::Output(_) => f.write_str("could not write to the terminal"),
         }

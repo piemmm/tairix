@@ -38,9 +38,11 @@ se muestra (y por cuál se ordena), y `--time-style` — o `--full-time`
 contrato del sistema de archivos todavía no lleva enlaces duros;
 aparecerá cuando lo haga.
 
-Cuando se dan varios operandos — y siempre bajo `-R` — la lista de
-cada directorio va precedida de un encabezado `ruta:`, y los bloques
-se separan con una línea en blanco.
+Cuando se dan varios operandos — y siempre bajo `-R` — la lista de cada
+directorio va precedida de un encabezado `ruta:`, y los bloques se
+separan con una línea en blanco. La ruta de un encabezado se
+entrecomilla en el estilo de la lista, y también cualquier `:` que
+contenga.
 
 Un enlace simbólico se muestra con la letra de tipo `l` y, en el formato
 largo, como `nombre -> destino` — el destino exactamente como está

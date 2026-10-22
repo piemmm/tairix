@@ -7,22 +7,26 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, FileId};
+use tairix_collections::HashMap;
 use tairix_fscopy::{
-    copy_attributes, AttrError, DataCopy, DataError, Omissions, PathFile, CHUNK_LEN,
+    copy_attributes, landing, AttrError, Created, DataCopy, DataError, Descent, Landing, Omissions,
+    PathFile, CHUNK_LEN,
 };
+use tairix_hash::BuildSipHash13;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::{join, leaf_name};
+use tairix_util::quote::quote;
 
-use crate::command::{Clobber, Command, Contents, Options, TargetMode};
+use crate::command::{Clobber, Command, Contents, Dereference, Options, TargetMode};
 use crate::error::CpError;
 use crate::io::{Entry, EntryKind, FileSystem, Follow, Output, Probe, Prompt};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `cp`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
-usage: cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
-          [-t dir] [--] source... dest
+usage: cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST]
+          [--no-preserve=LIST] [-t dir] [--] source... dest
 
   -r, -R, --recursive        copy directories and their contents
   -f, --force                remove an unwritable destination and retry
@@ -31,8 +35,12 @@ usage: cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
   -l, --link                 give the destination a second name for the
                              source's node instead of copying its bytes
   -s, --symbolic-link        make a symbolic link naming the source
-  -P, --no-dereference       reproduce a symbolic-link source as a link
+  -P, --no-dereference       reproduce every symbolic-link source as a link
                              rather than copying what it names
+  -L, --dereference          follow every symbolic-link source
+  -H                         follow the operands' links, not those inside
+                             a tree; without -H, -L or -P, a recursive copy
+                             follows none and any other follows its operands
   --preserve=links           two sources naming one node get two names at
                              the destination, not two copies
   --preserve=xattr           fail a copy whose destination cannot keep an
@@ -89,31 +97,25 @@ const OWN_WORD: &str = "cp";
 /// * [`CpError::NotADirectory`] — a directory source's destination already
 ///   exists as a non-directory, or the `-t` operand is not an existing
 ///   directory.
-/// * [`CpError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`].
-/// * [`CpError::Read`] — a source file or directory could not be read.
-/// * [`CpError::Create`] — a destination file or directory could not be made.
-/// * [`CpError::Write`] — writing a destination file's bytes failed.
+/// * [`CpError::Stat`] — a path could not be inspected.
+/// * [`CpError::Read`] — a source file, directory or link could not be read.
+/// * [`CpError::Create`] — a destination file, directory or link could not be
+///   made.
+/// * [`CpError::Write`] — writing a destination file failed.
 /// * [`CpError::Prompt`] — a confirmation could not be read (never treated
 ///   as consent).
 /// * [`CpError::Output`] — writing the usage banner or a `-v` report failed.
 /// * [`CpError::Attribute`] — the destination refused an extended attribute
 ///   the copy had to carry.
+/// * [`CpError::JustCreated`] — an earlier operand put a non-directory
+///   source's destination there.
 ///
 /// Attributes a destination could not keep are reported once, after the
-/// last copy and before any failure that ended the run: a warning on
-/// `diagnostics` and an advisory record on `out`'s information stream.
-pub fn run(
-    command: Command,
-    locale: Option<&str>,
-    fs: &dyn FileSystem,
-    prompt: &dyn Prompt,
-    help: &dyn HelpSource,
-    out: &dyn Output,
-    diagnostics: &dyn Output,
-) -> Result<(), CpError> {
+/// last copy and before any failure that ended the run: a warning on the
+/// diagnostics stream and an advisory record on the information stream.
+pub fn run(command: Command, locale: Option<&str>, seams: Seams<'_>) -> Result<(), CpError> {
     match command {
-        Command::Help => short_help(locale, help, out),
+        Command::Help => short_help(locale, seams.help, seams.out),
         Command::Copy {
             options,
             sources,
@@ -121,23 +123,44 @@ pub fn run(
         } => {
             let mut copier = Copier {
                 options,
-                linked: Linked::default(),
+                linked: Linked::new(seams.keys),
+                created: Created::new(seams.keys),
                 omissions: Omissions::default(),
+                descent: Descent::default(),
                 buf: Vec::new(),
-                fs,
-                prompt,
-                out,
+                fs: seams.fs,
+                prompt: seams.prompt,
+                out: seams.out,
             };
             let outcome = copier.copy_all(&sources, &dest);
             if let Some(report) = copier.omissions.report(OWN_WORD) {
-                out.info(&report.record);
+                seams.out.info(&report.record);
                 // The warning is advisory: a stream refusing it changes nothing.
-                let _ = diagnostics
+                let _ = seams
+                    .diagnostics
                     .write_all(format!("{OWN_WORD}: warning: {}\n", report.summary).as_bytes());
             }
             outcome
         }
     }
+}
+
+/// What a run reaches outside itself through.
+#[derive(Clone, Copy)]
+pub struct Seams<'a> {
+    /// The files copied.
+    pub fs: &'a dyn FileSystem,
+    /// The `-i` question.
+    pub prompt: &'a dyn Prompt,
+    /// The tool's own `Help/` tree, read by the short-help switches.
+    pub help: &'a dyn HelpSource,
+    /// The `-v` reports, the usage banner and the information stream.
+    pub out: &'a dyn Output,
+    /// The end-of-run warning about attributes left behind.
+    pub diagnostics: &'a dyn Output,
+    /// The process's hash key, which the run's records of nodes are kept
+    /// under, since what names them may be a hostile volume's to choose.
+    pub keys: BuildSipHash13,
 }
 
 /// Render `cp`'s own short help (`NAME` + `SYNOPSIS` + compact `OPTIONS`)
@@ -166,8 +189,12 @@ struct Copier<'a> {
     /// The destinations already written for each multiply-named source node
     /// (`--preserve=links`).
     linked: Linked,
+    /// The destinations earlier operands put in place.
+    created: Created,
     /// What the copies' destinations could not keep, reported once.
     omissions: Omissions,
+    /// The directories the walk is inside, so it never enters one again.
+    descent: Descent,
     /// The one buffer every file's bytes pass through, sized on first use.
     buf: Vec<u8>,
     fs: &'a dyn FileSystem,
@@ -185,24 +212,24 @@ struct Copier<'a> {
 /// from no fixed ceiling; a heap that refuses to grow it makes the copy fall
 /// back to copying the bytes, which is correct output rather than a failure,
 /// and the destinations simply are not linked.
-#[derive(Default)]
 struct Linked {
-    /// `(source node identity, the destination first written for it)`,
-    /// sorted by identity so a lookup is a binary search.
-    seen: Vec<(tairix_abi::FileId, String)>,
+    /// The destination first written for each source node.
+    seen: HashMap<FileId, String, BuildSipHash13>,
 }
 
 impl Linked {
+    const fn new(keys: BuildSipHash13) -> Self {
+        Self {
+            seen: HashMap::with_hasher(keys),
+        }
+    }
+
     /// The destination already written for `probe`'s node, if any.
     fn destination_of(&self, probe: &Probe) -> Option<&str> {
         if probe.nlink <= 1 || probe.id.is_none() {
             return None;
         }
-        let at = self
-            .seen
-            .binary_search_by_key(&probe.id, |(id, _)| *id)
-            .ok()?;
-        self.seen.get(at).map(|(_, target)| target.as_str())
+        self.seen.get(&probe.id).map(String::as_str)
     }
 
     /// Remember `target` as the destination written for `probe`'s node.
@@ -210,16 +237,15 @@ impl Linked {
     /// A node that cannot recur, or one the backing offers no identity for,
     /// is not remembered; nor is anything, if the heap cannot grow the map.
     fn remember(&mut self, probe: &Probe, target: &str) {
-        if probe.nlink <= 1 || probe.id.is_none() {
+        if probe.nlink <= 1 || probe.id.is_none() || self.seen.contains_key(&probe.id) {
             return;
         }
-        let Err(at) = self.seen.binary_search_by_key(&probe.id, |(id, _)| *id) else {
-            return;
-        };
-        if self.seen.try_reserve_exact(1).is_err() {
+        let mut name = String::new();
+        if name.try_reserve_exact(target.len()).is_err() {
             return;
         }
-        self.seen.insert(at, (probe.id, String::from(target)));
+        name.push_str(target);
+        let _ = self.seen.try_insert(probe.id, name);
     }
 }
 
@@ -236,7 +262,7 @@ impl Copier<'_> {
             TargetMode::Directory => match self.stat(dest, Follow::Target)?.map(|p| p.kind) {
                 Some(EntryKind::Directory) => true,
                 Some(EntryKind::File | EntryKind::Symlink) => return Err(CpError::NotADirectory),
-                None => return Err(CpError::Stat(Errno::NotFound)),
+                None => return Err(stat_error(dest, Errno::NotFound)),
             },
             // `-T`: the destination is a normal file for exactly one source.
             TargetMode::NoDirectory => {
@@ -262,16 +288,69 @@ impl Copier<'_> {
             };
             let probe = self
                 .fs
-                .probe(source, self.source_follow())
-                .map_err(CpError::Stat)?;
-            self.copy_known(source, probe, &target)?;
+                .probe(source, self.operand_follow())
+                .map_err(|errno| stat_error(source, errno))?;
+            if probe.kind == EntryKind::Directory && self.options.recursive {
+                self.refuse_landing_in(source, probe.id, &target)?;
+            }
+            // A directory merges into one an earlier operand made, as GNU's
+            // does; anything else would replace it.
+            let guarded = probe.kind != EntryKind::Directory;
+            let follow = self.destination_follow(&probe);
+            if guarded {
+                if let Some(there) = self.stat(&target, follow)? {
+                    if self.created.holds(there.id, &target) {
+                        return Err(CpError::JustCreated {
+                            source: String::from(source),
+                            target,
+                        });
+                    }
+                }
+            }
+            let written = self.copy_known(source, probe, &target)?;
+            if guarded && written {
+                if let Some(made) = self.stat(&target, follow)? {
+                    self.created
+                        .note(made.id, &target)
+                        .map_err(|errno| write_error(&target, errno))?;
+                }
+            }
         }
         Ok(())
     }
 
+    /// How a destination for `probe` is looked at: through a final link for a
+    /// byte copy, which writes what the link names, and as itself for a link
+    /// or a second name, which replace the name.
+    fn destination_follow(&self, probe: &Probe) -> Follow {
+        if probe.kind == EntryKind::File && self.options.contents == Contents::Bytes {
+            Follow::Target
+        } else {
+            Follow::Keep
+        }
+    }
+
+    /// Refuse, before anything is written, a directory copy whose `target`
+    /// is the directory `source` or lies inside it.
+    fn refuse_landing_in(&self, source: &str, id: FileId, target: &str) -> Result<(), CpError> {
+        let named = || (String::from(source), String::from(target));
+        match landing(self.fs, source, id, target).map_err(|errno| stat_error(target, errno))? {
+            Landing::Apart => Ok(()),
+            Landing::Same => {
+                let (source, target) = named();
+                Err(CpError::SameFile { source, target })
+            }
+            Landing::Within => {
+                let (source, target) = named();
+                Err(CpError::IntoItself { source, target })
+            }
+        }
+    }
+
     /// Copy an object a probe already described (from the parent's directory
-    /// entry, or from the operand's own probe), recursing into directories.
-    fn copy_known(&mut self, source: &str, probe: Probe, target: &str) -> Result<(), CpError> {
+    /// entry, or from the operand's own probe), recursing into directories;
+    /// whether the destination was written rather than kept.
+    fn copy_known(&mut self, source: &str, probe: Probe, target: &str) -> Result<bool, CpError> {
         match probe.kind {
             EntryKind::File => self.reproduce_file(source, &probe, target),
             // Only a `Follow::Keep` probe reports a link, i.e. only under
@@ -279,51 +358,86 @@ impl Copier<'_> {
             // target, verbatim, so a relative or dangling one survives.
             EntryKind::Symlink => {
                 if !self.replaceable(target)? {
-                    return Ok(());
+                    return Ok(false);
                 }
-                let stored = self.fs.read_link(source).map_err(CpError::Read)?;
-                self.fs.symlink(&stored, target).map_err(CpError::Create)?;
-                self.report(source, target)
+                let stored = self
+                    .fs
+                    .read_link(source)
+                    .map_err(|errno| read_error(source, errno))?;
+                self.fs
+                    .symlink(&stored, target)
+                    .map_err(|errno| create_error(target, errno))?;
+                self.report(source, target)?;
+                Ok(true)
             }
-            EntryKind::Directory => self.reproduce_directory(source, target),
+            EntryKind::Directory => self
+                .reproduce_directory(source, probe.id, target)
+                .map(|()| true),
         }
     }
 
-    /// Reproduce a directory source under `target` and recurse into it.
-    fn reproduce_directory(&mut self, source: &str, target: &str) -> Result<(), CpError> {
+    /// Reproduce the directory source `source`, whose identity is `id`, under
+    /// `target` and recurse into it.
+    fn reproduce_directory(
+        &mut self,
+        source: &str,
+        id: FileId,
+        target: &str,
+    ) -> Result<(), CpError> {
         if !self.options.recursive {
             return Err(CpError::IsDirectory);
         }
-        match self.stat(target, Follow::Target)?.map(|p| p.kind) {
-            Some(EntryKind::Directory) => {}
-            Some(EntryKind::File | EntryKind::Symlink) => return Err(CpError::NotADirectory),
+        let made = match self.stat(target, Follow::Target)? {
+            Some(existing) if existing.kind == EntryKind::Directory => existing.id,
+            Some(_) => return Err(CpError::NotADirectory),
             None => {
-                self.fs.mkdir(target).map_err(CpError::Create)?;
+                self.fs
+                    .mkdir(target)
+                    .map_err(|errno| create_error(target, errno))?;
                 self.carry_attributes(source, target)?;
                 self.report(source, target)?;
+                self.fs
+                    .probe(target, Follow::Keep)
+                    .map_err(|errno| stat_error(target, errno))?
+                    .id
             }
-        }
+        };
+        self.descent
+            .enter(id, made)
+            .map_err(|errno| write_error(target, errno))?;
         for entry in self.read_children(source)? {
             let child_source = join(source, &entry.name);
             let child_target = join(target, &entry.name);
             // A listing describes each child itself, so a child link needs a
-            // following probe unless `-P`/`-d` keeps it.
-            let child = if entry.probe.kind == EntryKind::Symlink && !self.options.no_dereference {
+            // following probe when the run follows links inside a tree.
+            let child = if entry.probe.kind == EntryKind::Symlink && self.follows_children() {
                 self.fs
                     .probe(&child_source, Follow::Target)
-                    .map_err(CpError::Stat)?
+                    .map_err(|errno| stat_error(&child_source, errno))?
             } else {
                 entry.probe
             };
+            if child.kind == EntryKind::Directory && self.descent.refuses(child.id) {
+                return Err(CpError::IntoItself {
+                    source: child_source,
+                    target: child_target,
+                });
+            }
             self.copy_known(&child_source, child, &child_target)?;
         }
+        self.descent.leave();
         Ok(())
     }
 
     /// Put a non-directory source at `target`: its bytes, a second name for
     /// its node (`-l`, or `--preserve=links` meeting the node again), or a
     /// symbolic link naming it (`-s`).
-    fn reproduce_file(&mut self, source: &str, probe: &Probe, target: &str) -> Result<(), CpError> {
+    fn reproduce_file(
+        &mut self,
+        source: &str,
+        probe: &Probe,
+        target: &str,
+    ) -> Result<bool, CpError> {
         // A node already written under another of its names becomes a second
         // name there, whatever the contents mode: `--preserve=links` is about
         // keeping the *sources'* sharing, so it outranks copying the bytes.
@@ -331,32 +445,51 @@ impl Copier<'_> {
             // The borrow of `self.linked` ends with this copy of the name.
             let first = String::from(first);
             if !self.replaceable(target)? {
-                return Ok(());
+                return Ok(false);
             }
-            self.fs.link(&first, target).map_err(CpError::Create)?;
-            return self.report(source, target);
+            self.fs
+                .link(&first, target)
+                .map_err(|errno| create_error(target, errno))?;
+            self.report(source, target)?;
+            return Ok(true);
         }
-        match self.options.contents {
+        let written = match self.options.contents {
             Contents::Bytes => self.copy_file(source, probe, target)?,
             Contents::HardLink => {
                 if !self.replaceable(target)? {
-                    return Ok(());
+                    return Ok(false);
                 }
-                self.fs.link(source, target).map_err(CpError::Create)?;
+                // Linking never follows a name, so a link this copy followed
+                // is linked by the path of what it names, as GNU links it.
+                let existing = match self.stat(source, Follow::Keep)? {
+                    Some(own) if own.kind == EntryKind::Symlink => self
+                        .fs
+                        .canonical(source)
+                        .map_err(|errno| stat_error(source, errno))?,
+                    _ => String::from(source),
+                };
+                self.fs
+                    .link(&existing, target)
+                    .map_err(|errno| create_error(target, errno))?;
                 self.report(source, target)?;
+                true
             }
             Contents::SymbolicLink => {
                 if !self.replaceable(target)? {
-                    return Ok(());
+                    return Ok(false);
                 }
-                self.fs.symlink(source, target).map_err(CpError::Create)?;
+                self.fs
+                    .symlink(source, target)
+                    .map_err(|errno| create_error(target, errno))?;
                 self.report(source, target)?;
+                true
             }
-        }
-        if self.options.preserve_links {
+        };
+        // A destination kept rather than written is no copy of this node.
+        if written && self.options.preserve_links {
             self.linked.remember(probe, target);
         }
-        Ok(())
+        Ok(written)
     }
 
     /// Whether the destination may be written: the existing-destination
@@ -390,7 +523,7 @@ impl Copier<'_> {
             Clobber::Skip => Ok(false),
             Clobber::Prompt => self
                 .prompt
-                .confirm(&format!("overwrite '{target}'?"))
+                .confirm(&format!("overwrite {}?", quote(target)))
                 .map_err(CpError::Prompt),
         }
     }
@@ -398,8 +531,8 @@ impl Copier<'_> {
     /// Copy the regular file `source`, the node `node` describes, to `target`
     /// — its bytes with its holes, then its extended attributes — honouring
     /// the existing-destination policy and `-f` (remove a destination that
-    /// cannot be created and retry the create once).
-    fn copy_file(&mut self, source: &str, node: &Probe, target: &str) -> Result<(), CpError> {
+    /// cannot be created and retry the create once); whether it was written.
+    fn copy_file(&mut self, source: &str, node: &Probe, target: &str) -> Result<bool, CpError> {
         let occupant = self.stat(target, Follow::Keep)?;
         // The create follows a final link, so the node it would empty is the
         // one the link names.
@@ -414,23 +547,27 @@ impl Copier<'_> {
             });
         }
         if occupant.is_some() && !self.consented(target)? {
-            return Ok(());
+            return Ok(false);
         }
-        let len = self.fs.size(source).map_err(CpError::Read)?;
+        let len = self
+            .fs
+            .size(source)
+            .map_err(|errno| read_error(source, errno))?;
         self.create_destination(target)?;
         if self.buf.is_empty() && !tairix_util::fallible::grow_to(&mut self.buf, CHUNK_LEN, 0) {
-            return Err(CpError::Write(Errno::OutOfMemory));
+            return Err(write_error(target, Errno::OutOfMemory));
         }
         let mut from = PathFile::new(self.fs, source);
         let mut to = PathFile::new(self.fs, target);
         DataCopy::new(len, self.options.sparse)
             .run(&mut from, &mut to, &mut self.buf)
             .map_err(|failure| match failure {
-                DataError::Read(errno) => CpError::Read(errno),
-                DataError::Write(errno) => CpError::Write(errno),
+                DataError::Read(errno) => read_error(source, errno),
+                DataError::Write(errno) => write_error(target, errno),
             })?;
         self.carry_attributes(source, target)?;
-        self.report(source, target)
+        self.report(source, target)?;
+        Ok(true)
     }
 
     /// Carry `source`'s extended attributes to `target`, noting what its
@@ -439,7 +576,7 @@ impl Copier<'_> {
         let left =
             copy_attributes(self.fs, source, target, self.options.attributes).map_err(|err| {
                 match err {
-                    AttrError::Read(errno) => CpError::Read(errno),
+                    AttrError::Read(errno) => read_error(source, errno),
                     AttrError::Write { key, error } => CpError::Attribute {
                         key,
                         target: String::from(target),
@@ -460,9 +597,11 @@ impl Copier<'_> {
                 // not writable). `-f` removes it and retries exactly once; a
                 // removal error is irrelevant if the retried create succeeds.
                 let _ = self.fs.remove_file(target);
-                self.fs.create(target).map_err(CpError::Create)
+                self.fs
+                    .create(target)
+                    .map_err(|errno| create_error(target, errno))
             }
-            Err(errno) => Err(CpError::Create(errno)),
+            Err(errno) => Err(create_error(target, errno)),
         }
     }
 
@@ -472,7 +611,11 @@ impl Copier<'_> {
     fn read_children(&self, path: &str) -> Result<Vec<Entry>, CpError> {
         let mut entries = Vec::new();
         let mut index: u64 = 0;
-        while let Some(entry) = self.fs.read_dir(path, index).map_err(CpError::Read)? {
+        while let Some(entry) = self
+            .fs
+            .read_dir(path, index)
+            .map_err(|errno| read_error(path, errno))?
+        {
             index = index.saturating_add(1);
             entries.push(entry);
         }
@@ -485,17 +628,34 @@ impl Copier<'_> {
         match self.fs.probe(path, follow) {
             Ok(probe) => Ok(Some(probe)),
             Err(Errno::NotFound) => Ok(None),
-            Err(errno) => Err(CpError::Stat(errno)),
+            Err(errno) => Err(stat_error(path, errno)),
         }
     }
 
-    /// The follow posture this run's source probes use: `-P`/`-d` describe a
-    /// link source itself, everything else describes what it names.
-    const fn source_follow(&self) -> Follow {
-        if self.options.no_dereference {
-            Follow::Keep
-        } else {
+    /// The follow posture an operand's own probe uses: GNU's, where a
+    /// recursive copy reproduces an operand's link unless `-H`/`-L` (or `-l`,
+    /// which links what the link names) says otherwise.
+    fn operand_follow(&self) -> Follow {
+        let follows = match self.options.dereference {
+            Dereference::Never => false,
+            Dereference::Operands | Dereference::Always => true,
+            Dereference::Default => {
+                !self.options.recursive || self.options.contents == Contents::HardLink
+            }
+        };
+        if follows {
             Follow::Target
+        } else {
+            Follow::Keep
+        }
+    }
+
+    /// Whether a link met inside a tree is followed rather than reproduced.
+    fn follows_children(&self) -> bool {
+        match self.options.dereference {
+            Dereference::Always => true,
+            Dereference::Never | Dereference::Operands => false,
+            Dereference::Default => self.options.contents == Contents::HardLink,
         }
     }
 
@@ -505,23 +665,57 @@ impl Copier<'_> {
             return Ok(());
         }
         self.out
-            .write_all(format!("'{source}' -> '{target}'\n").as_bytes())
+            .write_all(format!("{} -> {}\n", quote(source), quote(target)).as_bytes())
             .map_err(CpError::Output)
     }
 }
+
+fn stat_error(path: &str, errno: Errno) -> CpError {
+    CpError::Stat {
+        path: String::from(path),
+        errno,
+    }
+}
+
+fn read_error(path: &str, errno: Errno) -> CpError {
+    CpError::Read {
+        path: String::from(path),
+        errno,
+    }
+}
+
+fn create_error(path: &str, errno: Errno) -> CpError {
+    CpError::Create {
+        path: String::from(path),
+        errno,
+    }
+}
+
+fn write_error(path: &str, errno: Errno) -> CpError {
+    CpError::Write {
+        path: String::from(path),
+        errno,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{run as engine_run, USAGE};
-    use crate::command::{Clobber, Command, Contents, Options, TargetMode};
+    use super::{
+        create_error, read_error, run as engine_run, stat_error, write_error, Seams, USAGE,
+    };
+    use crate::command::{Clobber, Command, Contents, Dereference, Options, TargetMode};
     use crate::error::CpError;
     use crate::io::{
-        AttributeStore, Entry, EntryKind, FileSystem, Follow, Output, PathFiles, Probe, Prompt,
+        Ancestry, AttributeStore, Entry, EntryKind, FileSystem, Follow, Output, PathFiles, Probe,
+        Prompt,
     };
+    use alloc::format;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::fs::SeekRegion;
     use tairix_abi::{Errno, FileId};
+    use tairix_hash::BuildSipHash13;
     use tairix_help::{HelpSource, SourceError};
 
     /// A prompt no non-interactive run may ever reach.
@@ -605,7 +799,24 @@ mod tests {
     /// The engine under a prompt that must never be reached — the shape
     /// every pre-existing non-interactive test uses.
     fn run(command: Command, fs: &dyn FileSystem, out: &Recorder) -> Result<(), CpError> {
-        engine_run(command, None, fs, &NeverAsked, &NoHelp, out, out)
+        engine_run(command, None, seams(fs, &NeverAsked, &NoHelp, out, out))
+    }
+
+    fn seams<'a>(
+        fs: &'a dyn FileSystem,
+        prompt: &'a dyn Prompt,
+        help: &'a dyn HelpSource,
+        out: &'a dyn Output,
+        diagnostics: &'a dyn Output,
+    ) -> Seams<'a> {
+        Seams {
+            fs,
+            prompt,
+            help,
+            out,
+            diagnostics,
+            keys: BuildSipHash13::UNKEYED,
+        }
     }
 
     /// An in-memory tree. Regular files carry their bytes; directories are
@@ -857,9 +1068,24 @@ mod tests {
             None
         }
 
+        /// The identity of the directory `path`, distinct from every file's.
+        fn dir_id(&self, path: &str) -> FileId {
+            let index = self
+                .state
+                .borrow()
+                .dirs
+                .iter()
+                .position(|p| p == path)
+                .expect("the directory is in the fixture");
+            FileId {
+                volume: [3u8; 16],
+                node: u64::try_from(index).expect("fixture index") + 1,
+            }
+        }
+
         /// The identity and name count of the object at `object`: a distinct
         /// non-zero node number per object, plus one name per second name.
-        fn identity(&self, object: &str) -> (FileId, u32) {
+        fn object_identity(&self, object: &str) -> (FileId, u32) {
             let index = self
                 .state
                 .borrow()
@@ -980,6 +1206,30 @@ mod tests {
         }
     }
 
+    impl Ancestry for MemFs {
+        fn canonical(&self, path: &str) -> Result<String, Errno> {
+            tairix_fscopy::fixture::resolve(path, |here| self.target_of(here))
+        }
+
+        fn identity(&self, path: &str) -> Result<FileId, Errno> {
+            let path = canon(path);
+            if path == "/" {
+                return Ok(FileId {
+                    volume: [3u8; 16],
+                    node: u64::MAX,
+                });
+            }
+            if self.target_of(path).is_some() {
+                return Ok(FileId::NONE);
+            }
+            if self.state.borrow().dirs.iter().any(|p| p == path) {
+                return Ok(self.dir_id(path));
+            }
+            let object = self.object_of(path).ok_or(Errno::NotFound)?;
+            Ok(self.object_identity(&object).0)
+        }
+    }
+
     impl FileSystem for MemFs {
         fn probe(&self, path: &str, follow: Follow) -> Result<Probe, Errno> {
             let path = canon(path);
@@ -1000,12 +1250,12 @@ mod tests {
             if self.state.borrow().dirs.iter().any(|p| p == path) {
                 return Ok(Probe {
                     kind: EntryKind::Directory,
-                    id: FileId::NONE,
+                    id: self.dir_id(path),
                     nlink: 2,
                 });
             }
             let object = self.object_of(path).ok_or(Errno::NotFound)?;
-            let (id, nlink) = self.identity(&object);
+            let (id, nlink) = self.object_identity(&object);
             Ok(Probe {
                 kind: EntryKind::File,
                 id,
@@ -1081,8 +1331,8 @@ mod tests {
                 let (id, nlink) = match kind {
                     EntryKind::File => self
                         .object_of(&p)
-                        .map_or((FileId::NONE, 1), |object| self.identity(&object)),
-                    EntryKind::Directory => (FileId::NONE, 2),
+                        .map_or((FileId::NONE, 1), |object| self.object_identity(&object)),
+                    EntryKind::Directory => (self.dir_id(&p), 2),
                     EntryKind::Symlink => (FileId::NONE, 1),
                 };
                 entries.push(Entry {
@@ -1211,7 +1461,11 @@ mod tests {
         fs: &dyn FileSystem,
     ) -> (Result<(), CpError>, Recorder, Recorder) {
         let (out, diagnostics) = (Recorder::new(), Recorder::new());
-        let result = engine_run(command, None, fs, &NeverAsked, &NoHelp, &out, &diagnostics);
+        let result = engine_run(
+            command,
+            None,
+            seams(fs, &NeverAsked, &NoHelp, &out, &diagnostics),
+        );
         (result, out, diagnostics)
     }
 
@@ -1447,7 +1701,7 @@ mod tests {
                 &fs,
                 &out
             ),
-            Err(CpError::Create(Errno::AlreadyExists))
+            Err(create_error("/b.txt", Errno::AlreadyExists))
         );
         assert_eq!(fs.contents("/b.txt"), Some(b"old".to_vec()));
     }
@@ -1530,7 +1784,7 @@ mod tests {
             run(
                 copy_with(
                     Options {
-                        no_dereference: true,
+                        dereference: Dereference::Never,
                         ..Options::DEFAULT
                     },
                     &["/alias"],
@@ -1555,7 +1809,7 @@ mod tests {
             run(
                 copy_with(
                     Options {
-                        no_dereference: true,
+                        dereference: Dereference::Never,
                         ..Options::DEFAULT
                     },
                     &["/alias"],
@@ -1571,7 +1825,7 @@ mod tests {
         let fs = MemFs::new().symlink_at("/alias", "nowhere");
         assert_eq!(
             run(copy(false, false, &["/alias"], "/c"), &fs, &Recorder::new()),
-            Err(CpError::Stat(Errno::NotFound))
+            Err(stat_error("/alias", Errno::NotFound))
         );
     }
 
@@ -1587,7 +1841,7 @@ mod tests {
                 copy_with(
                     Options {
                         recursive: true,
-                        no_dereference: true,
+                        dereference: Dereference::Never,
                         ..Options::DEFAULT
                     },
                     &["/src"],
@@ -1603,15 +1857,174 @@ mod tests {
     }
 
     #[test]
-    fn a_recursive_copy_follows_interior_links_by_default() {
+    fn a_recursive_copy_reproduces_its_links_unless_told_to_follow_them() {
+        // GNU's default under `-r`: a link inside the tree, and the operand
+        // itself, are copied as links, so a link to `/` copies one link.
+        let tree = || {
+            MemFs::new()
+                .dir("/src")
+                .file("/src/real", b"bytes")
+                .symlink_at("/src/alias", "/src/real")
+                .symlink_at("/link", "/src")
+                .symlink_at("/flink", "/src/real")
+        };
+        let fs = tree();
+        assert_eq!(
+            run(copy(true, false, &["/src"], "/dst"), &fs, &Recorder::new()),
+            Ok(())
+        );
+        assert_eq!(fs.target_of("/dst/alias").as_deref(), Some("/src/real"));
+        assert!(fs.contents("/dst/alias").is_none());
+        assert_eq!(
+            run(
+                copy(true, false, &["/link"], "/lcopy"),
+                &fs,
+                &Recorder::new()
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.target_of("/lcopy").as_deref(), Some("/src"));
+
+        let recursive = |dereference| Options {
+            recursive: true,
+            dereference,
+            ..Options::DEFAULT
+        };
+        // `-L` follows every link.
+        let fs = tree().dir("/out");
+        let all = copy_with(recursive(Dereference::Always), &["/src", "/flink"], "/out");
+        assert_eq!(run(all, &fs, &Recorder::new()), Ok(()));
+        assert_eq!(fs.contents("/out/src/alias"), Some(b"bytes".to_vec()));
+        assert_eq!(fs.contents("/out/flink"), Some(b"bytes".to_vec()));
+        // `-H` follows the operands' links but reproduces the ones inside.
+        let fs = tree().dir("/out");
+        let operands = copy_with(
+            recursive(Dereference::Operands),
+            &["/src", "/flink"],
+            "/out",
+        );
+        assert_eq!(run(operands, &fs, &Recorder::new()), Ok(()));
+        assert_eq!(fs.contents("/out/flink"), Some(b"bytes".to_vec()));
+        assert_eq!(fs.target_of("/out/src/alias").as_deref(), Some("/src/real"));
+        // `-l` links what each link names, so it follows them too.
+        let fs = tree();
+        let linked = Options {
+            contents: Contents::HardLink,
+            ..recursive(Dereference::Default)
+        };
+        assert_eq!(
+            run(copy_with(linked, &["/src"], "/dst"), &fs, &Recorder::new()),
+            Ok(())
+        );
+        assert_eq!(fs.object_of("/dst/alias").as_deref(), Some("/src/real"));
+    }
+
+    #[test]
+    fn a_hard_link_to_a_followed_link_names_the_file_it_names() {
         let fs = MemFs::new()
             .dir("/src")
             .file("/src/real", b"bytes")
-            .symlink_at("/src/alias", "/src/real");
+            .symlink_at("/flink", "/src/real");
+        let link = Options {
+            contents: Contents::HardLink,
+            ..Options::DEFAULT
+        };
+        assert_eq!(
+            run(copy_with(link, &["/flink"], "/x"), &fs, &Recorder::new()),
+            Ok(())
+        );
+        assert!(
+            fs.target_of("/x").is_none(),
+            "a second name for the file, not the link"
+        );
+        assert_eq!(fs.object_of("/x").as_deref(), Some("/src/real"));
+    }
+
+    // --- a directory copied into itself -----------------------------------
+
+    #[test]
+    fn a_directory_copy_into_its_own_subtree_is_refused_before_anything_is_written() {
+        let fs = MemFs::new().dir("/a").dir("/a/x").file("/a/f", b"bytes");
         let out = Recorder::new();
-        assert_eq!(run(copy(true, false, &["/src"], "/dst"), &fs, &out), Ok(()));
-        assert_eq!(fs.contents("/dst/alias"), Some(b"bytes".to_vec()));
-        assert!(fs.target_of("/dst/alias").is_none());
+        assert_eq!(
+            run(copy(true, false, &["/a"], "/a/b"), &fs, &out),
+            Err(CpError::IntoItself {
+                source: String::from("/a"),
+                target: String::from("/a/b"),
+            })
+        );
+        assert!(!fs.has_dir("/a/b"), "nothing was made");
+        // Into an existing directory of its own, the copy would land at
+        // `/a/x/a`, which is inside it too.
+        assert_eq!(
+            run(copy(true, false, &["/a"], "/a/x"), &fs, &out),
+            Err(CpError::IntoItself {
+                source: String::from("/a"),
+                target: String::from("/a/x/a"),
+            })
+        );
+        assert!(!fs.has_dir("/a/x/a"));
+    }
+
+    #[test]
+    fn a_link_on_the_way_does_not_hide_the_source() {
+        let fs = MemFs::new()
+            .dir("/a")
+            .dir("/b")
+            .file("/a/f", b"bytes")
+            .symlink_at("/b/to-a", "/a");
+        assert_eq!(
+            run(
+                copy(true, false, &["/a"], "/b/to-a/c"),
+                &fs,
+                &Recorder::new()
+            ),
+            Err(CpError::IntoItself {
+                source: String::from("/a"),
+                target: String::from("/b/to-a/c"),
+            })
+        );
+        assert!(!fs.has_dir("/a/c"));
+    }
+
+    #[test]
+    fn a_directory_copied_onto_itself_is_the_same_file() {
+        let fs = MemFs::new().dir("/a").file("/a/f", b"bytes");
+        let onto = Options {
+            recursive: true,
+            target_mode: TargetMode::NoDirectory,
+            ..Options::DEFAULT
+        };
+        assert_eq!(
+            run(copy_with(onto, &["/a"], "/a"), &fs, &Recorder::new()),
+            Err(CpError::SameFile {
+                source: String::from("/a"),
+                target: String::from("/a"),
+            })
+        );
+    }
+
+    #[test]
+    fn a_walk_that_meets_a_directory_it_is_inside_stops_there() {
+        // Under `-L` the loop's link leads the walk back into `/a`, a
+        // directory it is already copying.
+        let fs = MemFs::new()
+            .dir("/a")
+            .file("/a/f", b"bytes")
+            .symlink_at("/a/loop", "/a");
+        let follow = Options {
+            recursive: true,
+            dereference: Dereference::Always,
+            ..Options::DEFAULT
+        };
+        assert_eq!(
+            run(copy_with(follow, &["/a"], "/dst"), &fs, &Recorder::new()),
+            Err(CpError::IntoItself {
+                source: String::from("/a/loop"),
+                target: String::from("/dst/loop"),
+            })
+        );
+        assert!(!fs.has_dir("/dst/loop"));
     }
 
     // --- --preserve=links: keep the sources' sharing ----------------------
@@ -1646,6 +2059,78 @@ mod tests {
             fs.contents("/dst/two").is_none(),
             "the second name is not a second copy"
         );
+    }
+
+    /// A kept destination is no copy of the node: linking the node's next
+    /// name to it would give that name an unrelated file's bytes.
+    #[test]
+    fn a_destination_kept_at_the_question_is_never_linked_to_the_nodes_next_name() {
+        let fs = MemFs::new()
+            .dir("/dst")
+            .file("/dst/one", b"unrelated")
+            .file("/one", b"shared")
+            .second_name("/two", "/one");
+        let out = Recorder::new();
+        let prompt = Answers::new(&[false]);
+        let options = Options {
+            preserve_links: true,
+            clobber: Clobber::Prompt,
+            ..Options::DEFAULT
+        };
+        assert_eq!(
+            engine_run(
+                copy_with(options, &["/one", "/two"], "/dst"),
+                None,
+                seams(&fs, &prompt, &NoHelp, &out, &out),
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/dst/one"), Some(b"unrelated".to_vec()));
+        assert_eq!(fs.contents("/dst/two"), Some(b"shared".to_vec()));
+        assert!(!fs.is_second_name_of("/dst/two", "/dst/one"));
+    }
+
+    /// GNU 9.4's refusal, and its wording.
+    #[test]
+    fn an_operand_never_replaces_what_an_earlier_one_copied_into_place() {
+        let fs = MemFs::new()
+            .dir("/d")
+            .file("/a/x", b"first")
+            .file("/b/x", b"second")
+            .file("/b/y", b"third");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy(false, false, &["/a/x", "/b/x", "/b/y"], "/d"),
+                &fs,
+                &out
+            ),
+            Err(CpError::JustCreated {
+                source: String::from("/b/x"),
+                target: String::from("/d/x"),
+            })
+        );
+        assert_eq!(fs.contents("/d/x"), Some(b"first".to_vec()));
+        let err = CpError::JustCreated {
+            source: String::from("b/x"),
+            target: String::from("e/x"),
+        };
+        assert_eq!(
+            format!("{err}"),
+            "will not overwrite just-created 'e/x' with 'b/x'"
+        );
+        // A directory merges into one an earlier operand made, as GNU's does.
+        let fs = MemFs::new()
+            .dir("/g")
+            .dir("/f/sub")
+            .file("/f/sub/z", b"4")
+            .dir("/h/sub")
+            .file("/h/sub/z", b"5");
+        assert_eq!(
+            run(copy(true, false, &["/f/sub", "/h/sub"], "/g"), &fs, &out),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/g/sub/z"), Some(b"5".to_vec()));
     }
 
     #[test]
@@ -1706,7 +2191,11 @@ mod tests {
         let fs = MemFs::new();
         let out = Recorder::new();
         assert_eq!(
-            engine_run(Command::Help, None, &fs, &NeverAsked, &OneDoc, &out, &out),
+            engine_run(
+                Command::Help,
+                None,
+                seams(&fs, &NeverAsked, &OneDoc, &out, &out)
+            ),
             Ok(())
         );
         let text = out.text();
@@ -1848,7 +2337,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run(copy(false, false, &["/absent"], "/dst"), &fs, &out),
-            Err(CpError::Stat(Errno::NotFound))
+            Err(stat_error("/absent", Errno::NotFound))
         );
     }
 
@@ -1859,7 +2348,7 @@ mod tests {
         // The first source is missing, so the second is never copied.
         assert_eq!(
             run(copy(false, false, &["/absent", "/b"], "/dst"), &fs, &out),
-            Err(CpError::Stat(Errno::NotFound))
+            Err(stat_error("/absent", Errno::NotFound))
         );
         assert!(fs.contents("/dst/b").is_none());
     }
@@ -1872,7 +2361,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run(copy(false, false, &["/a"], "/b"), &fs, &out),
-            Err(CpError::Read(Errno::PermissionDenied))
+            Err(read_error("/a", Errno::PermissionDenied))
         );
     }
 
@@ -1884,7 +2373,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run(copy(false, false, &["/a"], "/b"), &fs, &out),
-            Err(CpError::Create(Errno::PermissionDenied))
+            Err(create_error("/b", Errno::PermissionDenied))
         );
     }
 
@@ -1902,6 +2391,23 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_names_the_path_it_met_quoted() {
+        let fs = MemFs::new()
+            .file("/a", b"data")
+            .create_fails("/b\u{1b}", Errno::PermissionDenied);
+        let err = run(
+            copy(false, false, &["/a"], "/b\u{1b}"),
+            &fs,
+            &Recorder::new(),
+        )
+        .expect_err("the create is refused");
+        assert_eq!(
+            format!("{err}"),
+            format!("cannot create '/b'$'\\033': {}", Errno::PermissionDenied)
+        );
+    }
+
+    #[test]
     fn a_failed_write_surfaces_the_errno() {
         let fs = MemFs::new()
             .file("/a", b"data")
@@ -1909,7 +2415,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run(copy(false, false, &["/a"], "/b"), &fs, &out),
-            Err(CpError::Write(Errno::PermissionDenied))
+            Err(write_error("/b", Errno::PermissionDenied))
         );
     }
 
@@ -2023,11 +2529,7 @@ mod tests {
                     "/dst",
                 ),
                 None,
-                &fs,
-                &prompt,
-                &NoHelp,
-                &out,
-                &out,
+                seams(&fs, &prompt, &NoHelp, &out, &out),
             ),
             Ok(())
         );
@@ -2057,11 +2559,7 @@ mod tests {
                     "/b",
                 ),
                 None,
-                &fs,
-                &prompt,
-                &NoHelp,
-                &out,
-                &out,
+                seams(&fs, &prompt, &NoHelp, &out, &out),
             ),
             Err(CpError::Prompt(Errno::NotFound))
         );
@@ -2149,7 +2647,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Err(CpError::Stat(Errno::NotFound))
+            Err(stat_error("/absent", Errno::NotFound))
         );
     }
 

@@ -71,6 +71,20 @@ fn add_str_writes_cells_and_advances_cursor() {
 }
 
 #[test]
+fn a_control_character_is_written_as_a_glyph_never_as_itself() {
+    let mut win = Window::new(Pos::ORIGIN, Size::new(2, 10));
+    win.add_str("a\0b\u{1b}c");
+    let row: String = (0..5).map(|col| glyph_at(&win, 0, col)).collect();
+    assert_eq!(row, "a\u{fffd}b\u{fffd}c");
+    assert_eq!(win.cursor(), Pos::new(0, 5));
+    let _ = win.put_cell(Pos::new(1, 0), tairix_vt::Cell::plain('\u{9b}'));
+    win.move_to(Pos::new(1, 1)).expect("in bounds");
+    win.horizontal_line('\u{7}', 2);
+    let row: String = (0..3).map(|col| glyph_at(&win, 1, col)).collect();
+    assert_eq!(row, "\u{fffd}\u{fffd}\u{fffd}");
+}
+
+#[test]
 fn writing_past_the_right_edge_wraps_to_the_next_line() {
     let mut win = Window::new(Pos::ORIGIN, Size::new(3, 3));
     win.add_str("abcd");

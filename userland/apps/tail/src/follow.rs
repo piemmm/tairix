@@ -21,6 +21,7 @@ use crate::client::{
 use crate::command::{Count, Follow, HeaderMode, Job, Source};
 use crate::error::TailError;
 use crate::io::{Input, Output, Watcher};
+use tairix_util::quote::{quote, quote_if_needed};
 
 /// One followed file source's live state.
 struct FollowSource {
@@ -230,7 +231,13 @@ fn poll_source(
                 sources[i].offset = 0;
                 sources[i].unchanged = 0;
                 let path = sources[i].path.clone();
-                diagnose(err, &format!("'{path}' has appeared;  following new file"))?;
+                diagnose(
+                    err,
+                    &format!(
+                        "{path} has appeared;  following new file",
+                        path = quote(&path)
+                    ),
+                )?;
             }
             Err(_) => return Ok(()),
         }
@@ -260,7 +267,10 @@ fn poll_source(
 
     if meta.size < sources[i].offset {
         let path = sources[i].path.clone();
-        diagnose(err, &format!("{path}: file truncated"))?;
+        diagnose(
+            err,
+            &format!("{path}: file truncated", path = quote_if_needed(&path)),
+        )?;
         sources[i].offset = 0;
     }
 
@@ -324,7 +334,10 @@ fn reopen_rotated(
             let path = sources[i].path.clone();
             diagnose(
                 err,
-                &format!("'{path}' has been replaced;  following new file"),
+                &format!(
+                    "{path} has been replaced;  following new file",
+                    path = quote(&path)
+                ),
             )
         }
         // The new name is not openable yet; keep the old handle and let the
@@ -354,7 +367,10 @@ fn emit_appended(
                 offset += n as u64;
             }
             Err(errno) => {
-                diagnose(err, &format!("error reading '{path}': {errno}"))?;
+                diagnose(
+                    err,
+                    &format!("error reading {path}: {errno}", path = quote(path)),
+                )?;
                 break;
             }
         }
@@ -423,7 +439,10 @@ fn open_and_emit_initial(
                         offset += n as u64;
                     }
                     Err(errno) => {
-                        diagnose(err, &format!("error reading '{path}': {errno}"))?;
+                        diagnose(
+                            err,
+                            &format!("error reading {path}: {errno}", path = quote(path)),
+                        )?;
                         break;
                     }
                 }
@@ -442,7 +461,13 @@ fn open_and_emit_initial(
             Ok((true, engine.omitted))
         }
         Err(errno) => {
-            diagnose(err, &format!("cannot open '{path}' for reading: {errno}"))?;
+            diagnose(
+                err,
+                &format!(
+                    "cannot open {path} for reading: {errno}",
+                    path = quote(path)
+                ),
+            )?;
             sources.push(FollowSource {
                 path: String::from(path),
                 handle: None,

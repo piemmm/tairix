@@ -4,7 +4,7 @@ cp — Dateien und Verzeichnisse kopieren
 
 ## SYNOPSIS
 
-`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -36,6 +36,13 @@ Laufs in einer einzigen Warnung gemeldet und in einem `omission`-Datensatz
 auf dem Standard-Informationsstrom; mit `--preserve=xattr` schlägt eine
 solche Kopie stattdessen fehl.
 
+Ein Verzeichnis wird nie in sich selbst kopiert: Ein Ziel innerhalb der
+Quelle — wie auch immer es geschrieben ist, über eine Verknüpfung, ein
+`..` oder einen anderen Namen des Datenträgers — wird abgelehnt, bevor
+irgendetwas geschrieben ist, und ein Verzeichnis, das während der Kopie
+in die Quelle verschoben wird, beendet die Kopie dort, wo der Durchlauf
+es antrifft.
+
 ## OPTIONS
 
 - `-r, -R, --recursive` — Verzeichnisse mitsamt Inhalt kopieren.
@@ -51,11 +58,18 @@ solche Kopie stattdessen fehl.
   Quellverzeichnis braucht weiterhin `-r`.
 - `-s, --symbolic-link` — eine symbolische Verknüpfung anlegen, die die
   Quelle benennt, statt sie zu kopieren.
-- `-P, --no-dereference` — eine symbolische Quellverknüpfung als
-  Verknüpfung mit demselben Ziel wortgetreu reproduzieren, statt das
-  Benannte zu kopieren (so übersteht eine relative oder ins Leere
-  zeigende Verknüpfung die Kopie). Ohne sie wird einer Quellverknüpfung
-  gefolgt.
+- `-P, --no-dereference` — jede symbolische Verknüpfung unter den
+  Quellen als Verknüpfung mit demselben Ziel nachbilden, wörtlich, statt
+  zu kopieren, worauf sie zeigt (so übersteht eine relative oder ins
+  Leere zeigende Verknüpfung die Kopie).
+- `-L, --dereference` — jeder symbolischen Verknüpfung unter den Quellen
+  folgen und kopieren, worauf sie zeigt.
+- `-H` — einer als Operand genannten symbolischen Verknüpfung folgen,
+  die innerhalb eines Baums angetroffenen aber nachbilden. Ohne `-H`,
+  `-L` oder `-P` bildet eine rekursive Kopie jede Verknüpfung nach, auch
+  die ihrer Operanden, und jede andere Kopie folgt den Verknüpfungen
+  ihrer Operanden, wie bei GNU; `-l` verknüpft, worauf eine verfolgte
+  Verknüpfung zeigt.
 - `--preserve=links` — zwei Quellen, die einen Knoten benennen, erhalten
   am Ziel zwei Namen statt zweier Kopien, sodass die Kopie den Speicher
   nicht stillschweigend verdoppelt.

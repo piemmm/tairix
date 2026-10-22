@@ -39,6 +39,7 @@ use tairix_net::dns::{Name, Presentation, WireName};
 use tairix_net::dnssd::{InstanceName, ServiceType, Transport};
 use tairix_net::mdns::TxtStrings;
 use tairix_net::mdns::{is_link_local_name, LOCAL_LABEL};
+use tairix_util::quote::quote;
 
 /// The one-line usage banner.
 pub const USAGE: &str =
@@ -141,16 +142,36 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoMode => f.write_str("exactly one of -B, -L, or -G is required"),
-            Self::UnknownOption(option) => write!(f, "unknown option '{option}'"),
-            Self::Operands => f.write_str("wrong number of operands for the mode"),
-            Self::BadType(ty) => write!(f, "'{ty}' is not a service type such as _ipp._tcp"),
-            Self::BadInstance => f.write_str("not an instance name"),
-            Self::BadHost(host) => write!(f, "'{host}' is not a host name under local"),
-            Self::BadFamily(family) => write!(f, "'{family}' is not v4, v6, or v4v6"),
-            Self::BadDomain(domain) => {
-                write!(f, "'{domain}' is not local, the only domain on the link")
+            Self::UnknownOption(option) => {
+                write!(f, "unknown option {option}", option = quote(option))
             }
-            Self::BadSeconds(value) => write!(f, "'{value}' is not a whole number of seconds"),
+            Self::Operands => f.write_str("wrong number of operands for the mode"),
+            Self::BadType(ty) => write!(
+                f,
+                "{ty} is not a service type such as _ipp._tcp",
+                ty = quote(ty)
+            ),
+            Self::BadInstance => f.write_str("not an instance name"),
+            Self::BadHost(host) => write!(
+                f,
+                "{host} is not a host name under local",
+                host = quote(host)
+            ),
+            Self::BadFamily(family) => {
+                write!(f, "{family} is not v4, v6, or v4v6", family = quote(family))
+            }
+            Self::BadDomain(domain) => {
+                write!(
+                    f,
+                    "{domain} is not local, the only domain on the link",
+                    domain = quote(domain)
+                )
+            }
+            Self::BadSeconds(value) => write!(
+                f,
+                "{value} is not a whole number of seconds",
+                value = quote(value)
+            ),
         }
     }
 }

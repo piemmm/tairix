@@ -9,6 +9,7 @@ use tairix_help::{own_short_help, HelpSource};
 use crate::command::Command;
 use crate::error::PrintfError;
 use crate::template::{render_pass, Severity};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `printf`'s own Help tree is
@@ -83,7 +84,8 @@ pub fn run(
                 let first = argument_slices[used];
                 err.write_all(
                     format!(
-                        "printf: warning: ignoring excess arguments, starting with '{first}'\n"
+                        "printf: warning: ignoring excess arguments, starting with {first}\n",
+                        first = quote(first)
                     )
                     .as_bytes(),
                 )

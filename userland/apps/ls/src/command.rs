@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use tairix_glob::Pattern;
 use tairix_termcap::ColorChoice;
+use tairix_util::quote::Style as QuotingStyle;
 
 use crate::error::LsError;
 
@@ -52,14 +53,12 @@ pub enum Indicator {
     None,
     /// `/` after directories (`-p` / `--indicator-style=slash`).
     Slash,
-    /// A type indicator after every classifiable entry *except* executables
-    /// (`--file-type` / `--indicator-style=file-type`). With the VFS's two
-    /// kinds (regular file, directory) this appends `/` to directories and
-    /// nothing else; it differs from [`Classify`](Self::Classify) only in
-    /// never appending the executable `*`.
+    /// `/` after directories and `@` after links (`--file-type` /
+    /// `--indicator-style=file-type`): [`Classify`](Self::Classify) without
+    /// the executable `*`.
     FileType,
-    /// `/` after directories and `*` after executables (`-F` / `--classify`
-    /// / `--indicator-style=classify`).
+    /// `/` after directories, `@` after links and `*` after executables
+    /// (`-F` / `--classify` / `--indicator-style=classify`).
     Classify,
 }
 
@@ -220,39 +219,6 @@ pub enum TimeField {
     Changed,
     /// Creation time — `--time=birth`.
     Created,
-}
-
-/// How each rendered name is quoted (`-N` / `-Q` / `-b` / `--quoting-style`).
-///
-/// These are the GNU `ls` quoting styles. The `locale` and `clocale` styles
-/// are a documented divergence: they select quotation marks from the active
-/// locale, which TAIRiX has no infrastructure for, so they are refused (fail
-/// closed) rather than faked — the same stance the tool already takes on a
-/// custom `--time-style=+FORMAT`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum QuotingStyle {
-    /// Names verbatim, no quoting (`-N` / `--literal` / `--quoting-style=literal`).
-    /// With `-q` (hide control characters) nongraphic bytes become `?`.
-    Literal,
-    /// Quote for the shell only when the name contains a shell-special or
-    /// nongraphic character (`--quoting-style=shell`). Nongraphic characters
-    /// are left literal (or, with `-q`, shown as `?`).
-    Shell,
-    /// Like [`Shell`](Self::Shell) but always quote, even a plain name
-    /// (`--quoting-style=shell-always`).
-    ShellAlways,
-    /// Like [`Shell`](Self::Shell) but render nongraphic characters with
-    /// `$'…'` ANSI-C escapes (`--quoting-style=shell-escape`).
-    ShellEscape,
-    /// Like [`ShellEscape`](Self::ShellEscape) but always quote
-    /// (`--quoting-style=shell-escape-always`).
-    ShellEscapeAlways,
-    /// C string quoting: always double-quoted with C backslash escapes
-    /// (`-Q` / `--quote-name` / `--quoting-style=c`).
-    C,
-    /// Like [`C`](Self::C) but without the surrounding double quotes and with
-    /// spaces escaped (`-b` / `--escape` / `--quoting-style=escape`).
-    Escape,
 }
 
 /// How a timestamp is rendered in the long format.

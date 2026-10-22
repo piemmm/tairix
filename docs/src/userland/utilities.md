@@ -13,6 +13,11 @@ whose implementation in `lib/rt` reports a refused write with the kernel's
 own reason. A tool whose engine renders whole lines (`sysinfo`, `ps`,
 `whoami`) takes `lib/procinfo`'s line `Output`, which every byte stream is.
 
+Every name a tool puts in a diagnostic, a prompt or a `-v` report is written
+through `tairix_util::quote` — always quoted, hidden characters as `$'…'`
+escapes, as GNU's `quoteaf` writes it — so a name a foreign volume carries can
+neither hide nor rewrite what the terminal shows around it.
+
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
 `tairix-sysinfo` is the single command-line tool that exposes the System
@@ -1043,9 +1048,11 @@ flag/width/precision on a conversion that rejects it (`%b`/`%q` take
 none; the per-conversion validity table is probe-pinned against GNU) —
 and a malformed escape are fatal, with output already rendered kept, as
 GNU keeps it. Floats render through the shared `tairix_util::cfloat`
-engine; `%q` reproduces coreutils `quotearg`'s shell-escape style
-(probe-pinned: bare/safe words, `''`, `"it's"` double-quoting, `\'`
-splices, `$'\t\n'` control groups, octal-escaped non-ASCII bytes).
+engine; `%q` is the shared quoting engine's shell-escape style
+(`tairix_util::quote::quote_if_needed`, GNU's `quotef`: bare/safe words,
+`''`, `"it's"` double-quoting, `\'` splices, `$'\t\n'` control groups,
+octal-escaped bytes), with that engine's two documented departures — every
+hidden character escaped, and always the minimal quoting that reads back.
 
 Two deliberate divergences, documented in the bundle's help: floats
 compute in `f64` rather than `long double` (the `seq` precedent — a
@@ -1059,7 +1066,7 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 the session baseline. `cargo test -p tairix-printf` drives the argument
 converter (base-0/char-constant/float readings, saturation, wrapping),
 the template engine (escapes, every conversion, the validity table, `\c`
-halting, `*` width/precision, flush-before-fatal), the `%q` quoter, the
+halting, `*` width/precision, flush-before-fatal), `%q`'s quoting, the
 reuse loop with its diagnostics and exit statuses, and the locale
 switch-drift pin — all against observed GNU coreutils behaviour.
 
@@ -1650,8 +1657,9 @@ otherwise, decided against the wall clock), `long-iso`, `full-iso`, or
 `strftime` engine lands with `date`. The stamp is decomposed through the
 one shared civil-date breakdown (`tairix_fsmeta::calendar::CivilTime`).
 
-Names are quoted through a faithful port of GNU `quotearg`, so awkward
-characters are visible and safe to paste back into a shell. `-N`
+Names are quoted through the shared engine every command app writes names
+with (`tairix_util::quote`, GNU's `quotearg` styles), so awkward characters
+are visible and safe to paste back into a shell. `-N`
 (`--quoting-style=literal`) prints names verbatim, `-Q`
 (`--quoting-style=c`) uses C string quoting, `-b`
 (`--quoting-style=escape`) is the same without the surrounding quotes
@@ -1669,9 +1677,13 @@ infrastructure. The default is resolved against the attested console:
 `literal` otherwise (control characters shown, `--show-control-chars`);
 `-q` / `--show-control-chars` toggle whether the non-escaping styles show
 nongraphic characters as `?`. `-p` / `-F` / `--file-type` /
-`--indicator-style` append the indicator suffix after any closing quote
-(with the VFS's two kinds only directories take `/`; `-F` also stars an
-executable, `--file-type` never does).
+`--indicator-style` append the indicator suffix after any closing quote — `/`
+after a directory, `@` after a link under `--file-type` and `-F`, and `*`
+after an executable under `-F` alone — and under `-F` and `--file-type` the
+C styles also escape each `*`, `=`, `>`, `@` and `|` in a name, so no name
+passes for a suffix; GNU 9.4 leaves `-F`'s own `*` unescaped. A `path:`
+heading is quoted in the listing's style, any `:` in the path quoted too, as
+GNU quotes it.
 
 Sizes follow GNU's two independent scalings — one for the long-format
 file-size column, one for the `-s` allocation cells and the `total`
@@ -1921,7 +1933,7 @@ only `lib/*` crates — the copy itself is the shared engine
 ### Grammar
 
 ```
-cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
+cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
    [-t dir] [--] source... dest
 ```
 
@@ -1933,7 +1945,9 @@ cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
 | `-n`, `--no-clobber`      | never overwrite an existing file                   |
 | `-l`, `--link`            | a second name for the source's node, not a copy    |
 | `-s`, `--symbolic-link`   | a symbolic link naming the source                  |
-| `-P`, `--no-dereference`  | reproduce a link source as a link, verbatim        |
+| `-P`, `--no-dereference`  | reproduce a link as a link, verbatim (the default under `-r`) |
+| `-L`, `--dereference`     | follow every link, operand or met in a tree        |
+| `-H`                      | follow a link named as an operand only             |
 | `--preserve=links`        | keep two sources' shared node shared               |
 | `--preserve=xattr`        | fail a copy whose destination cannot keep an extended attribute |
 | `--no-preserve=xattr`     | copy no extended attributes                        |
@@ -1943,6 +1957,9 @@ cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
 | `-t dir`, `--target-directory=dir` | copy every source into `dir`              |
 | `-T`, `--no-target-directory` | treat dest as a normal file (one source)      |
 | `-h`, `--help`            | print the usage banner (wins immediately)          |
+| `--`                      | end option parsing; every later argument is a path |
+| *source*                  | a file or directory to copy                        |
+| *dest*                    | the destination path (the last operand)            |
 
 `-l` and `-s` are alternatives to copying rather than modifiers of it, so
 they are one last-wins state; `-P` stores the source link's own target
@@ -1967,9 +1984,12 @@ What a destination cannot keep is left and reported once, after the run, as
 `cp: warning: extended attributes not kept on N files (why): keys` on
 `stderr` and an `fs.attributes_not_kept` `omission` record on `stdinfo`;
 `--preserve=xattr` turns any such refusal into a failed copy.
-| `--`                      | end option parsing; every later argument is a path |
-| *source*                  | a file or directory to copy                        |
-| *dest*                    | the destination path (the last operand)            |
+
+Links are followed as GNU follows them: an operand's link is followed unless
+`-r` is given, a link met inside a tree is reproduced, `-H` follows the
+operands' links only, `-L` every link, and the last of `-H`, `-L` and `-P`
+wins. `-l` gives a followed link's second name to what it names, linked by
+its resolved path because `fs_link` follows neither of its names.
 
 At least one source and a destination are required (fewer than two path
 operands is a `CpError::Usage`). Without `-t` the last path operand is
@@ -1992,12 +2012,17 @@ injected seams, the same discipline as `rm`'s `Removal`/`Output`:
 - `FileSystem` — learn a path's kind and identity, read a directory's
   entries, and create directories and files (plus remove a destination
   file for `-f`); a file's bytes are read and written through its
-  supertrait, the copy engine's by-path seam (`tairix_fscopy::PathFiles`).
+  supertrait, the copy engine's by-path seam (`tairix_fscopy::PathFiles`),
+  and a path's resolution and each ancestor's identity through
+  `tairix_fscopy::Ancestry`.
 - `Prompt` — ask the `-i` overwrite question; a declined question skips
   that copy without error, and an unanswerable one fails closed — never
   treated as consent.
 - `Output` — write the usage banner and the `-v` `'src' -> 'dst'`
-  reports to the terminal (`cp` is otherwise silent on success).
+  reports to the terminal (`cp` is otherwise silent on success). Every name
+  a report, prompt or diagnostic carries is quoted through
+  `tairix_util::quote`, so a name holding a control byte reaches the terminal
+  escaped.
 
 On a running system these are syscall- and console-backed; in tests they
 are in-memory fixtures, so every parsing, recursion, clobber, and force
@@ -2018,6 +2043,17 @@ copy descends, so the walk does not depend on directory indices staying
 stable. The destination directory is created before its contents, so a
 parent always exists before a child is copied into it.
 
+A tree copy never copies itself. Before anything is written, a directory
+source whose destination resolves to the directory or inside it —
+compared by the path the kernel resolves the destination to and by the
+identity of each directory on that path, so neither a link, a `..` nor
+another spelling of the volume hides it (`tairix_fscopy::landing`) — is
+refused. While the copy runs, the walk keeps the identities of the source
+and destination directories it is inside (`tairix_fscopy::Descent`, its
+depth's worth, never the tree's) and refuses to enter one again, so a
+directory moved into the source meanwhile, or a link leading back up, stops
+the copy rather than recursing without end.
+
 ### Force
 
 `-f` covers a destination that cannot be created (for example, an
@@ -2033,15 +2069,29 @@ retried exactly once. Without `-f`, a create failure surfaces as a
 - A directory source named without `-r` is a `CpError::IsDirectory`; a
   directory source whose destination already exists as a non-directory is
   a `CpError::NotADirectory`.
-- An operand that cannot be inspected surfaces the underlying `Errno` as
-  `CpError::Stat`, and the run stops before any later operand.
+- A path that cannot be inspected is `CpError::Stat`, naming it with the
+  kernel's reason, and the run stops before any later operand.
 - A destination that is the source's own node — the same name, another
   name for it, or a link to it, compared by the identity a following probe
   reports, before any question is asked — is `CpError::SameFile` ("'a' and
   'a' are the same file", the GNU wording), and nothing is written: the
-  create would otherwise empty the very file it was about to read.
+  create would otherwise empty the very file it was about to read. A
+  directory copied onto itself is the same refusal.
+- A directory copied into its own subtree is `CpError::IntoItself`
+  ("cannot copy a directory, 'a', into itself, 'a/b'", the GNU wording),
+  refused before anything is written, or where the walk meets it.
+- A non-directory operand whose destination an earlier operand wrote is
+  `CpError::JustCreated` ("will not overwrite just-created 'd/x' with 'b/x'",
+  GNU's words): `cp a/x b/x d/` keeps the first copy rather than silently
+  ending with the last. The record of what the run wrote (`tairix_fscopy::
+  Created`) knows a destination by its identity, so a case-folding volume or
+  another spelling of the name does not hide it; a directory still merges into
+  the one an earlier operand made. A destination kept at the `-i` question or
+  under `-n` is no copy of its source, so `--preserve=links` never links the
+  source node's next name to it.
 - An unreadable source is `CpError::Read`; an uncreatable destination is
-  `CpError::Create`; a failed write is `CpError::Write`; an attribute the
+  `CpError::Create`; a failed write is `CpError::Write`, each naming the
+  path; an attribute the
   destination refuses under `--preserve=xattr`, or refuses for a reason that
   is no attribute's, is `CpError::Attribute`, naming the key in its display
   form, so a key's control bytes never reach the terminal.
@@ -2065,7 +2115,13 @@ failed-write paths, the `-f` remove-and-retry recovery, the trailing-slash
 base-name join, a sparse file copied with its holes under each `--sparse`
 mode, attributes carried, refused and reported once, a destination that is
 the source itself (the same name, a second name, a link) refused and left
-whole, an attribute key reported escaped, and the help document kept in step
+whole, a directory copied into its own subtree — named directly, through a
+link on the way, or met again during the walk — refused before anything
+is written, the link-following postures and their last-wins rule, a hard
+link to a followed link naming what it names, a failure naming its path
+quoted, an operand never replacing what an earlier one copied into place, a
+destination kept at the `-i` question never linked to a source node's next
+name, an attribute key reported escaped, and the help document kept in step
 with the options.
 
 ## `mv` — move (rename) files and directories (`userland/apps/mv`)
@@ -2089,11 +2145,11 @@ only `lib/*` crates — a cross-volume move copies through the shared engine
 ```
 mv [-finvT] [-t dir] [--] source... dest
 
-  -f, --force                remove a blocking destination and retry the
-                             rename; never prompt
+  -f, --force                never prompt
   -i, --interactive          ask before overwriting an existing destination
   -n, --no-clobber           never overwrite an existing destination
-  -v, --verbose              report each move (renamed 'src' -> 'dst')
+  -v, --verbose              report each move (renamed 'src' -> 'dst', or
+                             copied 'src' -> 'dst' then removed 'src')
   -t dir, --target-directory=dir
                              move every source into dir
   -T, --no-target-directory  treat dest as a normal file (one source)
@@ -2120,12 +2176,15 @@ crates (`cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s `Removal`, `cp`'s
 `FileSystem`):
 
 - `FileSystem` — learn a path's kind, rename a path, read a directory's
-  entries, create directories and files, and remove files and directories
-  (for the cross-device relocation and for `-f`); a file's bytes go
-  through its supertrait, the copy engine's by-path seam
-  (`tairix_fscopy::PathFiles`).
-- `Output` — write the usage banner to the terminal (`mv` is silent on
-  success).
+  entries, create directories and files (never replacing one), carry a
+  node's owner and mode, draw a staging name, commit what was written to the
+  disk, and remove files and directories; a file's bytes go through its
+  supertrait, the copy engine's by-path seam (`tairix_fscopy::PathFiles`),
+  and a path's resolution and each ancestor's identity through
+  `tairix_fscopy::Ancestry`.
+- `Prompt` — ask the `-i` question.
+- `Output` — write the usage banner and the `-v` reports, every name in
+  them quoted through `tairix_util::quote`.
 
 On a running system these are syscall- and console-backed; in tests they
 are in-memory fixtures, so every routing and fallback decision is
@@ -2133,59 +2192,98 @@ testable without a kernel.
 
 ### Cross-device relocation
 
-A rename cannot be atomic when its source and destination live on
-different filesystems. Rather than overload an `Errno`, the `rename` seam
-reports that case as an explicit `RenameOutcome::CrossDevice` outcome
-(`AGENTS.md` §2.11). The engine then performs the POSIX relocation: it
-copies the source to the destination — a regular file through the shared
-copy engine with its holes and extended attributes, a symbolic link
-recreated with the target it stores (never followed, so what it names is
-neither copied nor removed), and a directory subtree depth-first — and only
-then removes the source, depth-first, so a directory is unlinked after its
-contents. A failure during the copy leaves the source in place, and a file
-whose copy failed is removed again, so no partial file is left under the
-destination's name; the files a failed directory relocation finished stay
-whole. Attributes the destination cannot keep are left and reported once, as
-`cp` reports them.
+A rename cannot cross filesystems, so the `rename` seam reports that case as
+an explicit `RenameOutcome::CrossDevice` outcome rather than an overloaded
+`Errno`. `mv` then keeps the rename's promise by other means. GNU removes the
+destination and copies over it, so a failure or a crash part way leaves
+neither the old destination nor a whole new one; here:
+
+1. The move is checked as the rename would be: a directory replaces only an
+   empty directory, a non-directory never replaces a directory nor a
+   directory a non-directory, and a directory never moves into its own
+   subtree — judged physically, by the resolved path and each ancestor's
+   identity, exactly as `cp` judges it.
+2. The copy is built beside the destination under a fresh staging name
+   (`<name>.<16 hex digits>.new`, the same rule `tairix_rt::replace_file`
+   stages under, shortened to `.<16 hex digits>.new` when the name would
+   outgrow a component): a regular file through the shared copy engine with
+   its holes and extended attributes, a symbolic link recreated with the
+   target it stores (never followed), and a directory subtree depth-first,
+   each directory taking its mode only after its entries are in.
+3. The copy is committed to the disk, renamed onto the destination in one
+   step — the destination holds its old contents until that instant — and
+   committed again.
+4. Only then is the source removed, depth-first.
+
+A failure before the rename discards the staged copy and leaves both sides as
+they were, and a crash there leaves at most the staged copy beside them; a
+failure after it leaves the source in place beside a whole destination, so
+nothing is lost either way. Each node keeps its owner and
+mode wherever the destination volume keeps them; a file the mover may not
+give back to its owner becomes the mover's, without its set-user-ID and
+set-group-ID bits. Timestamps are not carried: no call sets a node's times.
+Attributes the destination cannot keep are left and reported once, as `cp`
+reports them.
 
 ### No-clobber and force
 
-`-n` never overwrites: a source whose destination already exists is
-skipped silently. `-f` covers a destination that blocks the rename (for
-example, an existing read-only file): the destination is removed and the
-rename is retried exactly once. Without either flag an existing
-destination is overwritten, the default POSIX behaviour.
+`-n` never overwrites: a source whose destination already exists is skipped,
+and the rename itself refuses to replace (`RenameFlags::NO_REPLACE`), so a
+destination that appears between the check and the move is kept too. The skip
+is not a failure, so the exit status stays `0` — where GNU 9.4's `mv` reports
+it and exits `1` while its `cp -n` exits `0`. `-f` only cancels an earlier `-i`
+or `-n`: it never removes a destination, so it cannot destroy a directory or a
+node of the other kind that the rename would refuse to replace. Without
+either flag an existing destination is overwritten, the default POSIX
+behaviour.
 
 ### Fail closed
 
 - An unknown option, fewer than two operands, or more than one source
   aimed at a non-directory destination is an `MvError::Usage` that moves
   nothing.
-- An operand that cannot be inspected surfaces the underlying `Errno` as
-  `MvError::Stat`, and the run stops before any later operand.
-- A rename that fails for a reason other than crossing a filesystem
-  boundary is `MvError::Rename`.
+- A path that cannot be inspected is `MvError::Stat`, naming it, and the run
+  stops before any later operand.
+- A directory moved into its own subtree is `MvError::IntoItself`; a
+  non-directory over a directory is `MvError::OverwriteDirectory` and a
+  directory over a non-directory `MvError::OverwriteNonDirectory`, each in
+  the GNU wording, whether the move stays on one volume or crosses one; a
+  directory over a non-empty directory is `MvError::Rename` with the kernel's
+  `NotEmpty`.
+- A non-directory operand whose destination an earlier operand moved there is
+  `MvError::JustCreated` ("will not overwrite just-created 'd/x' with 'b/x'",
+  GNU's words): without it `mv a/x b/x d/` would lose `a/x`, whose source is
+  already gone. The run's record (`tairix_fscopy::Created`) knows each
+  destination by its identity, so a case-folding volume or another spelling
+  of the name does not hide it; a directory may still replace the empty one an
+  earlier operand moved there.
+- A rename that fails for another reason is `MvError::Rename`.
 - During a cross-device relocation an unreadable source is
   `MvError::Read`, an uncreatable destination is `MvError::Create`, a
-  failed write is `MvError::Write`, and a source that cannot be removed
-  after a successful copy is `MvError::Remove`.
+  failed write or commit is `MvError::Write`, and a source that cannot be
+  removed after the move is `MvError::Remove`, each naming its path.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
 `cargo test -p tairix-mv` drives the parser and the move engine against
-an in-memory tree and a recording output: the command grammar (every
-option, clustered short flags, `-`/`--`, the too-few-operands and
-unknown-option paths), a file renamed to a new path, a directory renamed,
-a file moved into a directory under its base name, several files into a
-directory, the several-sources-to-a-non-directory `Usage` refusal, the
-missing-source fail-closed path, a failure stopping before a later
-source, `-n` skipping an existing destination, the default overwrite, the
-failed-rename path, the blocking-destination refusal and its `-f`
-remove-and-retry recovery, the cross-device file / large-file /
-directory relocations, the cross-device read/write/remove fail-closed
-paths with no partial file left behind, an attribute key reported escaped,
+an in-memory tree that applies the kernel's rename rules and records every
+call in order: the command grammar (every option, clustered short flags,
+`-`/`--`, the too-few-operands and unknown-option paths), a file renamed to a
+new path, a directory renamed, a file moved into a directory under its base
+name, several files into a directory, the several-sources-to-a-non-directory
+`Usage` refusal, the missing-source fail-closed path, a failure stopping
+before a later source, `-n` skipping an existing destination and one that
+appears late, the default overwrite, `-f` never destroying a destination of
+the other kind, the rename's rules held across volumes, no directory moved
+into its own subtree on one volume or across, the cross-device file /
+large-file / directory relocations, the replace happening only after the
+staged copy is committed, a failed copy keeping the destination and a failed
+commit keeping the source, a staging name another holds refused and left
+alone, an operand never replacing what an earlier one moved into place, owner and mode carried with the set-ID bits
+dropped where ownership cannot be, a directory taking its mode after its
+entries, the `-v` reports, names quoted, an attribute key reported escaped,
 and the trailing-slash base-name join.
 
 ## `chmod` — change file mode bits (`userland/apps/chmod`)

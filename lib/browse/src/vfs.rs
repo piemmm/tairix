@@ -579,14 +579,7 @@ pub fn probe_directory(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
 #[cfg(feature = "rt")]
 impl LinkReader for RtLinkReader {
     fn describe(&mut self, path: &str) -> Option<LinkInfo> {
-        // The target is bounded by `FS_SYMLINK_MAX`, and `fs_readlink`
-        // refuses an undersized buffer rather than truncating a target — a
-        // truncated one would name somewhere else entirely — so one buffer of
-        // that size always suffices.
-        let mut buf = alloc::vec![0u8; tairix_abi::fs::FS_SYMLINK_MAX];
-        let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
-        let len = usize::try_from(ret).ok()?;
-        let target = core::str::from_utf8(buf.get(..len)?).ok()?;
+        let target = tairix_rt::readlink(path).ok()?;
         // A resolve-only open with the *following* posture: no read authority
         // is requested, the handle closes on drop, and a target that cannot be
         // reached simply yields no kind.
@@ -594,9 +587,6 @@ impl LinkReader for RtLinkReader {
             .ok()
             .and_then(|file| file.stat().ok())
             .map(|stat| stat.kind);
-        Some(LinkInfo {
-            target: String::from(target),
-            kind,
-        })
+        Some(LinkInfo { target, kind })
     }
 }

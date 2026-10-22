@@ -29,6 +29,8 @@ name = "tairix-edit-run"
 path = "src/run.rs"
 
 [dependencies]
+# The one quoting of a name in a message.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The frozen `Errno`: the editor's file notices carry the exact kernel
 # refusal; the tool invents no parallel error set and never links a kernel
 # or driver crate.

@@ -57,6 +57,7 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `unlink`'s own Help tree is unavailable.
@@ -97,7 +98,9 @@ impl fmt::Display for UnlinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => f.write_str("invalid usage"),
-            Self::Remove { path, errno } => write!(f, "cannot unlink '{path}': {errno}"),
+            Self::Remove { path, errno } => {
+                write!(f, "cannot unlink {path}: {errno}", path = quote(path))
+            }
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }
     }

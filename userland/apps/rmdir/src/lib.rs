@@ -55,6 +55,7 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `rmdir`'s own Help tree is unavailable.
@@ -102,7 +103,7 @@ impl fmt::Display for RmdirError {
         match self {
             Self::Usage => f.write_str("invalid usage"),
             Self::Remove { path, errno } => {
-                write!(f, "failed to remove '{path}': {errno}")
+                write!(f, "failed to remove {path}: {errno}", path = quote(path))
             }
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }
@@ -299,8 +300,10 @@ fn remove_one(
     path: &str,
 ) -> Result<Walk, RmdirError> {
     if options.verbose {
-        out.write_all(format!("rmdir: removing directory, '{path}'\n").as_bytes())
-            .map_err(RmdirError::Output)?;
+        out.write_all(
+            format!("rmdir: removing directory, {path}\n", path = quote(path)).as_bytes(),
+        )
+        .map_err(RmdirError::Output)?;
     }
     match fs.rmdir(path) {
         Ok(()) => Ok(Walk::Continue),

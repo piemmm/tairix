@@ -8,6 +8,7 @@ use tairix_help::{own_short_help, HelpSource};
 use crate::command::{Command, Job, OutputError};
 use crate::error::TeeError;
 use crate::io::{FileSink, Input, Output};
+use tairix_util::quote::quote_if_needed;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `tee`'s own Help tree is unavailable.
@@ -163,7 +164,7 @@ pub fn run(
                 Err(errno) => {
                     let verdict = judge(job.on_error, target.is_pipe_class());
                     if verdict.diagnose {
-                        diagnose(err, &format!("{}: {errno}", target.name()))?;
+                        diagnose(err, &format!("{}: {errno}", quote_if_needed(target.name())))?;
                     }
                     all_ok &= !verdict.fail;
                     if verdict.stop {
@@ -198,7 +199,10 @@ fn open_targets<'a>(
         match files.open(id, path, job.append) {
             Ok(()) => targets.push(Target::File { id, path }),
             Err(errno) => {
-                diagnose(err, &format!("{path}: {errno}"))?;
+                diagnose(
+                    err,
+                    &format!("{path}: {errno}", path = quote_if_needed(path)),
+                )?;
                 *all_ok = false;
                 if mode_is_exit(job.on_error) {
                     targets.clear();
@@ -537,7 +541,7 @@ mod tests {
         assert_eq!(out.bytes(), b"abc");
         assert_eq!(files.contents("f"), b"abcdef"[..3].to_vec());
         assert!(
-            err.text().starts_with("tee: standard output:"),
+            err.text().starts_with("tee: 'standard output':"),
             "unexpected diagnostic: {}",
             err.text()
         );
@@ -564,7 +568,7 @@ mod tests {
         assert_eq!(out.bytes(), b"abc");
         assert_eq!(files.contents("f"), b"abcdef");
         assert!(
-            err.text().starts_with("tee: standard output:"),
+            err.text().starts_with("tee: 'standard output':"),
             "unexpected diagnostic: {}",
             err.text()
         );

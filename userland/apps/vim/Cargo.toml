@@ -29,6 +29,8 @@ name = "tairix-vim-run"
 path = "src/run.rs"
 
 [dependencies]
+# The one quoting of an operand in a message.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The frozen `Errno` the editor's file seam reports; `vim` invents no
 # parallel error set and never links a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

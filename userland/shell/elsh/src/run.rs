@@ -77,6 +77,7 @@ mod program {
     };
     use tairix_resref::SelectorDomain;
     use tairix_rt::io::{write_stderr_line, Read, StdInfo, Stderr, Stdin, Stdout, Write};
+    use tairix_util::quote::quote_if_needed;
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
     /// and standard error (fd 2) through the shared `tairix_rt::io` layer — the
@@ -661,7 +662,8 @@ mod program {
         // always re-parse; a malformed one is refused, never guessed at.
         let parsed = tairix_resref::parse(reference).map_err(|_| {
             write_stderr_line(&alloc::format!(
-                "shell: redirection: {reference}: not a resource reference"
+                "shell: redirection: {reference}: not a resource reference",
+                reference = quote_if_needed(reference)
             ));
             // The kernel resolver's own errno for a malformed reference, so
             // a spelling refusal reads the same wherever it is caught.
@@ -672,7 +674,10 @@ mod program {
         // the shared wording — which names the capability a denial wanted —
         // is stated here against the reference itself.
         let value = tairix_procinfo::read_value(&parsed, now, &IpcTransport).map_err(|err| {
-            write_stderr_line(&alloc::format!("shell: redirection: {reference}: {err}"));
+            write_stderr_line(&alloc::format!(
+                "shell: redirection: {reference}: {err}",
+                reference = quote_if_needed(reference)
+            ));
             err.to_errno()
         })?;
         tairix_rt::fs_write_all(write, 0, value.as_bytes()).inspect_err(|&err| {

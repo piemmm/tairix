@@ -41,6 +41,7 @@ use tairix_display::{winframe, SERIAL};
 use tairix_raster::Surface;
 use tairix_rt::work::{Desk, Worker};
 use tairix_theme::{Accessibility, ThemeRegistry};
+use tairix_util::utf8::Shown;
 
 use crate::client::{
     notice_alert, presented_damage, retained_damage, WindowClient, WindowTransport,
@@ -138,10 +139,20 @@ impl fmt::Display for ShellError {
     }
 }
 
-/// State `reason` on `stderr` under the application's `name`.
+/// State `reason` on `stderr` under the application's `name`, each hidden
+/// character in it shown as U+FFFD: a reason quotes names from elsewhere, and
+/// a terminal must never take one for a command.
 pub fn report(name: &str, reason: impl fmt::Display) {
     use tairix_rt::io::{Stderr, Write};
-    let _ = writeln!(Stderr, "{name}: {reason}");
+    let _ = writeln!(Stderr, "{name}: {}", Shown(reason));
+}
+
+/// State one ready-made diagnostic `line` on `stderr`, shown as [`report`]
+/// shows a reason; only its own line ending is kept, so no name in it can
+/// start a line of its own.
+pub fn report_line(line: &str) {
+    use tairix_rt::io::{Stderr, Write};
+    let _ = writeln!(Stderr, "{}", Shown(line.strip_suffix('\n').unwrap_or(line)));
 }
 
 /// State on `stderr` under `name`, and in an error alert holding window

@@ -1,14 +1,32 @@
 //! The shared copy engine's seams (`lib/fscopy`) over the running system's
-//! files and their extended attributes.
+//! files, their extended attributes, and the directories a tree copy must
+//! not land in.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::fs::{OpenFlags, SeekRegion};
-use tairix_abi::Errno;
-use tairix_fscopy::{AttributeStore, PathFiles, Source, Target};
+use tairix_abi::{Errno, FileId, RealpathMode};
+use tairix_fscopy::{Ancestry, AttributeStore, PathFiles, Source, Target};
 
 use crate::File;
+
+/// The system's own resolution of a path and identity of a node.
+pub struct RtAncestry;
+
+impl Ancestry for RtAncestry {
+    fn canonical(&self, path: &str) -> Result<String, Errno> {
+        crate::realpath(path, RealpathMode::Final)
+    }
+
+    fn identity(&self, path: &str) -> Result<FileId, Errno> {
+        // A resolve-only open: no read authority is asked for, and the handle
+        // closes on drop.
+        let file =
+            File::open(path.as_bytes(), OpenFlags::NO_FOLLOW).map_err(Errno::from_syscall)?;
+        Ok(file.stat().map_err(Errno::from_syscall)?.id)
+    }
+}
 
 /// The extended attributes of the system's filesystem, by path.
 pub struct RtAttributes;

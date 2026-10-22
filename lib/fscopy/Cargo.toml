@@ -11,8 +11,22 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The kernel's resolution in miniature, for the copying tools' in-memory
+# test filesystems.
+test-support = []
+
 # The seams over the running system's files are `tairix_rt::copy`, so the
 # engine depends on the ABI alone and the runtime can run it too.
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }
+# The one spelling of a path's ancestors, which the containment check walks.
+tairix-path = { path = "../path", version = "=0.0.0" }
+# The fallible keyed set the record of a run's destinations is held in.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+tairix-hash = { path = "../hash", version = "=0.0.0" }
+
+[dev-dependencies]
+# The crate itself with its test support, so the resolver's own tests run.
+tairix-fscopy = { path = ".", version = "=0.0.0", features = ["test-support"] }

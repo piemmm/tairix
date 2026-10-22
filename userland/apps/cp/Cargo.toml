@@ -46,6 +46,9 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # The one file copy: a file's bytes with its holes, its extended attributes,
 # and the report of what a destination could not keep.
 tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
+# The keyed map `--preserve=links` remembers destinations in, and its key.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 # The one display form of an attribute key a volume wrote, escaped so its
 # control bytes never reach a terminal as an escape sequence.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
@@ -59,6 +62,11 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The freestanding `Run` binary also enables the help engine's syscall-backed
 # own-bundle `HelpSource` (`BundleHelp`), shared by every command app.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+
+[dev-dependencies]
+# The shared miniature of the kernel's path resolution the test filesystem
+# answers the containment check with.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

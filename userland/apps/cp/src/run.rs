@@ -40,13 +40,14 @@ mod program {
     use core::cell::RefCell;
 
     use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion};
-    use tairix_abi::{Errno, FileKind};
+    use tairix_abi::{Errno, FileId, FileKind};
     use tairix_cp::{
-        parse, run, AttributeStore, CpError, Entry, EntryKind, FileSystem, Follow, PathFiles,
-        Probe, Prompt, USAGE,
+        parse, run, Ancestry, AttributeStore, CpError, Entry, EntryKind, FileSystem, Follow,
+        PathFiles, Probe, Prompt, Seams, USAGE,
     };
+    use tairix_hash::{BuildSipHash13, HashSeed};
     use tairix_help::BundleHelp;
-    use tairix_rt::copy::{OpenFiles, RtAttributes};
+    use tairix_rt::copy::{OpenFiles, RtAncestry, RtAttributes};
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_rt::File;
 
@@ -148,6 +149,18 @@ mod program {
         }
     }
 
+    /// The kernel's own resolution and identities, through the shared
+    /// runtime-backed seam.
+    impl Ancestry for RtFileSystem {
+        fn canonical(&self, path: &str) -> Result<String, Errno> {
+            RtAncestry.canonical(path)
+        }
+
+        fn identity(&self, path: &str) -> Result<FileId, Errno> {
+            RtAncestry.identity(path)
+        }
+    }
+
     /// Map a reported [`FileKind`] onto the distinction `cp` acts on.
     fn entry_kind(kind: FileKind) -> EntryKind {
         match kind {
@@ -204,17 +217,7 @@ mod program {
         }
 
         fn read_link(&self, path: &str) -> Result<String, Errno> {
-            // The buffer is the ABI's own target bound, so one call always
-            // suffices: a longer target cannot exist.
-            let mut buf = alloc::vec![0u8; tairix_abi::fs::FS_SYMLINK_MAX];
-            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
-            let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
-            let target = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
-            Ok(String::from(target))
+            tairix_rt::readlink(path)
         }
 
         fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {
@@ -350,15 +353,16 @@ mod program {
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
-        match run(
-            command,
-            locale,
-            &RtFileSystem::new(),
-            &RtPrompt,
-            &BundleHelp::new("cp"),
-            &Stdout,
-            &Stderr,
-        ) {
+        let seams = Seams {
+            fs: &RtFileSystem::new(),
+            prompt: &RtPrompt,
+            help: &BundleHelp::new("cp"),
+            out: &Stdout,
+            diagnostics: &Stderr,
+            // Without a key the records are predictable, never absent.
+            keys: BuildSipHash13::with_seed(tairix_rt::hash_seed().unwrap_or(HashSeed::UNKEYED)),
+        };
+        match run(command, locale, seams) {
             Ok(()) => 0,
             Err(err) => {
                 write_stderr_line(&format!("cp: {err}"));

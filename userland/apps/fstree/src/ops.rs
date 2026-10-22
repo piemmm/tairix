@@ -29,10 +29,10 @@ use core::cell::RefCell;
 use core::fmt::Write as _;
 
 use tairix_abi::fs::SeekRegion;
-use tairix_abi::{Errno, FileKind, RenameFlags};
+use tairix_abi::{Errno, FileId, FileKind, RenameFlags};
 use tairix_fscopy::{
-    copy_attributes, AttrError, AttributeStore, Attributes, DataCopy, DataError, Omissions,
-    Refusal, Source, Sparse, Target, CHUNK_LEN,
+    copy_attributes, landing, Ancestry, AttrError, AttributeStore, Attributes, DataCopy, DataError,
+    Descent, Landing, Omissions, Refusal, Source, Sparse, Target, CHUNK_LEN,
 };
 use tairix_path::{join, leaf_name};
 
@@ -143,8 +143,10 @@ fn probe(fs: &mut dyn Fs, path: &str) -> Result<Option<FileKind>, OpError> {
 /// Resolve where a transfer of `src` must land, given the normalised
 /// destination the user typed: an existing directory receives the source
 /// *inside* it under its base name; anything else is the target itself.
-/// Refuses — before any I/O — a target equal to the source or inside the
-/// source's own subtree.
+/// Refuses, before anything is written, a target that is the source or lies
+/// inside a directory source's own subtree — by the path the kernel resolves
+/// it to and the identity of each directory on it, so no link, `..` or alias
+/// spelling hides the source.
 ///
 /// # Errors
 ///
@@ -162,8 +164,18 @@ pub fn plan_target(
     if target.trim_end_matches('/') == src.trim_end_matches('/') {
         return Err(OpError::SamePath);
     }
-    if src_kind == FileKind::Directory && is_inside(src, &target) {
-        return Err(OpError::IntoItself);
+    if src_kind == FileKind::Directory {
+        let id = fs
+            .identity(src)
+            .map_err(|errno| OpError::Fs(String::from(src), errno))?;
+        let shared = Shared(RefCell::new(fs));
+        match landing(&shared, src, id, &target)
+            .map_err(|errno| OpError::Fs(target.clone(), errno))?
+        {
+            Landing::Apart => {}
+            Landing::Same => return Err(OpError::SamePath),
+            Landing::Within => return Err(OpError::IntoItself),
+        }
     }
     Ok(target)
 }
@@ -246,6 +258,8 @@ enum Work {
     Remove { path: String, kind: FileKind },
     /// Remove one directory the steps queued above it emptied.
     RemoveEmptiedDir { path: String },
+    /// Leave the directory a transfer entered, its entries all queued above.
+    Leave,
 }
 
 /// A resumable file operation: a work stack advanced until it finishes,
@@ -271,6 +285,8 @@ pub struct FileOp {
     /// What the copies' destinations could not keep, for the completion
     /// report.
     omissions: Omissions,
+    /// The directories the walk is inside, so it never enters one again.
+    descent: Descent,
     /// Whether the user cancelled the remaining steps.
     cancelled: bool,
 }
@@ -328,6 +344,7 @@ impl FileOp {
             done: 0,
             skipped: 0,
             omissions: Omissions::default(),
+            descent: Descent::default(),
             cancelled: false,
         }
     }
@@ -401,6 +418,10 @@ impl FileOp {
                 } => self.step_transfer(fs, src, kind, dst, approved),
                 Work::Remove { path, kind } => self.step_remove(fs, &path, kind),
                 Work::RemoveEmptiedDir { path } => self.step_remove_emptied(fs, &path),
+                Work::Leave => {
+                    self.descent.leave();
+                    Ok(())
+                }
             };
             match step {
                 Ok(()) => {}
@@ -566,6 +587,16 @@ impl FileOp {
                 Ok(())
             }
             FileKind::Directory => {
+                let fail_on = |path: &str| {
+                    let path = String::from(path);
+                    move |errno| StepEnd::Failed(OpError::Fs(path, errno))
+                };
+                // A directory renamed into the source meanwhile is met here,
+                // and refused rather than copied into its own copy.
+                let source_id = fs.identity(&src).map_err(fail_on(&src))?;
+                if self.descent.refuses(source_id) {
+                    return Err(StepEnd::Failed(OpError::IntoItself));
+                }
                 match probe(fs, &dst).map_err(StepEnd::Failed)? {
                     // An existing directory target is merged into.
                     Some(FileKind::Directory) => {}
@@ -575,16 +606,18 @@ impl FileOp {
                         return Err(StepEnd::Failed(OpError::KindMismatch(dst)));
                     }
                     None => {
-                        fs.mkdir(&dst)
-                            .map_err(|errno| StepEnd::Failed(OpError::Fs(dst.clone(), errno)))?;
+                        fs.mkdir(&dst).map_err(fail_on(&dst))?;
                         let left = carry_attributes(&Shared(RefCell::new(&mut *fs)), &src, &dst)
                             .map_err(StepEnd::Failed)?;
                         self.omissions.note(&left);
                     }
                 }
-                let entries = fs
-                    .list_dir(&src)
-                    .map_err(|errno| StepEnd::Failed(OpError::Fs(src.clone(), errno)))?;
+                let made_id = fs.identity(&dst).map_err(fail_on(&dst))?;
+                let entries = fs.list_dir(&src).map_err(fail_on(&src))?;
+                self.descent
+                    .enter(source_id, made_id)
+                    .map_err(fail_on(&dst))?;
+                self.stack.push(Work::Leave);
                 if self.kind == OpKind::Move {
                     // Queued beneath the children, so the source directory
                     // is removed only once they have all moved out.
@@ -743,6 +776,16 @@ fn carry_attributes(
 /// The filesystem a copy's two ends and its attributes share, each call
 /// borrowing it for that call alone.
 struct Shared<'a, 'f>(RefCell<&'a mut (dyn Fs + 'f)>);
+
+impl Ancestry for Shared<'_, '_> {
+    fn canonical(&self, path: &str) -> Result<String, Errno> {
+        self.0.borrow_mut().canonical(path)
+    }
+
+    fn identity(&self, path: &str) -> Result<FileId, Errno> {
+        self.0.borrow_mut().identity(path)
+    }
+}
 
 impl<'a, 'f> Shared<'a, 'f> {
     fn file<'s>(&'s self, path: &'s str) -> SharedFile<'s, 'a, 'f> {

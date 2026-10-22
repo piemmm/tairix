@@ -32,6 +32,7 @@ use tairix_procinfo::{
     CallError, ListError, Output, StreamScope, Transport, WalkStep, AUDIO_DEVICE_HEADER,
     AUDIO_STREAM_HEADER,
 };
+use tairix_util::quote::quote;
 
 /// The command word the tool's help and `stdinfo` records go by.
 pub const OWN_WORD: &str = "audioctl";
@@ -88,17 +89,24 @@ pub enum UsageError {
 impl fmt::Display for UsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownCommand(word) => write!(f, "unknown command '{word}'"),
-            Self::UnknownOption(option) => write!(f, "unrecognized option '{option}'"),
+            Self::UnknownCommand(word) => write!(f, "unknown command {word}", word = quote(word)),
+            Self::UnknownOption(option) => {
+                write!(f, "unrecognized option {option}", option = quote(option))
+            }
             Self::Missing(what) => write!(f, "missing {what}"),
-            Self::Extra(operand) => write!(f, "extra operand '{operand}'"),
-            Self::Device(text, err) => write!(f, "'{text}': {err}"),
+            Self::Extra(operand) => write!(f, "extra operand {operand}", operand = quote(operand)),
+            Self::Device(text, err) => write!(f, "{text}: {err}", text = quote(text)),
             Self::Level(text, LevelError::Malformed) => write!(
                 f,
-                "'{text}': a level is decibels to the hundredth, such as -6 or -3.5"
+                "{text}: a level is decibels to the hundredth, such as -6 or -3.5",
+                text = quote(text)
             ),
             Self::Level(text, LevelError::Boost) => {
-                write!(f, "'{text}': a level only attenuates: 0 dB or below")
+                write!(
+                    f,
+                    "{text}: a level only attenuates: 0 dB or below",
+                    text = quote(text)
+                )
             }
         }
     }

@@ -64,6 +64,7 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `link`'s own Help tree is unavailable.
@@ -116,7 +117,12 @@ impl fmt::Display for LinkError {
                 existing,
                 new,
                 errno,
-            } => write!(f, "cannot create link '{new}' to '{existing}': {errno}"),
+            } => write!(
+                f,
+                "cannot create link {new} to {existing}: {errno}",
+                new = quote(new),
+                existing = quote(existing)
+            ),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }
     }

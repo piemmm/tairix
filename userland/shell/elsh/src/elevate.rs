@@ -31,6 +31,7 @@ use tairix_util::secret::wipe;
 
 use crate::builtin::BuiltinContext;
 use crate::host::Denied;
+use tairix_util::quote::quote_if_needed;
 
 /// Status returned when the builtin is used incorrectly or refused.
 const USAGE_ERROR: i32 = 1;
@@ -53,8 +54,10 @@ pub(crate) fn elevate(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
     }
     let operands: Vec<&str> = rest.iter().map(String::as_str).collect();
 
-    ctx.console
-        .write_stdout(&format!("Password for {username}: "));
+    ctx.console.write_stdout(&format!(
+        "Password for {username}: ",
+        username = quote_if_needed(username)
+    ));
     let mut secret = [0u8; MAX_PASSWORD_LEN];
     let result = match ctx.elevator.read_secret(&mut secret) {
         Ok(len) => match core::str::from_utf8(&secret[..len]) {
@@ -74,7 +77,8 @@ pub(crate) fn elevate(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
         Err(Denied::Cooling(retry_after)) => {
             ctx.console.write_stderr(&format!(
                 "elevate: too many attempts for {username}; try again in {} s\n",
-                retry_after.secs_rounded_up()
+                retry_after.secs_rounded_up(),
+                username = quote_if_needed(username)
             ));
             USAGE_ERROR
         }

@@ -60,6 +60,7 @@ use core::fmt;
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_util::cnum::scan_double;
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `sleep`'s own Help tree is unavailable.
@@ -118,10 +119,20 @@ pub enum SleepError {
 impl fmt::Display for SleepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => write!(f, "unrecognized option '{token}'"),
-            Self::UnknownShort(flag) => write!(f, "invalid option -- '{flag}'"),
+            Self::UnknownLong(token) => {
+                write!(f, "unrecognized option {token}", token = quote(token))
+            }
+            Self::UnknownShort(flag) => write!(
+                f,
+                "invalid option -- {}",
+                quote(flag.encode_utf8(&mut [0; 4]))
+            ),
             Self::MissingOperand => f.write_str("missing operand"),
-            Self::InvalidInterval(operand) => write!(f, "invalid time interval '{operand}'"),
+            Self::InvalidInterval(operand) => write!(
+                f,
+                "invalid time interval {operand}",
+                operand = quote(operand)
+            ),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }
     }

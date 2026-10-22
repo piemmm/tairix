@@ -45,6 +45,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_path::leaf_name;
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `basename`'s own Help tree is
@@ -90,7 +91,9 @@ impl fmt::Display for BasenameError {
         match self {
             BasenameError::Usage => f.write_str("unrecognized option"),
             BasenameError::MissingOperand => f.write_str("missing operand"),
-            BasenameError::ExtraOperand(operand) => write!(f, "extra operand '{operand}'"),
+            BasenameError::ExtraOperand(operand) => {
+                write!(f, "extra operand {operand}", operand = quote(operand))
+            }
             BasenameError::MissingSuffix => f.write_str("option requires an argument -- 's'"),
         }
     }

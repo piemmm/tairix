@@ -300,7 +300,10 @@ argument or redirection target additionally offers the registered resource
 namespaces (`sys:`, `info:`, `state:`, `stats:` …). A unique candidate inserts
 (directories stay open with `/`, finished words close with a space), several
 extend to their longest common prefix, and an unextendable set is listed
-inline. Unlexable prefixes and quoted/expansion-bearing words degrade to no
+inline, in columns measured by each name's display width and with every
+hidden character a name holds shown as U+FFFD; the prompt and the line under
+edit reach the terminal through `lib/vt`, which prints no control character
+as itself. Unlexable prefixes and quoted/expansion-bearing words degrade to no
 candidates, fail closed.
 
 A word the shared resolution rule reads as a resource reference

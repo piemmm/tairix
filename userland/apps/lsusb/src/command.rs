@@ -17,6 +17,7 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use core::fmt;
+use tairix_util::quote::quote;
 
 /// What a parsed argument vector asks `lsusb` to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,18 +82,24 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option '{opt}'"),
-            Self::MissingValue(opt) => write!(f, "option '{opt}' requires an argument"),
+            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
+            Self::MissingValue(opt) => {
+                write!(f, "option {opt} requires an argument", opt = quote(opt))
+            }
             Self::BadDeviceFilter(value) => {
-                write!(f, "-d expects [<vendor>]:[<product>] in hex, got '{value}'")
+                write!(
+                    f,
+                    "-d expects [<vendor>]:[<product>] in hex, got {value}",
+                    value = quote(value)
+                )
             }
             Self::BadSlot(value) => {
                 write!(
                     f,
-                    "-s expects [[<bus>]:][<devnum>] as decimal hardware-tree node ids, got '{value}'"
+                    "-s expects [[<bus>]:][<devnum>] as decimal hardware-tree node ids, got {value}", value = quote(value)
                 )
             }
-            Self::UnexpectedOperand(arg) => write!(f, "unexpected operand '{arg}'"),
+            Self::UnexpectedOperand(arg) => write!(f, "unexpected operand {arg}", arg = quote(arg)),
         }
     }
 }

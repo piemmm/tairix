@@ -53,9 +53,9 @@ pub struct Options {
     pub target_mode: TargetMode,
     /// What a non-directory source becomes at the destination (`-l` / `-s`).
     pub contents: Contents,
-    /// Reproduce a symbolic-link source as a link rather than following it
-    /// (`-P`/`--no-dereference`; `-d` sets this and `preserve_links`).
-    pub no_dereference: bool,
+    /// Which symbolic links in the sources are followed (`-H` / `-L` / `-P`,
+    /// last one wins; `-d` is `-P` with `preserve_links`).
+    pub dereference: Dereference,
     /// Give two sources naming one node two names at the destination rather
     /// than two copies (`--preserve=links`; `-d` sets this too).
     pub preserve_links: bool,
@@ -83,6 +83,23 @@ pub enum Contents {
     SymbolicLink,
 }
 
+/// Which symbolic links in the sources a copy follows rather than
+/// reproduces as links.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Dereference {
+    /// GNU's default: an operand's link is followed unless the copy is
+    /// recursive, and inside a tree none is, unless `-l` hard-links what the
+    /// links name.
+    #[default]
+    Default,
+    /// None (`-P`/`--no-dereference`).
+    Never,
+    /// The operands' own, not those met inside a tree (`-H`).
+    Operands,
+    /// Every one (`-L`/`--dereference`).
+    Always,
+}
+
 impl Options {
     /// The defaults of a bare `cp`.
     pub const DEFAULT: Self = Self {
@@ -92,7 +109,7 @@ impl Options {
         verbose: false,
         target_mode: TargetMode::Inferred,
         contents: Contents::Bytes,
-        no_dereference: false,
+        dereference: Dereference::Default,
         preserve_links: false,
         sparse: Sparse::Auto,
         attributes: Attributes::Carry,
@@ -196,7 +213,8 @@ fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
         "no-target-directory" => return Ok(Long::NoTargetDirectory),
         "link" => options.contents = Contents::HardLink,
         "symbolic-link" => options.contents = Contents::SymbolicLink,
-        "no-dereference" => options.no_dereference = true,
+        "no-dereference" => options.dereference = Dereference::Never,
+        "dereference" => options.dereference = Dereference::Always,
         // `-a` is `-dR --preserve=all`, and `--preserve=all` includes the
         // timestamps no call can set yet, so it is refused rather than
         // delivered as a silently narrower `-dR`.
@@ -211,7 +229,7 @@ fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
 /// [`Command`].
 ///
 /// The grammar is the GNU `cp` surface,
-/// `cp [-dfilnPrRsvT] [-t dir] [--] source... dest`:
+/// `cp [-dfHilLnPrRsvT] [-t dir] [--] source... dest`:
 ///
 /// * `-r` / `-R` / `--recursive` — copy directories and their contents.
 /// * `-f` / `--force` — remove an unwritable destination and retry.
@@ -219,7 +237,9 @@ fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
 /// * `-n` / `--no-clobber` — never overwrite an existing file.
 /// * `-l` / `--link` — a second name for the source's node, not a copy.
 /// * `-s` / `--symbolic-link` — a symbolic link naming the source.
-/// * `-P` / `--no-dereference` — reproduce a link source as a link.
+/// * `-P` / `--no-dereference` — reproduce every link source as a link.
+/// * `-L` / `--dereference` — follow every link source.
+/// * `-H` — follow the operands' links, not those met inside a tree.
 /// * `--preserve=LIST` — `links` keeps two sources' shared node shared, and
 ///   `xattr` makes every extended attribute a copy must carry, failing one
 ///   the destination cannot keep.
@@ -291,10 +311,12 @@ pub fn parse(args: &[&str]) -> Result<Command, CpError> {
                         'T' => no_target_dir = true,
                         'l' => options.contents = Contents::HardLink,
                         's' => options.contents = Contents::SymbolicLink,
-                        'P' => options.no_dereference = true,
+                        'P' => options.dereference = Dereference::Never,
+                        'L' => options.dereference = Dereference::Always,
+                        'H' => options.dereference = Dereference::Operands,
                         // GNU's `-d` is exactly this pair.
                         'd' => {
-                            options.no_dereference = true;
+                            options.dereference = Dereference::Never;
                             options.preserve_links = true;
                         }
                         'a' => return Err(CpError::Unsupported(String::from("-a"))),
@@ -354,7 +376,9 @@ pub fn parse(args: &[&str]) -> Result<Command, CpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Attributes, Clobber, Command, Contents, Options, Sparse, TargetMode};
+    use super::{
+        parse, Attributes, Clobber, Command, Contents, Dereference, Options, Sparse, TargetMode,
+    };
     use crate::error::CpError;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -558,6 +582,8 @@ mod tests {
                 "`-l, --link`",
                 "`-s, --symbolic-link`",
                 "`-P, --no-dereference`",
+                "`-L, --dereference`",
+                "`-H`",
                 "`--preserve=links`",
                 "`--preserve=xattr`",
                 "`--no-preserve=xattr`",
@@ -599,6 +625,22 @@ mod tests {
     }
 
     #[test]
+    fn h_l_and_p_choose_which_links_are_followed_and_the_last_one_wins() {
+        let followed = |args: &[&str]| match parse(args).expect("parse") {
+            Command::Copy { options, .. } => options.dereference,
+            Command::Help => panic!("expected a copy"),
+        };
+        assert_eq!(followed(&["a", "b"]), Dereference::Default);
+        assert_eq!(followed(&["-L", "a", "b"]), Dereference::Always);
+        assert_eq!(followed(&["--dereference", "a", "b"]), Dereference::Always);
+        assert_eq!(followed(&["-H", "a", "b"]), Dereference::Operands);
+        assert_eq!(followed(&["-P", "a", "b"]), Dereference::Never);
+        assert_eq!(followed(&["-LP", "a", "b"]), Dereference::Never);
+        assert_eq!(followed(&["-PL", "a", "b"]), Dereference::Always);
+        assert_eq!(followed(&["-Hd", "a", "b"]), Dereference::Never);
+    }
+
+    #[test]
     fn d_is_exactly_no_dereference_plus_preserve_links() {
         // GNU defines `-d` as that pair, so it is spelled as the pair rather
         // than as a third state that could drift from either half.
@@ -606,7 +648,7 @@ mod tests {
         let Command::Copy { options, .. } = d else {
             panic!("expected a copy");
         };
-        assert!(options.no_dereference);
+        assert_eq!(options.dereference, Dereference::Never);
         assert!(options.preserve_links);
         let pair = parse(&["-P", "--preserve=links", "a", "b"]).expect("parse");
         assert!(matches!(pair, Command::Copy { options: o, .. } if o == options));

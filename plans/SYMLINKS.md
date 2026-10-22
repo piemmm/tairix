@@ -506,8 +506,10 @@ hard links.
 second name for the source's node rather than a copy of its bytes; `-s` makes
 a symbolic link naming the source; `-P` reproduces a symbolic-link source as a
 link storing the same target verbatim, so a relative or dangling one survives
-the copy; and `--preserve=links` gives two sources naming one node two names
-at the destination, keyed on the identity S7's record carries and remembering
+the copy — GNU's posture under `-r`, where `-H` follows the operands' links
+and `-L` every link, the last of the three winning; and `--preserve=links`
+gives two sources naming one node two names at the destination, keyed on the
+identity S7's record carries and remembering
 only nodes whose count exceeds one. `-d` is exactly `-P --preserve=links`.
 `-a` is refused, because `--preserve=all` includes timestamps no syscall can
 set — a preservation reported but not performed would be worse than a refusal.

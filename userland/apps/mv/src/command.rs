@@ -8,7 +8,7 @@ use crate::error::MvError;
 /// What happens when a destination already exists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Clobber {
-    /// Overwrite it (the default, and `-f`).
+    /// Overwrite it (the default, and `-f`, which never prompts).
     Overwrite,
     /// Ask before overwriting (`-i`).
     Prompt,
@@ -33,9 +33,6 @@ pub enum TargetMode {
 /// The full option set of one `mv` run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
-    /// Remove a destination that blocks an atomic rename and retry once
-    /// (`-f`).
-    pub force: bool,
     /// The existing-destination policy (`-f` / `-i` / `-n`, last one
     /// wins).
     pub clobber: Clobber,
@@ -48,7 +45,6 @@ pub struct Options {
 impl Options {
     /// The defaults of a bare `mv`.
     pub const DEFAULT: Self = Self {
-        force: false,
         clobber: Clobber::Overwrite,
         verbose: false,
         target_mode: TargetMode::Inferred,
@@ -82,8 +78,7 @@ pub enum Command {
 /// The grammar is the GNU `mv` surface,
 /// `mv [-finvT] [-t dir] [--] source... dest`:
 ///
-/// * `-f` / `--force` — remove a destination that blocks the rename and
-///   retry; never prompt.
+/// * `-f` / `--force` — never prompt before overwriting.
 /// * `-i` / `--interactive` — ask before overwriting an existing
 ///   destination.
 /// * `-n` / `--no-clobber` — never overwrite an existing destination.
@@ -135,18 +130,9 @@ pub fn parse(args: &[&str]) -> Result<Command, MvError> {
             if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
                 for (pos, letter) in letters.char_indices() {
                     match letter {
-                        'f' => {
-                            options.force = true;
-                            options.clobber = Clobber::Overwrite;
-                        }
-                        'i' => {
-                            options.clobber = Clobber::Prompt;
-                            options.force = false;
-                        }
-                        'n' => {
-                            options.clobber = Clobber::Skip;
-                            options.force = false;
-                        }
+                        'f' => options.clobber = Clobber::Overwrite,
+                        'i' => options.clobber = Clobber::Prompt,
+                        'n' => options.clobber = Clobber::Skip,
                         'v' => options.verbose = true,
                         'T' => no_target_dir = true,
                         't' => {
@@ -199,18 +185,9 @@ fn apply_long(
         return Ok(false);
     }
     match name {
-        "force" => {
-            options.force = true;
-            options.clobber = Clobber::Overwrite;
-        }
-        "interactive" => {
-            options.clobber = Clobber::Prompt;
-            options.force = false;
-        }
-        "no-clobber" => {
-            options.clobber = Clobber::Skip;
-            options.force = false;
-        }
+        "force" => options.clobber = Clobber::Overwrite,
+        "interactive" => options.clobber = Clobber::Prompt,
+        "no-clobber" => options.clobber = Clobber::Skip,
         "verbose" => options.verbose = true,
         "no-target-directory" => *no_target_dir = true,
         "help" => return Ok(true),
@@ -272,10 +249,9 @@ mod tests {
         }
     }
 
-    fn mv(force: bool, no_clobber: bool, sources: &[&str], dest: &str) -> Command {
+    fn mv(no_clobber: bool, sources: &[&str], dest: &str) -> Command {
         mv_with(
             Options {
-                force,
                 clobber: if no_clobber {
                     Clobber::Skip
                 } else {
@@ -292,7 +268,7 @@ mod tests {
     fn a_single_source_and_dest_parses() {
         assert_eq!(
             parse(&["a.txt", "b.txt"]),
-            Ok(mv(false, false, &["a.txt"], "b.txt"))
+            Ok(mv(false, &["a.txt"], "b.txt"))
         );
     }
 
@@ -348,37 +324,25 @@ mod tests {
 
     #[test]
     fn several_sources_precede_the_destination() {
-        assert_eq!(
-            parse(&["a", "b", "dst"]),
-            Ok(mv(false, false, &["a", "b"], "dst"))
-        );
+        assert_eq!(parse(&["a", "b", "dst"]), Ok(mv(false, &["a", "b"], "dst")));
     }
 
     #[test]
     fn force_and_no_clobber_spellings_parse() {
-        assert_eq!(parse(&["-f", "a", "b"]), Ok(mv(true, false, &["a"], "b")));
-        assert_eq!(
-            parse(&["--force", "a", "b"]),
-            Ok(mv(true, false, &["a"], "b"))
-        );
-        assert_eq!(parse(&["-n", "a", "b"]), Ok(mv(false, true, &["a"], "b")));
+        assert_eq!(parse(&["-f", "a", "b"]), Ok(mv(false, &["a"], "b")));
+        assert_eq!(parse(&["--force", "a", "b"]), Ok(mv(false, &["a"], "b")));
+        assert_eq!(parse(&["-n", "a", "b"]), Ok(mv(true, &["a"], "b")));
         assert_eq!(
             parse(&["--no-clobber", "a", "b"]),
-            Ok(mv(false, true, &["a"], "b"))
+            Ok(mv(true, &["a"], "b"))
         );
     }
 
     #[test]
     fn force_interactive_and_no_clobber_last_one_wins() {
         // As in the GNU tool, the last of `-f` / `-i` / `-n` wins.
-        assert_eq!(
-            parse(&["-n", "-f", "a", "b"]),
-            Ok(mv(true, false, &["a"], "b"))
-        );
-        assert_eq!(
-            parse(&["-f", "-n", "a", "b"]),
-            Ok(mv(false, true, &["a"], "b"))
-        );
+        assert_eq!(parse(&["-n", "-f", "a", "b"]), Ok(mv(false, &["a"], "b")));
+        assert_eq!(parse(&["-f", "-n", "a", "b"]), Ok(mv(true, &["a"], "b")));
         assert_eq!(
             parse(&["-f", "-i", "a", "b"]),
             Ok(mv_with(
@@ -390,10 +354,7 @@ mod tests {
                 "b",
             ))
         );
-        assert_eq!(
-            parse(&["-i", "-f", "a", "b"]),
-            Ok(mv(true, false, &["a"], "b"))
-        );
+        assert_eq!(parse(&["-i", "-f", "a", "b"]), Ok(mv(false, &["a"], "b")));
     }
 
     #[test]
@@ -467,14 +428,11 @@ mod tests {
 
     #[test]
     fn double_dash_ends_options() {
-        assert_eq!(
-            parse(&["--", "-f", "b"]),
-            Ok(mv(false, false, &["-f"], "b"))
-        );
+        assert_eq!(parse(&["--", "-f", "b"]), Ok(mv(false, &["-f"], "b")));
     }
 
     #[test]
     fn bare_dash_is_a_path() {
-        assert_eq!(parse(&["-", "b"]), Ok(mv(false, false, &["-"], "b")));
+        assert_eq!(parse(&["-", "b"]), Ok(mv(false, &["-"], "b")));
     }
 }

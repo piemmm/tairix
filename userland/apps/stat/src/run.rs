@@ -30,7 +30,7 @@ mod program {
     use alloc::format;
     use alloc::string::String;
 
-    use tairix_abi::fs::{OpenFlags, FS_PATH_MAX, FS_SYMLINK_MAX};
+    use tairix_abi::fs::OpenFlags;
     use tairix_abi::{Errno, FileStat, RealpathMode};
     use tairix_help::BundleHelp;
     use tairix_procinfo::{IpcTransport, Namespace};
@@ -60,9 +60,7 @@ mod program {
         }
 
         fn read_link(&self, path: &str) -> Result<String, Errno> {
-            let mut buf = alloc::vec![0u8; FS_SYMLINK_MAX];
-            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
-            copied(ret, &buf)
+            tairix_rt::readlink(path)
         }
 
         fn canonicalize(&self, path: &str) -> Result<String, Errno> {
@@ -71,25 +69,8 @@ mod program {
             // volume it lands on; a path whose tail does not exist yet is
             // still nameable, which is the reading `RealpathMode::Missing`
             // asks for.
-            let mut buf = alloc::vec![0u8; FS_PATH_MAX];
-            let ret = tairix_rt::fs_realpath(path.as_bytes(), &mut buf, RealpathMode::Missing);
-            copied(ret, &buf)
+            tairix_rt::realpath(path, RealpathMode::Missing)
         }
-    }
-
-    /// The text a `(length, else -errno)` syscall wrote into `buf`.
-    ///
-    /// A path the ABI hands back is UTF-8 by contract; bytes that are not are
-    /// a corrupt or hostile record, refused rather than rendered as
-    /// replacement characters.
-    fn copied(ret: i64, buf: &[u8]) -> Result<String, Errno> {
-        if ret < 0 {
-            return Err(Errno::from_syscall(ret));
-        }
-        let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
-        let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
-        let text = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
-        Ok(String::from(text))
     }
 
     /// The production [`Mounts`]: the `sysinfo-v1` `MOUNT_LIST` and

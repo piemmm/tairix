@@ -2,6 +2,7 @@
 
 use alloc::string::String;
 use core::fmt;
+use tairix_util::quote::quote;
 
 /// Why a `seq` invocation did not complete.
 ///
@@ -44,37 +45,71 @@ pub enum SeqError {
 impl fmt::Display for SeqError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => write!(f, "unrecognized option '{token}'"),
-            Self::UnknownShort(flag) => write!(f, "invalid option -- '{flag}'"),
+            Self::UnknownLong(token) => {
+                write!(f, "unrecognized option {token}", token = quote(token))
+            }
+            Self::UnknownShort(flag) => write!(
+                f,
+                "invalid option -- {}",
+                quote(flag.encode_utf8(&mut [0; 4]))
+            ),
             Self::MissingValue(option) => {
-                write!(f, "option '{option}' requires an argument")
+                write!(
+                    f,
+                    "option {option} requires an argument",
+                    option = quote(option)
+                )
             }
             Self::MissingOperand => write!(f, "missing operand"),
-            Self::ExtraOperand(text) => write!(f, "extra operand '{text}'"),
+            Self::ExtraOperand(text) => write!(f, "extra operand {text}", text = quote(text)),
             Self::InvalidNumber(text) => {
-                write!(f, "invalid floating point argument: '{text}'")
+                write!(
+                    f,
+                    "invalid floating point argument: {text}",
+                    text = quote(text)
+                )
             }
             Self::NotANumber(text) => {
-                write!(f, "invalid 'not-a-number' argument: '{text}'")
+                write!(
+                    f,
+                    "invalid 'not-a-number' argument: {text}",
+                    text = quote(text)
+                )
             }
             Self::ZeroIncrement(text) => {
-                write!(f, "invalid Zero increment value: '{text}'")
+                write!(
+                    f,
+                    "invalid Zero increment value: {text}",
+                    text = quote(text)
+                )
             }
             Self::FormatWithEqualWidth => write!(
                 f,
                 "format string may not be specified when printing equal width strings"
             ),
             Self::FormatNoDirective(fmt_str) => {
-                write!(f, "format '{fmt_str}' has no % directive")
+                write!(
+                    f,
+                    "format {fmt_str} has no % directive",
+                    fmt_str = quote(fmt_str)
+                )
             }
             Self::FormatEndsInPercent(fmt_str) => {
-                write!(f, "format '{fmt_str}' ends in %")
+                write!(f, "format {fmt_str} ends in %", fmt_str = quote(fmt_str))
             }
             Self::FormatUnknownDirective(fmt_str, ch) => {
-                write!(f, "format '{fmt_str}' has unknown %{ch} directive")
+                write!(
+                    f,
+                    "format {fmt_str} has unknown %{ch} directive",
+                    fmt_str = quote(fmt_str)
+                )
             }
             Self::FormatTooManyDirectives(fmt_str) => {
-                write!(f, "format '{fmt_str}' has too many % directives")
+                write!(
+                    f,
+                    "format {fmt_str} has too many % directives",
+                    fmt_str = quote(fmt_str)
+                )
             }
             Self::Output => write!(f, "write error"),
         }

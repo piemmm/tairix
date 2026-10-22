@@ -54,6 +54,7 @@ use core::fmt;
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{user_name, CallError, ListError, Output, Transport};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `whoami`'s own Help tree is unavailable.
@@ -116,9 +117,17 @@ impl From<ListError> for WhoamiError {
 impl fmt::Display for WhoamiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => write!(f, "unrecognized option '{token}'"),
-            Self::UnknownShort(flag) => write!(f, "invalid option -- '{flag}'"),
-            Self::ExtraOperand(operand) => write!(f, "extra operand '{operand}'"),
+            Self::UnknownLong(token) => {
+                write!(f, "unrecognized option {token}", token = quote(token))
+            }
+            Self::UnknownShort(flag) => write!(
+                f,
+                "invalid option -- {}",
+                quote(flag.encode_utf8(&mut [0; 4]))
+            ),
+            Self::ExtraOperand(operand) => {
+                write!(f, "extra operand {operand}", operand = quote(operand))
+            }
             Self::Service(errno) => write!(f, "system information service error: {errno}"),
             Self::NoName(uid) => write!(f, "cannot find name for user ID {uid}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),

@@ -53,6 +53,7 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::quote::quote_if_needed;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `flock`'s own Help tree is unavailable.
@@ -158,8 +159,14 @@ impl fmt::Display for FlockError {
         match self {
             Self::Usage => f.write_str("bad usage"),
             Self::Lock(err) => write!(f, "cannot lock: {err}"),
-            Self::NotFound(word) => write!(f, "{word}: command not found"),
-            Self::NotExecutable(word) => write!(f, "{word}: command not executable"),
+            Self::NotFound(word) => {
+                write!(f, "{word}: command not found", word = quote_if_needed(word))
+            }
+            Self::NotExecutable(word) => write!(
+                f,
+                "{word}: command not executable",
+                word = quote_if_needed(word)
+            ),
             Self::Run(err) => write!(f, "cannot run: {err}"),
             Self::Output => f.write_str("cannot write output"),
         }

@@ -8,6 +8,7 @@ use tairix_abi::Errno;
 use tairix_help::{LoadError, NameError};
 use tairix_sandbox::helpdoc::{HelpRefusal, HelpRenderFailure};
 use tairix_sandbox::host::SandboxError;
+use tairix_util::quote::quote_if_needed;
 
 /// Why a `man` invocation failed.
 ///
@@ -68,16 +69,26 @@ impl fmt::Display for ManError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ManError::Usage => f.write_str("usage error"),
-            ManError::CommandNotFound(word) => write!(f, "no such command: {word}"),
+            ManError::CommandNotFound(word) => {
+                write!(f, "no such command: {word}", word = quote_if_needed(word))
+            }
             ManError::NotABundle(word) => {
-                write!(f, "{word}: not an application bundle (no help to read)")
+                write!(
+                    f,
+                    "{word}: not an application bundle (no help to read)",
+                    word = quote_if_needed(word)
+                )
             }
             ManError::InvalidName(err) => write!(f, "invalid help name: {err}"),
             ManError::NoHelp { word, name } => {
                 if word == name {
-                    write!(f, "no help for {word}")
+                    write!(f, "no help for {word}", word = quote_if_needed(word))
                 } else {
-                    write!(f, "no help topic {name} for {word}")
+                    write!(
+                        f,
+                        "no help topic {name} for {word}",
+                        word = quote_if_needed(word)
+                    )
                 }
             }
             ManError::Tree(err) => write!(f, "help unavailable: {err}"),
@@ -107,7 +118,8 @@ impl fmt::Display for ManError {
             ManError::SearchTruncated { root } => write!(
                 f,
                 "app search under {root} stopped at its safety bound; \
-                 name the bundle's path directly"
+                 name the bundle's path directly",
+                root = quote_if_needed(root)
             ),
             ManError::Output(err) => write!(f, "cannot write the page: {err}"),
         }

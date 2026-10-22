@@ -15,6 +15,7 @@ use tairix_procinfo::{field_lossy, Namespace};
 use crate::command::{Command, Options, Piece, Subject, Trailer};
 use crate::error::StatError;
 use crate::io::{Filesystem, Mounts, Names, Output};
+use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `stat`'s own Help tree is unavailable.
@@ -123,7 +124,10 @@ pub fn run(
                 clean = false;
                 reporter
                     .err
-                    .write_all(format!("stat: cannot stat '{path}': {errno}\n").as_bytes())
+                    .write_all(
+                        format!("stat: cannot stat {path}: {errno}\n", path = quote(path))
+                            .as_bytes(),
+                    )
                     .map_err(StatError::Output)?;
             }
         }
@@ -305,8 +309,8 @@ fn file_field(letter: char, stat: &FileStat, facts: &Facts, mount: Option<&Mount
         'm' => mount.map_or_else(|| String::from("?"), |m| m.target.clone()),
         'n' => facts.name.clone(),
         'N' => match &facts.target {
-            Some(target) => format!("'{}' -> '{target}'", facts.name),
-            None => format!("'{}'", facts.name),
+            Some(target) => format!("{} -> {}", quote(&facts.name), quote(target)),
+            None => format!("{}", quote(&facts.name)),
         },
         // `st_blksize`'s role — the transfer size the backing prefers — is
         // the mounted format's own block size.

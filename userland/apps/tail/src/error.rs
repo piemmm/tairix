@@ -3,6 +3,7 @@
 use alloc::string::String;
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_util::quote::{quote, quote_if_needed};
 
 /// Why a `tail` invocation did not complete.
 ///
@@ -45,20 +46,41 @@ pub enum TailError {
 impl fmt::Display for TailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => write!(f, "unrecognized option '{token}'"),
-            Self::UnknownShort(flag) => write!(f, "invalid option -- '{flag}'"),
-            Self::InvalidLines(text) => write!(f, "invalid number of lines: '{text}'"),
-            Self::InvalidBytes(text) => write!(f, "invalid number of bytes: '{text}'"),
-            Self::InvalidTrailing(flag) => write!(f, "invalid trailing option -- {flag}"),
-            Self::MissingValue(option) => {
-                write!(f, "option '{option}' requires an argument")
+            Self::UnknownLong(token) => {
+                write!(f, "unrecognized option {token}", token = quote(token))
             }
-            Self::InvalidPid(text) => write!(f, "invalid PID: '{text}'"),
-            Self::InvalidSleep(text) => write!(f, "invalid number of seconds: '{text}'"),
+            Self::UnknownShort(flag) => write!(
+                f,
+                "invalid option -- {}",
+                quote(flag.encode_utf8(&mut [0; 4]))
+            ),
+            Self::InvalidLines(text) => {
+                write!(f, "invalid number of lines: {text}", text = quote(text))
+            }
+            Self::InvalidBytes(text) => {
+                write!(f, "invalid number of bytes: {text}", text = quote(text))
+            }
+            Self::InvalidTrailing(flag) => write!(
+                f,
+                "invalid trailing option -- {}",
+                quote_if_needed(flag.encode_utf8(&mut [0; 4]))
+            ),
+            Self::MissingValue(option) => {
+                write!(
+                    f,
+                    "option {option} requires an argument",
+                    option = quote(option)
+                )
+            }
+            Self::InvalidPid(text) => write!(f, "invalid PID: {text}", text = quote(text)),
+            Self::InvalidSleep(text) => {
+                write!(f, "invalid number of seconds: {text}", text = quote(text))
+            }
             Self::InvalidMaxUnchanged(text) => {
                 write!(
                     f,
-                    "invalid maximum number of unchanged stats between opens: '{text}'"
+                    "invalid maximum number of unchanged stats between opens: {text}",
+                    text = quote(text)
                 )
             }
             Self::Output(errno) => write!(f, "write error: {errno}"),

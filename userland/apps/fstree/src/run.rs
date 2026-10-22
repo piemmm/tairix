@@ -43,23 +43,25 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion, FS_MODE_MASK, FS_SYMLINK_MAX};
-    use tairix_abi::{Errno, FileKind, InputMode, RenameFlags, UnlinkFlags, STDOUT};
+    use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion, FS_MODE_MASK};
+    use tairix_abi::{Errno, FileId, FileKind, InputMode, RenameFlags, UnlinkFlags, STDOUT};
     use tairix_appdata::{RtHost, Settings as SettingsStore};
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
+    use tairix_fscopy::Ancestry;
     use tairix_fscopy::PathFiles;
     use tairix_fstree::{
         run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo, OWN_WORD,
     };
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_procinfo::{for_each_mount, IpcTransport, Namespace, VolumeBytes, WalkStep};
-    use tairix_rt::copy::OpenFiles;
+    use tairix_rt::copy::{OpenFiles, RtAncestry};
     use tairix_rt::io::{write_stderr_line, StdInfo, Write};
     use tairix_rt::File;
     use tairix_sandbox::decode::DecodeService;
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_termcap::from_term;
+    use tairix_util::quote::quote_if_needed;
     use tairix_vt::{Op, Parser};
 
     /// The conventional fallback terminal grid — 80 columns by 24 rows —
@@ -262,24 +264,16 @@ mod program {
             Ok(stat.kind)
         }
 
+        fn canonical(&mut self, path: &str) -> Result<String, Errno> {
+            RtAncestry.canonical(path)
+        }
+
+        fn identity(&mut self, path: &str) -> Result<FileId, Errno> {
+            RtAncestry.identity(path)
+        }
+
         fn read_link(&mut self, path: &str) -> Result<String, Errno> {
-            // One call, one buffer: `fs_readlink` refuses an undersized
-            // buffer rather than truncating a target — a truncated one would
-            // name somewhere else entirely — and a target is bounded by
-            // `FS_SYMLINK_MAX`.
-            let mut buf = alloc::vec![0u8; FS_SYMLINK_MAX];
-            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
-            let target = buf.get(..len).ok_or(Errno::OutOfRange)?;
-            // A stored target is UTF-8 by the grammar the kernel checked
-            // before storing it; anything else is a corrupt or hostile
-            // volume, refused rather than lossily copied onward.
-            core::str::from_utf8(target)
-                .map(String::from)
-                .map_err(|_| Errno::OutOfRange)
+            tairix_rt::readlink(path)
         }
 
         fn create_link(&mut self, target: &str, path: &str) -> Result<(), Errno> {
@@ -477,7 +471,10 @@ mod program {
                     root = Some(String::from(other));
                 }
                 other => {
-                    write_stderr_line(&alloc::format!("fstree: unknown argument: {other}"));
+                    write_stderr_line(&alloc::format!(
+                        "fstree: unknown argument: {other}",
+                        other = quote_if_needed(other)
+                    ));
                     write_stderr_line(USAGE);
                     return 2;
                 }
@@ -516,7 +513,10 @@ mod program {
         let mut model = match Model::new(&mut fs, &root, help_text) {
             Ok(model) => model,
             Err(errno) => {
-                write_stderr_line(&alloc::format!("fstree: {root}: {errno:?}"));
+                write_stderr_line(&alloc::format!(
+                    "fstree: {root}: {errno:?}",
+                    root = quote_if_needed(&root)
+                ));
                 return 1;
             }
         };

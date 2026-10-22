@@ -50,11 +50,13 @@ posture that resolves it (`-L`, or `-H` for an operand) reports the target
 as unreachable.
 
 Names are quoted so that awkward characters are visible and safe to
-paste back into a shell: at a terminal the default is `shell-escape`
-(a name with spaces or metacharacters is quoted, control characters
-shown as `$'…'` escapes), and elsewhere it is `literal` (names
-verbatim). `-N`, `-Q`, `-b`, and `--quoting-style` choose the style,
-and `-q` shows control characters as `?`.
+paste back into a shell: at a terminal the default is `shell-escape` (a
+name with spaces or metacharacters is quoted, control characters shown
+as `$'…'` escapes), and elsewhere it is `literal` (names verbatim).
+`-N`, `-Q`, `-b`, and `--quoting-style` choose the style, and `-q` shows
+control characters as `?`. Under `-F` and `--file-type`, `-Q` and `-b`
+also escape each `*`, `=`, `>`, `@`, and `|` in a name, so a name cannot
+pass for an indicator suffix.
 
 At a colour terminal names are coloured by kind — directories,
 executables, and plain files each in the standard scheme's role —
@@ -65,7 +67,8 @@ sequences, so it never changes columns, ordering, or a script's view.
 
 When more than one operand is given — and always under `-R` — each
 directory's listing is preceded by a `path:` header, and blocks are
-separated by a blank line.
+separated by a blank line. The path in a header is quoted in the
+listing's style, and so is any `:` it holds.
 
 ## OPTIONS
 

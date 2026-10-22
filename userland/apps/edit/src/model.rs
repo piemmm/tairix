@@ -18,6 +18,7 @@ use tairix_abi::Errno;
 use tairix_curses::Event;
 
 use crate::buffer::{width_of_prefix, DecodeError, TextBuffer};
+use tairix_util::quote::quote_if_needed;
 
 /// The filesystem seam the editor loads and saves through. The production
 /// implementation wraps the kernel-authorised `fs_*` syscalls (adding no
@@ -187,12 +188,18 @@ impl Model {
                     self.buffer = buffer;
                     self.notice = load_notice(notices);
                 }
-                Err(err) => return Err(format!("{path}: {}", decode_message(err))),
+                Err(err) => {
+                    return Err(format!(
+                        "{path}: {}",
+                        decode_message(err),
+                        path = quote_if_needed(path)
+                    ))
+                }
             },
             Err(Errno::NotFound) => {
                 self.notice = Some(String::from("New file"));
             }
-            Err(errno) => return Err(format!("{path}: {errno}")),
+            Err(errno) => return Err(format!("{path}: {errno}", path = quote_if_needed(path))),
         }
         self.path = Some(String::from(path));
         Ok(())
@@ -571,7 +578,11 @@ impl Model {
                     self.notice = load_notice(notices);
                 }
                 Err(err) => {
-                    self.notice = Some(format!("{path}: {}", decode_message(err)));
+                    self.notice = Some(format!(
+                        "{path}: {}",
+                        decode_message(err),
+                        path = quote_if_needed(path)
+                    ));
                 }
             },
             Err(Errno::NotFound) => {
@@ -581,7 +592,7 @@ impl Model {
                 self.notice = Some(String::from("New file"));
             }
             Err(errno) => {
-                self.notice = Some(format!("{path}: {errno}"));
+                self.notice = Some(format!("{path}: {errno}", path = quote_if_needed(path)));
             }
         }
     }
@@ -600,11 +611,11 @@ impl Model {
         match fs.write(&path, &self.buffer.to_bytes()) {
             Ok(()) => {
                 self.buffer.mark_saved();
-                self.notice = Some(format!("Saved {path}"));
+                self.notice = Some(format!("Saved {path}", path = quote_if_needed(&path)));
                 self.resume_pending()
             }
             Err(errno) => {
-                self.notice = Some(format!("{path}: {errno}"));
+                self.notice = Some(format!("{path}: {errno}", path = quote_if_needed(&path)));
                 self.pending = None;
                 Action::Continue
             }
