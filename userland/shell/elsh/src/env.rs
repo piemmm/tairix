@@ -1,27 +1,30 @@
 //! The shell's mutable state and the variable-expansion phase.
 //!
 //! An [`Environment`] holds the shell variables, the working directory, and
-//! the exit status of the most recently completed pipeline (`$?`). It is the
-//! single owner of expansion: turning a parsed [`Word`] — still a list of
-//! [`Segment`]s — into the final argument string.
-//!
-//! Expansion is deliberately *minimal and correct* rather than broad:
+//! the exit status of the most recently completed pipeline (`$?`). It owns
+//! parameter expansion: turning a parsed [`Word`] — still a list of
+//! [`Segment`]s — into its text.
 //!
 //! * `$NAME` and `${NAME}` expand a variable; an unset variable expands to
 //!   the empty string (POSIX default).
 //! * `$?` and `${?}` expand to the last exit status.
 //! * A `$` not followed by a name, `{`, or `?` is a literal `$`.
-//! * Expansion never field-splits its result: each word stays one word. This
-//!   is a documented simplification, not a defect — it keeps argument counts
-//!   predictable and avoids re-quoting surprises.
+//! * Expansion never field-splits its result, as zsh does not.
 //!
 //! Only [`Segment::Expandable`] and [`Segment::QuotedExpandable`] runs are
 //! scanned; [`Segment::Literal`] runs (single quotes, backslash escapes) are
 //! emitted verbatim, so a quoted or escaped `$` is never expanded.
+//!
+//! Expansion keeps, beside each character, whether it stands for itself:
+//! quoted or escaped text, and every variable's value. A value is never
+//! re-read as a wildcard — the zsh rule — so only pattern characters typed
+//! unquoted reach filename generation.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+
+use tairix_glob::Mark;
 
 use crate::error::ParseError;
 use crate::lexer::{Segment, Word};
@@ -137,31 +140,63 @@ impl Environment {
             .collect()
     }
 
-    /// Expand a parsed word into its final string.
+    /// Expand a parsed word's parameters into its text, quotes removed.
     ///
     /// # Errors
     ///
     /// Returns [`ParseError::UnterminatedExpansion`] if a `${` is never
     /// closed by `}`.
     pub fn expand_word(&self, word: &Word) -> Result<String, ParseError> {
-        let mut out = String::new();
+        Ok(self.expand_marked(word)?.text())
+    }
+
+    /// Expand a parsed word's parameters, keeping which characters stand for
+    /// themselves.
+    ///
+    /// # Errors
+    ///
+    /// As [`Environment::expand_word`].
+    pub(crate) fn expand_marked(&self, word: &Word) -> Result<Expansion, ParseError> {
+        let mut out = Expansion {
+            marks: Vec::new(),
+            quoted: false,
+        };
         for segment in word {
             match segment {
-                Segment::Literal(s) => out.push_str(s),
-                Segment::Expandable(s) | Segment::QuotedExpandable(s) => {
-                    self.expand_into(s, &mut out)?;
+                Segment::Literal(s) => {
+                    out.quoted = true;
+                    out.marks
+                        .extend(s.chars().map(|ch| Mark { ch, literal: true }));
                 }
+                Segment::QuotedExpandable(s) => {
+                    out.quoted = true;
+                    self.expand_into(s, true, &mut out.marks)?;
+                }
+                Segment::Expandable(s) => self.expand_into(s, false, &mut out.marks)?,
             }
         }
         Ok(out)
     }
 
-    fn expand_into(&self, source: &str, out: &mut String) -> Result<(), ParseError> {
+    /// Expand `source`'s parameters onto `out`, its own characters marked
+    /// literal when `quoted` and every expanded value marked literal.
+    fn expand_into(
+        &self,
+        source: &str,
+        quoted: bool,
+        out: &mut Vec<Mark>,
+    ) -> Result<(), ParseError> {
+        fn value(text: &str, out: &mut Vec<Mark>) {
+            out.extend(text.chars().map(|ch| Mark { ch, literal: true }));
+        }
         let chars: Vec<char> = source.chars().collect();
         let mut i = 0;
         while i < chars.len() {
             if chars[i] != '$' {
-                out.push(chars[i]);
+                out.push(Mark {
+                    ch: chars[i],
+                    literal: quoted,
+                });
                 i += 1;
                 continue;
             }
@@ -178,11 +213,11 @@ impl Environment {
                     }
                     let name: String = chars[start..i].iter().collect();
                     i += 1; // consume '}'
-                    out.push_str(&self.lookup(&name));
+                    value(&self.lookup(&name), out);
                 }
                 Some('?') => {
                     i += 1;
-                    out.push_str(&self.last_status.to_string());
+                    value(&self.last_status.to_string(), out);
                 }
                 Some(&c) if is_name_start(c) => {
                     let start = i;
@@ -190,9 +225,12 @@ impl Environment {
                         i += 1;
                     }
                     let name: String = chars[start..i].iter().collect();
-                    out.push_str(&self.lookup(&name));
+                    value(&self.lookup(&name), out);
                 }
-                _ => out.push('$'),
+                _ => out.push(Mark {
+                    ch: '$',
+                    literal: quoted,
+                }),
             }
         }
         Ok(())
@@ -316,6 +354,22 @@ impl Environment {
             }
         }
         out
+    }
+}
+
+/// A word after parameter expansion: each character marked literal when it
+/// stands for itself, and whether any part of the word was quoted — which
+/// keeps an empty result as an empty argument rather than no argument.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Expansion {
+    pub(crate) marks: Vec<Mark>,
+    pub(crate) quoted: bool,
+}
+
+impl Expansion {
+    /// The text, quoting removed.
+    pub(crate) fn text(&self) -> String {
+        self.marks.iter().map(|mark| mark.ch).collect()
     }
 }
 

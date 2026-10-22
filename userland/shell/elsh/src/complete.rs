@@ -386,7 +386,7 @@ fn command_candidates(
             let Some(name) = entry.name.strip_suffix(".app") else {
                 continue;
             };
-            if !entry.is_dir || name.is_empty() || !name.starts_with(word) {
+            if !entry.kind.is_dir() || name.is_empty() || !name.starts_with(word) {
                 continue;
             }
             out.push(Candidate {
@@ -670,7 +670,7 @@ fn path_candidates(word: &str, lister: &dyn DirLister, out: &mut Vec<Candidate>)
     for entry in tairix_complete::path_matches(word, ".", lister) {
         let mut insert = String::from(dir_part);
         insert.push_str(&escape_word(&entry.name));
-        let (display, closing) = if entry.is_dir {
+        let (display, closing) = if entry.kind.is_dir() {
             insert.push('/');
             (format!("{}/", entry.name), None)
         } else {
@@ -691,7 +691,7 @@ mod tests {
     };
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, FileKind};
 
     /// A resource lister with nothing to offer in any domain — the shape of a
     /// session holding no enumeration capability, and the default for the
@@ -783,7 +783,11 @@ mod tests {
                                 .iter()
                                 .map(|(name, is_dir)| DirEntryInfo {
                                     name: (*name).to_string(),
-                                    is_dir: *is_dir,
+                                    kind: if *is_dir {
+                                        FileKind::Directory
+                                    } else {
+                                        FileKind::Regular
+                                    },
                                 })
                                 .collect(),
                         )

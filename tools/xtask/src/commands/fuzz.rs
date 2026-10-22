@@ -572,6 +572,12 @@ pub const TARGETS: &[Target] = &[
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",
     },
     Target {
+        package: "tairix-elsh",
+        test: "fuzz_expand",
+        description:
+            "elsh word expansion (hostile command lines: pattern groups, braces, parameters, filename generation under every glob option; never panics, argv stays bounded)",
+    },
+    Target {
         package: "tairix-help",
         test: "fuzz_help",
         description:
@@ -1161,6 +1167,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-glob");
+    }
+
+    #[test]
+    fn shell_expansion_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_expand"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-elsh");
     }
 
     #[test]

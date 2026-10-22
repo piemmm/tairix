@@ -19,7 +19,8 @@ candidates verbatim into a plain path prompt.
 
 ## API
 
-- `DirEntryInfo` — one listed entry: name and whether it is a directory.
+- `DirEntryInfo` — one listed entry: its name and its `FileKind` as listed
+  (a link reported as a link, not followed).
 - `DirLister` — the injected, read-only directory-listing seam; listing is
   the only filesystem operation completion may perform.
 - `split_path_word(word) -> (dir_part, leaf)` — the split at the last `/`.

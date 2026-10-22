@@ -741,8 +741,9 @@ prerequisites it depends on, of which only P4–P6 are recorded.
 - **P5** — `lib/resref`, the one resource-reference parser, with
   `resource_open` serving `sys:random` and `sys:null` in the kernel, and
   `lib/procinfo::resolve` serving `info:` and `stats:` in userland.
-- **P6** — `lib/glob`, the one bounded, backtracking-free glob matcher, and
-  `lib/complete`, the one completion policy.
+- **P6** — `lib/glob`, the one bounded glob matcher (POSIX brackets and
+  classes, bash's `extglob`, the case, period and pathname modes, matched
+  without backtracking), and `lib/complete`, the one completion policy.
 
 ## Self-contained bundles
 

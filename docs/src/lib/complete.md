@@ -38,7 +38,9 @@ uses. Neither re-derives the policy.
 
 The engine reaches the filesystem only through the injected `DirLister`
 seam, whose sole operation is listing a directory — completion can never
-create, write, or run anything. A listing the kernel refuses yields an
+create, write, or run anything. Each `DirEntryInfo` carries the entry's
+`FileKind` as listed, a link reported as a link rather than followed; the
+shell's filename generation walks the same seam. A listing the kernel refuses yields an
 empty candidate set, never a guess; whether the caller may *see* a
 directory is decided kernel-side exactly as for any other listing.
 

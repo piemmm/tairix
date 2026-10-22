@@ -2,52 +2,67 @@
 
 Shared filename-glob matcher for TAIRiX (`lib/glob`).
 
-Several TAIRiX components need to match a name against a shell-style wildcard
-pattern — the shell's filename generation and interactive completion first, and
-later the file browser, `find`-class tooling, and any other wildcard resolver.
-That matching is identical wherever it happens, so it lives here once and every
-consumer imports it, rather than each embedding a private matcher. The shell
-does not own a glob engine; it links this one.
+The one definition of shell wildcard patterns: the shell's filename
+generation, `ls --ignore`/`--hide` and the tree file manager's filters and
+searches compile their patterns here rather than each embedding a matcher.
 
 ## Glob, not regex
 
-This crate implements POSIX shell **globbing**, deliberately not a general
-regular-expression engine. Globs are what a shell expands and can be matched in
-bounded time without backtracking blow-up. A full regex dialect invites
-catastrophic backtracking on a hostile pattern and no current consumer needs
-it; if one ever does, it is a separate engine, not a feature bolted on here.
+This crate implements shell **pattern matching notation** (POSIX XBD 2.13
+and bash's `extglob`), deliberately not a regular-expression engine.
 
 ## API
 
-- `Pattern::new(pattern) -> Result<Pattern, GlobError>` — compile and validate a
-  pattern. This is the only fallible step.
-- `Pattern::matches(candidate) -> bool` — whether the whole candidate matches
-  (anchored). Infallible and never panics.
+- `Pattern::new(pattern)` / `Pattern::with_options(pattern, Options)` —
+  compile pattern text, `\` escaping the next character. The only fallible
+  step.
+- `Pattern::from_marked(&[Mark], Options)` — compile text whose literal
+  characters the caller has marked (the shell's quoting), with no escaping
+  round trip.
+- `Pattern::matches(candidate)` / `matches_with(candidate, &mut Scratch)` —
+  whether the whole candidate matches. Infallible; `Scratch` lets a caller
+  testing many candidates allocate once.
+- `Pattern::components()` — one `Component` per `/`-separated piece in
+  pathname mode, each reporting `literal()` (the exact name when it holds no
+  wildcard) and `is_double_star()` (spelled exactly `**`) for a caller
+  walking a tree.
+- `Options` — flags: `EXTENDED` (extglob operators), `CASE_INSENSITIVE`,
+  `PERIOD` (a leading `.` must be matched by a `.`) and `PATHNAME` (match
+  component by component): glibc's `FNM_EXTMATCH`, `FNM_CASEFOLD`,
+  `FNM_PERIOD` and `FNM_PATHNAME`.
+- `may_hold_wildcards(&[Mark], extended)` — whether text holds a character
+  that can begin a wildcard, the cheap test before compiling.
 - `GlobError` — why a pattern was rejected.
-- `MAX_PATTERN_LEN` / `MAX_TOKENS` / `MAX_CLASS_ITEMS` — the fixed security
-  bounds on an untrusted pattern.
 
 ## Syntax
 
-- `*` — any run of zero or more characters.
-- `?` — exactly one character.
-- `[abc]`, `[a-z]`, `[!abc]` / `[^abc]` — bracket expression (membership,
-  ranges, negation). A `]` first in the expression, or a `-` first or last, is
-  literal.
-- `\` — escapes the next character.
+- `*` any run of characters, `?` exactly one.
+- `[...]` one character: members, code-point ranges, `!`/`^` negation, the
+  POSIX classes (`[:alpha:]` …) plus bash's `[:word:]` and `[:ascii:]`,
+  equivalence classes `[=c=]`, collating symbols `[.c.]` and POSIX character
+  names (`[.space.]`). `\` escapes inside an expression too. A `[` that opens
+  no complete expression matches itself, as POSIX specifies.
+- With `EXTENDED`: `?(…)`, `*(…)`, `+(…)`, `@(…)` and `!(…)` over
+  `|`-separated alternatives.
+- Case-insensitive matching folds literals and ranges; classes test the
+  character as written, as bash's `nocaseglob` does.
 
-The path separator `/` is an ordinary character; a caller globbing a
-multi-segment path splits it and matches each segment, so separator policy is
-not duplicated here.
+## Bounds and fail-closed behaviour
 
-## Design
+A pattern is untrusted input: `MAX_PATTERN_LEN`, `MAX_TOKENS`,
+`MAX_CLASS_ITEMS`, `MAX_GROUPS` and `MAX_GROUP_DEPTH` are fixed security
+bounds, and a malformed pattern (a reversed range, an unknown class or
+collating element, an unclosed group, a dangling escape) is a typed
+`GlobError`, never matched as something else.
 
-- `no_std` + `alloc`, `#![forbid(unsafe_code)]`.
-- Fail-closed: a malformed or over-large pattern is a typed `GlobError`, never a
-  silent "match it literally" fallback. It is a matcher of untrusted patterns,
-  so pattern length, token count, and bracket size are fixed security bounds.
-- No catastrophic backtracking: matching is the classic two-pointer glob
-  algorithm, `O(tokens * candidate-chars)`, with no recursion.
+Matching never backtracks: it tracks the set of positions each step can
+reach. A pattern without groups costs time linear in tokens times length. A
+group's reach from each start is memoised, bounding an extended pattern by
+the cube of the candidate's length, so a component holding a group matches
+candidates of at most `MAX_EXTENDED_LEN` characters — the longest name a
+filesystem stores.
+
+`no_std` + `alloc`, `#![forbid(unsafe_code)]`.
 
 ## Stability
 

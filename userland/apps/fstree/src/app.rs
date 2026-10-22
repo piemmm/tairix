@@ -970,7 +970,7 @@ impl tairix_complete::DirLister for SeamLister<'_> {
         Ok(entries
             .into_iter()
             .map(|entry| tairix_complete::DirEntryInfo {
-                is_dir: entry.kind == FileKind::Directory,
+                kind: entry.kind,
                 name: entry.name,
             })
             .collect())
@@ -1011,7 +1011,7 @@ fn complete_destination(model: &mut Model, fs: &mut dyn Fs, prompt: &mut InputPr
     match matches.as_slice() {
         [] => model.message = Some(String::from("no completion")),
         [only] => {
-            let text = completed(&only.name, only.is_dir);
+            let text = completed(&only.name, only.kind.is_dir());
             if text.len() <= INPUT_MAX {
                 prompt.input = text;
             }

@@ -11,6 +11,8 @@
 //! expand runs nothing and returns a [`ParseError`]; a command the host
 //! cannot launch is reported and becomes a non-zero `$?`, never a panic and
 //! never a line abort, so the remaining connectors behave as POSIX requires.
+//! A redirection target that expands ambiguously is the same kind of
+//! command failure.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -19,16 +21,19 @@ use alloc::vec::Vec;
 use crate::builtin::{self, is_builtin, BuiltinContext};
 use crate::env::{split_prefix_assignments, Environment};
 use crate::error::ParseError;
+use crate::expand::{ExpandError, Expander};
 use crate::host::{
     classify_redirect_target, Console, Elevator, LaunchError, LaunchSpec, LimitStore, ProcessHost,
     RedirAction, RedirTarget, ResolvedCommand, ResolvedRedirection, NULL_ELEVATOR,
     NULL_LIMIT_STORE,
 };
 use crate::job::{ExitStatus, JobState, JobTable, WaitOutcome};
-use crate::lexer::{FdSpec, Segment, Word};
+use crate::lexer::{has_pattern_group, FdSpec, Segment, Word};
+use crate::options::{ShellOption, ShellOptions};
 use crate::parser::{
     parse, Command, CommandList, ListEntry, OpenMode, Pipeline, Redirection, RunCondition,
 };
+use crate::pathexp::{GlobFs, NULL_FS};
 use tairix_util::quote::quote_if_needed;
 
 /// Standard output's descriptor — the target of a combined `&>` open.
@@ -58,6 +63,8 @@ pub struct Shell<'a> {
     console: &'a dyn Console,
     limits: &'a dyn LimitStore,
     elevator: &'a dyn Elevator,
+    fs: &'a dyn GlobFs,
+    options: ShellOptions,
     exit: Option<i32>,
     next_dyn_fd: u32,
 }
@@ -84,6 +91,8 @@ impl<'a> Shell<'a> {
             console,
             limits: &NULL_LIMIT_STORE,
             elevator: &NULL_ELEVATOR,
+            fs: &NULL_FS,
+            options: ShellOptions::default(),
             exit: None,
             next_dyn_fd: FIRST_DYN_FD,
         }
@@ -109,6 +118,17 @@ impl<'a> Shell<'a> {
     #[must_use]
     pub fn with_elevator(mut self, elevator: &'a dyn Elevator) -> Self {
         self.elevator = elevator;
+        self
+    }
+
+    /// Install the filesystem view filename generation reads.
+    ///
+    /// A shell built without one can read nothing, so no pattern matches
+    /// and a wildcard word is left as written — bash's answer for a pattern
+    /// matching nothing. This mirrors [`Shell::with_limits`].
+    #[must_use]
+    pub fn with_filesystem(mut self, fs: &'a dyn GlobFs) -> Self {
+        self.fs = fs;
         self
     }
 
@@ -171,7 +191,7 @@ impl<'a> Shell<'a> {
     /// error is reported and `$?` becomes 2.
     pub fn parse_line(&mut self, line: &str) -> Result<CommandList, ParseError> {
         self.report_finished_jobs();
-        parse(line).map_err(|err| self.fail_line(err))
+        parse(line).map_err(|err| self.fail_line(&err.into()))
     }
 
     /// Run a parsed command list, honouring the `;`/`&&`/`||` connectors and
@@ -181,26 +201,41 @@ impl<'a> Shell<'a> {
     ///
     /// Returns [`ParseError`] if a word cannot be expanded, a redirection
     /// target is malformed, or a here-document body is missing or was
-    /// discarded as over-length; the error is reported, `$?` becomes 2, and
-    /// nothing further from the line runs.
+    /// discarded as over-length; the error is reported, `$?` becomes the
+    /// error's [status](ParseError::status), and nothing further from the
+    /// line runs.
     pub fn run_list(&mut self, list: &CommandList) -> Result<(), ParseError> {
+        // Bash reads an extended pattern as a syntax error unless `extglob`
+        // was on when the line was read, so the whole line is refused.
+        if !self.options.is_on(ShellOption::Extglob) && list_holds_pattern_group(list) {
+            return Err(self.fail_line(&ParseError::ExtendedGlobDisabled.into()));
+        }
         for entry in &list.entries {
             if self.should_run(entry.run_if) {
                 if let Err(err) = self.run_entry(entry) {
-                    return Err(self.fail_line(err));
+                    return Err(self.fail_line(&err));
                 }
             }
         }
         Ok(())
     }
 
-    /// Report a line-aborting error on standard error and set `$?` to 2 (the
-    /// shell's parse/usage status), returning the error for propagation. One
-    /// definition, so parse-stage and run-stage aborts report identically.
-    fn fail_line(&mut self, err: ParseError) -> ParseError {
-        self.console.write_stderr(&format!("shell: {err}\n"));
-        self.env.set_last_status(2);
-        err
+    /// Report a line-aborting error on standard error, naming the word it
+    /// concerns, and set `$?` to the error's status, returning the error for
+    /// propagation. One definition, so parse-stage and run-stage aborts
+    /// report identically.
+    fn fail_line(&mut self, err: &ExpandError) -> ParseError {
+        self.report(err);
+        self.env.set_last_status(err.error.status());
+        err.error
+    }
+
+    fn report(&self, err: &ExpandError) {
+        let line = match &err.subject {
+            Some(subject) => format!("shell: {}: {}\n", quote_if_needed(subject), err.error),
+            None => format!("shell: {}\n", err.error),
+        };
+        self.console.write_stderr(&line);
     }
 
     fn should_run(&self, condition: RunCondition) -> bool {
@@ -211,72 +246,115 @@ impl<'a> Shell<'a> {
         }
     }
 
-    fn run_entry(&mut self, entry: &ListEntry) -> Result<(), ParseError> {
-        if !entry.background {
-            if let Some(status) = self.try_run_special(&entry.pipeline)? {
+    fn expander(&self) -> Expander<'_> {
+        Expander::new(&self.env, &self.options, self.fs)
+    }
+
+    fn run_entry(&mut self, entry: &ListEntry) -> Result<(), ExpandError> {
+        let pipeline = &entry.pipeline;
+        let mut expanded = Vec::with_capacity(pipeline.commands.len());
+        for command in &pipeline.commands {
+            expanded.push(self.expand_command(command)?);
+        }
+        if let [command] = pipeline.commands.as_slice() {
+            if let Some(status) = self.run_in_shell(command, &mut expanded[0], entry.background)? {
                 self.env
-                    .set_last_status(negate_if(entry.pipeline.negated, status));
+                    .set_last_status(negate_if(pipeline.negated, status));
                 return Ok(());
             }
         }
-        let commands = self.resolve_pipeline(&entry.pipeline)?;
+        let commands = match self.resolve_pipeline(pipeline, expanded)? {
+            Ok(commands) => commands,
+            Err(status) => {
+                self.env
+                    .set_last_status(negate_if(pipeline.negated, status));
+                return Ok(());
+            }
+        };
         if entry.background {
             // `!` negates a pipeline's *exit status*; a background launch
             // reports 0 either way, so negation only applies foreground.
             self.launch_background(&commands);
         } else {
             self.launch_foreground(&commands);
-            let status = negate_if(entry.pipeline.negated, self.env.last_status());
+            let status = negate_if(pipeline.negated, self.env.last_status());
             self.env.set_last_status(status);
         }
         Ok(())
     }
 
-    /// Handle the two cases that must run inside the shell process: an
-    /// assignment-only command and a standalone builtin (either may carry
-    /// `NAME=VALUE` prefix assignments). Returns the status if handled, or
-    /// `None` if the pipeline is an ordinary external one.
-    fn try_run_special(&mut self, pipeline: &Pipeline) -> Result<Option<i32>, ParseError> {
-        if pipeline.commands.len() != 1 {
-            return Ok(None);
-        }
-        let command = &pipeline.commands[0];
+    /// Expand one command's prefix assignments and words, once: both against
+    /// the environment as it stands, as POSIX orders expansion before
+    /// assignment.
+    fn expand_command(&self, command: &Command) -> Result<ExpandedCommand, ExpandError> {
         let (assignments, rest) = split_prefix_assignments(&command.words);
         if rest.is_empty() {
-            // An assignment-only command mutates the shell's own variables —
-            // but only the plain form: with redirections attached it is left
-            // to the ordinary launch path, exactly as before the split.
-            if !command.redirections.is_empty() {
+            // An assignment-only command with redirections launches its words
+            // verbatim, so they are not taken apart as fields either.
+            let mut argv = Vec::with_capacity(command.words.len());
+            for word in &command.words {
+                argv.push(self.env.expand_word(word)?);
+            }
+            return Ok(ExpandedCommand {
+                assignments: self.expand_assignments(assignments)?,
+                argv,
+                assignment_only: true,
+            });
+        }
+        Ok(ExpandedCommand {
+            assignments: self.expand_assignments(assignments)?,
+            argv: self.expander().fields(rest)?,
+            assignment_only: false,
+        })
+    }
+
+    /// Handle what runs inside the shell process: an assignment-only command,
+    /// a command whose words all expanded away, and a standalone builtin
+    /// (either may carry `NAME=VALUE` prefix assignments). Returns the
+    /// status if handled, or `None` for an ordinary launch.
+    fn run_in_shell(
+        &mut self,
+        command: &Command,
+        expanded: &mut ExpandedCommand,
+        background: bool,
+    ) -> Result<Option<i32>, ExpandError> {
+        let plain = command.redirections.is_empty();
+        if expanded.assignment_only {
+            // Only the plain form mutates the shell's own variables; with
+            // redirections attached it takes the ordinary launch path.
+            if !plain || background {
                 return Ok(None);
             }
-            let assignments = self.expand_assignments(assignments)?;
-            for (name, value) in assignments {
+            for (name, value) in core::mem::take(&mut expanded.assignments) {
                 self.env.set(name, value);
             }
             return Ok(Some(0));
         }
-        let name = self.env.expand_word(&rest[0])?;
-        if !is_builtin(&name) {
+        if expanded.argv.is_empty() {
+            // No command name is left: like bash, the assignments then bind
+            // in the shell itself. Redirections need a command to apply to.
+            if !plain {
+                return Err(ParseError::EmptyCommand.into());
+            }
+            for (name, value) in core::mem::take(&mut expanded.assignments) {
+                self.env.set(name, value);
+            }
+            return Ok(Some(0));
+        }
+        if background || !is_builtin(&expanded.argv[0]) {
             return Ok(None);
         }
         // Builtins write through the Console seam; a redirection on one
         // cannot be applied yet. Refusing loudly beats silently sending a
         // stream the user redirected to the terminal instead.
-        if !command.redirections.is_empty() {
+        if !plain {
             self.console
                 .write_stderr("shell: redirections on builtins are not supported\n");
             return Ok(Some(1));
         }
-        let mut argv = Vec::with_capacity(rest.len());
-        argv.push(name);
-        for word in &rest[1..] {
-            argv.push(self.env.expand_word(word)?);
-        }
         // Prefix assignments bind for the builtin's duration only — they are
-        // the command's environment, not the shell's. Argv and values were
-        // expanded above, against the *pre-assignment* environment, as POSIX
-        // orders expansion before assignment.
-        let assignments = self.expand_assignments(assignments)?;
+        // the command's environment, not the shell's.
+        let assignments = core::mem::take(&mut expanded.assignments);
         let saved: Vec<(String, Option<String>)> = assignments
             .iter()
             .map(|(name, _)| (name.clone(), self.env.get(name).map(String::from)))
@@ -284,7 +362,7 @@ impl<'a> Shell<'a> {
         for (name, value) in assignments {
             self.env.set(name, value);
         }
-        let status = self.run_builtin(&argv);
+        let status = self.run_builtin(&expanded.argv);
         for (name, old) in saved.into_iter().rev() {
             match old {
                 Some(value) => self.env.set(name, value),
@@ -317,46 +395,63 @@ impl<'a> Shell<'a> {
             console: self.console,
             limits: self.limits,
             elevator: self.elevator,
+            options: &mut self.options,
             exit: &mut self.exit,
         };
         builtin::dispatch(&mut ctx, argv).unwrap_or(NOT_FOUND_STATUS)
     }
 
+    /// Lower each expanded command's redirections, ready to launch — or the
+    /// status of a command that failed on its redirection target, reported
+    /// already.
     fn resolve_pipeline(
         &mut self,
         pipeline: &Pipeline,
-    ) -> Result<Vec<ResolvedCommand>, ParseError> {
+        expanded: Vec<ExpandedCommand>,
+    ) -> Result<Result<Vec<ResolvedCommand>, i32>, ExpandError> {
         let mut commands = Vec::with_capacity(pipeline.commands.len());
-        for command in &pipeline.commands {
-            commands.push(self.resolve_command(command)?);
+        for (command, expanded) in pipeline.commands.iter().zip(expanded) {
+            // A member left with no command cannot be launched, and dropping
+            // it would rewire the pipeline around it.
+            if expanded.argv.is_empty() {
+                return Err(ParseError::EmptyCommand.into());
+            }
+            let mut redirections = Vec::with_capacity(command.redirections.len());
+            for redirection in &command.redirections {
+                match self.lower_redirection(redirection, &mut redirections) {
+                    Ok(()) => {}
+                    // Bash fails just the command on these, and so does the
+                    // shell: the reason is stated and the line goes on.
+                    Err(err)
+                        if matches!(
+                            err.error,
+                            ParseError::AmbiguousRedirectTarget | ParseError::NoMatch
+                        ) =>
+                    {
+                        self.report(&err);
+                        return Ok(Err(err.error.status()));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            commands.push(ResolvedCommand {
+                argv: expanded.argv,
+                env_overrides: if expanded.assignment_only {
+                    Vec::new()
+                } else {
+                    expanded.assignments
+                },
+                redirections: merge_multios(redirections)?,
+            });
         }
-        Ok(commands)
+        Ok(Ok(commands))
     }
 
-    fn resolve_command(&mut self, command: &Command) -> Result<ResolvedCommand, ParseError> {
-        let (assignments, rest) = split_prefix_assignments(&command.words);
-        // A command that is *all* assignments (e.g. `FOO=1 >file`, or the
-        // background `FOO=1 &`) launches verbatim, as it always did — prefix
-        // assignments only bind when a command word follows them.
-        let (env_overrides, argv_words) = if rest.is_empty() {
-            (Vec::new(), &command.words[..])
-        } else {
-            (self.expand_assignments(assignments)?, rest)
-        };
-        let mut argv = Vec::with_capacity(argv_words.len());
-        for word in argv_words {
-            argv.push(self.env.expand_word(word)?);
-        }
-        let mut redirections = Vec::with_capacity(command.redirections.len());
-        for redirection in &command.redirections {
-            self.lower_redirection(redirection, &mut redirections)?;
-        }
-        let redirections = merge_multios(redirections)?;
-        Ok(ResolvedCommand {
-            argv,
-            env_overrides,
-            redirections,
-        })
+    /// The path or resource a redirection's target word names: expanded
+    /// like any argument, but to exactly one word.
+    fn redirect_target(&self, target: &Word) -> Result<RedirTarget, ExpandError> {
+        let text = self.expander().target(target)?;
+        Ok(classify_redirect_target(text)?)
     }
 
     /// Lower one parsed [`Redirection`] into the primitive descriptor actions
@@ -369,7 +464,7 @@ impl<'a> Shell<'a> {
         &mut self,
         redirection: &Redirection,
         out: &mut Vec<ResolvedRedirection>,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), ExpandError> {
         match redirection {
             Redirection::File { fd, mode, target } => {
                 let fd = self.resolve_bound_fd(fd)?;
@@ -377,7 +472,7 @@ impl<'a> Shell<'a> {
                     fd,
                     action: RedirAction::Open {
                         mode: *mode,
-                        target: classify_redirect_target(self.env.expand_word(target)?)?,
+                        target: self.redirect_target(target)?,
                     },
                 });
             }
@@ -395,7 +490,7 @@ impl<'a> Shell<'a> {
                     fd: STDOUT_FD,
                     action: RedirAction::Open {
                         mode,
-                        target: classify_redirect_target(self.env.expand_word(target)?)?,
+                        target: self.redirect_target(target)?,
                     },
                 });
                 out.push(ResolvedRedirection {
@@ -619,6 +714,39 @@ impl<'a> Shell<'a> {
             }
         }
     }
+}
+
+/// One command's words, expanded once.
+struct ExpandedCommand {
+    /// The `NAME=VALUE` prefix assignments, values expanded.
+    assignments: Vec<(String, String)>,
+    /// The fields the command's words expanded to (for an assignment-only
+    /// command, its words as written).
+    argv: Vec<String>,
+    /// The command is nothing but assignments.
+    assignment_only: bool,
+}
+
+/// Whether any word of `list` holds an extended pattern group.
+fn list_holds_pattern_group(list: &CommandList) -> bool {
+    list.entries
+        .iter()
+        .flat_map(|entry| &entry.pipeline.commands)
+        .any(|command| {
+            command.words.iter().any(has_pattern_group)
+                || command
+                    .redirections
+                    .iter()
+                    .any(|redirection| match redirection {
+                        Redirection::File { target, .. } | Redirection::Combined { target, .. } => {
+                            has_pattern_group(target)
+                        }
+                        Redirection::HereString { content, .. } => has_pattern_group(content),
+                        Redirection::Dup { .. }
+                        | Redirection::Close { .. }
+                        | Redirection::HereDoc(_) => false,
+                    })
+        })
 }
 
 /// Map a launch refusal onto its POSIX-style exit status and report text.

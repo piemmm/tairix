@@ -34,20 +34,20 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, FileKind};
 
-/// One directory entry a [`DirLister`] reports: the name and whether it
-/// is a directory (a directory candidate stays open for further
-/// completion; a file candidate finishes the word).
+/// One directory entry a [`DirLister`] reports: its name and its kind as
+/// listed, a link reported as a link rather than followed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirEntryInfo {
     /// The entry's name within its directory (a single component).
     pub name: String,
-    /// `true` if the entry is a directory.
-    pub is_dir: bool,
+    /// What the entry is; a directory candidate stays open for further
+    /// completion, any other finishes the word.
+    pub kind: FileKind,
 }
 
-/// The engine's read-only filesystem seam: list a directory's entries.
+/// The read-only filesystem seam: list a directory's entries.
 ///
 /// On a running kernel this is backed by the `fs_*` listing syscalls
 /// (every permission check stays kernel-side); in tests it is an
@@ -137,7 +137,7 @@ mod tests {
     use super::{common_prefix, path_matches, split_path_word, DirEntryInfo, DirLister};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, FileKind};
 
     /// An in-memory directory tree: `(path, entries)` pairs.
     struct MapLister {
@@ -156,7 +156,11 @@ mod tests {
                                 .iter()
                                 .map(|(name, is_dir)| DirEntryInfo {
                                     name: (*name).to_string(),
-                                    is_dir: *is_dir,
+                                    kind: if *is_dir {
+                                        FileKind::Directory
+                                    } else {
+                                        FileKind::Regular
+                                    },
                                 })
                                 .collect(),
                         )
@@ -199,7 +203,7 @@ mod tests {
         )]);
         let matches = path_matches("no", "/work", &lister);
         assert_eq!(names(&matches), ["notebooks", "notes.txt"]);
-        assert!(matches[0].is_dir && !matches[1].is_dir);
+        assert!(matches[0].kind.is_dir() && !matches[1].kind.is_dir());
 
         let hidden = path_matches(".no", "/work", &lister);
         assert_eq!(names(&hidden), [".notrc"]);

@@ -203,6 +203,21 @@ impl WordBuilder {
         }
     }
 
+    /// Open a single-quoted run: an empty `''` still records that the word
+    /// was quoted, which keeps it from being dropped as an empty expansion.
+    fn open_literal(&mut self) {
+        if !matches!(self.segments.last(), Some(Segment::Literal(_))) {
+            self.segments.push(Segment::Literal(String::new()));
+        }
+    }
+
+    /// Open a double-quoted run, recorded even when empty (`""`).
+    fn open_quoted_expandable(&mut self) {
+        if !matches!(self.segments.last(), Some(Segment::QuotedExpandable(_))) {
+            self.segments.push(Segment::QuotedExpandable(String::new()));
+        }
+    }
+
     fn finish(self) -> Word {
         self.segments
     }
@@ -610,6 +625,9 @@ impl Lexer {
                         Some(c) => word.push_literal(c),
                     }
                 }
+                Some(c) if is_pattern_group_op(c) && self.peek2() == Some('(') => {
+                    self.lex_pattern_group(&mut word)?;
+                }
                 Some(c) => {
                     self.bump();
                     word.push_expandable(c);
@@ -620,7 +638,50 @@ impl Lexer {
         Ok(word.finish())
     }
 
+    /// An extended pattern group, `?(…)` `*(…)` `+(…)` `@(…)` or `!(…)`,
+    /// with the cursor on its operator. Parentheses balance, and `|`, blanks
+    /// and operator characters inside are word text, as bash reads them;
+    /// quoting and escapes work as anywhere in a word.
+    fn lex_pattern_group(&mut self, word: &mut WordBuilder) -> Result<(), ParseError> {
+        let mut depth = 0usize;
+        loop {
+            match self.peek() {
+                None => return Err(ParseError::UnterminatedPatternGroup),
+                Some('\'') => {
+                    self.bump();
+                    self.lex_single_quoted(word)?;
+                }
+                Some('"') => {
+                    self.bump();
+                    self.lex_double_quoted(word)?;
+                }
+                Some('\\') => {
+                    self.bump();
+                    match self.bump() {
+                        None => return Err(ParseError::DanglingEscape),
+                        Some(c) => word.push_literal(c),
+                    }
+                }
+                Some(c) => {
+                    self.bump();
+                    word.push_expandable(c);
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Ok(());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     fn lex_single_quoted(&mut self, word: &mut WordBuilder) -> Result<(), ParseError> {
+        word.open_literal();
         loop {
             match self.bump() {
                 None => return Err(ParseError::UnterminatedQuote),
@@ -631,6 +692,7 @@ impl Lexer {
     }
 
     fn lex_double_quoted(&mut self, word: &mut WordBuilder) -> Result<(), ParseError> {
+        word.open_quoted_expandable();
         loop {
             match self.bump() {
                 None => return Err(ParseError::UnterminatedQuote),
@@ -652,12 +714,30 @@ impl Lexer {
     }
 }
 
+/// Whether `c` opens an extended pattern group when a `(` follows it.
+pub(crate) fn is_pattern_group_op(c: char) -> bool {
+    matches!(c, '?' | '*' | '+' | '@' | '!')
+}
+
+/// Whether `word` holds an extended pattern group as written: an unquoted
+/// operator character followed by `(`, which [`tokenize`] always reads as
+/// one.
+pub(crate) fn has_pattern_group(word: &Word) -> bool {
+    word.iter().any(|segment| match segment {
+        Segment::Expandable(text) => text
+            .chars()
+            .zip(text.chars().skip(1))
+            .any(|(op, open)| is_pattern_group_op(op) && open == '('),
+        Segment::Literal(_) | Segment::QuotedExpandable(_) => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{tokenize, tokenize_with_spans, FdSpec, RedirOp, Segment, Token};
     use crate::error::ParseError;
     use crate::parser::OpenMode;
-    use alloc::string::ToString;
+    use alloc::string::{String, ToString};
     use alloc::vec;
 
     fn expandable(s: &str) -> Token {
@@ -917,9 +997,80 @@ mod tests {
         assert_eq!(text, "PLAY-PASS");
     }
 
+    /// An empty quote pair still records that the word was quoted, so it
+    /// survives as an empty argument where an empty expansion would not.
     #[test]
-    fn empty_double_quotes_make_an_empty_word() {
-        assert_eq!(tokenize(r#""""#).unwrap(), vec![Token::Word(vec![])]);
+    fn empty_quotes_make_an_empty_quoted_word() {
+        assert_eq!(
+            tokenize(r#""""#).unwrap(),
+            vec![Token::Word(vec![Segment::QuotedExpandable(String::new())])]
+        );
+        assert_eq!(
+            tokenize("''").unwrap(),
+            vec![Token::Word(vec![Segment::Literal(String::new())])]
+        );
+        // Between unquoted text the empty run keeps its place, so `FOO""=x`
+        // is not spelled as the assignment `FOO=x`.
+        assert_eq!(
+            tokenize(r#"FOO""=x"#).unwrap(),
+            vec![Token::Word(vec![
+                Segment::Expandable("FOO".to_string()),
+                Segment::QuotedExpandable(String::new()),
+                Segment::Expandable("=x".to_string()),
+            ])]
+        );
+    }
+
+    /// An extended pattern group is one word: its `|`, blanks and nested
+    /// parentheses are word text, and quoting inside it holds.
+    #[test]
+    fn a_pattern_group_lexes_as_word_text() {
+        assert_eq!(
+            tokenize("ls *.@(jpg|png) !(a b)").unwrap(),
+            vec![
+                expandable("ls"),
+                expandable("*.@(jpg|png)"),
+                expandable("!(a b)"),
+            ]
+        );
+        assert_eq!(
+            tokenize("+(a|@(b|(c)))x").unwrap(),
+            vec![expandable("+(a|@(b|(c)))x")]
+        );
+        assert_eq!(
+            tokenize(r#"@("a|b"|c)"#).unwrap(),
+            vec![Token::Word(vec![
+                Segment::Expandable("@(".to_string()),
+                Segment::QuotedExpandable("a|b".to_string()),
+                Segment::Expandable("|c)".to_string()),
+            ])]
+        );
+        // Escaped, the operator opens nothing: its `(` is plain word text.
+        assert_eq!(
+            tokenize(r"\@(x)").unwrap(),
+            vec![Token::Word(vec![
+                Segment::Literal("@".to_string()),
+                Segment::Expandable("(x)".to_string()),
+            ])]
+        );
+        assert_eq!(
+            tokenize("x@(a|b"),
+            Err(ParseError::UnterminatedPatternGroup)
+        );
+    }
+
+    #[test]
+    fn has_pattern_group_finds_only_unquoted_groups() {
+        use super::has_pattern_group;
+        let word = |line: &str| match tokenize(line).unwrap().as_slice() {
+            [Token::Word(word)] => word.clone(),
+            other => panic!("one word: {other:?}"),
+        };
+        assert!(has_pattern_group(&word("*.@(a|b)")));
+        assert!(has_pattern_group(&word("!(x)")));
+        assert!(!has_pattern_group(&word("'@(a|b)'")));
+        assert!(!has_pattern_group(&word("a(b)")));
+        assert!(!has_pattern_group(&word("*.txt")));
     }
 
     #[test]

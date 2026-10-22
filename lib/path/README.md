@@ -59,9 +59,15 @@ than being invented speculatively here.
   (the kernel's `FS_NAME_MAX`). A tool that lets the user *name* something (the
   file manager's rename) judges the typed name against this so every consumer
   agrees on what a legal name is.
+- `root_len(input) -> Result<usize, PathError>` — the byte length of the root
+  a spelling names (`/`, `Name:/`, `alias::Name/`, `id::<volume-id>/`; `0`
+  when relative), by the same rule `parse` applies, examining nothing after
+  it: the shell's filename generation splits a word's root off before reading
+  the rest as a pattern.
 - `PathError` — why a string or name was rejected.
 - `MAX_PATH_LEN` / `MAX_COMPONENTS` / `MAX_COMPONENT_LEN` / `MAX_ALIAS_LEN` — the
-  fixed security bounds on an untrusted path string.
+  fixed security bounds on an untrusted path string; the path and component
+  lengths are the filesystem ABI's own (`FS_PATH_MAX`, `FS_NAME_MAX`).
 
 ## Design
 

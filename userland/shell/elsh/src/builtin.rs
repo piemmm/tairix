@@ -9,8 +9,8 @@
 //! Each builtin returns an exit status; the caller stores it as `$?`. The
 //! recognised set is intentionally minimal (no bloat):
 //! `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,
-//! `ulimit`, `elevate`, and `help`. A name outside this set is not a
-//! builtin and is launched as an external program instead.
+//! `ulimit`, `elevate`, `shopt`, and `help`. A name outside this set is not
+//! a builtin and is launched as an external program instead.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -19,6 +19,7 @@ use crate::elevate;
 use crate::env::{is_valid_name, Environment};
 use crate::host::{Console, Elevator, LimitStore, ProcessHost};
 use crate::job::{JobId, JobState, JobTable, Signal};
+use crate::options::{self, ShellOptions};
 use crate::ulimit;
 use tairix_util::quote::quote_if_needed;
 
@@ -37,6 +38,7 @@ pub(crate) struct BuiltinContext<'a> {
     pub console: &'a dyn Console,
     pub limits: &'a dyn LimitStore,
     pub elevator: &'a dyn Elevator,
+    pub options: &'a mut ShellOptions,
     /// Set to `Some(code)` by `exit` to ask the read-eval loop to stop.
     pub exit: &'a mut Option<i32>,
 }
@@ -45,7 +47,8 @@ pub(crate) struct BuiltinContext<'a> {
 /// [`is_builtin`], [`dispatch`], and command completion share, so a name can
 /// never be completable but not runnable (or the reverse).
 pub(crate) const BUILTIN_NAMES: &[&str] = &[
-    "cd", "pwd", "exit", "export", "unset", "echo", "jobs", "fg", "bg", "ulimit", "elevate", "help",
+    "cd", "pwd", "exit", "export", "unset", "echo", "jobs", "fg", "bg", "ulimit", "elevate",
+    "shopt", "help",
 ];
 
 /// `true` if `name` is a shell builtin.
@@ -71,6 +74,7 @@ pub(crate) fn dispatch(ctx: &mut BuiltinContext<'_>, argv: &[String]) -> Option<
         "bg" => bg(ctx, operands),
         "ulimit" => ulimit::ulimit(ctx, operands),
         "elevate" => elevate::elevate(ctx, operands),
+        "shopt" => options::shopt(ctx, operands),
         "help" => help(ctx),
         _ => return None,
     };
@@ -78,6 +82,11 @@ pub(crate) fn dispatch(ctx: &mut BuiltinContext<'_>, argv: &[String]) -> Option<
 }
 
 fn cd(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
+    // A pattern matching several directories must not pick one of them.
+    if args.len() > 1 {
+        ctx.console.write_stderr("cd: too many arguments\n");
+        return USAGE_ERROR;
+    }
     let target = if let Some(path) = args.first() {
         path.clone()
     } else {

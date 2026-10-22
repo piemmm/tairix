@@ -60,7 +60,12 @@ normalising it — the crate exports `alias_root_len`: the byte length of a
 leading `Name:/` alias-root prefix, decided by the grammar's own
 root-delimiter rule and alias-name validation, so such a tool treats an alias
 root the way POSIX treats `/` (a root that is never stripped into) without a
-second path parser.
+second path parser. Its general form is `root_len`: the byte length of
+whatever root a spelling names (`/`, `Name:/`, `alias::Name/`,
+`id::<volume-id>/`, or none for a relative path), split by the same rule
+`parse` applies and examining nothing after it — which is how the shell's
+filename generation takes a word's root off before reading the rest as a
+glob pattern.
 
 For the ancestor-walking tools — `mkdir -p` (create missing parents,
 outermost first) and `rmdir -p` (remove parents, innermost first) — a parsed
@@ -81,7 +86,9 @@ D3a).
 
 A path string is untrusted input, so every dimension is a fixed **security**
 bound, not a growable capacity: `MAX_PATH_LEN`, `MAX_COMPONENTS`,
-`MAX_COMPONENT_LEN`, and `MAX_ALIAS_LEN`. Parsing fails closed with a typed
+`MAX_COMPONENT_LEN`, and `MAX_ALIAS_LEN`, the path and component lengths being
+the filesystem ABI's `FS_PATH_MAX` and `FS_NAME_MAX`, so a spelling the parser
+accepts is never one a syscall refuses for length. Parsing fails closed with a typed
 `PathError` — never a silently "fixed up" path — when a bound is exceeded, an
 interior component is empty (`a//b`), a component holds a control character or a
 `:` (a reserved delimiter, so a rendered path always re-parses to the same

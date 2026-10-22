@@ -39,9 +39,8 @@ pub fn stored_root_entries() -> impl Iterator<Item = &'static str> {
 ///
 /// A fail-closed validation bound on untrusted input, not a capacity that
 /// scales with hardware: it caps the kernel staging buffer a path is copied
-/// into. It is the sum of the VFS's own component-count and component-length
-/// limits with room for separators, far larger than any real path, and a
-/// path exceeding it is refused before any resolution begins.
+/// into. It is far longer than any real path, and a path exceeding it is
+/// refused before any resolution begins.
 pub const FS_PATH_MAX: usize = 4096;
 
 /// Maximum length, in bytes, of a symbolic link's target.
@@ -876,8 +875,8 @@ impl FileStat {
 /// Maximum length, in bytes, of a single directory-entry name in the
 /// `fs_readdir` stream.
 ///
-/// A fail-closed bound matching the VFS's own component-length limit; a
-/// driver reporting a longer name is a structural fault, not a capacity.
+/// A fail-closed bound, and the VFS's own component-length limit; a driver
+/// reporting a longer name is a structural fault, not a capacity.
 pub const FS_NAME_MAX: usize = 255;
 
 /// One entry in the packed `fs_readdir` stream.

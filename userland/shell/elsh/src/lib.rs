@@ -3,16 +3,17 @@
 //!
 //! `tairix-elsh` reads a line of text and runs it: it lexes the line with
 //! full quoting and escaping, parses pipelines and `;`/`&&`/`||`/`&`
-//! connectors, expands `$`-variables, runs a small set of builtins in-process,
-//! and launches everything else through an injected process host with job
-//! control over background and stopped jobs.
+//! connectors, expands braces, `$`-variables and filename patterns, runs a
+//! small set of builtins in-process, and launches everything else through an
+//! injected process host with job control over background and stopped jobs.
 //!
 //! # What this crate is
 //!
 //! A **pure interpreter**. It decides *what* to run and *with what arguments*,
-//! but it never itself touches the kernel or a terminal. The two operations
-//! that reach the outside world — launching/waiting/signalling a job and
-//! writing output — are the injected [`ProcessHost`] and [`Console`] seams.
+//! but it never itself touches the kernel or a terminal. What reaches the
+//! outside world — launching/waiting/signalling a job, writing output, and
+//! reading the directories a filename pattern names — goes through the
+//! injected [`ProcessHost`], [`Console`] and [`GlobFs`] seams.
 //! On a running kernel they are syscall-backed; in tests they are in-memory
 //! fixtures. This mirrors `init`'s `Spawner`/`Reaper` design and keeps every
 //! parsing, expansion, and control-flow decision exhaustively testable
@@ -25,7 +26,9 @@
 //!    here-document (`<<`, `<<-`) parses *pending*: its body is collected from
 //!    the following input lines ([`parser::CommandList::feed_here_doc_line`],
 //!    bounded and fail-closed) before the list runs.
-//! 3. [`env::Environment::expand_word`] — `$`-expansion of each word.
+//! 3. Expansion, in bash's order: brace expansion, `$`-expansion
+//!    ([`env::Environment::expand_word`]), then filename generation through
+//!    the shared `lib/glob` matcher, an unquoted word left empty dropped.
 //! 4. [`Shell::run_line`] — run each pipeline, honouring connectors and the
 //!    background flag, dispatching builtins ([`builtin`]) or launching through
 //!    the [`ProcessHost`], and tracking jobs in the [`job::JobTable`].
@@ -34,22 +37,18 @@
 //!
 //! # Deliberate simplifications
 //!
-//! These keep a first shell small and predictable; each is documented where
-//! it lives rather than papered over:
-//!
-//! * Expansion does not field-split or remove empty results: each word
-//!   becomes exactly one argument.
-//! * `NAME=VALUE` is an assignment only when the whole simple command is
-//!   assignments; it is not a per-command temporary-environment prefix.
-//! * The supported expansions are `$NAME`, `${NAME}`, and `$?`.
+//! * Expansion does not field-split, as zsh does not, and a variable's value
+//!   is never read as a filename pattern — zsh's rule rather than bash's.
+//! * The supported parameter expansions are `$NAME`, `${NAME}`, and `$?`.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependencies are the audited `lib/*`
-//! crates `tairix-abi` (for [`Errno`](tairix_abi::Errno) on the host seam),
-//! `tairix-resref` (the one resource-reference spelling parser), and
-//! `tairix-vt` (the shared read line discipline the REPL's line reader
-//! runs), so a userland program never links a kernel or driver crate.
+//! `no_std` (with `alloc`); the dependencies are audited `lib/*` crates —
+//! among them `tairix-abi` (for [`Errno`](tairix_abi::Errno) on the host
+//! seams), `tairix-glob` and `tairix-path` (the one pattern matcher and path
+//! grammar), `tairix-resref` (the one resource-reference spelling parser),
+//! and `tairix-vt` (the shared read line discipline the REPL's line reader
+//! runs) — so a userland program never links a kernel or driver crate.
 //! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
@@ -58,17 +57,21 @@
 
 extern crate alloc;
 
+mod brace;
 pub mod builtin;
 pub mod complete;
 mod editor;
 mod elevate;
 pub mod env;
 pub mod error;
+mod expand;
 pub mod host;
 pub mod invocation;
 pub mod job;
 pub mod lexer;
+mod options;
 pub mod parser;
+mod pathexp;
 pub mod repl;
 pub mod shell;
 mod ulimit;
@@ -86,6 +89,7 @@ pub use host::{
 };
 pub use invocation::{parse as parse_invocation, Invocation, UsageError, USAGE};
 pub use job::{ExitStatus, Job, JobId, JobState, JobTable, Pid, Signal, WaitOutcome};
+pub use pathexp::GlobFs;
 pub use repl::{run as run_repl, ReplInput};
 pub use shell::Shell;
 pub use wireplan::{

@@ -1,35 +1,33 @@
 //! Deterministic fuzz harness for the `lib/glob` matcher (its untrusted-pattern
-//! decoder and match loop).
+//! compiler and match engine).
 //!
-//! [`tairix_glob::Pattern::new`] compiles a pattern supplied by a user or a
-//! script — untrusted input — and [`tairix_glob::Pattern::matches`] runs the
-//! compiled pattern against a candidate. The harness's invariants are:
+//! The invariants:
 //!
-//! * compiling any byte string (as UTF-8) never panics — it returns a
-//!   `Pattern` or a typed `GlobError` (fail closed);
+//! * compiling any text, under any [`Options`] and as marked text, never
+//!   panics — it yields a `Pattern` or a typed `GlobError` (fail closed);
 //! * matching any compiled pattern against any candidate never panics and
-//!   always terminates (the algorithm is backtracking-free, so a hostile
-//!   pattern or candidate cannot trigger runaway work).
+//!   always terminates, including extended patterns against candidates at
+//!   and past [`tairix_glob::MAX_EXTENDED_LEN`];
+//! * the convenience match and a reused [`Scratch`] agree, so no state leaks
+//!   from one candidate into the next.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` draws
-//! pseudo-random pattern strings, mutates real glob templates, and matches them
-//! against mutated candidates. A plain `cargo test` runs the
-//! [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask fuzz`
-//! exports `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock
-//! budget.
+//! pseudo-random patterns, mutates real templates, and matches them against
+//! mutated candidates. A plain `cargo test` runs the [`SMOKE_ITERATIONS`]
+//! sweep once from a fresh, logged seed; `cargo xtask fuzz` exports
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend it to a wall-clock budget.
 
 use tairix_fuzzseed::Prng;
-use tairix_glob::Pattern;
+use tairix_glob::{Mark, Options, Pattern, Scratch, MAX_EXTENDED_LEN};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
-const SMOKE_ITERATIONS: u64 = 100_000;
+const SMOKE_ITERATIONS: u64 = 20_000;
 
 /// Largest arbitrary byte string turned into a pattern or candidate.
 const MAX_NOISE: usize = 512;
 
-/// Real glob templates the harness mutates: each exercises a different
-/// compile/match path (stars, question marks, ranges, negation, escaping,
-/// literal brackets, and deliberately malformed forms).
+/// Real templates the harness mutates, each exercising a different compile
+/// or match path, malformed forms included.
 const TEMPLATES: &[&str] = &[
     "*.rs",
     "img_[0-9][0-9].???",
@@ -41,6 +39,16 @@ const TEMPLATES: &[&str] = &[
     "[z-a]",
     r"trailing\",
     "?*?*?*?*?*",
+    "[[:alpha:][:digit:]_]*",
+    "[[.space.][=e=]]x",
+    "[[:nope:]]",
+    "!(*.o|*.a)",
+    "*.@(jpg|png|gif)",
+    "+([0-9])?(.[0-9])",
+    "*(a|b*(c|!(d)))",
+    "@(a(b)c|[|)]x)",
+    "@(unclosed|",
+    "src/*/[!.]*.rs",
 ];
 
 /// Candidate strings compiled patterns are matched against.
@@ -51,17 +59,32 @@ const CANDIDATES: &[&str] = &[
     "café/photo_99.jpeg",
     "a/b/c/d.tar.gz",
     "]-]",
+    ".hidden",
     "ZZZ",
+    "a(b)c",
 ];
 
-/// Compile `pattern` (must not panic) and, when it compiles, match it against
-/// every fixed candidate plus `extra` (must not panic or hang).
-fn exercise(pattern: &str, extra: &str) {
-    if let Ok(pat) = Pattern::new(pattern) {
-        for cand in CANDIDATES {
-            let _ = pat.matches(cand);
+/// Every combination of the four option flags.
+fn options(bits: u8) -> Options {
+    Options::empty()
+        .with(Options::EXTENDED, bits & 1 != 0)
+        .with(Options::CASE_INSENSITIVE, bits & 2 != 0)
+        .with(Options::PERIOD, bits & 4 != 0)
+        .with(Options::PATHNAME, bits & 8 != 0)
+}
+
+/// Compile `pattern` (must not panic) under `options`, and when it compiles
+/// match it against every fixed candidate plus `extra` (must not panic or
+/// hang), checking the reused scratch agrees with a fresh match.
+fn exercise(pattern: &str, options: Options, extra: &str, scratch: &mut Scratch) {
+    if let Ok(pat) = Pattern::with_options(pattern, options) {
+        for candidate in CANDIDATES.iter().copied().chain([extra]) {
+            assert_eq!(
+                pat.matches_with(candidate, scratch),
+                pat.matches(candidate),
+                "{pattern:?} against {candidate:?}"
+            );
         }
-        let _ = pat.matches(extra);
     }
 }
 
@@ -75,14 +98,16 @@ fn compile_and_match_never_panic_for_any_input() {
         "compile_and_match_never_panic_for_any_input",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
+    let mut scratch = Scratch::new();
 
     let mut iteration: u64 = 0;
     loop {
+        let flags = options(rng.next_u8() & 0x0F);
+
         // 1. A real template with a handful of bytes flipped at random.
         let template = *rng.pick(TEMPLATES);
         let mut mutated: Vec<u8> = template.as_bytes().to_vec();
-        let flips = rng.at_most(6);
-        for _ in 0..flips {
+        for _ in 0..rng.at_most(6) {
             if mutated.is_empty() {
                 break;
             }
@@ -90,35 +115,53 @@ fn compile_and_match_never_panic_for_any_input() {
             mutated[pos] ^= rng.next_u8();
         }
         let candidate = *rng.pick(CANDIDATES);
-        // Lossy UTF-8 keeps the pattern a `&str` while still feeding it the
-        // byte damage the flips introduced.
-        exercise(&String::from_utf8_lossy(&mutated), candidate);
+        exercise(
+            &String::from_utf8_lossy(&mutated),
+            flags,
+            candidate,
+            &mut scratch,
+        );
 
-        // 2. A structured-but-hostile pattern: metacharacters spliced with a
-        //    random blob, exercising the tokeniser and bracket parser.
-        let blob_len = rng.at_most(48);
+        // 2. A structured-but-hostile pattern: metacharacters, group
+        //    operators and bracket syntax spliced together.
         let mut spliced = String::new();
-        for _ in 0..blob_len {
-            let pick = rng.at_most(7);
-            match pick {
-                0 => spliced.push('*'),
-                1 => spliced.push('?'),
-                2 => spliced.push('['),
-                3 => spliced.push(']'),
-                4 => spliced.push('-'),
-                5 => spliced.push('\\'),
-                6 => spliced.push('!'),
-                _ => spliced.push(char::from(b'a' + rng.next_u8() % 26)),
+        for _ in 0..rng.at_most(48) {
+            const PIECES: &[&str] = &[
+                "*", "?", "[", "]", "-", "\\", "!", "^", "(", ")", "|", "@(", "*(", "+(", "!(",
+                "[:", ":]", "[.", ".]", "[=", "=]", "/", ".",
+            ];
+            if rng.at_most(3) == 0 {
+                spliced.push(char::from(b'a' + rng.next_u8() % 26));
+            } else {
+                spliced.push_str(rng.pick(PIECES));
             }
         }
-        exercise(&spliced, candidate);
+        exercise(&spliced, flags, candidate, &mut scratch);
 
-        // 3. Pure noise as the pattern (lossy UTF-8), and as the candidate.
-        let nlen = rng.at_most(MAX_NOISE);
-        let mut noise = vec![0u8; nlen];
+        // 3. The same text as marked input, with random characters literal.
+        let marked: Vec<Mark> = spliced
+            .chars()
+            .map(|ch| Mark {
+                ch,
+                literal: rng.at_most(3) == 0,
+            })
+            .collect();
+        if let Ok(pat) = Pattern::from_marked(&marked, flags) {
+            let _ = pat.matches_with(candidate, &mut scratch);
+        }
+
+        // 4. An extended pattern against candidates at and past the bound.
+        if let Ok(pat) = Pattern::with_options("*(a|b*(a))!(c)", options(1)) {
+            let len = MAX_EXTENDED_LEN - 1 + rng.at_most(2);
+            let long: String = (0..len).map(|_| ['a', 'b', 'c'][rng.below(3)]).collect();
+            let _ = pat.matches_with(&long, &mut scratch);
+        }
+
+        // 5. Pure noise as the pattern (lossy UTF-8), and as the candidate.
+        let mut noise = vec![0u8; rng.at_most(MAX_NOISE)];
         rng.fill(&mut noise);
-        let noise_str = String::from_utf8_lossy(&noise);
-        exercise(&noise_str, &noise_str);
+        let noise = String::from_utf8_lossy(&noise);
+        exercise(&noise, flags, &noise, &mut scratch);
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {

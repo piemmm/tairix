@@ -29,8 +29,21 @@ The builtins:
 - `elevate <user> <program> [argument ...]` — run one command, with the
   arguments given, re-authenticated through the console's login
   supervisor.
+- `shopt [-pqsu] [-o] [name ...]` — show or set the filename-matching
+  options.
 - `help` — list the builtins.
 - `exit [code]` — end the session.
+
+A word holding an unquoted `*`, `?` or `[...]` is a filename pattern,
+replaced by the sorted names it matches, as in bash: `cp *.tmp /tmp`. A
+leading `.` must be matched by a `.`, and a pattern matching nothing is
+left as written. Braces expand first: `a{b,c}` gives `ab ac`, and
+`{1..5}` counts. Quoting makes any of these characters literal, and a
+variable's value is never read as a pattern. `shopt -s` turns on bash's
+options: `nullglob` (no match gives no word), `failglob` (no match is an
+error), `dotglob`, `nocaseglob`, `globstar` (`**` matches any depth) and
+`extglob` (`?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)`); `shopt -o -s noglob`
+turns filename matching off.
 
 On a terminal the shell runs an interactive line editor with the
 familiar bash/zsh keys: Up/Down (or `Ctrl-P`/`Ctrl-N`) walk the
@@ -68,6 +81,8 @@ grammar.
 ## ENVIRONMENT
 
 - `PATH` — the directories searched after the fixed store prefix.
+- `GLOBIGNORE` — `:`-separated patterns whose matches a filename pattern
+  drops.
 - `LANG` — the preferred locale for the short help (a BCP-47 tag such
   as `fr-FR`), exported to every launched command.
 

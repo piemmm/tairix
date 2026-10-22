@@ -3,7 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_glob::Pattern;
+use tairix_glob::{Options as GlobOptions, Pattern};
 use tairix_termcap::ColorChoice;
 use tairix_util::quote::Style as QuotingStyle;
 
@@ -564,10 +564,9 @@ pub enum Command {
 ///   glob `PATTERN` (repeatable); applied in every dotfile mode.
 /// * `--hide=PATTERN` — like `--ignore`, but has no effect when `-a` or
 ///   `-A` is given (the GNU rule that an explicit "show hidden" wins).
-///   `-I` and `--hide` patterns are the shared `tairix_glob` matcher, in
-///   which `*` / `?` also match a leading `.` (a documented divergence
-///   from GNU's `fnmatch(FNM_PERIOD)`); a malformed pattern is a usage
-///   error (fail closed).
+///   `-I` and `--hide` patterns are the shared `tairix_glob` matcher read
+///   as GNU's `fnmatch(FNM_PERIOD)`, so no wildcard matches a leading `.`;
+///   a malformed pattern is a usage error (fail closed).
 /// * `--time-style=STYLE` — how the long-format timestamp is rendered:
 ///   `locale` (the default), `long-iso`, `full-iso`, or `iso`. A custom
 ///   `+FORMAT` style is refused (fail closed; a documented divergence).
@@ -709,6 +708,13 @@ impl ParseState {
     }
 }
 
+/// Compile an `-I`/`--hide` name pattern as GNU's `fnmatch(FNM_PERIOD)`
+/// reads it, so a wildcard never matches a leading `.`. A malformed pattern
+/// is a usage error, never a silently ignored filter.
+pub(crate) fn name_pattern(raw: &str) -> Result<Pattern, LsError> {
+    Pattern::with_options(raw, GlobOptions::PERIOD).map_err(|_| LsError::Usage)
+}
+
 /// Read a long option's value, taking it from the inline `--opt=value` form
 /// or the following argument. A missing value is a usage error (fail closed).
 fn long_value<'a>(
@@ -774,14 +780,14 @@ fn apply_long<'a>(
             state
                 .filters
                 .ignore
-                .push(Pattern::new(long_value(inline, args)?).map_err(|_| LsError::Usage)?);
+                .push(name_pattern(long_value(inline, args)?)?);
             return Ok(false);
         }
         "hide" => {
             state
                 .filters
                 .hide
-                .push(Pattern::new(long_value(inline, args)?).map_err(|_| LsError::Usage)?);
+                .push(name_pattern(long_value(inline, args)?)?);
             return Ok(false);
         }
         "full-time" => {
@@ -930,18 +936,14 @@ fn apply_short<'a>(
                 break;
             }
             // `-I` takes a value like `-w`: the rest of the cluster, or the
-            // next argument when it ends the cluster. A malformed pattern is
-            // a usage error, never a silently ignored filter (fail closed).
+            // next argument when it ends the cluster.
             'I' => {
                 let raw = if rest.is_empty() {
                     *args.next().ok_or(LsError::Usage)?
                 } else {
                     rest
                 };
-                state
-                    .filters
-                    .ignore
-                    .push(Pattern::new(raw).map_err(|_| LsError::Usage)?);
+                state.filters.ignore.push(name_pattern(raw)?);
                 break;
             }
             // `-T` takes a value like `-w`: the rest of the cluster, or the
@@ -1158,14 +1160,13 @@ fn parse_block_size(raw: &str) -> Result<SizeFormat, LsError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ColorChoice, Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle,
-        SizeFormat, Sort, TimeField, TimeStyle,
+        name_pattern, parse, ColorChoice, Command, Filters, Format, Hidden, Indicator, Options,
+        QuotingStyle, SizeFormat, Sort, TimeField, TimeStyle,
     };
     use crate::error::LsError;
     use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
-    use tairix_glob::Pattern;
 
     fn list(options: Options, paths: &[&str]) -> Command {
         listing(options, Filters::default(), paths)
@@ -1932,8 +1933,8 @@ mod tests {
     fn ignore_patterns_collect_in_order_from_both_spellings() {
         let filters = Filters {
             ignore: alloc::vec![
-                Pattern::new("*.o").expect("valid glob"),
-                Pattern::new("tmp*").expect("valid glob"),
+                name_pattern("*.o").expect("valid glob"),
+                name_pattern("tmp*").expect("valid glob"),
             ],
             ..Filters::default()
         };
@@ -1946,7 +1947,7 @@ mod tests {
     #[test]
     fn ignore_takes_its_value_from_the_cluster_tail() {
         let filters = Filters {
-            ignore: alloc::vec![Pattern::new("*.tmp").expect("valid glob")],
+            ignore: alloc::vec![name_pattern("*.tmp").expect("valid glob")],
             ..Filters::default()
         };
         assert_eq!(
@@ -1958,7 +1959,7 @@ mod tests {
     #[test]
     fn hide_patterns_are_separate_from_ignore() {
         let filters = Filters {
-            hide: alloc::vec![Pattern::new("*~").expect("valid glob")],
+            hide: alloc::vec![name_pattern("*~").expect("valid glob")],
             ..Filters::default()
         };
         assert_eq!(
@@ -1971,8 +1972,18 @@ mod tests {
     fn a_malformed_or_missing_ignore_pattern_is_a_usage_error() {
         // A malformed glob fails closed rather than becoming a filter that
         // silently matches nothing.
-        assert_eq!(parse(&["-I", "["]), Err(LsError::Usage));
-        assert_eq!(parse(&["--hide=[a-"]), Err(LsError::Usage));
+        assert_eq!(parse(&["-I", "[z-a]"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--hide=[[:bogus:]]"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--ignore=x\\"]), Err(LsError::Usage));
+        // An unclosed `[` is no fault: POSIX reads it as itself, as GNU does.
+        let literal = Filters {
+            ignore: alloc::vec![name_pattern("[").expect("valid glob")],
+            ..Filters::default()
+        };
+        assert_eq!(
+            parse(&["-I", "["]),
+            Ok(listing(Options::DEFAULT, literal, &["."]))
+        );
         // A value-taking option with no value fails closed.
         assert_eq!(parse(&["-I"]), Err(LsError::Usage));
         assert_eq!(parse(&["--ignore"]), Err(LsError::Usage));

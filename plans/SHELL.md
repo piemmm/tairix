@@ -1,5 +1,30 @@
 # elsh (Element Shell) — the TAIRiX shell (`userland/shell/elsh`)
 
+| ID | Deliverable | Status |
+|---|---|---|
+| SH1 | Lexing: zsh quoting and escapes, comments, extended pattern groups as word text | done |
+| SH2 | ANSI-C quoted strings (`$'…'`) | planned |
+| SH3 | Command forms: simple commands, prefix assignments, pipelines, `\|&`, `;`/`&&`/`\|\|`, `&`, `!` | done |
+| SH4 | Compound commands (`( list )`, `{ list; }`) and functions | planned |
+| SH5 | Parameter expansion: `$NAME`, `${NAME}`, `$?` | done |
+| SH6 | The other special and positional parameters, and arrays | planned |
+| SH7 | Brace expansion | done |
+| SH8 | Tilde expansion | planned |
+| SH9 | Command substitution and arithmetic expansion | planned |
+| SH10 | Filename generation: bash's pathname expansion, its options and `shopt`, `GLOBIGNORE` | done |
+| SH11 | Redirections: the POSIX and zsh forms, here-documents and here-strings, multios, `{var}` allocation | done |
+| SH12 | A `{var}` descriptor (fd ≥ 10) reaching a launched program | blocked: the spawn attach block wires only fd 0–3 |
+| SH13 | Resource-reference redirection targets and value pipes | done |
+| SH14 | Process substitution (`<(…)`, `>(…)`) | planned |
+| SH15 | The `noclobber` option | planned |
+| SH16 | Typed resource values | planned |
+| SH17 | Job control | done |
+| SH18 | The required builtins, with `ulimit`, `elevate` and `shopt` | done |
+| SH19 | The interactive line editor over the shared terminal stack | done |
+| SH20 | Tab completion of commands, paths and resource references | done |
+| SH21 | Descriptor-driven completion (options, views, fields, renderers) and the `stdinfo` cache | planned |
+| SH22 | Structured output: native streams, views, `render`/`save`, the discovery utilities, planner introspection | planned |
+
 **elsh** ("Element Shell") is the default TAIRiX command interpreter; its
 crate is `tairix-elsh` and its `Run` binary is `tairix-elsh-run`. It should
 feel familiar to users of zsh/POSIX shells while adding structured output
@@ -238,6 +263,92 @@ $(( expression ))
 The first implementation MAY support only `$NAME`, `${NAME}`, and `$?`, but it
 MUST document each unsupported expansion and fail closed where continuing would
 change command meaning.
+
+A variable's value is data: it is neither split into fields nor read as a
+filename pattern (zsh's defaults, `SH_WORD_SPLIT` and `GLOB_SUBST` off). Only
+pattern characters written unquoted in the line are wildcards. An unquoted word
+whose expansion is empty is removed; a word with any quoted part, even `""`, is
+kept as an empty argument.
+
+### Brace expansion
+
+Brace expansion follows bash. It acts on the word as written, before any
+other expansion, and only on unquoted text: `a{b,c}d` gives `abd acd`,
+alternatives nest and may be empty, and `{x..y}` / `{x..y..step}` count between
+two integers or two single letters, a leading zero on either endpoint padding
+every number to the wider endpoint's width. A `{` opening no list and no
+sequence is literal and the search resumes after it (`{{a,b}` gives `{a {b`);
+a `${…}` is skipped whole. Assignment values, here-strings and here-documents
+are not brace-expanded.
+
+### Filename generation
+
+Filename generation follows bash's pathname expansion, through the shared
+`lib/glob` matcher (one pattern definition for every consumer) and the shared
+path grammar:
+
+1. A word is a pattern when it holds an unquoted `*`, `?`, or a bracket
+   expression that closes; a `[` opening no complete expression is an ordinary
+   character, so `[ -f x ]` is no pattern. Brackets take POSIX classes,
+   equivalence classes and collating symbols; ranges compare code points
+   (bash's `globasciiranges`, fixed on).
+2. The word's root, written in literal text before its first `/` (`/`,
+   `Home:/`, `alias::Home/`, `id::<volume-id>/`), is recognised by the shared
+   path grammar and kept as written; a `:` inside a wildcard component is
+   pattern syntax. A word naming no path (a resource reference such as
+   `sys:*`) matches nothing.
+3. The rest is matched a component at a time. A wildcard component lists its
+   directory; a literal one is appended and checked only at the end of the
+   word, by a `lstat`-style probe, or by the listing of a later component. A
+   component before a `/` needs a directory: a listed directory or a link
+   resolving to one. A leading `.` is matched only by a `.`, and `.` and `..`
+   are never matched (bash's `globskipdots`, fixed on).
+4. Matches are sorted bytewise — the C collation every listing on the system
+   uses — and deduplicated, then `GLOBIGNORE`'s `:`-separated patterns remove
+   the paths they match whole, along with any path ending in `.` or `..`. A
+   non-empty `GLOBIGNORE` implies `dotglob` without setting the option, so
+   unsetting it never clears a `dotglob` the session set. An entry that is no
+   valid pattern fails a line whose pattern matched anything (bash's hides
+   nothing), so a typo can never expose what it was meant to hide.
+5. A pattern matching nothing is left as written, removed under `nullglob`,
+   or, under `failglob`, an error that aborts the line with `$?` 1.
+6. A redirection target is expanded the same way and must yield exactly one
+   word; anything else is `ambiguous redirect`, which, like a `failglob`
+   miss there, fails only that command (`$?` 1) — in a pipeline, the whole
+   pipeline, which launches nothing, as for a target that cannot be opened.
+7. `export`'s `NAME=value` operands, assignment values, here-strings and
+   here-documents are not filename-expanded.
+
+The options are bash's, with bash's defaults (all off) and set by a `shopt`
+builtin with bash's flags (`-s`, `-u`, `-p`, `-q`, `-o`): `dotglob`,
+`failglob`, `nullglob`, `nocaseglob` (literal and range characters fold; classes
+and literal components do not), `globstar`, `extglob`, and the `set -o`
+option `noglob`.
+
+- **`globstar`.** A component spelled exactly `**` stands for the directory
+  itself and every directory below it, never descending through a link; a
+  final `**` yields every file and directory below as well, and a run of
+  `**` stands for what one does. The level `**` adds nothing to is spelled
+  with the separator before it (`dir/**` yields `dir/`), one way everywhere.
+  Each directory is read once: a wildcard after `**` is matched against the
+  listing the walk reads anyway, and the walk ends at `MAX_COMPONENTS` levels,
+  where a path could no longer be spelled.
+- **`extglob`.** `?(…)`, `*(…)`, `+(…)`, `@(…)` and `!(…)` over
+  `|`-separated alternatives. The lexer always reads such a group as one word,
+  its `|`, blanks and nested parentheses included; while `extglob` is off, a
+  line holding one is refused whole before anything runs, as bash refuses it
+  as a syntax error.
+
+An expansion is bounded: one command's words may hold no more than the
+largest argument block a program can be handed
+(`PROCESS_START_MAX_TOTAL_LEN`, each word charged its bookkeeping too), so a
+short line can never demand unbounded memory. A directory that cannot be read
+because it is absent, is not a directory, or is not the session's to list
+contributes nothing, as in bash; any other failure aborts the line naming the
+directory rather than leaving a silently partial result. Filename generation
+reaches the filesystem only through the injected read-only `GlobFs` seam
+(listing and a resolve-only probe), so every permission check stays
+kernel-side.
 
 ### Redirection syntax
 
@@ -1848,9 +1959,7 @@ launch form still refused closed (`NotImplemented`) is a redirection or
 duplication naming a `{var}` dynamic descriptor (fd ≥ 10): the spawn
 attach block wires only the standard fd 0–3.
 
-Redirection state:
-
-- **Implemented and tested** — the fd-aware redirection model. The lexer
+- **Redirections.** The fd-aware redirection model. The lexer
   decodes each operator into a `RedirOp` (carrying its explicit or default
   descriptor); the parser attaches the file target; and the interpreter lowers
   each `Redirection` to primitive `ResolvedRedirection { fd, action }` values
@@ -1866,7 +1975,7 @@ Redirection state:
   descriptor, default fd 0). Fail-closed: a file redirection, here-string, or
   here-document with no target/delimiter word, or an ambiguous duplication
   (`<&file`, `2>&file`), runs nothing.
-- **Implemented and tested** — multi-line here-documents (`<<`, `<<-`). The
+- **Here-documents** (`<<`, `<<-`). The
   command line names only the delimiter (quote removal, never expansion; any
   quoted part — including a double-quoted run, tracked by the lexer's
   `Segment::QuotedExpandable` — makes the body literal, else the body gets
@@ -1880,11 +1989,11 @@ Redirection state:
   discarded yet still consumed to its terminator (so body lines are never
   misread as commands) and fails the line with `HereDocTooLarge`, and an
   unterminated document (end of input first) fails with
-  `UnterminatedHereDoc`; either way `$?` is 2 and nothing runs. Any
-  run-stage line abort (failed expansion, missing body) now reports and
-  sets `$?` through the same shared path as a parse error.
-- **Implemented and tested** — redirection-target classification (the
-  "Resolution rule" above). Each expanded `Open` target is classified into a
+  `UnterminatedHereDoc`; either way `$?` is 2 and nothing runs. Every
+  run-stage line abort reports through the same shared path as a parse
+  error, `$?` being the error's status: 2 for a fault in the line as
+  written, 1 for an expansion that could not complete.
+- **Redirection-target classification** (the "Resolution rule" above). Each expanded `Open` target is classified into a
   `RedirTarget` (`Path` or `Resource`) through the single shared
   `lib/resref` parser, never a shell-private reference grammar (`AGENTS.md`
   §2.2). A relative target whose first path component holds a `:` preceded by a
@@ -1895,8 +2004,7 @@ Redirection state:
   file whose name contains `:` is ever shadowed. A registered-namespace target
   that is not a well-formed reference (`sys:null@`) fails the whole line closed
   (`InvalidResourceTarget`) rather than falling back to creating a file.
-- **Implemented and tested** — the required pipeline/command forms beyond the
-  basic connectors: `a |& b` (lowered once, in the parser, to a `2>&1`
+- **The pipeline and command forms** beyond the basic connectors: `a |& b` (lowered once, in the parser, to a `2>&1`
   duplication appended to the left command), the `!` status-negation prefix
   (`Pipeline::negated`, applied to the foreground `$?`; a doubled `!` negates
   again), and `NAME=VALUE` prefix assignments (split by the shared
@@ -1905,8 +2013,7 @@ Redirection state:
   child's environment, never the shell's — and bound temporarily around a
   builtin). A `!` after the pipeline has begun is an `UnexpectedToken` parse
   error rather than a silently dropped word.
-- **Implemented and tested** — zsh multios and `{var}` dynamic descriptor
-  allocation. Repeated opens on one descriptor merge into a single
+- **zsh multios and `{var}` dynamic descriptor allocation.** Repeated opens on one descriptor merge into a single
   `RedirAction::Multi` (targets keep their own modes and are classified
   independently, so `>log >sys:null` mixes a path and a resource); all-output
   targets fan out, all-input targets concatenate in order, and a descriptor
@@ -1916,8 +2023,7 @@ Redirection state:
   never fd 0–3) and binds its number to `$var`; `{var}>&-` closes the number
   read back from `$var` and fails closed (`BadDynamicFd`) when the variable
   does not hold an allocated descriptor.
-- **Implemented and tested** — command resolution (`plans/APPS.md` §8–§9,
-  the owning spec). The pure candidate policy
+- **Command resolution** (`plans/APPS.md` §8–§9, the owning spec). The pure candidate policy
   (`tairix_cmdres::resolution_candidates`, the `lib/cmdres` definition the
   `man` command's bundle lookup also imports) computes the ordered program-path
   spellings for a command word — explicit paths (containing `/`) bypass the
@@ -1941,10 +2047,9 @@ Redirection state:
   reports on the terminal exit; a background job's refusal is stated on stderr
   as its `[N] Done` line is drained, so no launch failure is ever silent
   (`§24.1`).
-- **Recognised and failing closed** (tracked here): process substitution —
-  `<(…)`/`>(…)` await the pipe/launch plumbing and `=(…)` is permanently
-  unsupported (no scratch filesystem, §16.1) — and the compound commands
-  `( list )` / `{ list; }`. Each aborts the line with a parse error
+- **Forms refused closed**: process substitution — `<(…)`/`>(…)` await the
+  pipe/launch plumbing and `=(…)` is permanently unsupported (no scratch
+  filesystem, §16.1) — and the compound commands `( list )` / `{ list; }`. Each aborts the line with a parse error
   (`UnsupportedProcessSubstitution` / `UnsupportedCompound`), so a
   parenthesised command is never misread as a filename and `{`/`(` never runs
   as a program name. A redirection on a *builtin* also fails closed (status
@@ -1954,6 +2059,20 @@ Redirection state:
   capability-checked kernel resolver), exactly as a `Path` target opens
   through `fs_open`; both are pre-opened in the shell's own table and wired
   into the child through the spawn attach block (`plans/SPAWN.md` SP10b).
+
+- **Expansion.** `src/brace.rs` (brace expansion over the lexer's quoted
+  segments, sequences generated lazily against the budget), `src/env.rs`
+  (parameter expansion keeping each character's quoting as a `lib/glob`
+  `Mark`, values marked literal), `src/pathexp.rs` (the component walk over
+  `GlobFs`) and `src/expand.rs` (the pipeline, the empty-word rule, the
+  `export` operand rule, and the bound). Each command's words are expanded
+  exactly once, before the builtin-or-launch decision, so a pattern's
+  directory reads are never repeated. A command whose words all expand away
+  runs nothing (`$?` 0) and its assignments bind in the shell, as bash's do;
+  with redirections, or in a pipeline, it is refused (`EmptyCommand`), since
+  the host cannot apply redirections without a program. `cd` refuses more
+  than one operand, so a pattern naming several directories never picks one.
+  A line-aborting expansion error names its word: `shell: <word>: <reason>`.
 
 ## Tests
 
@@ -1996,6 +2115,16 @@ Redirection state:
 - resource-reference completion is namespace-aware, inserts an identity guard
   for a destructive command, and does not hide an identity mismatch
 - parse-error fail-closed behavior
+- brace expansion: lists, nesting, empty alternatives, integer and letter
+  sequences with steps and zero padding, literal non-expressions, quoting,
+  `${…}` skipping, a scan linear in the word, and the expansion bound
+- filename generation against an in-memory tree, each expectation bash's own
+  output: `*`, `?`, brackets and classes, quoting, dotfiles, roots and alias
+  paths, links, trailing `/`, sorting, `nullglob`/`failglob`/`dotglob`/
+  `nocaseglob`/`globstar`/`extglob`/`noglob`, `GLOBIGNORE`, redirection
+  targets, the empty-word rule, and unreadable directories; `**` runs, one
+  listing per directory, and a walk over an endless tree ending
+- `shopt`: listing, `-s`/`-u`/`-p`/`-q`/`-o`, and its refusals
 - builtin behavior and status propagation
 - job control table behavior
 - `stdinfo` JSONL emission from the REPL and representative commands

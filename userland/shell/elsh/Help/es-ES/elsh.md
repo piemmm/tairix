@@ -30,8 +30,23 @@ Los comandos integrados:
 - `ulimit` — leer e imponer límites de recursos.
 - `elevate` — ejecutar un comando re-autenticado a través del
   supervisor de inicio de sesión de la consola.
+- `shopt [-pqsu] [-o] [name ...]` — mostrar o ajustar las opciones de
+  los patrones de nombres de archivo.
 - `help` — listar los comandos integrados.
 - `exit [code]` — terminar la sesión.
+
+Una palabra que contiene un `*`, `?` o `[...]` sin entrecomillar es un
+patrón de nombres de archivo, sustituido, como en bash, por los nombres
+ordenados que coinciden con él: `cp *.tmp /tmp`. Un `.` inicial solo
+coincide con un `.`, y un patrón sin coincidencias se queda tal como se
+escribió. Las llaves se expanden primero: `a{b,c}` da `ab ac`, y
+`{1..5}` cuenta. Entrecomillar hace literal cualquiera de estos
+caracteres, y el valor de una variable nunca se lee como patrón.
+`shopt -s` activa las opciones de bash: `nullglob` (sin coincidencias no
+queda palabra), `failglob` (sin coincidencias es un error), `dotglob`,
+`nocaseglob`, `globstar` (`**` coincide a cualquier profundidad) y
+`extglob` (`?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)`); `shopt -o -s noglob`
+desactiva los patrones de nombres de archivo.
 
 El intérprete no acepta operandos: la ejecución de guiones aún no forma
 parte de su gramática.
@@ -62,6 +77,8 @@ escribe por redirección.
 
 - `PATH` — los directorios buscados después del prefijo fijo de
   tiendas.
+- `GLOBIGNORE` — patrones separados por `:` cuyas coincidencias descarta
+  un patrón de nombres de archivo.
 - `LANG` — la configuración regional preferida para la ayuda corta (una
   etiqueta BCP-47 como `es-ES`), exportada a cada comando lanzado.
 

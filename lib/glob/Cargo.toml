@@ -1,6 +1,6 @@
 [package]
 name = "tairix-glob"
-description = "TAIRiX shared filename-glob matcher: the one first-party definition of shell wildcard patterns (`*`, `?`, `[...]` bracket expressions, `\\` escaping) that the shell's filename generation and interactive completion, and every other consumer, import instead of embedding a private matcher. no_std + alloc, forbids unsafe, fail-closed on a malformed pattern, and matches in bounded time with no catastrophic backtracking (it is a matcher of untrusted patterns)."
+description = "TAIRiX shared filename-glob matcher: the one first-party definition of shell wildcard patterns (`*`, `?`, POSIX bracket expressions with classes, equivalence classes and collating symbols, `\\` escaping, and bash's extglob operators), with case-insensitive, leading-period and pathname modes, that the shell's filename generation, `ls` and the tree file manager import instead of embedding a private matcher. no_std + alloc, forbids unsafe, fail-closed on a malformed pattern, and matches without backtracking in bounded time (it is a matcher of untrusted patterns)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,11 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `FS_NAME_MAX`: an extended pattern's candidate bound is the longest name a
+# filesystem stores, so the two cannot drift apart.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [dev-dependencies]
 # The in-tree fuzz harness draws its inputs through the shared seed/budget

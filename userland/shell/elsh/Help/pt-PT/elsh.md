@@ -29,8 +29,23 @@ Os builtins:
 - `ulimit` — ler e impor limites de recursos.
 - `elevate` — executar um comando reautenticado através do supervisor
   de início de sessão da consola.
+- `shopt [-pqsu] [-o] [name ...]` — mostrar ou definir as opções dos
+  padrões de nomes de ficheiros.
 - `help` — listar os builtins.
 - `exit [code]` — terminar a sessão.
+
+Uma palavra com um `*`, `?` ou `[...]` sem aspas é um padrão de nomes de
+ficheiros, substituído, como no bash, pelos nomes ordenados que lhe
+correspondem: `cp *.tmp /tmp`. Um `.` inicial só corresponde a um `.`, e
+um padrão sem correspondências fica tal como foi escrito. As chavetas
+expandem-se primeiro: `a{b,c}` dá `ab ac`, e `{1..5}` conta. As aspas
+tornam literal qualquer destes caracteres, e o valor de uma variável
+nunca é lido como padrão. `shopt -s` ativa as opções do bash: `nullglob`
+(sem correspondências não fica palavra), `failglob` (sem
+correspondências é um erro), `dotglob`, `nocaseglob`, `globstar` (`**`
+corresponde a qualquer profundidade) e `extglob` (`?(…)`, `*(…)`,
+`+(…)`, `@(…)`, `!(…)`); `shopt -o -s noglob` desativa os padrões de
+nomes de ficheiros.
 
 A shell não aceita operandos: a execução de scripts ainda não faz parte
 da sua gramática.
@@ -61,6 +76,8 @@ redireccionamento.
 ## ENVIRONMENT
 
 - `PATH` — os diretórios procurados depois do prefixo fixo de lojas.
+- `GLOBIGNORE` — padrões separados por `:` cujas correspondências um
+  padrão de nomes de ficheiros descarta.
 - `LANG` — a região preferida para a ajuda curta (uma etiqueta BCP-47
   como `pt-PT`), exportada para cada comando lançado.
 

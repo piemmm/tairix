@@ -1826,7 +1826,6 @@ mod tests {
     use tairix_abi::fs::FileKind;
     use tairix_abi::time::Time64;
     use tairix_abi::{Errno, NodeTimes};
-    use tairix_glob::Pattern;
     use tairix_help::{HelpSource, SourceError};
     use tairix_termcap::ColorChoice;
 
@@ -2588,7 +2587,7 @@ mod tests {
             ..Options::DEFAULT
         };
         let filters = Filters {
-            ignore: alloc::vec![Pattern::new("*.o").expect("valid glob")],
+            ignore: alloc::vec![crate::command::name_pattern("*.o").expect("valid glob")],
             ..Filters::default()
         };
         let out = Recorder::new();
@@ -2601,6 +2600,36 @@ mod tests {
         assert_eq!(out.text(), ".hidden\nkeep.txt\n");
     }
 
+    /// GNU matches `-I` with `FNM_PERIOD`: `ls -a -I '*'` drops every name
+    /// a wildcard reaches and keeps the dotfiles, which only a `.` can.
+    #[test]
+    fn an_ignore_wildcard_never_matches_a_leading_dot() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", ".hidden", FileKind::Regular, 0o644, 0)
+            .entry(".", "plain", FileKind::Regular, 0o644, 0);
+        let options = Options {
+            hidden: Hidden::All,
+            ..Options::DEFAULT
+        };
+        for (pattern, kept) in [
+            ("*", ".hidden\n"),
+            ("?hidden", ".hidden\nplain\n"),
+            (".*", "plain\n"),
+        ] {
+            let filters = Filters {
+                ignore: alloc::vec![crate::command::name_pattern(pattern).expect("valid glob")],
+                ..Filters::default()
+            };
+            let out = Recorder::new();
+            assert_eq!(
+                run_ls(listing_with(options, filters, &["."]), &fs, &out),
+                Ok(Outcome::Complete)
+            );
+            assert_eq!(out.text(), kept, "-I {pattern}");
+        }
+    }
+
     #[test]
     fn hide_pattern_yields_to_show_hidden() {
         let fs = TreeFs::new()
@@ -2608,7 +2637,7 @@ mod tests {
             .entry(".", "keep", FileKind::Regular, 0o644, 0)
             .entry(".", "skip.tmp", FileKind::Regular, 0o644, 0);
         let filters = Filters {
-            hide: alloc::vec![Pattern::new("*.tmp").expect("valid glob")],
+            hide: alloc::vec![crate::command::name_pattern("*.tmp").expect("valid glob")],
             ..Filters::default()
         };
         // Without `-a`, `--hide` suppresses the match.

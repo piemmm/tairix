@@ -80,8 +80,8 @@ listing's style, and so is any `:` it holds.
 - `-B, --ignore-backups` — do not list entries whose name ends with
   `~`, in every mode (backups are hidden even under `-a`).
 - `-I, --ignore=PATTERN` — do not list entries matching the shell glob
-  `PATTERN` (repeatable); applies in every mode. `*` and `?` also match
-  a leading `.`.
+  `PATTERN` (repeatable); applies in every mode. A leading `.` is
+  matched only by a `.` in the pattern, never by a wildcard.
 - `--hide=PATTERN` — like `--ignore`, but has no effect when `-a` or
   `-A` is given.
 - `--time=WORD` — which timestamp to show and sort by: `atime`

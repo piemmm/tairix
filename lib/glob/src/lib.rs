@@ -1,536 +1,358 @@
 //! TAIRiX shared filename-glob matcher (`lib/glob`).
 //!
-//! Several TAIRiX components need to match a name against a shell-style
-//! wildcard pattern: the shell's filename generation and its interactive
-//! completion first, and later the file browser, `find`-class tooling, and any
-//! other place that resolves a wildcard. That matching is *identical* wherever
-//! it happens, so it lives here once and every consumer imports it, rather than
-//! each growing a private copy.
-//!
-//! # Glob, not full regular expressions
-//!
-//! This crate implements POSIX shell **globbing**, deliberately not a general
-//! regular-expression engine. Globs are what a shell actually expands, and
-//! they can be matched in bounded time with a simple, backtracking-free
-//! algorithm. A full regex dialect (alternation, capture groups, unbounded
-//! repetition) invites catastrophic backtracking on a hostile pattern, and no
-//! current consumer needs it; if one ever does, it is a separate engine, not a
-//! feature bolted onto this one.
+//! The one definition of shell wildcard patterns. The shell's filename
+//! generation, `ls --ignore`/`--hide` and the tree file manager's filters all
+//! compile their patterns here rather than each embedding a matcher.
 //!
 //! # Pattern syntax
 //!
-//! A pattern is matched against a whole candidate string (it is anchored: the
-//! pattern must match the entire candidate, not a substring).
+//! A pattern matches a whole candidate: it is anchored at both ends.
 //!
-//! - `*` matches any run of zero or more characters.
-//! - `?` matches exactly one character.
-//! - `[...]` is a *bracket expression* matching one character:
-//!   - `[abc]` matches any of `a`, `b`, `c`.
-//!   - `[a-z]` matches any character in the inclusive range `a..=z`.
-//!   - `[!abc]` (or `[^abc]`) matches any character that is *not* listed.
-//!   - A `]` immediately after `[`, `[!`, or `[^` is a literal `]`.
-//!   - A `-` at the start or end of the expression is a literal `-`.
-//! - `\` escapes the following character, so `\*` matches a literal `*`.
+//! - `*` matches any run of characters, `?` exactly one.
+//! - `[...]` matches one character: members, code-point ranges `a-z`, a
+//!   leading `!` or `^` to negate, the POSIX classes `[:alpha:]`, `[:digit:]`
+//!   and the rest (plus bash's `[:word:]` and `[:ascii:]`), equivalence
+//!   classes `[=c=]`, and collating symbols `[.c.]` or `[.space.]`. A `]`
+//!   first in the expression, or a `-` first or last, is a member. A `[` that
+//!   opens no complete expression matches itself, as POSIX specifies.
+//! - `\` makes the next character literal, inside an expression too.
+//! - With [`Options::EXTENDED`], bash's `extglob` operators over
+//!   `|`-separated alternatives: `?(…)` zero or one, `*(…)` zero or more,
+//!   `+(…)` one or more, `@(…)` exactly one, `!(…)` anything but one.
 //!
-//! Characters have no special meaning to the matcher beyond the above; in
-//! particular the path separator `/` is an ordinary character here. A consumer
-//! globbing a multi-segment path splits it on `/` and matches each segment's
-//! pattern against each name, so path-separator policy stays with the caller
-//! and is not duplicated in the matcher.
+//! [`Options`] also selects case-insensitive matching, the leading-period rule
+//! and pathname mode (glibc's `FNM_CASEFOLD`, `FNM_PERIOD` and `FNM_PATHNAME`).
+//! [`Pattern::from_marked`] compiles text whose quoted characters the caller
+//! already knows are literal, which is how the shell hands a word over
+//! without re-escaping it.
 //!
-//! # Bounds and fail-closed behaviour
+//! # Bounds
 //!
-//! A pattern is untrusted input (a user or a script supplies it), so every
-//! dimension is bounded as a security limit, not a growable capacity:
-//! [`MAX_PATTERN_LEN`], [`MAX_TOKENS`], and [`MAX_CLASS_ITEMS`]. A pattern that
-//! exceeds a bound, or is malformed (an unterminated bracket expression, a
-//! trailing escape, an empty or reversed bracket range), is rejected by
-//! [`Pattern::new`] with a typed [`GlobError`] — it is never silently
-//! "fixed up" or matched as if it were literal.
-//!
-//! Compilation is the only fallible step. [`Pattern::matches`] cannot fail and
-//! never panics: a compiled pattern always yields a `bool`. Matching runs in
-//! `O(tokens * candidate-chars)` time with no recursion and no exponential
-//! backtracking, so neither a hostile pattern nor a hostile candidate can
-//! trigger runaway work.
+//! A pattern is untrusted input, so its size is bounded ([`MAX_PATTERN_LEN`],
+//! [`MAX_TOKENS`], [`MAX_CLASS_ITEMS`], [`MAX_GROUPS`], [`MAX_GROUP_DEPTH`])
+//! and a malformed one is a typed [`GlobError`]. Matching never fails and
+//! never backtracks: it tracks the set of positions each step can reach. A
+//! pattern without groups matches in time linear in its tokens times the
+//! candidate's length. A group's matches are memoised per start position,
+//! which bounds an extended pattern by the cube of the candidate's length;
+//! that is why one matches candidates of at most [`MAX_EXTENDED_LEN`]
+//! characters, the longest name a filesystem stores.
 //!
 //! # Example
 //!
 //! ```
-//! use tairix_glob::Pattern;
+//! use tairix_glob::{Options, Pattern};
 //!
-//! let pat = Pattern::new("*.rs").expect("valid pattern");
-//! assert!(pat.matches("lib.rs"));
-//! assert!(!pat.matches("lib.rss"));
-//!
-//! let pat = Pattern::new("img_[0-9][0-9].???").expect("valid pattern");
+//! let pat = Pattern::new("img_[[:digit:]][0-9].???").expect("valid pattern");
 //! assert!(pat.matches("img_04.png"));
 //! assert!(!pat.matches("img_4.png"));
 //!
-//! assert!(Pattern::new("[unterminated").is_err());
+//! let extended = Options::EXTENDED.union(Options::PERIOD);
+//! let pat = Pattern::with_options("!(*.o)", extended).expect("valid pattern");
+//! assert!(pat.matches("main.rs"));
+//! assert!(!pat.matches("main.o"));
+//! assert!(!pat.matches(".profile"));
 //! ```
 
 #![no_std]
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 extern crate alloc;
 
+mod bracket;
+mod compile;
+mod engine;
+#[cfg(test)]
+mod tests;
+
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use compile::{fold, Node};
+
 /// Largest pattern accepted, in bytes of UTF-8.
-///
-/// A pattern is untrusted input, so its length is a fixed security bound
-/// rather than a capacity that grows on demand. A pattern longer than this is
-/// rejected with [`GlobError::PatternTooLong`].
 pub const MAX_PATTERN_LEN: usize = 4096;
 
-/// Largest number of top-level tokens a pattern may compile to.
-///
-/// Each literal character, `?`, `*`, and bracket expression is one token. This
-/// bounds both the compiled size and the per-match work, and a pattern that
-/// needs more tokens is rejected with [`GlobError::TooManyTokens`].
+/// Most nodes a pattern may compile to: each literal, `?`, bracket
+/// expression, run of `*`, and group counts one.
 pub const MAX_TOKENS: usize = 1024;
 
-/// Largest number of items (single characters plus ranges) in one bracket
-/// expression.
-///
-/// Exceeding it rejects the pattern with [`GlobError::TooManyTokens`], so a
-/// bracket expression cannot be used to smuggle unbounded work past
-/// [`MAX_TOKENS`].
+/// Most members (characters, ranges, classes) one bracket expression holds.
 pub const MAX_CLASS_ITEMS: usize = 256;
 
-/// Why a pattern was rejected at compile time.
-///
-/// A malformed or over-large pattern always fails closed with one of these; it
-/// is never matched as if it were a literal string.
+/// Most extended groups one component of a pattern holds.
+pub const MAX_GROUPS: usize = 16;
+
+/// Deepest nesting of extended groups.
+pub const MAX_GROUP_DEPTH: usize = 8;
+
+/// Longest candidate, in characters, a component holding a group matches:
+/// the longest name a filesystem stores, so every directory entry is in
+/// reach. A longer candidate matches no such component.
+pub const MAX_EXTENDED_LEN: usize = tairix_abi::fs::FS_NAME_MAX;
+
+/// How a pattern is read and matched: a set of flags, glibc's `FNM_*` in
+/// spirit. The empty set is POSIX `fnmatch` with no flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Options(u8);
+
+impl Options {
+    /// Recognise the extended operators `?(…)`, `*(…)`, `+(…)`, `@(…)` and
+    /// `!(…)` (bash's `extglob`). Otherwise their characters are ordinary.
+    pub const EXTENDED: Self = Self(1 << 0);
+    /// Ignore case: literals and ranges compare case-folded, while classes
+    /// keep testing the character as written, as bash's `nocaseglob` does.
+    pub const CASE_INSENSITIVE: Self = Self(1 << 1);
+    /// A `.` beginning a candidate (or, in pathname mode, any component)
+    /// must be matched by a literal `.`: no `*`, `?`, bracket expression or
+    /// `!(…)` matches it.
+    pub const PERIOD: Self = Self(1 << 2);
+    /// Split pattern and candidate at every `/` and match them component by
+    /// component, so only a `/` matches a `/`.
+    pub const PATHNAME: Self = Self(1 << 3);
+
+    /// No flags.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// The flags of both.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// These flags with `flag` set when `on`, cleared otherwise.
+    #[must_use]
+    pub const fn with(self, flag: Self, on: bool) -> Self {
+        if on {
+            Self(self.0 | flag.0)
+        } else {
+            Self(self.0 & !flag.0)
+        }
+    }
+
+    /// Whether every flag of `flag` is set.
+    #[must_use]
+    pub const fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 == flag.0
+    }
+}
+
+/// Why a pattern was rejected. A malformed or over-large pattern always fails
+/// closed with one of these rather than being matched as something else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GlobError {
     /// The pattern was longer than [`MAX_PATTERN_LEN`] bytes.
     PatternTooLong,
-    /// The pattern needed more than [`MAX_TOKENS`] tokens, or a bracket
-    /// expression more than [`MAX_CLASS_ITEMS`] items.
+    /// The pattern compiled to more than [`MAX_TOKENS`] nodes, or a bracket
+    /// expression held more than [`MAX_CLASS_ITEMS`] members.
     TooManyTokens,
-    /// A bracket expression was opened with `[` but never closed with `]`.
-    UnterminatedClass,
-    /// A bracket range `a-b` had its endpoints out of order (`b` below `a`).
-    ReversedRange,
     /// The pattern ended with a `\` that escaped nothing.
     DanglingEscape,
+    /// A bracket range's endpoints were out of order (`[z-a]`).
+    ReversedRange,
+    /// A `[:name:]` named no character class.
+    UnknownClass,
+    /// A `[.name.]` or `[=name=]` named no single character.
+    UnknownCollatingElement,
+    /// An extended group was opened but never closed.
+    UnterminatedGroup,
+    /// A component held more than [`MAX_GROUPS`] extended groups.
+    TooManyGroups,
+    /// Extended groups nested deeper than [`MAX_GROUP_DEPTH`].
+    TooDeep,
 }
 
 impl fmt::Display for GlobError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let msg = match self {
-            GlobError::PatternTooLong => "glob pattern exceeds the maximum length",
-            GlobError::TooManyTokens => "glob pattern has too many tokens",
-            GlobError::UnterminatedClass => "glob bracket expression is not closed",
-            GlobError::ReversedRange => "glob bracket range endpoints are out of order",
-            GlobError::DanglingEscape => "glob pattern ends with a dangling escape",
-        };
-        f.write_str(msg)
-    }
-}
-
-/// One member of a bracket expression.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ClassItem {
-    /// A single literal character.
-    Char(char),
-    /// An inclusive character range `lo..=hi` (with `lo <= hi`).
-    Range(char, char),
-}
-
-/// A compiled bracket expression (`[...]`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Class {
-    /// Whether the sense is inverted (`[!...]` / `[^...]`).
-    negated: bool,
-    /// The members; a character matches if it is (not, when `negated`) in one.
-    items: Vec<ClassItem>,
-}
-
-impl Class {
-    /// Whether `ch` is accepted by this bracket expression.
-    fn matches(&self, ch: char) -> bool {
-        let mut hit = false;
-        for item in &self.items {
-            let member = match *item {
-                ClassItem::Char(c) => c == ch,
-                ClassItem::Range(lo, hi) => lo <= ch && ch <= hi,
-            };
-            if member {
-                hit = true;
-                break;
+        f.write_str(match self {
+            Self::PatternTooLong => "glob pattern exceeds the maximum length",
+            Self::TooManyTokens => "glob pattern has too many tokens",
+            Self::DanglingEscape => "glob pattern ends with a dangling escape",
+            Self::ReversedRange => "glob bracket range endpoints are out of order",
+            Self::UnknownClass => "glob bracket expression names an unknown character class",
+            Self::UnknownCollatingElement => {
+                "glob bracket expression names an unknown collating element"
             }
-        }
-        hit ^ self.negated
+            Self::UnterminatedGroup => "glob pattern group is not closed",
+            Self::TooManyGroups => "glob pattern has too many groups",
+            Self::TooDeep => "glob pattern groups are nested too deeply",
+        })
     }
 }
 
-/// One unit of a compiled pattern.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Token {
-    /// A literal character that must appear verbatim.
-    Literal(char),
-    /// `?`: any single character.
-    AnyOne,
-    /// `*`: any run of zero or more characters.
-    AnySequence,
-    /// `[...]`: one character accepted by the bracket expression.
-    Class(Class),
+/// Whether `text` holds an unquoted character that can begin a wildcard —
+/// `*`, `?`, `[`, or with `extended` a group's `(`. Every pattern with
+/// wildcards holds one, so text holding none need not be compiled to learn
+/// it stands for itself.
+#[must_use]
+pub fn may_hold_wildcards(text: &[Mark], extended: bool) -> bool {
+    text.iter().any(|mark| {
+        !mark.literal && (matches!(mark.ch, '*' | '?' | '[') || (extended && mark.ch == '('))
+    })
 }
 
-/// A compiled glob pattern, ready to match many candidates.
-///
-/// Build one with [`Pattern::new`]; the fallible compile step validates and
-/// bounds the pattern. Matching with [`Pattern::matches`] is then infallible
-/// and allocation-light.
+/// One pattern character and whether it is literal — escaped, or quoted by
+/// the caller — rather than pattern syntax.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mark {
+    /// The character.
+    pub ch: char,
+    /// `true` when the character stands for itself.
+    pub literal: bool,
+}
+
+/// A compiled glob pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pattern {
-    tokens: Vec<Token>,
+    components: Vec<Component>,
+    pathname: bool,
 }
 
 impl Pattern {
-    /// Compile `pattern` into a matcher.
+    /// Compile `pattern` with no [`Options`].
     ///
     /// # Errors
     ///
-    /// Returns a [`GlobError`] if the pattern exceeds a bound (it is too long
-    /// or has too many tokens) or is malformed (an unterminated bracket
-    /// expression, a reversed bracket range, or a dangling escape). See the
-    /// [`GlobError`] variants for the exact cases.
+    /// The [`GlobError`] naming why the pattern is malformed or too large.
     pub fn new(pattern: &str) -> Result<Self, GlobError> {
+        Self::with_options(pattern, Options::empty())
+    }
+
+    /// Compile `pattern` read and matched as `options` say.
+    ///
+    /// # Errors
+    ///
+    /// The [`GlobError`] naming why the pattern is malformed or too large.
+    pub fn with_options(pattern: &str, options: Options) -> Result<Self, GlobError> {
         if pattern.len() > MAX_PATTERN_LEN {
             return Err(GlobError::PatternTooLong);
         }
-
-        let chars: Vec<char> = pattern.chars().collect();
-        let mut tokens: Vec<Token> = Vec::new();
-        let mut i = 0;
-
-        while i < chars.len() {
-            if tokens.len() >= MAX_TOKENS {
-                return Err(GlobError::TooManyTokens);
-            }
-            match chars[i] {
-                '*' => {
-                    // Collapse a run of `*` to a single token: `**` matches
-                    // exactly what `*` does, and one token per run keeps the
-                    // match loop's work bounded.
-                    if !matches!(tokens.last(), Some(Token::AnySequence)) {
-                        tokens.push(Token::AnySequence);
-                    }
-                    i += 1;
-                }
-                '?' => {
-                    tokens.push(Token::AnyOne);
-                    i += 1;
-                }
-                '\\' => {
-                    let Some(&escaped) = chars.get(i + 1) else {
-                        return Err(GlobError::DanglingEscape);
-                    };
-                    tokens.push(Token::Literal(escaped));
-                    i += 2;
-                }
-                '[' => {
-                    let (class, consumed) = parse_class(&chars, i)?;
-                    tokens.push(Token::Class(class));
-                    i += consumed;
-                }
-                literal => {
-                    tokens.push(Token::Literal(literal));
-                    i += 1;
-                }
-            }
-        }
-
-        Ok(Self { tokens })
+        Self::compiled(&compile::marks_of(pattern)?, options)
     }
 
-    /// Whether `candidate` matches this pattern in full.
+    /// Compile text whose literal characters are already marked, so a
+    /// caller holding quoting needs no escaping round trip. `\` is an
+    /// ordinary character here unless marked.
     ///
-    /// Anchored: the whole candidate must match, not a prefix or substring.
-    /// Never panics and never allocates unboundedly; it runs in
-    /// `O(tokens * candidate-chars)` with no backtracking blow-up.
+    /// # Errors
+    ///
+    /// The [`GlobError`] naming why the pattern is malformed or too large.
+    pub fn from_marked(text: &[Mark], options: Options) -> Result<Self, GlobError> {
+        let len: usize = text.iter().map(|mark| mark.ch.len_utf8()).sum();
+        if len > MAX_PATTERN_LEN {
+            return Err(GlobError::PatternTooLong);
+        }
+        Self::compiled(text, options)
+    }
+
+    fn compiled(marks: &[Mark], options: Options) -> Result<Self, GlobError> {
+        Ok(Self {
+            components: compile::compile(marks, options)?,
+            pathname: options.contains(Options::PATHNAME),
+        })
+    }
+
+    /// The pattern's components: one, or one per `/`-separated piece in
+    /// pathname mode.
+    #[must_use]
+    pub fn components(&self) -> &[Component] {
+        &self.components
+    }
+
+    /// Whether any component holds a wildcard, so the pattern can match
+    /// something other than its own literal text.
+    #[must_use]
+    pub fn has_wildcards(&self) -> bool {
+        self.components.iter().any(|c| c.literal.is_none())
+    }
+
+    /// Whether `candidate` matches in full.
     #[must_use]
     pub fn matches(&self, candidate: &str) -> bool {
-        let text: Vec<char> = candidate.chars().collect();
-        matches_tokens(&self.tokens, &text)
+        self.matches_with(candidate, &mut Scratch::new())
+    }
+
+    /// [`Self::matches`] reusing `scratch`, so matching many candidates
+    /// allocates once.
+    #[must_use]
+    pub fn matches_with(&self, candidate: &str, scratch: &mut Scratch) -> bool {
+        if !self.pathname {
+            return self
+                .components
+                .iter()
+                .all(|c| c.matches_with(candidate, scratch));
+        }
+        let mut pieces = candidate.split('/');
+        self.components.iter().all(|component| {
+            pieces
+                .next()
+                .is_some_and(|piece| component.matches_with(piece, scratch))
+        }) && pieces.next().is_none()
     }
 }
 
-/// Parse a bracket expression starting at `chars[start] == '['`.
-///
-/// Returns the compiled [`Class`] and the number of characters consumed
-/// (including the opening `[` and closing `]`).
-fn parse_class(chars: &[char], start: usize) -> Result<(Class, usize), GlobError> {
-    let mut i = start + 1;
-
-    let negated = matches!(chars.get(i), Some('!' | '^'));
-    if negated {
-        i += 1;
-    }
-
-    let mut items: Vec<ClassItem> = Vec::new();
-    let mut first = true;
-
-    while i < chars.len() {
-        let c = chars[i];
-
-        // A `]` closes the expression unless it is the very first member, in
-        // which case it is a literal `]`. Because reaching a non-first
-        // position always pushed at least one member, a closed expression is
-        // never empty.
-        if c == ']' && !first {
-            return Ok((Class { negated, items }, i - start + 1));
-        }
-        first = false;
-
-        if items.len() >= MAX_CLASS_ITEMS {
-            return Err(GlobError::TooManyTokens);
-        }
-
-        // A range `c-d`, but only when the `-` is followed by a member (a `-`
-        // just before the closing `]`, or at the end of input, is a literal
-        // `-`).
-        if chars.get(i + 1) == Some(&'-') {
-            if let Some(&hi) = chars.get(i + 2) {
-                if hi != ']' {
-                    if hi < c {
-                        return Err(GlobError::ReversedRange);
-                    }
-                    items.push(ClassItem::Range(c, hi));
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-
-        items.push(ClassItem::Char(c));
-        i += 1;
-    }
-
-    Err(GlobError::UnterminatedClass)
+/// One compiled component of a [`Pattern`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Component {
+    nodes: Vec<Node>,
+    literal: Option<String>,
+    double_star: bool,
+    leaves: usize,
+    groups: usize,
+    options: Options,
 }
 
-/// Match a compiled token slice against a candidate's characters.
-///
-/// Uses the classic two-pointer glob algorithm: on a mismatch it backtracks
-/// only to the most recent `*`, advancing what that `*` consumed by one. There
-/// is no recursion and no re-exploration of already-rejected prefixes, so the
-/// worst case is `O(tokens * text)`.
-fn matches_tokens(tokens: &[Token], text: &[char]) -> bool {
-    let mut ti = 0;
-    let mut ci = 0;
-    // The most recent `*` token and the candidate position it was anchored at,
-    // so a later mismatch can let that `*` swallow one more character.
-    let mut star: Option<(usize, usize)> = None;
-
-    while ci < text.len() {
-        match tokens.get(ti) {
-            Some(Token::AnySequence) => {
-                star = Some((ti, ci));
-                ti += 1;
-                continue;
-            }
-            Some(Token::AnyOne) => {
-                ti += 1;
-                ci += 1;
-                continue;
-            }
-            Some(Token::Literal(c)) if *c == text[ci] => {
-                ti += 1;
-                ci += 1;
-                continue;
-            }
-            Some(Token::Class(class)) if class.matches(text[ci]) => {
-                ti += 1;
-                ci += 1;
-                continue;
-            }
-            _ => {}
-        }
-
-        // Mismatch (or tokens exhausted before the text): resume from the last
-        // `*`, letting it consume one more character. With no `*` to fall back
-        // on, the candidate cannot match.
-        match star {
-            Some((star_token, matched_upto)) => {
-                ti = star_token + 1;
-                ci = matched_upto + 1;
-                star = Some((star_token, matched_upto + 1));
-            }
-            None => return false,
-        }
+impl Component {
+    /// The exact name this component matches when it holds no wildcard,
+    /// escapes removed.
+    #[must_use]
+    pub fn literal(&self) -> Option<&str> {
+        self.literal.as_deref()
     }
 
-    // The text is consumed; the match succeeds only if the remaining tokens are
-    // all `*` (each of which can match the empty run).
-    tokens[ti..].iter().all(|t| matches!(t, Token::AnySequence))
+    /// Whether the component is spelled exactly `**`, the recursive
+    /// wildcard of bash's `globstar`.
+    #[must_use]
+    pub fn is_double_star(&self) -> bool {
+        self.double_star
+    }
+
+    /// Whether the name `name` matches this component, reusing `scratch`.
+    #[must_use]
+    pub fn matches_with(&self, name: &str, scratch: &mut Scratch) -> bool {
+        match &self.literal {
+            Some(literal) if self.options.contains(Options::CASE_INSENSITIVE) => {
+                literal.chars().map(fold).eq(name.chars().map(fold))
+            }
+            Some(literal) => literal == name,
+            None => engine::matches(self, name, scratch),
+        }
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{GlobError, Pattern, MAX_CLASS_ITEMS, MAX_PATTERN_LEN, MAX_TOKENS};
-    use alloc::format;
-    use alloc::string::String;
+/// Reusable working memory for matching, so a caller testing many candidates
+/// against one pattern allocates once.
+#[derive(Debug, Default)]
+pub struct Scratch {
+    raw: Vec<char>,
+    folded: Vec<char>,
+    pool: Vec<Vec<u64>>,
+    masks: Vec<u64>,
+    masked: Vec<bool>,
+    rows: Vec<u64>,
+    slots: Vec<usize>,
+    star_floor: Vec<usize>,
+}
 
-    fn matches(pattern: &str, candidate: &str) -> bool {
-        Pattern::new(pattern)
-            .expect("pattern compiles")
-            .matches(candidate)
-    }
-
-    #[test]
-    fn empty_pattern_matches_only_empty() {
-        assert!(matches("", ""));
-        assert!(!matches("", "x"));
-    }
-
-    #[test]
-    fn literal_is_anchored() {
-        assert!(matches("readme.md", "readme.md"));
-        assert!(!matches("readme.md", "readme.markdown"));
-        assert!(!matches("readme.md", "areadme.md"));
-    }
-
-    #[test]
-    fn question_mark_matches_exactly_one() {
-        assert!(matches("f?o", "foo"));
-        assert!(matches("f?o", "fxo"));
-        assert!(!matches("f?o", "fo"));
-        assert!(!matches("f?o", "fooo"));
-    }
-
-    #[test]
-    fn star_matches_any_run_including_empty() {
-        assert!(matches("*", ""));
-        assert!(matches("*", "anything at all"));
-        assert!(matches("*.rs", "lib.rs"));
-        assert!(matches("a*z", "az"));
-        assert!(matches("a*z", "abcz"));
-        assert!(!matches("a*z", "abc"));
-    }
-
-    #[test]
-    fn multiple_stars_behave_like_one() {
-        assert!(matches("a**b", "ab"));
-        assert!(matches("a**b", "axxxb"));
-        assert!(matches("***", "whatever"));
-    }
-
-    #[test]
-    fn star_backtracks_correctly() {
-        // The greedy `*` must give characters back so the trailing literal can
-        // still match.
-        assert!(matches("*.tar.gz", "archive.tar.gz"));
-        assert!(matches("*abc*abc*", "xxabcyyabczz"));
-        assert!(!matches("*abc*abc*", "xxabcyy"));
-    }
-
-    #[test]
-    fn bracket_class_members_and_ranges() {
-        assert!(matches("[abc]", "b"));
-        assert!(!matches("[abc]", "d"));
-        assert!(matches("[a-z]", "m"));
-        assert!(!matches("[a-z]", "M"));
-        assert!(matches("img_[0-9][0-9].png", "img_42.png"));
-        assert!(!matches("img_[0-9][0-9].png", "img_4.png"));
-    }
-
-    #[test]
-    fn bracket_negation() {
-        assert!(matches("[!0-9]", "a"));
-        assert!(!matches("[!0-9]", "5"));
-        assert!(matches("[^abc]", "d"));
-        assert!(!matches("[^abc]", "a"));
-    }
-
-    #[test]
-    fn bracket_literal_close_and_dash() {
-        // A `]` right after `[` is a literal `]`.
-        assert!(matches("[]]", "]"));
-        // A `-` at the end is a literal `-`.
-        assert!(matches("[a-]", "-"));
-        assert!(matches("[a-]", "a"));
-        assert!(!matches("[a-]", "b"));
-    }
-
-    #[test]
-    fn escaping_metacharacters() {
-        assert!(matches(r"\*", "*"));
-        assert!(!matches(r"\*", "x"));
-        assert!(matches(r"a\?b", "a?b"));
-        assert!(!matches(r"a\?b", "axb"));
-        assert!(matches(r"\[", "["));
-    }
-
-    #[test]
-    fn unicode_candidates() {
-        assert!(matches("caf?", "café"));
-        assert!(matches("*é", "café"));
-        assert!(matches("[α-ω]", "β"));
-    }
-
-    #[test]
-    fn malformed_patterns_fail_closed() {
-        assert_eq!(Pattern::new("[abc"), Err(GlobError::UnterminatedClass));
-        assert_eq!(Pattern::new("[]"), Err(GlobError::UnterminatedClass));
-        assert_eq!(Pattern::new("[!]"), Err(GlobError::UnterminatedClass));
-        assert_eq!(Pattern::new("[z-a]"), Err(GlobError::ReversedRange));
-        assert_eq!(Pattern::new(r"trailing\"), Err(GlobError::DanglingEscape));
-    }
-
-    #[test]
-    fn empty_class_after_immediate_close_is_reported() {
-        // `[]]` is a class matching `]`, but `[]` alone never closes and is
-        // reported as unterminated (the first `]` is a literal member).
-        assert!(Pattern::new("[]]").is_ok());
-        assert_eq!(Pattern::new("[]"), Err(GlobError::UnterminatedClass));
-    }
-
-    #[test]
-    fn pattern_length_bound_is_enforced() {
-        // A run of `*` collapses to one token, so the length bound — not the
-        // token bound — is what this exercises. At the limit it compiles; one
-        // byte over is rejected before tokenising.
-        let ok: String = "*".repeat(MAX_PATTERN_LEN);
-        assert!(Pattern::new(&ok).is_ok());
-        let too_long: String = "*".repeat(MAX_PATTERN_LEN + 1);
-        assert_eq!(Pattern::new(&too_long), Err(GlobError::PatternTooLong));
-    }
-
-    #[test]
-    fn token_count_bound_is_enforced() {
-        // `?` is one token each; one past the limit is rejected.
-        let ok: String = "?".repeat(MAX_TOKENS);
-        assert!(Pattern::new(&ok).is_ok());
-        let too_many: String = "?".repeat(MAX_TOKENS + 1);
-        assert_eq!(Pattern::new(&too_many), Err(GlobError::TooManyTokens));
-    }
-
-    #[test]
-    fn class_item_bound_is_enforced() {
-        let mut body = String::from("[");
-        for _ in 0..=MAX_CLASS_ITEMS {
-            body.push('a');
-        }
-        body.push(']');
-        assert_eq!(Pattern::new(&body), Err(GlobError::TooManyTokens));
-    }
-
-    #[test]
-    fn separator_is_an_ordinary_character() {
-        // The matcher does not treat `/` specially; segment policy is the
-        // caller's job.
-        assert!(matches("a/*/c", "a/b/c"));
-        assert!(matches("*", "a/b/c"));
-    }
-
-    #[test]
-    fn error_display_is_human_readable() {
-        assert!(!format!("{}", GlobError::UnterminatedClass).is_empty());
+impl Scratch {
+    /// Empty working memory.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 }

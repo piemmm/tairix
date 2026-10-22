@@ -669,7 +669,7 @@ mod tests {
             if dir == tairix_abi::SYSTEM_COMMAND_STORE {
                 return Ok(alloc::vec![crate::complete::DirEntryInfo {
                     name: String::from("cat.app"),
-                    is_dir: true,
+                    kind: tairix_abi::FileKind::Directory,
                 }]);
             }
             Err(tairix_abi::Errno::NotFound)

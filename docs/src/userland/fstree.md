@@ -134,9 +134,11 @@ what is built.
   file pane as it is typed: every keystroke in the prompt re-applies the
   pattern, Enter keeps it (shown in the status line), and Esc restores
   the filter held before the prompt opened. A pattern that does not
-  (yet) compile — an unclosed bracket mid-edit — hides nothing: the pane
+  compile — a reversed range, an unknown class — hides nothing: the pane
   stays unfiltered and the status line marks the filter `(bad pattern)`,
-  so entries are never silently hidden behind an uncompilable pattern.
+  so entries are never silently hidden behind an uncompilable pattern. A
+  bracket still open mid-edit is no fault: POSIX reads an unclosed `[` as
+  itself, so the pane shows what that literal matches until it closes.
   Emptying the pattern clears the filter.
 - **Branch filename search (`/`).** The S3 walker with a name sieve: the
   focused branch is descended in the same bounded, cancellable ticks,

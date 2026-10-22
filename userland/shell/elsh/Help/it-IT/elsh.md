@@ -29,8 +29,23 @@ I comandi integrati:
 - `ulimit` — leggere e imporre limiti di risorse.
 - `elevate` — eseguire un comando ri-autenticato tramite il supervisore
   di accesso della console.
+- `shopt [-pqsu] [-o] [name ...]` — mostrare o impostare le opzioni dei
+  modelli di nomi di file.
 - `help` — elencare i comandi integrati.
 - `exit [code]` — terminare la sessione.
+
+Una parola che contiene un `*`, `?` o `[...]` non protetto è un modello
+di nomi di file, sostituito, come in bash, dai nomi ordinati a cui
+corrisponde: `cp *.tmp /tmp`. Un `.` iniziale corrisponde solo a un `.`,
+e un modello senza corrispondenze resta com'è scritto. Le graffe si
+espandono per prime: `a{b,c}` dà `ab ac`, e `{1..5}` conta. Le
+virgolette rendono letterale ognuno di questi caratteri, e il valore di
+una variabile non viene mai letto come modello. `shopt -s` attiva le
+opzioni di bash: `nullglob` (nessuna corrispondenza non lascia alcuna
+parola), `failglob` (nessuna corrispondenza è un errore), `dotglob`,
+`nocaseglob`, `globstar` (`**` corrisponde a qualsiasi profondità) e
+`extglob` (`?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)`); `shopt -o -s noglob`
+disattiva i modelli di nomi di file.
 
 La shell non accetta operandi: l'esecuzione di script non fa ancora
 parte della sua grammatica.
@@ -60,6 +75,8 @@ si scrive mai per redirezione.
 ## ENVIRONMENT
 
 - `PATH` — le directory cercate dopo il prefisso fisso di store.
+- `GLOBIGNORE` — modelli separati da `:` le cui corrispondenze un
+  modello di nomi di file scarta.
 - `LANG` — la locale preferita per la guida breve (un tag BCP-47 come
   `it-IT`), esportata a ogni comando lanciato.
 

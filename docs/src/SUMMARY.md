@@ -88,6 +88,7 @@
   - [`tairix-fdt`](./lib/fdt.md)
   - [`tairix-fscopy`](./lib/fscopy.md)
   - [`tairix-font`](./lib/font.md)
+  - [`tairix-glob`](./lib/glob.md)
   - [`tairix-greeter`](./lib/greeter.md)
   - [`tairix-hash`](./lib/hash.md)
   - [`tairix-help`](./lib/help.md)

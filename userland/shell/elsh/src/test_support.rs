@@ -12,15 +12,18 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::{Errno, LimitKind, ResourceLimit};
+use tairix_abi::{Errno, FileKind, LimitKind, ResourceLimit};
 
 use crate::builtin::{dispatch, BuiltinContext};
+use crate::complete::{DirEntryInfo, DirLister};
 use crate::env::Environment;
 use crate::host::{
     Console, Elevator, LaunchError, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand,
     NULL_ELEVATOR,
 };
 use crate::job::{JobTable, Pid, Signal, WaitOutcome};
+use crate::options::ShellOptions;
+use crate::pathexp::GlobFs;
 
 /// A [`Console`] that accumulates everything written to each stream.
 #[derive(Default)]
@@ -293,6 +296,7 @@ pub(crate) struct Fixture<'a> {
     pub console: RecordingConsole,
     pub limits: MemoryLimitStore,
     pub elevator: &'a dyn Elevator,
+    pub options: ShellOptions,
     pub exit: Option<i32>,
 }
 
@@ -313,6 +317,7 @@ impl<'a> Fixture<'a> {
             console: RecordingConsole::new(),
             limits: MemoryLimitStore::new(),
             elevator,
+            options: ShellOptions::default(),
             exit: None,
         }
     }
@@ -328,6 +333,7 @@ impl<'a> Fixture<'a> {
             console: &self.console,
             limits: &self.limits,
             elevator: self.elevator,
+            options: &mut self.options,
             exit: &mut self.exit,
         };
         dispatch(&mut ctx, &argv)
@@ -356,5 +362,237 @@ pub(crate) struct EmptyResources;
 impl crate::complete::ResourceLister for EmptyResources {
     fn list(&self, _domain: tairix_resref::SelectorDomain) -> Result<Vec<String>, Errno> {
         Ok(Vec::new())
+    }
+}
+
+/// One node of a [`MemFs`] tree.
+#[derive(Clone, Debug)]
+enum MemNode {
+    Dir,
+    File,
+    /// A symbolic link and the path it holds.
+    Link(String),
+}
+
+/// An in-memory file tree for filename-generation tests: directories,
+/// files and links, reached through the same spellings the shell builds —
+/// relative to a working directory, from `/`, or from an alias root. A
+/// listing comes back in reverse name order, so a test only passes if the
+/// shell sorts.
+pub(crate) struct MemFs {
+    cwd: String,
+    aliases: Vec<(String, String)>,
+    nodes: BTreeMap<String, MemNode>,
+    failing: Vec<(String, Errno)>,
+    listings: RefCell<usize>,
+}
+
+/// Longest chain of links [`MemFs`] follows before reporting a loop.
+const MEM_LINK_HOPS: usize = 16;
+
+impl MemFs {
+    /// An empty tree whose working directory is `cwd` (absolute).
+    pub(crate) fn new(cwd: &str) -> Self {
+        let mut fs = Self {
+            cwd: cwd.to_string(),
+            aliases: Vec::new(),
+            nodes: BTreeMap::new(),
+            failing: Vec::new(),
+            listings: RefCell::new(0),
+        };
+        fs.nodes.insert("/".to_string(), MemNode::Dir);
+        fs.make_parents(cwd);
+        fs.nodes.insert(cwd.to_string(), MemNode::Dir);
+        fs
+    }
+
+    fn key(&self, path: &str) -> String {
+        if path.starts_with('/') {
+            path.to_string()
+        } else if self.cwd == "/" {
+            alloc::format!("/{path}")
+        } else {
+            alloc::format!("{}/{path}", self.cwd)
+        }
+    }
+
+    fn make_parents(&mut self, key: &str) {
+        let mut at = String::new();
+        let parts: Vec<&str> = key.split('/').filter(|p| !p.is_empty()).collect();
+        for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            at.push('/');
+            at.push_str(part);
+            self.nodes.entry(at.clone()).or_insert(MemNode::Dir);
+        }
+    }
+
+    fn insert(mut self, path: &str, node: MemNode) -> Self {
+        let key = self.key(path);
+        self.make_parents(&key);
+        self.nodes.insert(key, node);
+        self
+    }
+
+    /// Add a directory (and its parents).
+    pub(crate) fn dir(self, path: &str) -> Self {
+        self.insert(path, MemNode::Dir)
+    }
+
+    /// Add a regular file (and its parents).
+    pub(crate) fn file(self, path: &str) -> Self {
+        self.insert(path, MemNode::File)
+    }
+
+    /// Add a link holding `target`.
+    pub(crate) fn link(self, path: &str, target: &str) -> Self {
+        self.insert(path, MemNode::Link(target.to_string()))
+    }
+
+    /// Spell the directory `path` as the alias root `name:/`.
+    pub(crate) fn alias(mut self, name: &str, path: &str) -> Self {
+        self.aliases.push((name.to_string(), path.to_string()));
+        self
+    }
+
+    /// Make listing the directory `path` fail with `errno`.
+    pub(crate) fn failing(mut self, path: &str, errno: Errno) -> Self {
+        let key = self.key(path);
+        self.failing.push((key, errno));
+        self
+    }
+
+    /// How many directories have been listed.
+    pub(crate) fn listings(&self) -> usize {
+        *self.listings.borrow()
+    }
+
+    /// The components of `path` from the tree's root, aliases and the
+    /// working directory applied.
+    fn components(&self, path: &str) -> Result<Vec<String>, Errno> {
+        let (base, rest) = if let Some(rest) = path.strip_prefix('/') {
+            (String::new(), rest)
+        } else if let Some((name, rest)) = path.split_once(":/") {
+            let (_, target) = self
+                .aliases
+                .iter()
+                .find(|(alias, _)| alias == name)
+                .ok_or(Errno::NotFound)?;
+            (target.clone(), rest)
+        } else {
+            (self.cwd.clone(), path)
+        };
+        let mut parts: Vec<String> = base
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect();
+        let pieces: Vec<&str> = rest.split('/').collect();
+        for (index, piece) in pieces.iter().enumerate() {
+            if piece.is_empty() {
+                // An interior `//` is no path, as the kernel's grammar reads
+                // it; a trailing `/` is allowed.
+                if index + 1 == pieces.len() {
+                    continue;
+                }
+                return Err(Errno::OutOfRange);
+            }
+            parts.push((*piece).to_string());
+        }
+        Ok(parts)
+    }
+
+    /// Resolve `path`, links in the way followed and a final one followed
+    /// when `follow`, to its key and node.
+    fn lookup(&self, path: &str, follow: bool) -> Result<(String, MemNode), Errno> {
+        let mut pending = self.components(path)?;
+        pending.reverse();
+        let mut current: Vec<String> = Vec::new();
+        let mut hops = 0;
+        let mut node = MemNode::Dir;
+        while let Some(part) = pending.pop() {
+            match part.as_str() {
+                "." => continue,
+                ".." => {
+                    current.pop();
+                    node = MemNode::Dir;
+                    continue;
+                }
+                _ => {}
+            }
+            current.push(part);
+            let key = alloc::format!("/{}", current.join("/"));
+            node = self.nodes.get(&key).cloned().ok_or(Errno::NotFound)?;
+            if let MemNode::Link(target) = &node {
+                if !pending.is_empty() || follow {
+                    hops += 1;
+                    if hops > MEM_LINK_HOPS {
+                        return Err(Errno::LinkLoop);
+                    }
+                    current.pop();
+                    if target.starts_with('/') {
+                        current.clear();
+                    }
+                    pending.extend(
+                        target
+                            .split('/')
+                            .filter(|p| !p.is_empty())
+                            .rev()
+                            .map(String::from),
+                    );
+                    node = MemNode::Dir;
+                    continue;
+                }
+            }
+            if !pending.is_empty() && !matches!(node, MemNode::Dir) {
+                return Err(Errno::NotADirectory);
+            }
+        }
+        Ok((alloc::format!("/{}", current.join("/")), node))
+    }
+}
+
+impl DirLister for MemFs {
+    fn list_dir(&self, dir: &str) -> Result<Vec<DirEntryInfo>, Errno> {
+        *self.listings.borrow_mut() += 1;
+        let (key, node) = self.lookup(dir, true)?;
+        if let Some((_, errno)) = self.failing.iter().find(|(path, _)| *path == key) {
+            return Err(*errno);
+        }
+        if !matches!(node, MemNode::Dir) {
+            return Err(Errno::NotADirectory);
+        }
+        let prefix = if key == "/" {
+            key.clone()
+        } else {
+            alloc::format!("{key}/")
+        };
+        let mut entries: Vec<DirEntryInfo> = self
+            .nodes
+            .iter()
+            .filter_map(|(path, node)| {
+                let name = path.strip_prefix(&prefix)?;
+                (!name.is_empty() && !name.contains('/')).then(|| DirEntryInfo {
+                    name: name.to_string(),
+                    kind: match node {
+                        MemNode::Dir => FileKind::Directory,
+                        MemNode::File => FileKind::Regular,
+                        MemNode::Link(_) => FileKind::Symlink,
+                    },
+                })
+            })
+            .collect();
+        entries.reverse();
+        Ok(entries)
+    }
+}
+
+impl GlobFs for MemFs {
+    fn kind(&self, path: &str, follow: bool) -> Result<FileKind, Errno> {
+        let (_, node) = self.lookup(path, follow)?;
+        Ok(match node {
+            MemNode::Dir => FileKind::Directory,
+            MemNode::File => FileKind::Regular,
+            MemNode::Link(_) => FileKind::Symlink,
+        })
     }
 }

@@ -11,16 +11,17 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::fs::FS_SYMLINK_MAX;
+use tairix_abi::fs::{FS_NAME_MAX, FS_SYMLINK_MAX};
 use tairix_abi::ROOT_VIEW;
 
 use super::VfsError;
 
-/// Maximum bytes in a single path component.
+/// Maximum bytes in a single path component: the ABI's name bound, so the
+/// VFS and every caller judge a name alike.
 ///
-/// Matches the long-standing Unix `NAME_MAX`; bounding it keeps a hostile
-/// on-disk record from forcing an unbounded component allocation.
-pub const MAX_COMPONENT_LEN: usize = 255;
+/// Bounding it keeps a hostile on-disk record from forcing an unbounded
+/// component allocation.
+pub const MAX_COMPONENT_LEN: usize = FS_NAME_MAX;
 
 /// Maximum number of components in a single absolute path.
 ///

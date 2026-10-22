@@ -2,24 +2,32 @@
 //! run.
 //!
 //! [`ParseError`] is the shell's only *line-aborting* error: a lexical fault
-//! (an unterminated quote, a dangling escape) or a grammatical one (an empty
-//! command, a redirection with no target, an unterminated `${...}`). When a
-//! line fails to parse or expand, the shell runs **nothing** from it.
+//! (an unterminated quote, a dangling escape), a grammatical one (an empty
+//! command, a redirection with no target, an unterminated `${...}`), or an
+//! expansion that cannot complete (a pattern that matched nothing under
+//! `failglob`). When a line fails to parse or expand, the shell runs
+//! **nothing** more from it. The one exception is a redirection target: one
+//! that expands ambiguously, or matches nothing under `failglob`, fails only
+//! its own command (or the pipeline it is part of), as bash's does.
 //!
 //! Everything that can go wrong *after* a line is understood — a program that
 //! is not found, a permission denial, a redirection target that cannot be
 //! opened — is not a `ParseError`. It is an ordinary non-zero exit status
 //! (carried back from the [`ProcessHost`](crate::ProcessHost) as an
-//! [`Errno`](tairix_abi::Errno)), so that `;`, `&&`, and `||` keep working
+//! [`Errno`]), so that `;`, `&&`, and `||` keep working
 //! across a failed command exactly as a POSIX shell requires. Neither path
 //! ever panics.
 
 use core::fmt;
 
+use tairix_abi::Errno;
+use tairix_glob::GlobError;
+
 /// A command line that could not be turned into an executable form.
 ///
 /// Every variant names *what* is wrong without quoting the offending bytes
-/// back, so the type stays allocation-free and `Copy`.
+/// back, so the type stays allocation-free and `Copy`; the shell names the
+/// offending word beside it when it reports one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ParseError {
@@ -74,6 +82,47 @@ pub enum ParseError {
     /// deliberate: silently dropping the token would run a different command
     /// than the user wrote.
     UnexpectedToken,
+    /// An extended pattern group (`@(…)`, `!(…)`, …) was opened but its `)`
+    /// never came.
+    UnterminatedPatternGroup,
+    /// An extended pattern group was written while the `extglob` option is
+    /// off, which bash refuses as a syntax error.
+    ExtendedGlobDisabled,
+    /// A pattern matched nothing while the `failglob` option is on.
+    NoMatch,
+    /// A redirection target expanded to no word or to several.
+    AmbiguousRedirectTarget,
+    /// A pattern the matcher refused: a reversed range, an unknown class,
+    /// or one past its size bounds.
+    Pattern(GlobError),
+    /// An expansion would produce more argument text than any program can
+    /// be handed.
+    ExpansionTooLarge,
+    /// Filename generation could not read a directory for a reason other
+    /// than its absence or the caller's lack of access, so its result would
+    /// have been silently partial.
+    UnreadableDirectory(Errno),
+    /// Every word of a command expanded away, leaving no command for its
+    /// redirections, or its place in a pipeline, to apply to.
+    EmptyCommand,
+}
+
+impl ParseError {
+    /// The `$?` a line aborted by this error leaves: `2` for a fault in the
+    /// line as written, as for any syntax error, and `1` for an expansion
+    /// that could not complete, as bash reports those.
+    #[must_use]
+    pub fn status(self) -> i32 {
+        match self {
+            Self::NoMatch
+            | Self::AmbiguousRedirectTarget
+            | Self::Pattern(_)
+            | Self::ExpansionTooLarge
+            | Self::UnreadableDirectory(_)
+            | Self::EmptyCommand => 1,
+            _ => 2,
+        }
+    }
 }
 
 impl fmt::Display for ParseError {
@@ -92,6 +141,16 @@ impl fmt::Display for ParseError {
             Self::UnsupportedProcessSubstitution => "process substitution is not supported",
             Self::BadDynamicFd => "{var} does not name an allocated descriptor",
             Self::UnexpectedToken => "unexpected token",
+            Self::UnterminatedPatternGroup => "unterminated extended pattern group",
+            Self::ExtendedGlobDisabled => "extended pattern needs `shopt -s extglob`",
+            Self::NoMatch => "no match",
+            Self::AmbiguousRedirectTarget => "ambiguous redirect",
+            Self::Pattern(err) => return fmt::Display::fmt(err, f),
+            Self::ExpansionTooLarge => "expansion exceeds the argument size limit",
+            Self::UnreadableDirectory(errno) => {
+                return write!(f, "cannot read directory: {errno}");
+            }
+            Self::EmptyCommand => "command expanded to nothing",
         };
         f.write_str(message)
     }

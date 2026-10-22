@@ -2171,7 +2171,7 @@ fn malformed_glob_reports_and_tags_nothing() {
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('T'));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('['));
+    type_text(&mut m, &mut fs, "[z-a]");
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(m.tags.is_empty());
     let message = m.message.clone().expect("a refusal");
@@ -2511,7 +2511,7 @@ fn a_bad_filter_pattern_hides_nothing_and_says_so() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('f'));
-    type_text(&mut m, &mut fs, "[a");
+    type_text(&mut m, &mut fs, "[z-a]");
     // An uncompilable pattern filters nothing behind the user's back.
     assert_eq!(
         visible_names(&m),
@@ -2523,7 +2523,10 @@ fn a_bad_filter_pattern_hides_nothing_and_says_so() {
     let mut window = Window::new(Pos::new(0, 0), Size::new(10, 70));
     render(&m, &mut window);
     let status = row_text(&window, 8);
-    assert!(status.contains("filter [a (bad pattern)"), "got {status}");
+    assert!(
+        status.contains("filter [z-a] (bad pattern)"),
+        "got {status}"
+    );
 }
 
 // --- S4: the branch filename search (`/`) --------------------------------
@@ -2564,7 +2567,7 @@ fn a_bad_search_pattern_is_refused_in_the_panes() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('/'));
-    type_text(&mut m, &mut fs, "[x");
+    type_text(&mut m, &mut fs, "[[:bogus:]]");
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert_eq!(m.view, View::Panes);
     assert!(m.walk.is_none());

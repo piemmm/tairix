@@ -30,8 +30,23 @@ Die eingebauten Befehle:
 - `ulimit` — Ressourcenlimits lesen und setzen.
 - `elevate` — einen Befehl über den Anmelde-Supervisor der Konsole
   neu authentifiziert ausführen.
+- `shopt [-pqsu] [-o] [name ...]` — die Optionen für Dateinamensmuster
+  anzeigen oder setzen.
 - `help` — die eingebauten Befehle auflisten.
 - `exit [code]` — die Sitzung beenden.
+
+Ein Wort mit einem ungequoteten `*`, `?` oder `[...]` ist ein
+Dateinamensmuster und wird wie in bash durch die sortierten Namen
+ersetzt, auf die es passt: `cp *.tmp /tmp`. Ein führender `.` muss durch
+einen `.` getroffen werden, und ein Muster ohne Treffer bleibt
+unverändert. Geschweifte Klammern werden zuerst expandiert: `a{b,c}`
+ergibt `ab ac`, und `{1..5}` zählt. Quoting macht jedes dieser Zeichen
+wörtlich, und der Wert einer Variable wird nie als Muster gelesen.
+`shopt -s` schaltet die bash-Optionen ein: `nullglob` (kein Treffer
+ergibt kein Wort), `failglob` (kein Treffer ist ein Fehler), `dotglob`,
+`nocaseglob`, `globstar` (`**` passt auf jede Tiefe) und `extglob`
+(`?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)`); `shopt -o -s noglob` schaltet
+die Dateinamensmuster ab.
 
 Die Shell nimmt keine Operanden an: die Ausführung von Skripten gehört
 noch nicht zu ihrer Grammatik.
@@ -63,6 +78,8 @@ geschrieben.
 ## ENVIRONMENT
 
 - `PATH` — die nach dem festen Store-Präfix durchsuchten Verzeichnisse.
+- `GLOBIGNORE` — durch `:` getrennte Muster, deren Treffer ein
+  Dateinamensmuster verwirft.
 - `LANG` — die bevorzugte Locale für die Kurzhilfe (ein BCP-47-Tag wie
   `de-DE`), exportiert an jeden gestarteten Befehl.
 

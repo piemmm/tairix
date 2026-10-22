@@ -1737,10 +1737,10 @@ and no leading-`.` glob special case is needed). `-I` /
 `--ignore=PATTERN` (repeatable) drops names matching the glob in every
 mode, while `--hide=PATTERN` (repeatable) drops matches only when neither
 `-a` nor `-A` is given — an explicit "show hidden" wins over `--hide`, the
-GNU rule. Both patterns compile through the shared `lib/glob` matcher (in
-which `*` / `?` also match a leading `.`, a documented divergence from
-GNU's `fnmatch(FNM_PERIOD)`); a malformed pattern is a `LsError::Usage`
-error, never a filter that silently matches nothing. These filters are
+GNU rule. Both patterns compile through the shared `lib/glob` matcher read
+as GNU's `fnmatch(FNM_PERIOD)` reads them, so a leading `.` is matched only
+by a `.` in the pattern; a malformed pattern is a `LsError::Usage` error,
+never a filter that silently matches nothing. These filters are
 applied silently — unlike the default dotfile filter, an explicitly
 requested one emits no omission record.
 

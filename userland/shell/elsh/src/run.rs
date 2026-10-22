@@ -20,8 +20,8 @@
 //! The interpreter is pure: it decides *what* to run but reaches the outside
 //! world only through injected seams. `RtConsole` carries its output to
 //! fd 1 / fd 2, `RtProcessHost` launches external commands through the
-//! `spawn` syscall and reaps them through `wait`, `RtDirLister` reads
-//! directories for filename completion, and `RtResourceLister` reads the live
+//! `spawn` syscall and reaps them through `wait`, `RtFs` reads directories
+//! for filename completion and filename generation, and `RtResourceLister` reads the live
 //! names behind a resource-selector placeholder from the System Information
 //! API. A command word is resolved
 //! to a runnable bundle through the shared candidate policy
@@ -58,14 +58,14 @@ mod program {
 
     use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
-    use tairix_abi::fs::{DirEntries, FS_IO_MAX};
+    use tairix_abi::fs::{DirEntries, OpenFlags, FS_IO_MAX};
     use tairix_abi::net_ipc::if_name_str;
     use tairix_abi::origin::{CapabilitySummary, Origin};
     use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
     use tairix_abi::time::Time64;
     use tairix_abi::{CapabilityId, Errno, FileKind, InputMode, LimitKind, ResourceLimit};
     use tairix_elsh::{
-        parse_invocation, Console, Denied, DirEntryInfo, DirLister, Elevator, Environment,
+        parse_invocation, Console, Denied, DirEntryInfo, DirLister, Elevator, Environment, GlobFs,
         Invocation, LaunchError, LaunchSpec, LimitStore, Pid, PlannedOpen, PlannedWire,
         ProcessHost, PumpTask, ReplInput, ResolvedCommand, ResourceLister, Shell, Signal,
         WaitOutcome, USAGE,
@@ -137,27 +137,46 @@ mod program {
         }
     }
 
-    /// The completion engine's read-only directory seam, backed by the
-    /// kernel-authorised `fs_readdir`: every path resolution and per-inode
-    /// permission check stays kernel-side, and a refusal simply yields no
-    /// candidates (the engine degrades, never guesses).
-    struct RtDirLister;
+    /// The read-only filesystem view completion and filename generation
+    /// share, backed by the kernel-authorised `fs_readdir` and a
+    /// resolve-only open's `fs_stat`: every path resolution and per-inode
+    /// permission check stays kernel-side, so a pattern reveals no name the
+    /// session could not list itself.
+    struct RtFs;
 
-    impl DirLister for RtDirLister {
+    impl DirLister for RtFs {
         fn list_dir(&self, dir: &str) -> Result<Vec<DirEntryInfo>, Errno> {
             let stream = tairix_rt::read_dir_all(dir.as_bytes()).map_err(Errno::from_syscall)?;
             let mut entries = Vec::new();
             for entry in DirEntries::new(&stream) {
-                let entry = entry?;
-                // The ABI contract makes every entry name UTF-8; a stream
-                // that is not is refused whole rather than partially listed.
-                let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
+                // A stream the ABI does not describe — a malformed record, a
+                // name that is not UTF-8 — is refused whole as such, never
+                // mistaken for an absent directory.
+                let entry = entry.map_err(|_| Errno::BadMagic)?;
+                let name = core::str::from_utf8(entry.name).map_err(|_| Errno::BadMagic)?;
                 entries.push(DirEntryInfo {
                     name: String::from(name),
-                    is_dir: entry.kind == FileKind::Directory,
+                    kind: entry.kind,
                 });
             }
             Ok(entries)
+        }
+    }
+
+    impl GlobFs for RtFs {
+        fn kind(&self, path: &str, follow: bool) -> Result<FileKind, Errno> {
+            // Neither access bit: the handle only resolves, and with
+            // `NO_FOLLOW` it names a final link itself — `lstat`'s posture.
+            let flags = if follow {
+                OpenFlags::empty()
+            } else {
+                OpenFlags::NO_FOLLOW
+            };
+            let file =
+                tairix_rt::File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+            file.stat()
+                .map(|stat| stat.kind)
+                .map_err(Errno::from_syscall)
         }
     }
 
@@ -1060,12 +1079,13 @@ mod program {
         });
         let mut shell = Shell::with_environment(&host, &console, env)
             .with_limits(&limits)
-            .with_elevator(&elevator);
+            .with_elevator(&elevator)
+            .with_filesystem(&RtFs);
         tairix_elsh::run_repl(
             &mut shell,
             &console,
             &mut input,
-            &RtDirLister,
+            &RtFs,
             &RtResourceLister::new(),
         )
     }

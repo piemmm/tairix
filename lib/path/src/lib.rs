@@ -99,15 +99,17 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-/// Largest accepted path string, in bytes. Longer input is rejected outright,
-/// before any per-component work, so an over-long string cannot drive cost.
-pub const MAX_PATH_LEN: usize = 4096;
+/// Largest accepted path string, in bytes: the longest path a filesystem
+/// syscall takes. Longer input is rejected outright, before any
+/// per-component work, so an over-long string cannot drive cost.
+pub const MAX_PATH_LEN: usize = tairix_abi::FS_PATH_MAX;
 
 /// Largest number of components a normalised path may contain.
 pub const MAX_COMPONENTS: usize = 256;
 
-/// Largest single path component, in bytes.
-pub const MAX_COMPONENT_LEN: usize = 255;
+/// Largest single path component, in bytes: the longest name a filesystem
+/// stores.
+pub const MAX_COMPONENT_LEN: usize = tairix_abi::FS_NAME_MAX;
 
 /// Largest alias name, in bytes.
 pub const MAX_ALIAS_LEN: usize = 64;
@@ -397,26 +399,69 @@ pub fn parse(input: &str) -> Result<Path, PathError> {
     if input.len() > MAX_PATH_LEN {
         return Err(PathError::TooLong);
     }
+    let (root, offset) = split_root(input)?;
+    let rooted = root != Root::Relative;
+    let components = normalise(&input[offset..], rooted)?;
+    Ok(Path { root, components })
+}
 
+/// The byte length of the root `input` spells before its first component:
+/// `1` for the view's `/`, the length of `Name:/`, `alias::Name/` or
+/// `id::<volume-id>/` (the whole spelling when no `/` follows the name), and
+/// `0` for a relative path.
+///
+/// Purely lexical, like [`alias_root_len`]: the root's own spelling is
+/// validated exactly as [`parse`] validates it, and nothing after it is
+/// examined — so a caller treating the rest as something other than plain
+/// components (a glob pattern) still splits the root off by the grammar's one
+/// rule.
+///
+/// # Errors
+///
+/// The [`PathError`] [`parse`] reports for the same root: a resource
+/// reference or a missing-slash alias ([`PathError::NotAPath`]), an
+/// unsupported or empty resolver, or an invalid alias or volume id.
+pub fn root_len(input: &str) -> Result<usize, PathError> {
+    split_root(input).map(|(_, offset)| offset)
+}
+
+/// The root `input` names and the byte offset its components begin at.
+fn split_root(input: &str) -> Result<(Root, usize), PathError> {
     // A leading `/` is a synthetic-view path, regardless of any later `:`.
-    if let Some(rest) = input.strip_prefix('/') {
-        let components = normalise(rest, true)?;
-        return Ok(Path {
-            root: Root::View,
-            components,
-        });
+    if input.starts_with('/') {
+        return Ok((Root::View, 1));
+    }
+    let Some(colon) = root_delimiter(input) else {
+        return Ok((Root::Relative, 0));
+    };
+    let after_colon = &input[colon + 1..];
+
+    // `Name::rest` — a resolver-prefixed spelling: `Name::root` or
+    // `Name::root/path/inside/root`.
+    if let Some(rest) = after_colon.strip_prefix(':') {
+        let resolver = &input[..colon];
+        if resolver.is_empty() {
+            return Err(PathError::ResolverEmpty);
+        }
+        let (name, offset) = match rest.find('/') {
+            Some(slash) => (&rest[..slash], colon + 2 + slash + 1),
+            None => (rest, input.len()),
+        };
+        let root = match resolver {
+            ALIAS_RESOLVER => Root::Alias(validate_alias(name)?),
+            ID_RESOLVER => Root::VolumeId(validate_volume_id(name)?),
+            _ => return Err(PathError::UnsupportedResolver),
+        };
+        return Ok((root, offset));
     }
 
-    if let Some(colon) = root_delimiter(input) {
-        return parse_rooted(input, colon);
+    // `Name:/path` — an alias shorthand. A single colon not followed by `/` is
+    // a resource reference or a missing-slash alias path, neither of which is a
+    // filesystem path.
+    if !after_colon.starts_with('/') {
+        return Err(PathError::NotAPath);
     }
-
-    // No leading root token: a relative path.
-    let components = normalise(input, false)?;
-    Ok(Path {
-        root: Root::Relative,
-        components,
-    })
+    Ok((Root::Alias(validate_alias(&input[..colon])?), colon + 2))
 }
 
 /// The byte offset of the root-delimiting `:`, if `input` carries one.
@@ -452,69 +497,6 @@ pub fn alias_root_len(input: &str) -> Option<usize> {
     }
     validate_alias(&input[..colon]).ok()?;
     Some(colon + 2)
-}
-
-/// Parse a path whose first `:` (at byte offset `colon`) is a root delimiter.
-fn parse_rooted(input: &str, colon: usize) -> Result<Path, PathError> {
-    let after_colon = &input[colon + 1..];
-
-    // `Name::rest` — a resolver-prefixed spelling.
-    if let Some(rest) = after_colon.strip_prefix(':') {
-        let resolver = &input[..colon];
-        if resolver.is_empty() {
-            return Err(PathError::ResolverEmpty);
-        }
-        if resolver == ALIAS_RESOLVER {
-            return parse_expanded_alias(rest);
-        }
-        if resolver == ID_RESOLVER {
-            return parse_volume_id(rest);
-        }
-        return Err(PathError::UnsupportedResolver);
-    }
-
-    // `Name:/path` — an alias shorthand. A single colon not followed by `/` is
-    // a resource reference or a missing-slash alias path, neither of which is a
-    // filesystem path.
-    let Some(rest) = after_colon.strip_prefix('/') else {
-        return Err(PathError::NotAPath);
-    };
-    let alias = validate_alias(&input[..colon])?;
-    let components = normalise(rest, true)?;
-    Ok(Path {
-        root: Root::Alias(alias),
-        components,
-    })
-}
-
-/// Parse the tail of an expanded alias spelling (`alias::` already stripped),
-/// i.e. `Name` or `Name/path/inside/root`.
-fn parse_expanded_alias(rest: &str) -> Result<Path, PathError> {
-    let (name, path) = match rest.find('/') {
-        Some(slash) => (&rest[..slash], &rest[slash + 1..]),
-        None => (rest, ""),
-    };
-    let alias = validate_alias(name)?;
-    let components = normalise(path, true)?;
-    Ok(Path {
-        root: Root::Alias(alias),
-        components,
-    })
-}
-
-/// Parse the tail of a volume-identity spelling (`id::` already stripped),
-/// i.e. `<volume-id>` or `<volume-id>/path/inside/root`.
-fn parse_volume_id(rest: &str) -> Result<Path, PathError> {
-    let (text, path) = match rest.find('/') {
-        Some(slash) => (&rest[..slash], &rest[slash + 1..]),
-        None => (rest, ""),
-    };
-    let id = validate_volume_id(text)?;
-    let components = normalise(path, true)?;
-    Ok(Path {
-        root: Root::VolumeId(id),
-        components,
-    })
 }
 
 /// Validate the canonical hyphenated lowercase UUID spelling and decode its
@@ -743,6 +725,25 @@ mod tests {
 
     fn components(p: &Path) -> Vec<String> {
         p.components().to_vec()
+    }
+
+    /// The root splits off by the grammar's own rule, whatever follows it.
+    #[test]
+    fn root_len_splits_each_root_spelling_lexically() {
+        assert_eq!(root_len("/System/*"), Ok(1));
+        assert_eq!(root_len("//x"), Ok(1));
+        assert_eq!(root_len("Home:/Documents/*.md"), Ok("Home:/".len()));
+        assert_eq!(root_len("alias::Home/a/[b"), Ok("alias::Home/".len()));
+        assert_eq!(root_len("alias::Home"), Ok("alias::Home".len()));
+        let id = "id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001";
+        assert_eq!(root_len(&alloc::format!("{id}/x")), Ok(id.len() + 1));
+        assert_eq!(root_len("src/*.rs"), Ok(0));
+        assert_eq!(root_len("*"), Ok(0));
+        assert_eq!(root_len("a/b:c"), Ok(0), "a `:` after a `/` is no root");
+        assert_eq!(root_len("sys:null"), Err(PathError::NotAPath));
+        assert_eq!(root_len("fs::x/y"), Err(PathError::UnsupportedResolver));
+        assert_eq!(root_len("::x"), Err(PathError::ResolverEmpty));
+        assert_eq!(root_len("id::nope/x"), Err(PathError::VolumeIdInvalid));
     }
 
     #[test]

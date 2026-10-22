@@ -5,14 +5,15 @@ command interpreter: a POSIX-ish shell that
 reads a line of text and runs it. It lexes the line with full quoting and
 escaping, parses pipelines (`|`, `|&`, and the `!` status negation), the
 `;`/`&&`/`||`/`&` connectors, and `NAME=VALUE` prefix assignments, expands
-`$`-variables, runs a small set of builtins in-process, and launches
-everything else through an injected process host with job control over
-background and stopped jobs.
+braces, `$`-variables and filename patterns as bash does, runs a small set of
+builtins in-process, and launches everything else through an injected process
+host with job control over background and stopped jobs.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependencies are the audited `lib/*` crates `tairix-abi` (the stable
-`Errno` carried back by the process-host seam), `tairix-resref` (the one
+dependencies are audited `lib/*` crates — among them `tairix-abi` (the stable
+`Errno` carried back by the host seams), `tairix-glob` and `tairix-path` (the
+one pattern matcher and the one path grammar), `tairix-resref` (the one
 resource-reference spelling parser), and `tairix-vt` (the shared read line
 discipline the REPL's line reader runs) — so a userland program never links
 a kernel or driver crate (`AGENTS.md` §17.4).
@@ -29,6 +30,11 @@ the outside world are injected seams, mirroring `init`'s `Spawner`/
   kernel returns, so the shell invents no parallel error vocabulary
   (`AGENTS.md` §2.2).
 - `Console` — `write_stdout` / `write_stderr`.
+- `GlobFs` — the read-only filesystem view filename generation walks: a
+  directory listing (the completion engine's `DirLister`, an entry's kind
+  reported as listed) and the kind of the node a path names, a final link
+  followed or not. A shell built without one can read nothing, so every
+  pattern is left as written.
 
 On a running kernel these are syscall-backed; in tests they are in-memory
 fixtures. Splitting the seams from the interpreter keeps every parsing,
@@ -52,12 +58,89 @@ the REPL — drive separately). For each line it:
    (`parser::parse`).
 4. **Runs** each list entry whose run-condition the previous `$?`
    satisfies — `&&` runs on success, `||` runs on failure, `;` always —
-   expanding each word (`env::Environment::expand_word`) and either
+   expanding each command's words once (see Expansion) and either
    dispatching a builtin or launching through the `ProcessHost`.
 
 Any line-aborting error — at parse *or* run stage (a failed expansion, a
-missing here-document body) — is reported on standard error and sets `$?`
-to `2` through one shared path, so nothing (further) from the line runs.
+missing here-document body) — is reported on standard error, naming the word
+it concerns (`shell: <word>: <reason>`), and sets `$?` through one shared
+path: `2` for a fault in the line as written, `1` for an expansion that could
+not complete. Nothing (further) from the line runs.
+
+## Expansion
+
+Each command's words go through bash's order of expansions — brace
+expansion, parameter expansion, filename generation — exactly once, before
+the shell decides between a builtin and a launch, so a pattern's directory
+reads are never repeated. An unquoted word whose expansion is empty is
+removed; a word with any quoted part, even `""`, stays an empty argument.
+Assignment values, here-strings and here-documents take parameter expansion
+alone, as do `export`'s `NAME=value` operands.
+
+**Parameters.** `$NAME`, `${NAME}`, and `$?`. A value is never split into
+fields and never read as a filename pattern — zsh's rule, not bash's — so a
+filename held in a variable cannot be re-read as a wildcard; only pattern
+characters written unquoted in the line are wildcards. Parameter expansion
+keeps each character's quoting as a `lib/glob` `Mark` for the next stage.
+
+**Braces** (`src/brace.rs`), as bash expands them, on unquoted text only:
+`a{b,c}d` → `abd acd`, nested and empty alternatives, and sequences
+`{1..10..3}`, `{a..e}`, `{05..10}` (zero-padded to the wider endpoint). A `{`
+opening no valid expression stays literal and the search moves past it; a
+`${…}` is skipped whole; quoted text inside an alternative stays quoted in
+every word it lands in.
+
+**Filename generation** (`src/pathexp.rs`), as bash's pathname expansion. A
+word holding an unquoted `*`, `?` or closing bracket expression is compiled by
+the shared `lib/glob` matcher in pathname mode and replaced by the paths it
+matches, sorted bytewise and deduplicated:
+
+- The word's root, spelled in literal text before its first `/` (`/`,
+  `Home:/`, `alias::Home/`, `id::<volume-id>/`), is recognised by the shared
+  path grammar (`tairix_path::root_len`) and kept as written; a `:` inside a
+  wildcard component (`[[:digit:]]`) is pattern syntax. A word that names no
+  path at all — a resource reference such as `sys:*` — matches nothing.
+- A wildcard component lists its directory; a literal one is appended and
+  checked only at the end, by a resolve-only probe (`lstat`'s posture), or by
+  a later listing. A component before a `/` needs a directory or a link
+  resolving to one, so `*/` lists directories with their slash and `*/x`
+  reaches through a link.
+- A leading `.` is matched only by a `.`; `.` and `..` never match.
+- A pattern matching nothing stays as written, or is removed (`nullglob`),
+  or aborts the line (`failglob`, `$?` 1).
+- A redirection target expands the same way but must yield one word:
+  otherwise `ambiguous redirect`, which — like a `failglob` miss there —
+  fails only that command (`$?` 1), as bash's does; in a pipeline nothing of
+  it is launched, as for a target that cannot be opened.
+- A directory that is absent, not a directory, or not the session's to list
+  contributes nothing; any other failure aborts the line naming the
+  directory, so a result is never silently partial.
+
+The options are bash's, under bash's names, all off by default, and set by
+the `shopt` builtin: `dotglob`, `failglob`, `nullglob`, `nocaseglob`
+(literals and ranges fold; classes and literal components do not),
+`globstar` (a component spelled `**`, or a run of them, matches the
+directory and every directory below it, never through a link, and as the last
+component everything below as well; each directory is read once, a wildcard
+after `**` matched against the same listing), `extglob` (`?(…)`, `*(…)`,
+`+(…)`, `@(…)`, `!(…)`), and `noglob` through `shopt -o`. `globasciiranges`
+and `globskipdots` report on and cannot be turned off. The lexer always reads
+an extended group as one word (its `|` and blanks included); while `extglob`
+is off, a line holding one is refused whole, as bash refuses it as a syntax
+error. `GLOBIGNORE` names `:`-separated patterns whose matches are removed,
+compared against whole paths, along with any path ending in `.` or `..`. A
+non-empty one implies `dotglob` without setting it, so unsetting it never
+clears a `dotglob` the session chose, as bash's does. An entry that is no
+valid pattern fails a line whose pattern matched anything, rather than hiding
+nothing as bash's does, so a typo never exposes what it was meant to hide.
+
+An expansion is bounded by the largest argument block a program can be handed
+(`PROCESS_START_MAX_TOTAL_LEN`, each word charged its bookkeeping too):
+`{1..100000000}` fails with `expansion exceeds the argument size limit`
+rather than exhausting memory. A command whose words all expand away runs
+nothing, its assignments binding in the shell; with redirections, or inside a
+pipeline, it is refused (`command expanded to nothing`), since there is no
+program to apply them to.
 
 ## Redirections
 
@@ -204,22 +287,15 @@ value-backed reference still lower to `resource_open` and are refused with
 command, not by writing text at it. `<>` is refused despite its read half —
 serving half a request would silently downgrade it.
 
-Not yet implemented (tracked in `plans/SHELL.md`, deliberately failing closed
-rather than misbehaving): process substitution — the stream forms `<(…)` /
-`>(…)` await the launch plumbing, and the temporary-file form `=(…)` is
-permanently unsupported (TAIRiX has no scratch filesystem) — and the compound
-commands `( list )` and `{ list; }`. Each is *recognised* and aborts the line
-with a parse error, so a parenthesised command can never be misread as a
-filename and `{`/`(` can never run as a program name. Classifying a
-target is done; *resolving* a `Resource` target to a kernel stream backing
-(opening `sys:null`, the
-capability-checked resolve of any other namespace) waits on the same launch
-ABI that gates applying a file redirection. The `spawn` ABI carries the
-child's argument vector and environment but no descriptor plumbing yet, so
-the runtime process host reports `NotImplemented` for any redirection — a
-`Path` and a `Resource` target alike — until the launch ABI grows pipes and
-redirections; the parsing, classification, lowering, and fail-closed
-semantics above are exercised in full against the in-memory fixtures.
+Refused closed (tracked in `plans/SHELL.md`): process substitution — the
+stream forms `<(…)` / `>(…)` await the launch plumbing, and the
+temporary-file form `=(…)` is permanently unsupported (TAIRiX has no scratch
+filesystem) — and the compound commands `( list )` and `{ list; }`. Each is
+*recognised* and aborts the line with a parse error, so a parenthesised
+command can never be misread as a filename and `{`/`(` can never run as a
+program name. A `Resource` target resolves at launch through the
+capability-checked `resource_open`, exactly as a `Path` target opens through
+`fs_open` (below).
 
 ## The session program (`Run`) and its REPL
 
@@ -386,12 +462,22 @@ write through the `Console` seam as before.
 ## Builtins
 
 `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,
-`ulimit`, `elevate`, `help`. A builtin runs inside the shell process
+`ulimit`, `elevate`, `shopt`, `help`. A builtin runs inside the shell process
 because it mutates or reads shell-side state — the environment, the
 working directory, the job table, the `exit` request a read-eval loop
 watches, the process's own resource limits, or (for `elevate`) the
 controlling terminal a password prompt must own; everything else is
-launched as an external program.
+launched as an external program. `cd` refuses more than one operand
+(`cd: too many arguments`), so a pattern naming several directories never
+silently picks one.
+
+`shopt [-pqsu] [-o] [optname ...]` is bash's: with `-s`/`-u` it sets or
+unsets the named options (and alone lists those on or off); otherwise it
+reports every option, or the named ones, as bash's `name<TAB>on|off` table,
+or with `-p` as the commands that restore them; `-q` answers through the
+status alone (`0` when every named option is on); `-o` reaches the `set -o`
+options (`noglob`). An unknown name is refused naming it, and the rest of the
+request still applies.
 
 `elevate <user> <program> [argument ...]` is the per-invocation elevation
 frontend (`plans/CAPABILITY_USE.md` CU5): it prompts for the target
@@ -433,9 +519,12 @@ next line, so output never interleaves mid-command.
 ## Failure handling (`AGENTS.md` §2.9)
 
 `ParseError` is the shell's only *line-aborting* error — a lexical fault
-(unterminated quote, dangling escape) or a grammatical one (empty
-command, a redirection with no target, an unterminated `${...}`). A line
-that does not parse or expand runs **nothing** and sets `$?` to `2`.
+(unterminated quote, dangling escape), a grammatical one (empty
+command, a redirection with no target, an unterminated `${...}`), or an
+expansion that could not complete (a `failglob` miss, a malformed pattern,
+an over-large expansion, an unreadable directory). A line that does not
+parse or expand runs **nothing**; `$?` is `2` for a fault in the line as
+written and `1` for an expansion failure (`ParseError::status`).
 
 Everything that goes wrong *after* a line is understood — a program that
 cannot be launched, a `change_directory` denial — is an ordinary
@@ -448,13 +537,13 @@ as POSIX requires.
 These keep a first shell small and predictable; each is documented where
 it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 
-- Expansion does not field-split or remove empty results: each word
-  becomes exactly one argument.
-- The supported expansions are `$NAME`, `${NAME}`, and `$?`. Command
-  substitution, arithmetic expansion, brace expansion, tilde expansion, and
-  filename generation are not implemented yet; their spellings are inert
-  word text except where running them would change command meaning — process
-  substitution and compound commands fail closed with a parse error.
+- Expansion does not field-split, and a value is never re-read as a
+  pattern: zsh's rules, deliberately, over bash's.
+- The supported parameter expansions are `$NAME`, `${NAME}`, and `$?`.
+  Command substitution, arithmetic expansion and tilde expansion are not
+  implemented yet; their spellings are inert word text except where running
+  them would change command meaning — process substitution and compound
+  commands fail closed with a parse error.
 
 ## Tests
 
@@ -469,5 +558,9 @@ background job tracking, the `Done`-before-prompt reporting of finished
 jobs, connector short-circuiting, `!` status negation, `|&` lowering,
 prefix-assignment scoping (child environment only; temporary around a
 builtin), multios fan-out/concatenation and its fail-closed mixed-direction
-case, `{var}` dynamic-descriptor allocation/close, and the fail-closed
-process-substitution and compound-command spellings.
+case, `{var}` dynamic-descriptor allocation/close, the fail-closed
+process-substitution and compound-command spellings, brace expansion,
+`shopt`, and filename generation against an in-memory tree whose every
+expectation is bash 5.2's own output for the same line (`src/expand_tests.rs`).
+`tests/fuzz_expand.rs` drives hostile lines through every combination of the
+glob options (`cargo xtask fuzz --target fuzz_expand`).
