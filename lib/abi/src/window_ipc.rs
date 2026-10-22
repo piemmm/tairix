@@ -2869,6 +2869,18 @@ pub enum WindowRequest {
     /// [`NOTIFY_SOURCES_MAX`](crate::notify_ipc::NOTIFY_SOURCES_MAX) bundle
     /// identities ([`decode_notify_sources_reply`]).
     QueryNotifySources,
+    /// Ask the session for entry `index` of its screensaver catalogue: the
+    /// desktop's own Blank and Dim first, then every saver bundle it found,
+    /// each with what it declares (`plans/SCREENSAVERS.md`).
+    ///
+    /// Answered only to the desktop's own Settings application, whose
+    /// Screensaver pane it fills: which savers a user installed is theirs.
+    /// The reply ([`decode_screensaver_reply`]) carries the catalogue's total,
+    /// so a caller asks for each index below it.
+    QueryScreensaver {
+        /// The entry, counted from zero.
+        index: u16,
+    },
     /// Ask the session to lock the screen now.
     ///
     /// Answered only for the desktop's own Settings application, whose *Lock
@@ -2905,8 +2917,8 @@ pub enum WindowRequest {
     /// Ask the session to render `subject` as a `width`×`height`
     /// straight-alpha RGBA8 picture in the region granted as `shm_handle`.
     ///
-    /// The picture is named by a closed [`PreviewSubject`] — a **catalog
-    /// position** or a screensaver kind — never by a path: the session
+    /// The picture is named by a closed [`PreviewSubject`] — a place in one
+    /// of the session's catalogues — never by a path: the session
     /// resolves it against the store it knows itself, so this can never make
     /// the session read a file the caller chose.
     ///
@@ -3343,6 +3355,8 @@ const OP_TAKE_ZONE_STORE: u16 = 41;
 const OP_AUTHORISE: u16 = 42;
 /// Wire operation discriminant of [`WindowRequest::RevealDocument`].
 const OP_REVEAL_DOCUMENT: u16 = 44;
+/// Wire operation discriminant of [`WindowRequest::QueryScreensaver`].
+const OP_QUERY_SCREENSAVER: u16 = 45;
 /// Wire operation discriminant of [`WindowRequest::TakeAuthorisedOutput`].
 const OP_TAKE_AUTHORISED_OUTPUT: u16 = 43;
 
@@ -3444,6 +3458,10 @@ const REVEAL_DOCUMENT_WIRE_LEN: usize = REQUEST_HEADER_LEN + 16;
 /// page's first entry. It names no window — the catalog is the seat's, not
 /// any one window's.
 const QUERY_WALLPAPERS_WIRE_LEN: usize = REQUEST_HEADER_LEN + 2;
+
+/// Encoded size of a [`WindowRequest::QueryScreensaver`]: the header and the
+/// entry's index.
+const QUERY_SCREENSAVER_WIRE_LEN: usize = REQUEST_HEADER_LEN + 2;
 
 /// Encoded size of a [`WindowRequest::QueryCursorSets`]: the header alone.
 /// It names no window and no page — the whole choice space fits one reply.
@@ -3895,6 +3913,7 @@ impl WindowRequest {
             Self::QueryWallpapers { .. } => QUERY_WALLPAPERS_WIRE_LEN,
             Self::QueryCursorSets => QUERY_CURSOR_SETS_WIRE_LEN,
             Self::QueryNotifySources => QUERY_NOTIFY_SOURCES_WIRE_LEN,
+            Self::QueryScreensaver { .. } => QUERY_SCREENSAVER_WIRE_LEN,
             Self::LockScreen => LOCK_SCREEN_WIRE_LEN,
             Self::TakeZoneStore => TAKE_ZONE_STORE_WIRE_LEN,
             Self::PreviewScreensaver { ref document } => {
@@ -3999,6 +4018,7 @@ impl WindowRequest {
             Self::QueryWallpapers { .. } => OP_QUERY_WALLPAPERS,
             Self::QueryCursorSets => OP_QUERY_CURSOR_SETS,
             Self::QueryNotifySources => OP_QUERY_NOTIFY_SOURCES,
+            Self::QueryScreensaver { .. } => OP_QUERY_SCREENSAVER,
             Self::LockScreen => OP_LOCK_SCREEN,
             Self::TakeZoneStore => OP_TAKE_ZONE_STORE,
             Self::PreviewScreensaver { .. } => OP_PREVIEW_SCREENSAVER,
@@ -4180,6 +4200,7 @@ impl WindowRequest {
             | Self::LockScreen
             | Self::TakeZoneStore => {}
             Self::QueryWallpapers { .. }
+            | Self::QueryScreensaver { .. }
             | Self::RenderPreview { .. }
             | Self::PreviewScreensaver { .. } => self.write_preview_operands(out),
             Self::SetAppBar(ref bar) => write_app_bar(out, bar),
@@ -4235,6 +4256,7 @@ impl WindowRequest {
     fn write_preview_operands(&self, out: &mut [u8]) {
         match *self {
             Self::QueryWallpapers { from } => put_u16(out, REQUEST_HEADER_LEN, from),
+            Self::QueryScreensaver { index } => put_u16(out, REQUEST_HEADER_LEN, index),
             Self::PreviewScreensaver { ref document } => {
                 let text = document.as_str().as_bytes();
                 put_u16(out, PREVIEW_SCREENSAVER_LEN_OFFSET, document.len_u16());
@@ -4548,6 +4570,7 @@ impl WindowRequest {
             OP_QUERY_NOTIFY_SOURCES => {
                 exact_len(bytes, QUERY_NOTIFY_SOURCES_WIRE_LEN).map(|()| Self::QueryNotifySources)
             }
+            OP_QUERY_SCREENSAVER => read_query_screensaver(bytes),
             OP_LOCK_SCREEN => exact_len(bytes, LOCK_SCREEN_WIRE_LEN).map(|()| Self::LockScreen),
             OP_TAKE_ZONE_STORE => {
                 exact_len(bytes, TAKE_ZONE_STORE_WIRE_LEN).map(|()| Self::TakeZoneStore)
@@ -4614,6 +4637,14 @@ fn read_resize(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         height_px: layout.height_px,
         stride_bytes: layout.stride_bytes,
         format: layout.format,
+    })
+}
+
+/// Decode a [`WindowRequest::QueryScreensaver`] frame.
+fn read_query_screensaver(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, QUERY_SCREENSAVER_WIRE_LEN)?;
+    Ok(WindowRequest::QueryScreensaver {
+        index: read_u16(bytes, REQUEST_HEADER_LEN),
     })
 }
 
@@ -6503,16 +6534,17 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
     }
 }
 
-/// What a [`WindowRequest::RenderPreview`] asks the session to render: one of
-/// the pictures the desktop itself ships, named by a closed vocabulary rather
-/// than by a path.
+/// What a [`WindowRequest::RenderPreview`] asks the session to render: a
+/// picture the session already holds a catalogue of, named by its place there
+/// rather than by a path.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum PreviewSubject {
     /// A shipped wallpaper, by its position in the catalog the session answers
     /// [`WindowRequest::QueryWallpapers`] with.
     Wallpaper(u16),
-    /// The shipped preview picture of a screensaver.
-    Screensaver(crate::desktop::ScreensaverKind),
+    /// A screensaver's preview picture, by its position in the catalogue the
+    /// session answers [`WindowRequest::QueryScreensaver`] with.
+    Screensaver(u16),
 }
 
 /// Wire kind of [`PreviewSubject::Wallpaper`]. Zero names no subject, so an
@@ -6530,7 +6562,7 @@ impl PreviewSubject {
     fn write_to(self, out: &mut [u8], at: usize) {
         let (kind, operand) = match self {
             Self::Wallpaper(index) => (SUBJECT_WALLPAPER, index),
-            Self::Screensaver(kind) => (SUBJECT_SCREENSAVER, u16::from(kind.code())),
+            Self::Screensaver(index) => (SUBJECT_SCREENSAVER, index),
         };
         out[at] = kind;
         out[at + 1] = 0;
@@ -6541,8 +6573,8 @@ impl PreviewSubject {
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] for an unknown kind or screensaver, and
-    /// [`Errno::BadMagic`] for a dirty reserved byte.
+    /// [`Errno::OutOfRange`] for an unknown kind, and [`Errno::BadMagic`] for
+    /// a dirty reserved byte.
     fn read_from(bytes: &[u8], at: usize) -> Result<Self, Errno> {
         if bytes[at + 1] != 0 {
             return Err(Errno::BadMagic);
@@ -6550,9 +6582,7 @@ impl PreviewSubject {
         let operand = read_u16(bytes, at + 2);
         match bytes[at] {
             SUBJECT_WALLPAPER => Ok(Self::Wallpaper(operand)),
-            SUBJECT_SCREENSAVER => {
-                crate::desktop::ScreensaverKind::from_code(operand).map(Self::Screensaver)
-            }
+            SUBJECT_SCREENSAVER => Ok(Self::Screensaver(operand)),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -6962,6 +6992,291 @@ pub fn decode_notify_sources_reply(bytes: &[u8]) -> Result<NameList<'_>, Errno> 
         crate::notify_ipc::NOTIFY_SOURCES_MAX,
         crate::appinfo::BUNDLE_ID_MAX,
     )
+}
+
+/// Where a catalogued screensaver comes from.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SaverOrigin {
+    /// One of the desktop's own display states, Blank or Dim.
+    Desktop,
+    /// A bundle of the system screensaver store.
+    System,
+    /// A bundle of the user's own screensaver store.
+    User,
+}
+
+/// Whether a catalogued screensaver can be chosen, and why not.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SaverStanding {
+    /// It can be chosen.
+    Offered,
+    /// Its manifest cannot be read, or declares what no saver may.
+    Damaged,
+    /// A saver of the user's own declares a feed only a system saver is
+    /// given.
+    AsksForAFeed,
+    /// Another saver already claims its identifier.
+    Duplicate,
+    /// Its identifier is too long or too deep for its settings to be kept.
+    Unkeyable,
+}
+
+impl SaverOrigin {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Desktop => 1,
+            Self::System => 2,
+            Self::User => 3,
+        }
+    }
+
+    const fn from_code(code: u8) -> Result<Self, Errno> {
+        match code {
+            1 => Ok(Self::Desktop),
+            2 => Ok(Self::System),
+            3 => Ok(Self::User),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+impl SaverStanding {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Offered => 1,
+            Self::Damaged => 2,
+            Self::AsksForAFeed => 3,
+            Self::Duplicate => 4,
+            Self::Unkeyable => 5,
+        }
+    }
+
+    const fn from_code(code: u8) -> Result<Self, Errno> {
+        match code {
+            1 => Ok(Self::Offered),
+            2 => Ok(Self::Damaged),
+            3 => Ok(Self::AsksForAFeed),
+            4 => Ok(Self::Duplicate),
+            5 => Ok(Self::Unkeyable),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One entry of the screensaver catalogue, as the session answers a
+/// [`WindowRequest::QueryScreensaver`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ScreensaverEntry<'a> {
+    /// How a settings document names it: `blank`, `dim`, or the bundle's
+    /// identifier.
+    pub choice: &'a str,
+    /// What a chooser shows.
+    pub title: &'a str,
+    /// Its one-line purpose; empty when it states none.
+    pub purpose: &'a str,
+    /// Where it comes from.
+    pub origin: SaverOrigin,
+    /// Whether it can be chosen.
+    pub standing: SaverStanding,
+    /// The privileged feeds it declares.
+    pub feeds: crate::saver::SaverFeeds,
+    /// The options it declares, each one manifest entry.
+    options: &'a [u8],
+}
+
+impl<'a> ScreensaverEntry<'a> {
+    /// An entry declaring no option.
+    #[must_use]
+    pub const fn new(
+        (choice, title, purpose): (&'a str, &'a str, &'a str),
+        origin: SaverOrigin,
+        standing: SaverStanding,
+        feeds: crate::saver::SaverFeeds,
+    ) -> Self {
+        Self {
+            choice,
+            title,
+            purpose,
+            origin,
+            standing,
+            feeds,
+            options: &[],
+        }
+    }
+
+    /// The options it declares, in the order its manifest does.
+    pub fn options(&self) -> impl Iterator<Item = crate::saver::SaverOption> + 'a {
+        self.options
+            .as_chunks::<{ crate::saver::SAVER_OPTION_ENTRY_LEN }>()
+            .0
+            .iter()
+            .filter_map(|entry| crate::saver::SaverOption::from_entry(entry).ok())
+    }
+}
+
+const SAVER_REPLY_TOTAL: usize = 4;
+const SAVER_REPLY_ORIGIN: usize = 6;
+const SAVER_REPLY_STANDING: usize = 7;
+const SAVER_REPLY_CHOICE_LEN: usize = 8;
+const SAVER_REPLY_TITLE_LEN: usize = 9;
+const SAVER_REPLY_PURPOSE_LEN: usize = 10;
+const SAVER_REPLY_OPTION_COUNT: usize = 11;
+const SAVER_REPLY_FEEDS: usize = 12;
+const SAVER_REPLY_CHOICE: usize = 16;
+const SAVER_REPLY_TITLE: usize = SAVER_REPLY_CHOICE + crate::appinfo::BUNDLE_ID_MAX;
+const SAVER_REPLY_PURPOSE: usize = SAVER_REPLY_TITLE + crate::appinfo::BUNDLE_TITLE_MAX;
+const SAVER_REPLY_OPTIONS: usize = SAVER_REPLY_PURPOSE + crate::appinfo::BUNDLE_PURPOSE_MAX;
+
+/// Encoded length of the longest [`WindowRequest::QueryScreensaver`] reply:
+/// a status word, the catalogue total, the entry's fixed fields, then every
+/// option a saver may declare.
+pub const WINDOW_SCREENSAVER_REPLY_MAX: usize = SAVER_REPLY_OPTIONS
+    + crate::saver::SAVER_MAX_OPTIONS as usize * crate::saver::SAVER_OPTION_ENTRY_LEN;
+
+/// Encode a [`WindowRequest::QueryScreensaver`] outcome into `out`: the
+/// catalogue's `total` and one `entry` with its `options`, or the refusal.
+/// Answers the bytes written; only the options the entry declares are.
+///
+/// An entry whose text or options do not fit their fields is the session
+/// contradicting its own catalogue, so the whole reply is refused.
+#[must_use]
+pub fn encode_screensaver_reply(
+    out: &mut [u8; WINDOW_SCREENSAVER_REPLY_MAX],
+    result: Result<(u16, &ScreensaverEntry<'_>, &[crate::saver::SaverOption]), Errno>,
+) -> usize {
+    *out = [0u8; WINDOW_SCREENSAVER_REPLY_MAX];
+    let refuse = |out: &mut [u8; WINDOW_SCREENSAVER_REPLY_MAX], errno: Errno| {
+        out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(errno)));
+        4
+    };
+    let (total, entry, options) = match result {
+        Ok(found) => found,
+        Err(errno) => return refuse(out, errno),
+    };
+    let fields = [
+        (
+            entry.choice,
+            SAVER_REPLY_CHOICE,
+            crate::appinfo::BUNDLE_ID_MAX,
+        ),
+        (
+            entry.title,
+            SAVER_REPLY_TITLE,
+            crate::appinfo::BUNDLE_TITLE_MAX,
+        ),
+        (
+            entry.purpose,
+            SAVER_REPLY_PURPOSE,
+            crate::appinfo::BUNDLE_PURPOSE_MAX,
+        ),
+    ];
+    let lens = [
+        SAVER_REPLY_CHOICE_LEN,
+        SAVER_REPLY_TITLE_LEN,
+        SAVER_REPLY_PURPOSE_LEN,
+    ];
+    let count = u8::try_from(options.len())
+        .ok()
+        .filter(|&count| count <= crate::saver::SAVER_MAX_OPTIONS);
+    let widths =
+        fields.map(|(text, _, max)| u8::try_from(text.len()).ok().filter(|_| text.len() <= max));
+    let (Some(count), [Some(_), Some(_), Some(_)]) = (count, widths) else {
+        return refuse(out, Errno::LengthOutOfRange);
+    };
+    if entry.choice.is_empty() || entry.title.is_empty() {
+        return refuse(out, Errno::LengthOutOfRange);
+    }
+    put_u16(out, SAVER_REPLY_TOTAL, total);
+    out[SAVER_REPLY_ORIGIN] = entry.origin.code();
+    out[SAVER_REPLY_STANDING] = entry.standing.code();
+    for (((text, at, _), len_at), width) in fields.iter().zip(lens).zip(widths) {
+        out[len_at] = width.unwrap_or(0);
+        out[*at..*at + text.len()].copy_from_slice(text.as_bytes());
+    }
+    out[SAVER_REPLY_OPTION_COUNT] = count;
+    out[SAVER_REPLY_FEEDS..SAVER_REPLY_FEEDS + 4]
+        .copy_from_slice(&entry.feeds.bits().to_le_bytes());
+    let mut at = SAVER_REPLY_OPTIONS;
+    for option in options {
+        let end = at + crate::saver::SAVER_OPTION_ENTRY_LEN;
+        out[at..end].copy_from_slice(&option.to_entry());
+        at = end;
+    }
+    at
+}
+
+/// Decode a [`WindowRequest::QueryScreensaver`] reply into the catalogue's
+/// total and the entry, every option of which has been read.
+///
+/// # Errors
+///
+/// The refusal the status carries, [`Errno::LengthOutOfRange`] for a frame
+/// of the wrong length or a field past its bound, [`Errno::OutOfRange`] for
+/// an unknown origin or standing, text that is not UTF-8, or options that do
+/// not decode or repeat a key, and [`Errno::BadMagic`] for a stray byte.
+pub fn decode_screensaver_reply(bytes: &[u8]) -> Result<(u16, ScreensaverEntry<'_>), Errno> {
+    crate::reply::decode_status_reply(bytes.get(..4).ok_or(Errno::BufferTooSmall)?)?;
+    if bytes.len() < SAVER_REPLY_OPTIONS {
+        return Err(Errno::BufferTooSmall);
+    }
+    let count = usize::from(bytes[SAVER_REPLY_OPTION_COUNT]);
+    if count > usize::from(crate::saver::SAVER_MAX_OPTIONS)
+        || bytes.len() != SAVER_REPLY_OPTIONS + count * crate::saver::SAVER_OPTION_ENTRY_LEN
+    {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let text = |len_at: usize, at: usize, max: usize| -> Result<&str, Errno> {
+        let len = usize::from(bytes[len_at]);
+        if len > max {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if bytes[at + len..at + max].iter().any(|&b| b != 0) {
+            return Err(Errno::BadMagic);
+        }
+        core::str::from_utf8(&bytes[at..at + len]).map_err(|_| Errno::OutOfRange)
+    };
+    let choice = text(
+        SAVER_REPLY_CHOICE_LEN,
+        SAVER_REPLY_CHOICE,
+        crate::appinfo::BUNDLE_ID_MAX,
+    )?;
+    let title = text(
+        SAVER_REPLY_TITLE_LEN,
+        SAVER_REPLY_TITLE,
+        crate::appinfo::BUNDLE_TITLE_MAX,
+    )?;
+    let purpose = text(
+        SAVER_REPLY_PURPOSE_LEN,
+        SAVER_REPLY_PURPOSE,
+        crate::appinfo::BUNDLE_PURPOSE_MAX,
+    )?;
+    if choice.is_empty() || title.is_empty() {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let options = &bytes[SAVER_REPLY_OPTIONS..];
+    let mut keys = [crate::saver::OptionKey::BLANK; crate::saver::SAVER_MAX_OPTIONS as usize];
+    for (slot, entry) in options
+        .as_chunks::<{ crate::saver::SAVER_OPTION_ENTRY_LEN }>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        let key = *crate::saver::SaverOption::from_entry(entry)?.key();
+        if keys[..slot].contains(&key) {
+            return Err(Errno::OutOfRange);
+        }
+        keys[slot] = key;
+    }
+    let entry = ScreensaverEntry {
+        choice,
+        title,
+        purpose,
+        origin: SaverOrigin::from_code(bytes[SAVER_REPLY_ORIGIN])?,
+        standing: SaverStanding::from_code(bytes[SAVER_REPLY_STANDING])?,
+        feeds: crate::saver::SaverFeeds::from_bits(read_u32(bytes, SAVER_REPLY_FEEDS))?,
+        options,
+    };
+    Ok((read_u16(bytes, SAVER_REPLY_TOTAL), entry))
 }
 
 /// Encoded length of the longest [`WindowRequest::TakeMenuText`] reply: a
@@ -8570,6 +8885,8 @@ fn flag_at(bytes: &[u8], at: usize) -> Result<bool, Errno> {
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
+
     use super::{
         app_bar_wire_len, decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply,
         decode_desktop_reply, decode_drag_spot_reply, decode_drop_target_reply,
@@ -8636,8 +8953,13 @@ mod tests {
         PICKED_FILE_REPLY_HANDLE_OFFSET, PICK_PURPOSE_FOLDER, WINDOW_FOLDER_PICK_MAX,
         WINDOW_PICKED_FILE_REPLY_MAX,
     };
+    use super::{
+        decode_screensaver_reply, encode_screensaver_reply, SaverOrigin, SaverStanding,
+        ScreensaverEntry, QUERY_SCREENSAVER_WIRE_LEN, SAVER_REPLY_CHOICE_LEN, SAVER_REPLY_FEEDS,
+        SAVER_REPLY_OPTIONS, SAVER_REPLY_OPTION_COUNT, SAVER_REPLY_ORIGIN, SAVER_REPLY_PURPOSE,
+        SAVER_REPLY_STANDING, SAVER_REPLY_TITLE_LEN, WINDOW_SCREENSAVER_REPLY_MAX,
+    };
     use super::{PreviewOutcome, PreviewSubject, SystemTask};
-    use crate::desktop::ScreensaverKind;
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageList, DamageRect, DisplayFormat, MAX_DAMAGE_RECTS};
     use crate::elevate::{ElevateWords, ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES};
@@ -9276,6 +9598,7 @@ mod tests {
     /// among them, and the take of what one printed.
     fn each_settings_request(visit: &mut impl FnMut(WindowRequest)) {
         visit(WindowRequest::QueryNotifySources);
+        visit(WindowRequest::QueryScreensaver { index: u16::MAX });
         visit(WindowRequest::LockScreen);
         visit(WindowRequest::TakeZoneStore);
         let words = |args: &[&str]| ElevateWords::new(args).expect("within bounds");
@@ -12872,16 +13195,131 @@ mod tests {
         );
     }
 
+    fn keep_option() -> crate::saver::SaverOption {
+        crate::saver::SaverOption::new(
+            crate::saver::OptionKey::new("keep").expect("a key"),
+            (
+                crate::bounded_text::BoundedText::new("Keep pictures").expect("a label"),
+                crate::bounded_text::BoundedText::new("Each one, as a PNG.").expect("a note"),
+            ),
+            crate::saver::SaverOptionKind::Switch { default: true },
+        )
+        .expect("an option")
+    }
+
+    #[test]
+    fn a_screensaver_entry_round_trips_with_its_options() {
+        let query = WindowRequest::QueryScreensaver { index: 4 };
+        assert_eq!(query.wire_len(), QUERY_SCREENSAVER_WIRE_LEN);
+        assert_eq!(WindowRequest::from_bytes(&query.frame()), Ok(query));
+        let feeds =
+            crate::saver::SaverFeeds::from_bits(crate::APPINFO_FLAG_FEED_KEEP).expect("a feed");
+        let entry = ScreensaverEntry::new(
+            (
+                "os.tairix.saver.raytrace",
+                "Ray Tracer",
+                "Pictures traced a pixel at a time",
+            ),
+            SaverOrigin::System,
+            SaverStanding::Offered,
+            feeds,
+        );
+        let mut frame = [0u8; WINDOW_SCREENSAVER_REPLY_MAX];
+        let len = encode_screensaver_reply(&mut frame, Ok((9, &entry, &[keep_option()])));
+        let (total, decoded) = decode_screensaver_reply(&frame[..len]).expect("decodes");
+        assert_eq!(total, 9);
+        assert_eq!(
+            (decoded.choice, decoded.title, decoded.purpose),
+            (entry.choice, entry.title, entry.purpose)
+        );
+        assert_eq!(
+            (decoded.origin, decoded.standing, decoded.feeds),
+            (entry.origin, entry.standing, feeds)
+        );
+        assert_eq!(
+            decoded.options().collect::<alloc::vec::Vec<_>>(),
+            [keep_option()]
+        );
+        let desktop = ScreensaverEntry::new(
+            ("blank", "Blank", ""),
+            SaverOrigin::Desktop,
+            SaverStanding::Offered,
+            crate::saver::SaverFeeds::NONE,
+        );
+        let len = encode_screensaver_reply(&mut frame, Ok((9, &desktop, &[])));
+        assert_eq!(len, SAVER_REPLY_OPTIONS);
+        assert_eq!(
+            decode_screensaver_reply(&frame[..len]).map(|(_, e)| e.choice),
+            Ok("blank")
+        );
+    }
+
+    #[test]
+    fn a_screensaver_reply_is_refused_whole_for_any_flaw() {
+        let mut frame = [0u8; WINDOW_SCREENSAVER_REPLY_MAX];
+        let refused = encode_screensaver_reply(&mut frame, Err(Errno::PermissionDenied));
+        assert_eq!(
+            decode_screensaver_reply(&frame[..refused]).map(|(total, _)| total),
+            Err(Errno::PermissionDenied)
+        );
+        let entry = ScreensaverEntry::new(
+            ("os.tairix.saver.clock", "Clock", ""),
+            SaverOrigin::User,
+            SaverStanding::AsksForAFeed,
+            crate::saver::SaverFeeds::NONE,
+        );
+        let len =
+            encode_screensaver_reply(&mut frame, Ok((2, &entry, &[keep_option(), keep_option()])));
+        assert_eq!(
+            decode_screensaver_reply(&frame[..len]).map(|(total, _)| total),
+            Err(Errno::OutOfRange),
+            "an option key twice"
+        );
+        let len = encode_screensaver_reply(&mut frame, Ok((2, &entry, &[keep_option()])));
+        let good = frame;
+        for (at, value, refusal) in [
+            (SAVER_REPLY_ORIGIN, 9, Errno::OutOfRange),
+            (SAVER_REPLY_STANDING, 0, Errno::OutOfRange),
+            (SAVER_REPLY_TITLE_LEN, 0, Errno::BadMagic),
+            (SAVER_REPLY_CHOICE_LEN, 65, Errno::LengthOutOfRange),
+            (SAVER_REPLY_PURPOSE + 50, 1, Errno::BadMagic),
+            (SAVER_REPLY_FEEDS + 3, 0x80, Errno::BadMagic),
+            (SAVER_REPLY_OPTION_COUNT, 2, Errno::LengthOutOfRange),
+        ] {
+            let mut bad = good;
+            bad[at] = value;
+            assert_eq!(
+                decode_screensaver_reply(&bad[..len]).map(|(total, _)| total),
+                Err(refusal),
+                "byte {at} set to {value}"
+            );
+        }
+        assert_eq!(
+            decode_screensaver_reply(&good[..len - 1]).map(|(total, _)| total),
+            Err(Errno::LengthOutOfRange)
+        );
+        let long = "x".repeat(crate::appinfo::BUNDLE_TITLE_MAX + 1);
+        let entry = ScreensaverEntry::new(
+            ("os.tairix.x", &long, ""),
+            SaverOrigin::User,
+            SaverStanding::Offered,
+            crate::saver::SaverFeeds::NONE,
+        );
+        let len = encode_screensaver_reply(&mut frame, Ok((1, &entry, &[])));
+        assert_eq!(
+            decode_screensaver_reply(&frame[..len]).map(|(total, _)| total),
+            Err(Errno::LengthOutOfRange),
+            "the session refuses an entry its own fields cannot hold"
+        );
+    }
+
     #[test]
     fn the_picture_requests_round_trip_and_refuse_what_no_request_could_name() {
         let page = WindowRequest::QueryWallpapers { from: 7 };
         assert_eq!(page.wire_len(), QUERY_WALLPAPERS_WIRE_LEN);
         assert_eq!(WindowRequest::from_bytes(&page.frame()), Ok(page));
 
-        for subject in [
-            PreviewSubject::Wallpaper(5),
-            PreviewSubject::Screensaver(ScreensaverKind::Starfield),
-        ] {
+        for subject in [PreviewSubject::Wallpaper(5), PreviewSubject::Screensaver(5)] {
             let render = WindowRequest::RenderPreview {
                 window_id: 3,
                 shm_handle: 0x99,
@@ -12911,14 +13349,8 @@ mod tests {
                 );
             }
         }
-        // A subject is one of the closed kinds, naming a screensaver there is.
-        let past_last = u16::try_from(ScreensaverKind::ALL.len() + 1).expect("a small count");
-        for (kind, operand, refusal) in [
-            (0, 5, Errno::OutOfRange),
-            (3, 5, Errno::OutOfRange),
-            (2, 0, Errno::OutOfRange),
-            (2, past_last, Errno::OutOfRange),
-        ] {
+        // A subject is one of the closed kinds.
+        for (kind, operand, refusal) in [(0, 5, Errno::OutOfRange), (3, 5, Errno::OutOfRange)] {
             let mut frame = render.frame();
             frame[RENDER_PREVIEW_SUBJECT_OFFSET] = kind;
             put_u16(&mut frame, RENDER_PREVIEW_SUBJECT_OFFSET + 2, operand);
@@ -12944,7 +13376,7 @@ mod tests {
 
     #[test]
     fn a_screensaver_preview_carries_exactly_its_document() {
-        let text = "screensaver.kind = starfield\nscreensaver.starfield.warp = false\n";
+        let text = "screensaver.saver = os.tairix.saver.starfield\nsaver.os.tairix.saver.starfield.warp = false\n";
         let preview = WindowRequest::PreviewScreensaver {
             document: PinboardDocument::new(text).expect("a document"),
         };
@@ -13086,7 +13518,7 @@ mod tests {
     fn a_render_conclusion_round_trips_and_refuses_a_frame_no_render_produced() {
         let concluded = WindowEvent::PreviewRendered {
             window_id: 3,
-            subject: PreviewSubject::Screensaver(ScreensaverKind::Life),
+            subject: PreviewSubject::Screensaver(2),
             width: 144,
             height: 81,
             outcome: PreviewOutcome::Rendered,

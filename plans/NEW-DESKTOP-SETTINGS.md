@@ -53,13 +53,13 @@ dropped is a category the surface then has to lie about.
 | **DS15** | The sidebar's category badges: colour built-in pictures at the theme's sidebar icon size, on rows tall enough to seat them, retained in the window's own icon cache and trimmed on the memory-pressure wake | DS2 | §4, `plans/ICONS.md` I13 | done |
 | **DS16** | The window is cut from the icon bar's glass, frosted deeper: the bare ground and the command band at `chrome_alpha` over `window_backdrop_blur`, everything on them solid, and what the shell opens over its content drawn opaque (`Grounds`); the vertical's absence check reads the ground the production compositor draws | DS2, DS13 | §1.1 | done |
 | **DS17** | The sidebar as one grouped plate: the search field and the strip on a rounded plate, the categories in runs (`Group`) set apart by half-row breaks, a badge on every row including each disclosed pane, lists that open independently (`lib/controls::DisclosureSet`, the program library's folders on it too) with the tree keys, and the Theme category's stated absence | DS2, DS15 | DS17 | done |
-| **DS18** | Screensaver scenes and energy saving: the clock, minimal clock, starfield and Game of Life screensavers, the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
-| **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a shipped preview per screensaver; the chosen screensaver's own options; and *Test*, the session's preview | DS4, DS18 | DS19 | done |
+| **DS18** | Screensaver scenes and energy saving: the clock, minimal clock, starfield and Game of Life screensavers, each a bundle (`plans/SCREENSAVERS.md`), the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
+| **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a preview per screensaver, shipped in each saver's bundle; the chosen saver's own rows, from the options its manifest declares and the feeds it is given; and *Preview*, the session's preview | DS4, DS18 | DS19 | done |
 | **DS20** | Finding the pointer, and input set in words: shake to find (on by default), pointer trails, finding it with Ctrl, and a pointer shadow on Accessibility; the Mouse and Keyboard spans as sliders from *Slow* to *Fast* over the redesigned knob | DS3b, DS11 | DS20 | done |
-| **DS21** | The ray-traced screensaver (`screensaver.kind` = `raytrace`): scenes from `lib/raytrace` prepared and revealed coarse to fine on a tracing thread of its own with a progress readout, held, faded and replaced, on one core or every core as `screensaver.raytrace.cpu` sets, each finished picture kept when `screensaver.raytrace.save` asks | DS18, DS19 | DS21 | done |
-| **DS22** | The retro games screensaver (`screensaver.kind` = `retro_games`): a flight over a glowing grid towards a banded sun between two wireframe ranges, its reflection rippling on the floor, at a speed on the shared `Pace` ladder, where wireframe craft now and then play out retro arcade games — a starfighter, a flying saucer, a tank battle, and riders walling each other in | DS18, DS19 | DS22 | done |
-| **DS23** | The System Monitor screensaver (`screensaver.kind` = `system_monitor`): the machine's own readings set out to be read from across a room — processors, memory, tasks, storage and network under a verdict naming what needs attention — from the Switchboard's machine report, with whether the busiest tasks are named as its one option | DS18, DS19, `plans/NEW-SWITCHBOARD.md` M3 | DS23 | done |
-| **DS24** | The ray tracer's scene detail: `screensaver.raytrace.detail`, `simple` (the default) or `maximum`, a *Detail* dropdown in its group on the pane reading *Simple* or *Maximum realism*, carried to the tracing host at launch and falling back to Simple where the memory band says Maximum's peak is not free | DS21, `plans/RAYTRACE.md` RT39 | DS24 | done |
+| **DS21** | The ray-traced screensaver (`Raytrace.app`): scenes from `lib/raytrace` prepared and revealed coarse to fine on a tracing thread of its own with a progress readout, held, faded and replaced, on one core or every core as its `cpu` option sets, each finished picture kept through the keeping feed when its `save` option asks | DS18, DS19 | DS21 | done |
+| **DS22** | The retro games screensaver (`RetroGames.app`): a flight over a glowing grid towards a banded sun between two wireframe ranges, its reflection rippling on the floor, at a speed on the slow, normal and fast ladder every saver's speed uses (`tairix_saver::Setup::pace`), where wireframe craft now and then play out retro arcade games — a starfighter, a flying saucer, a tank battle, and riders walling each other in | DS18, DS19 | DS22 | done |
+| **DS23** | The System Monitor screensaver (`SystemMonitor.app`): the machine's own readings set out to be read from across a room — processors, memory, tasks, storage and network under a verdict naming what needs attention — from the Switchboard's machine report relayed through the machine feed, whose task names are the desktop's `screensaver.machine.tasks` | DS18, DS19, `plans/NEW-SWITCHBOARD.md` M3 | DS23 | done |
+| **DS24** | The ray tracer's scene detail: its `detail` option, `simple` (the default) or `maximum`, a *Detail* row reading *Simple* or *Maximum realism*, falling back to Simple where the memory band says Maximum's peak is not free of the memory the desktop granted | DS21, `plans/RAYTRACE.md` RT39 | DS24 | done |
 | **DS25** | Trackpad — tap to click, natural scrolling and the touchpad speed (`touchpad.*`), handed to the seat's gesture recogniser; the Touchscreen pane states what it would need to set anything | DS11 | §2, §3; `plans/POINTING.md` PO6 | done |
 | **DS26** | Text — the desktop font and its size (`font.family`, `font.size`, in points) on Appearance's TEXT group, resolved by the session against the font store and carried to every application in the desktop notice; the shipped base one point smaller (16 px, 10 pt of Inter) | DS3, `plans/FONT-SERVICE.md` | DS26 | done |
 | **DS27** | Sound — an Output and an Input plate, each choosing the device its direction uses and setting that device's volume and mute (a checkbox: muted, the volume stands silent and disabled), and a Recording plate; acting on `audio-v1` directly under the room the session holds, each change shown at once in the rows it touches | DS11 | §0, §2; `plans/SOUND.md` SND15 | done |
@@ -817,7 +817,7 @@ renderer, and Settings asks it.
   - `RenderPreview { window_id, shm_handle, subject, width, height }`
     renders one picture into a region **Settings** created and granted, which
     is the one thing its `CAP_SHM` already lets it do. Its subject is a
-    **catalog position** or a **screensaver kind**, never a path, so it cannot
+    **place in a catalogue** the session answers, never a path, so it cannot
     make the session read a file the caller chose; its size is bounded by
     `WINDOW_PREVIEW_MAX_SIDE`, which a chooser's picture at the widest scale
     fits. Its reply is only the acceptance — the read and the sandboxed decode
@@ -1464,22 +1464,21 @@ What it guarantees:
   whole minutes), each folded into the park only while its action is pending.
   A session that cannot verify a password never locks on its own; a resumed
   session starts idle afresh.
-- **The screensaver** (`saver::Screensaver`, `screensaver.kind`) is one
+- **The screensaver** (`saver::Screensaver`, `screensaver.saver`) is one
   full-screen surface kept over the lock: black, the backdrop dimmed, or a
-  slideshow of the shipped catalog, one picture every
-  `screensaver.slideshow.interval_s` in its chosen order and category,
-  each prepared at screen size through the wallpaper worker's new slide slot
-  and the one sandboxed decode — and the animated scenes of DS18. No worker,
-  no slides: it stays black rather than decoding on the serve loop. The
-  waking gesture is drained into nothing.
+  saver bundle hosted in the drawing sandbox (`plans/SCREENSAVERS.md`), whose
+  slides are prepared at screen size through the wallpaper worker's slide
+  slot and the one sandboxed decode. With no worker a slide is answered
+  unavailable rather than decoded on the serve loop. The waking gesture is
+  drained into nothing.
 - **One lock.** The Lock row, the idle policy and *Lock Now* all go through one
   `lock_screen` routine over `ScreenLock`. *Lock Now* is the `LockScreen`
   window request, honoured for the desktop's own Settings application alone
   and refused `NotSupported` without a broker; a refusal is stated on its row.
   Unlocking always asks for the account's password, which the pane states
   rather than offers.
-- **Defaults** are the minimal clock (`ribbon`) after ten minutes and a
-  fifteen-minute lock: security is the default.
+- **Defaults** are the minimal clock (`os.tairix.saver.ribbon`) after ten
+  minutes and a fifteen-minute lock: security is the default.
 
 ### DS18 — Screensaver scenes and energy saving
 
@@ -1490,26 +1489,20 @@ What it guarantees:
   artwork, so no refresh re-installs it over the screensaver; the drains
   behind the screensaver and the lock follow the device, so the pointer comes
   back where it is, in the shape of what it is over.
-- **Four animated scenes** (`screensaver.kind` = `clock` | `ribbon` |
-  `starfield` | `life`), each drawing every other desktop frame, repainting
-  only what its frame changed, and moving at most a few frames on a late wake:
-  the bar's own clock with the date and *account · machine*, moved each minute
-  against burn-in; the minimal clock, its time and spelled-out date held still
-  while a ribbon of orange light roams beneath them, each strand one smooth
-  curve moving on its own and every one held clear of the text; a perspective
-  starfield that cruises, surges into warp and settles back; and four-colour
-  Conway's Life on a bit-packed torus, reseeded once it settles. Each honours
-  reduced motion from the theme in force — the clock moves at once, the ribbon
-  holds still, the starfield only cruises, Life's cells change at once — and a
-  scene the heap will not give is a black screen instead.
+- **The scenes are bundles.** The clock, the minimal clock, the starfield and
+  the Game of Life are `Clock.app`, `Ribbon.app`, `Starfield.app` and
+  `Life.app` under `userland/gui/screensavers/`, hosted as every saver is
+  (`plans/SCREENSAVERS.md` SV9); what each draws is
+  `docs/src/desktop/screensavers.md`'s. The session draws none of them.
 - **Only the dimmed screensaver builds the backdrop's ground**, so no other
-  kind pays for a full-screen surface it discards.
+  choice pays for a full-screen surface it discards.
 - **Energy saving** (`screensaver.display_off_min`: `never`, or whole minutes
   `0..=1440`, default thirty) counts from the screensaver's start. When it runs
-  out the session sends `SetPower` (`plans/DISPLAY.md` D9); a display that is
-  off is presented nothing and arms no frame deadline, one that cannot switch
-  off keeps the screensaver black and still, and the first input lights it
-  before the screensaver goes. The pane's *Energy Saving* group offers *With
+  out the session sends `SetPower` (`plans/DISPLAY.md` D9) and ends the saver
+  drawing, since nothing it drew could be seen; a display that is off is
+  presented nothing and arms no frame deadline, one that cannot switch off
+  keeps the screensaver black and still, and the first input lights it before
+  the screensaver goes. The pane's *Energy Saving* group offers *With
   the screensaver*, minutes through a day, and *Never*.
 
 ### DS19 — Pictures as settables
@@ -1525,15 +1518,14 @@ What it guarantees:
   the backdrop's own colour, then the catalog under its categories; a picture
   in effect the catalog lacks is listed beside its category's, or under the
   directory it sits in.
-- **Every screensaver ships a preview** — a 16:9 PNG at
-  `/System/Graphics/Screensavers/<kind>.png`, build-discovered from
-  `lib/wallpaper/screensavers/` as its own graphics family and refused by the
-  image build when a kind lacks one, when it is another shape, or when it is
-  smaller than the largest picture a chooser draws. The Starfield, Game of
-  Life, Minimal Clock, Ray Tracer, Retro Games and System Monitor previews are
-  frames their scenes drew.
+- **Every screensaver ships a preview** — 16:9, and at least as large as the
+  largest picture a chooser draws, or the image build refuses it. Black's and
+  Dim's are `/System/Graphics/Screensavers/{blank,dim}.png`, build-discovered
+  from `lib/wallpaper/screensavers/` as their own graphics family; every
+  saver bundle's is its own `Resources/Preview.png`
+  (`docs/src/desktop/screensavers.md`).
 - **Pictures are served, and bounded.** A render names its subject — a
-  catalog position or a screensaver kind — and its size (`RenderPreview`,
+  catalog position or a screensaver's catalogue place — and its size (`RenderPreview`,
   DS4). The pane asks for the pictures on screen first, then those a screen's
   height either side while memory is plentiful and none beyond. While memory
   is plentiful every picture handed over is kept for the life of the pane — a
@@ -1552,24 +1544,22 @@ What it guarantees:
   its own tile alone. A question about pictures whose answer cannot have changed is
   answered without laying the pane out.
 - **The chosen screensaver's own group.** Beneath the chooser, a group named
-  for the chosen screensaver holds its options (`SaverOption`: the
-  slideshow's interval, order and pictures; the clock's date and who is
-  signed in; the minimal clock's date; the starfield's stars and warp; the
-  Game of Life's cell size and speed; the ray tracer's processor use; the
-  retro games' speed, on the one `Pace` ladder the Game of Life's speed
-  shares; whether the system monitor names the busiest tasks), every one kept
-  in the document
-  whichever screensaver is chosen (`plans/PINBOARD.md`), and ends with
-  *Test*. Choosing another screensaver rebuilds the pane in place, keeping
-  the keyboard cursor where it was, and lays it out afresh. The search index
-  names every screensaver's options, so a search for one reaches the pane
-  that sets it.
-- **Test is a preview, not a setting.** It hands the session the screensaver
-  keys as the pane shows them (`PreviewScreensaver`); the session serves it to
-  its own Settings alone, only while nothing holds the seat, reads the
-  document strictly as those keys over what it holds, keeps none of it, and
-  leaves the preview up through pointer motion in its first moment. A refusal
-  is stated on the row that asked.
+  for the chosen saver holds a row for each option its signed manifest
+  declares, then the desktop's own setting for each feed it is given — the
+  pictures the slides feed offers, whose task names the machine feed carries
+  (`settings::SaverRow`, `plans/SCREENSAVERS.md` SV8) — and ends with
+  *Preview*. Every value is kept in the document whichever saver is chosen
+  (`plans/PINBOARD.md`). Choosing another saver rebuilds the pane in place,
+  keeping the keyboard cursor where it was, and lays it out afresh. A saver's
+  rows are discovered, so the search index stands for them with the one
+  subject *Screensaver options*, beside the feed rows' labels, as it does for
+  the Notifications pane's discovered sources.
+- **Preview is a preview, not a setting.** It hands the session the
+  screensaver keys as the pane shows them (`PreviewScreensaver`); the session
+  serves it to its own Settings alone, only while nothing holds the seat,
+  reads the document strictly as those keys over what it holds, keeps none of
+  it, and leaves the preview up through pointer motion in its first moment. A
+  refusal is stated on the row that asked.
 
 Host tests: each chooser's listing, selection, sections and fail-closed
 adoption; the round's visible-first order, reach, stale-size and refusal
@@ -1578,11 +1568,12 @@ is plentiful, and those off screen let go once it is short; carrying pictures
 across a rebuild; a landed picture
 repainting its tile alone; every chooser picture fitting the preview bound at
 every scale; a screensaver choice bringing its own group laid out as a fresh
-pane is; every option posting its own key; the slideshow's category row
-keeping a category the store lost; Test's document and a refusal's
-statement; the session's preview authorisation and strict read, and the
-preview's steady first moment; the preview family's discovery and image
-checks.
+pane is; every declared option drawing the control of its kind and posting
+the saver's own key, failing closed off its list; the slides row keeping a
+category the store lost; Preview's document and a refusal's statement; the
+session's preview authorisation and strict read, and the preview's steady
+first moment; the preview family's discovery and image checks, and every
+saver bundle's preview.
 
 ### DS20 — Finding the pointer, and input set in words
 
@@ -1614,226 +1605,114 @@ What it guarantees:
 
 ### DS21 — The ray-traced screensaver
 
-What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
+The scene is `Raytrace.app` (`userland/gui/screensavers/raytrace`), hosted as
+every saver is (`plans/SCREENSAVERS.md` SV9); its scenes, sampling and reveal
+are `plans/RAYTRACE.md`'s, and what it shows is
+`docs/src/desktop/screensavers.md`'s. What it guarantees:
 
-- **A scene coarse to fine.** `screensaver.kind` = `raytrace` composes a
-  scene in one of `lib/raytrace`'s twenty-one settings, never the last one's,
-  prepares it a bounded unit at a time, then reveals it in
-  `lib/raytrace::Reveal`'s order: a first pass of every point of a grid at
-  least eight points to the shorter side, each later pass halving the grid's
-  spacing, every pixel traced once at the tracer's best and each pass
-  scattered over the picture. The picture shown is a cubic B-spline over the
-  current pass's grid, a blur coming into focus and exact once whole, and a
-  paint repaints and marks only what its steps change. Paints come half a
-  second apart while the coarse passes form the picture, then further apart
-  with the share shown, at most 3 s, each change crossfaded in over the wait
-  until the next, blending only the tiles it touches, until a twentieth of
-  the picture is shown, and laid straight on from there and under reduced
-  motion (`plans/RAYTRACE.md` RT1). It is held a minute, faded over three
-  seconds (cut under reduced motion), and replaced.
-- **Told as it goes.** A readout window above the picture reads *Generating
-  scene... N%* from `Draft::progress` while the scene is prepared, then
-  *Rendering... N%* while it is traced, mid-grey in the lower right, and goes
-  once the picture is whole.
-- **Traced off the serve loop.** `screensaver.raytrace.cpu` sets the share of
-  the machine: `idle` (the default) is one tracing thread, `performance` a
-  worker beside it for every other core, every one of them kept busy: a scene
-  is traced a pass at a time, each core taking the next untraced step as it
-  finishes the last and handing what it traced straight on, so none waits on
-  another's costly pixel but at a pass's end. The embedder grants the threads
-  through the `TraceHost` seam; the loop collects and paints on the reveal's
-  cadence through the host-tested `TraceDesk`, which drops whatever was traced
-  before the next scene is asked for, holds the thread once what it laid down
-  has waited two of the loop's longest waits, and has the thread wake the loop
-  through the session's worker wake as each scene is readied.
-  The threads leave when the screensaver comes down, the loop waiting on none
-  of them. With no thread granted the loop traces a slice a frame itself — on
-  its own thread alone under `idle` — and paints on the same cadence.
-- **Paced.** A slice is what fits half a desktop frame at the last slice's
-  pace, grown at most twofold.
-- **Kept when asked.** `screensaver.raytrace.save` (off by default) has the
-  engine copy each picture as it traces and the tracing thread write it,
-  once whole, as a PNG under `Home/Pictures/Raytracing/` through the
-  `Keeper` seam — named for its setting and when it was finished, never
-  written over another, once per scene, and nothing kept with no tracing
-  thread granted; a refusal says why on `stderr`.
-- **A lost buffer repainted, never retraced.** Once whole, the scene is let
-  go. The painter keeps every traced pixel, so a window buffer the compositor
-  releases is painted afresh from them; a scene, or a buffer for its picture,
-  that the heap refuses rests the screen black a minute before the next is
-  tried, rather than being retried every frame.
-- Its group on the pane holds its processor use, *Idle time* or
-  *Performance*, *Save pictures*, and its *Detail* (DS24), above *Test*.
+- **A scene coarse to fine.** A scene composed in one of `lib/raytrace`'s
+  settings, never the last one's, is prepared a bounded unit at a time and
+  revealed in `lib/raytrace::Reveal`'s order, every pixel traced once at the
+  tracer's best. Paints come half a second apart while the coarse passes form
+  the picture, each change crossfaded in over the wait until the next, then
+  further apart and laid straight on (`plans/RAYTRACE.md` RT1). A whole
+  picture is held a minute, faded over three seconds (cut under reduced
+  motion), and replaced.
+- **Told as it goes.** A readout in the lower right reads *Generating
+  scene... N%* while the scene is prepared and *Rendering... N%* while it is
+  traced, and goes once the picture is whole.
+- **Traced off the frames.** Its `cpu` option is `idle` (the default), one
+  tracing thread of the saver's own, or `performance`, a worker beside it for
+  every other thread the desktop granted, each taking the next untraced step
+  as it finishes the last. The frames collect through `TraceDesk` on the
+  reveal's cadence, and the thread parks on it rather than letting what it
+  traced pile up; granted no thread, the frames trace a slice each, what fits
+  half a display frame at the last slice's pace.
+- **Kept when asked.** Its `save` option (off by default) hands each whole
+  picture, once per scene, to the desktop through the keeping feed
+  (`plans/SCREENSAVERS.md` SV7).
+- **Never retraced.** The desktop lays the whole frame afresh from the region
+  where the screensaver's window has let its picture go; a scene, or room for
+  it, the heap refuses rests the screen black a minute before the next is
+  tried.
 
-Tests: the order visiting every pixel once, its first pass tracing its whole
-grid, each pass halving the last and ending whole, each pass scattered; the
-painter ending on every pixel's own trace however the steps arrive and across
-any cores, every paint changing only what it marks, a bounded cover of whole
-tiles, a
-scattered frame marking little of the screen, a lone point blurring without a
-crease, a new point settling in as its neighbours are traced, a pass beginning
-where the last ended, a buffer let go painted afresh, stray steps changing
-nothing, and a reset starting over from black; the reveal tracing each pixel
-exactly as tracing it alone at the best quality does, however slowly;
-preparation over slices tracing nothing and telling its progress, tracing
-telling its share; the pace, bounded per phase; a slice split across every
-worker matching the order traced alone; the next scene set elsewhere; each
-whole picture handed over once however long the engine runs on, and an
-unheld one reported; the desk's slices reaching the loop in order after what
-it has not yet painted, its hold on a loop behind, asking for the next scene
-dropping what came before, two asks being one, the signal owed only to a
-waiting thread, the loop woken once as each scene is readied, and a real
-thread handing its keeper each picture once; the album's folder chain, names,
-numbered suffixes, the file decoding to the picture, and its refusals; the
-readout's words, place and teardown; the hold, fade and next scene, the cut
-under reduced motion, the rest after a refusal or with nowhere to paint, a
-lost buffer painted afresh without tracing again, a change marking only the
-tiles about its steps and its fade writing nothing beyond them, the paints'
-wait growing with the share shown from half a second to at most 3 s over a
-steadily traced reveal, a change fading in over the wait until the next paint
-to just what laying it straight on shows, changes laid straight on past a
-twentieth of the picture, once the band wants the memory back, on a machine
-too small for the room and after a buffer let go mid-fade, a scene refused
-once shown resting black, the crossfade's blend writing only its tiles alike
-on any runner, a readied scene shown from its first steps, steps collected
-early painted with the next, a refused scene leaving nothing to the next, the
-options a crew is launched
-with, and on the loop a slice traced each frame and painted on the cadence,
-`idle` keeping to its own thread while `performance` uses the pool.
+Tests are the crate's own: the reveal order and painter across any cores, the
+pace, the crossfade and its tiles, the readout, the desk and its tracing
+thread, the hold, fade and rest, and each whole picture handed over once.
 
 ### DS22 — The retro games screensaver
 
-What it guarantees:
+The scene is `RetroGames.app` (`userland/gui/screensavers/retrogames`); what it
+shows is `docs/src/desktop/screensavers.md`'s. What it guarantees:
 
-- **A flight towards a setting sun.** `screensaver.kind` = `retro_games`
-  flies over a glowing grid towards a banded sun between two wireframe ranges
-  scattered afresh from each start, the sun's reflection rippling down the
-  floor. `screensaver.retro_games.speed` sets the flight on the `Pace` ladder
-  the Game of Life's speed shares; under reduced motion it holds still, no
-  craft come on, and nothing is drawn after the first frame.
-- **Craft now and then, playing retro games.** Two lanes, the sky's and the
-  ground's, each rest between acts and seldom play a kind twice running: a
-  starfighter's pass or a flying saucer's visit above; a tank battle or the
-  riders' duel below. Each act draws from a random stream of its own and is a
-  closed course between decisions its own course times, so it plays the same
-  however the frames fall; every battle and every duel ends, its survivors
-  driving or riding off out of sight.
+- **Craft that play the same however the frames fall.** Two lanes, the sky's
+  and the ground's, each rest between acts and seldom play a kind twice
+  running; each act draws from a random stream of its own and is a closed
+  course, and every battle and duel ends. Its `speed` option sets the flight
+  on the one pace ladder the Game of Life's speed shares
+  (`tairix_saver::Setup::pace`); under reduced
+  motion it holds still and no craft come on.
 - **Wireframe in the scene's own style.** Every craft is a convex hull built
-  from its corners and verified closed and convex; its faces turned from the
-  camera are culled and the rest drawn dark with glowing edges, far to near,
-  a multi-part craft ordered across the planes that part its pieces, so a
-  nearer thing hides what stands behind it from any angle.
+  from its corners and verified closed and convex, culled and drawn far to
+  near, a multi-part craft ordered across the planes that part its pieces.
 - **A frame costs what moves.** The sky, the sun's glow and the ranges are
-  painted once. A frame repaints the floor and the sun's banded part, lays
-  back what lay under the craft over the sky from the pixels kept beneath
-  them the frame before, and draws the craft from one list of polygons
-  replayed a band of rows at a time across the compositor's participants.
-  Ground craft stand lower than the camera, so they never rise above the
-  horizon. A late wake moves the flight at most `SceneClock::MOST_FRAMES` on.
+  painted once; a frame repaints the floor and the sun's banded part, lays
+  back what lay under the craft from the pixels kept beneath them, and draws
+  the craft from one list of polygons replayed a band of rows at a time across
+  the saver's threads. A late wake moves the flight at most
+  `SceneClock::MOST_FRAMES` on.
 - **Exact at every distance.** A grid line is the exact area it covers in each
-  pixel, through the frame's exposure where it moves; where lines crowd too
-  finely to draw they give way to their mean, so the horizon never shimmers.
-- **Every edge drawn once.** The ranges are drawn far to near, each edge after
-  the nearer of its faces, and the valley floor the two share is drawn by
-  neither.
+  pixel, and lines crowding too finely to draw give way to their mean, so the
+  horizon never shimmers; every edge of the ranges is drawn once.
 
-Tests: the scene opaque and whole; a frame repainting the floor and the bands
-alone before anything comes on, and the sky only where craft were and are
-once they do; into a fresh buffer the whole scene, and in parts what it
-paints whole, craft over the sky included; bands run backwards and on real
-threads painting what one thread does; the frame cadence, the late-wake cap,
-the chosen pace and the reduced-motion hold; every screen shape, and one with
-no floor or sky refused; the sun's fit; the exact pulse-train, motion and
-sheared-band coverage; the lines' crowding fade; the haze, the reflection and
-its ripples; the night, the disc and its sinking bands; the ranges' seed,
-valley, horizon and painter's order; every craft's hull sound and no ground
-craft as tall as the camera; culling, clipping, the far-to-near order and a
-display replayed in bands drawing what it draws whole; the kept pixels laid
-back exactly; each lane's timing, its first act either kind alike, and a
-seed's show repeated; every pass beginning and ending unseen, facing its
-course and banking within bounds; every visit one unbroken run of legs in
-sight; every battle ending, playing the same however its frames fall and
-wrecking what it strikes; every duel decided with no rider through a fence,
-and a bike's body and rider drawn in the order the camera sees them; and the
-blasts' spans and resting shards.
+Tests are the crate's own, over each of those guarantees and every craft.
 
 ### DS23 — The System Monitor screensaver
 
+The board is `SystemMonitor.app` (`userland/gui/screensavers/systemmonitor`),
+given the machine feed; what it shows is `docs/src/desktop/screensavers.md`'s.
 What it guarantees:
 
-- **The machine at a glance, from across a room.** A header gives the
-  machine's name and the time over a verdict pill. Five panels show:
-  - the processors — busy share, trend, load, and a cell per core spread
-    evenly over its rows;
-  - memory — committed share, trend, band, and where it went;
-  - the tasks — count, what needs recovery, and the busiest;
-  - each storage device — health, throughput and fullness;
-  - each interface — traffic and link.
-
-  The board is laid out against a 960 × 540 reference and scaled to fill the
-  screen, stacking its panels on a portrait one; a screen too small for the
-  smallest scale draws no board.
 - **The Switchboard's readings, and no thresholds of its own.** The session
-  holds no sysinfo authority. It watches the Switchboard while the board is up
+  holds no sysinfo authority and the saver none at all. While a saver given
+  the machine feed is shown, the session watches the Switchboard
   (`plans/NEW-SWITCHBOARD.md` S14), spawning the monitor once if it is not
-  running, and draws the reports that land on its wait set; it never polls.
-  The verdict is a fold over the monitor's own pressure latches, the storage
-  health and the recovery census, worst first, the rest counted.
+  running, and relays each report that lands on its wait set, only the latest
+  while one is queued; it never polls. The verdict is a fold over the
+  monitor's own pressure latches, the storage health and the recovery census,
+  worst first.
+- **Task names are the desktop's to give.** `screensaver.machine.tasks` is
+  `none`, `own` (the default) or `all`: anyone who can see the screen reads
+  them, the lock included, so another account's task reaches the saver by its
+  cost alone unless every account's are chosen.
 - **Never stale as live.** The board waits before the first report and then
-  says the monitor is not answering. After `STALE_PERIODS` of the monitor's
-  own period without a report, the verdict says when readings stopped and the
-  panels dim. A monitor that exits is named as not running.
-- **Every line whole, every part named.** A list is laid in as many columns
-  as `COLUMN_MIN` seats. A line of detail drops trailing facts whole rather
-  than cutting through one, its facts ordered so the least important go
-  first. Memory's composition shares the processors' band, so the two traces
-  stand level. Its key gives each part as a share of the whole, and a part
-  holding anything never reads `0%`. The largest parts are named and the rest
-  folded into one, never a lone part, until the key fits.
-- **A reading repaints only its part.** Parts are slots that tile the board.
-  A report repaints the parts whose readings it changed, and the header
-  whenever the verdict moved; nothing is drawn between reports. Each minute
-  the board steps round an orbit smaller than its margin, against burn-in.
-- **Task names are the option.** `screensaver.system_monitor.tasks` (default
-  on) names the busiest tasks; anyone who can see the screen reads them, the
-  lock included, which the Settings row states.
+  says the monitor is not answering; after `STALE_PERIODS` of the monitor's
+  own period without one, the verdict says when readings stopped and the
+  panels dim; a monitor that ends is named as not running.
+- **A reading repaints only its part**, each part a slot tiling the board, and
+  each minute the board steps round an orbit smaller than its margin.
 
-Tests: every screen shape tiling its parts on screen without overlap; the
-orbit keeping every part on screen; each part drawn inside its own slot
-alone, stale or live; a stale panel dimmed; the cells seating every core and
-spread evenly; the composition fitting any room, naming the largest, never
-folding a lone part, and no part holding anything reading as none; a line of
-detail cut between facts; a device's health and an interface's downed link
-first; a wide list in columns; the verdict's order and spellings; waiting,
-silence, staleness and an exited monitor; a report repainting only what it
-changed; the minute's orbit; the serve path refusing an unattested or
-malformed report and answering one nobody watches with `BrokenPipe`; and the
-watch lease's attest, re-offer and forget.
+Tests: the crate's board and verdict tests; the session's relay clearing names
+as the setting says, another account's task reaching a saver by its cost
+alone, and only the latest reading sent behind a queue; the serve path
+refusing an unattested or malformed report and answering one nobody watches
+with `BrokenPipe`; and the watch lease's attest, re-offer and forget.
 
 ### DS24 — The ray tracer's scene detail
 
-What it guarantees (the profiles themselves are `plans/RAYTRACE.md` RT39's):
+The profiles are `plans/RAYTRACE.md` RT39's. What it guarantees:
 
-- **A choice of two.** `screensaver.raytrace.detail` is `simple`, the default,
-  or `maximum` (`tairix_wallpaper::SceneDetail`); anything else is refused as
-  the other options' bad values are, and the settings document parses and
-  stages it beside `cpu` and `save`.
-- **On the pane.** The ray tracer's group holds a *Detail* dropdown — *Simple*
-  or *Maximum realism* — after *Save pictures*, above *Test*.
-- **Carried at launch.** The value travels with `cpu` and `save` into the
-  session's engine (`saver::raytrace::Detailing`), on the tracing thread or
-  the loop alike, with what the machine's memory can spare: its total, read
-  once at bring-up, and the pressure gauge.
+- **A choice of two.** The Ray Tracer's `detail` option is `simple`, the
+  default, or `maximum`, drawn on the pane as *Simple* or *Maximum realism*
+  from its manifest.
 - **Never refused partway.** Each scene is composed at the detail asked unless
-  the band last reported says that detail's `Detail::peak` is not free — a
-  band deeper than normal holds at most its exit watermark free, and an
-  unreported band holds nothing — when it is composed at Simple instead. Each
-  change from the last scene's detail is said once on `stderr`.
+  the pressure band last relayed says that detail's `Detail::peak` is not free
+  of the memory the desktop granted — a band deeper than normal holds at most
+  its exit watermark free — when it is composed at Simple instead.
 
-Tests: the option's parse, staging and refusals; the pane's row; the options a
-crew is launched with; each band's ceiling against Maximum's peak, a machine
-smaller than the peak never sparing it; and an engine asked for Maximum
-composing at Simple while the band cannot spare it, telling each change once.
+Tests: each band's ceiling against Maximum's peak, a grant smaller than the
+peak never sparing it, and an engine asked for Maximum composing at Simple
+while the band cannot spare it.
 
 ### DS13 — the QEMU vertical, and docs
 

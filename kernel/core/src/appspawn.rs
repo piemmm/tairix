@@ -47,8 +47,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use tairix_abi::{
-    digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityQuery, Errno, FileKind,
-    ProgramKind, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_SUFFIX, MIME_ENTRY_LEN,
+    digest_bundle_contents, BundleFileDigest, CapabilityQuery, Errno, FileKind, ProgramKind,
+    APPINFO_WIRE_MAX, BUNDLE_SUFFIX,
 };
 use tairix_appload::{AppError, BundleContents, BundleStore, Clock, LoadedApp, Verifier};
 use tairix_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
@@ -257,13 +257,6 @@ const BUNDLE_FILE_MAX: usize = 16 << 20;
 /// memory one verification may hold; exceeding it fails the load closed.
 const BUNDLE_TOTAL_MAX: usize = 32 << 20;
 
-/// Largest wire `AppInfo` the fixed header grammar can describe: the
-/// header plus a full capability body and a full MIME table. Anything
-/// longer cannot decode and is refused before it is read.
-const APPINFO_MAX: usize = AppInfoHeader::WIRE_LEN
-    + (APPINFO_MAX_CAPABILITIES as usize) * 2
-    + (APPINFO_MAX_MIME as usize) * MIME_ENTRY_LEN;
-
 /// Deepest directory nesting the content-hash walk follows inside a
 /// bundle. The fixed layout needs three levels (`Help/<locale>/<doc>`);
 /// eight leaves headroom for `Resources/` trees while still refusing a
@@ -431,7 +424,7 @@ impl BundleStore for FsBundleStore<'_> {
     }
 
     fn read_appinfo(&self, bundle: &str) -> Result<Vec<u8>, Errno> {
-        self.read_file(&format!("{bundle}/AppInfo"), APPINFO_MAX)
+        self.read_file(&format!("{bundle}/AppInfo"), APPINFO_WIRE_MAX)
     }
 
     fn contents(&self, bundle: &str) -> Result<BundleContents, Errno> {
@@ -589,10 +582,13 @@ pub fn app_error_errno(err: AppError) -> Errno {
 mod tests {
     use super::*;
     use crate::test_bundle::{
-        composed_bundle, composed_bundle_published_by, composed_bundle_signed_by, gate_load as load,
+        composed_bundle, composed_bundle_published_by, composed_bundle_signed_by, composed_saver,
+        gate_load as load, gate_load_at, NoCaps,
     };
     use tairix_abi::rxe::{LoadHeader, Segment};
-    use tairix_abi::{BundleLayoutError, CapabilityId, RxeError};
+    use tairix_abi::saver::SaverFeeds;
+    use tairix_abi::{AppInfoHeader, BundleLayoutError, CapabilityId, RxeError};
+    use tairix_appload::LoadMode;
     use tairix_itest_harness::app_image::PublisherSource;
 
     extern crate std;
@@ -766,10 +762,69 @@ mod tests {
         let (mut fs, anchor, _) = composed_bundle(vec![]);
         fs.files.insert(
             "/System/Commands/ps.app/AppInfo".to_string(),
-            vec![0u8; APPINFO_MAX + 1],
+            vec![0u8; APPINFO_WIRE_MAX + 1],
         );
         let err = load(&fs, anchor).expect_err("oversized manifest refused");
         assert!(matches!(err, AppError::Store(Errno::LengthOutOfRange)));
+    }
+
+    /// Regression: the store read its manifests against a bound of its own
+    /// that left the browsed types out, so a valid manifest declaring them
+    /// near the ceiling was refused unread.
+    #[test]
+    fn a_manifest_at_the_wire_bound_is_read_whole() {
+        let (mut fs, _, _) = composed_bundle(vec![]);
+        fs.files.insert(
+            "/System/Commands/ps.app/AppInfo".to_string(),
+            vec![0u8; APPINFO_WIRE_MAX],
+        );
+        let store = FsBundleStore::new(&fs, 1000, &NoCaps);
+        let read = store
+            .read_appinfo("/System/Commands/ps.app")
+            .expect("a manifest at the bound is read");
+        assert_eq!(read.len(), APPINFO_WIRE_MAX);
+    }
+
+    const SAVER_SEED: [u8; 32] = [0x6B; 32];
+
+    #[test]
+    fn a_system_saver_loads_only_into_a_drawing_spawn() {
+        let bundle = "/System/Screensavers/waves.app";
+        let (fs, anchor) = composed_saver(bundle, &SAVER_SEED, SaverFeeds::NONE);
+        let drawn = gate_load_at(&fs, anchor, bundle, LoadMode::Drawing).expect("loads");
+        assert_eq!(drawn.kind(), ProgramKind::Screensaver);
+        assert!(drawn.granted().is_empty());
+        let refused = gate_load_at(&fs, anchor, bundle, LoadMode::Ordinary);
+        assert_eq!(refused.err(), Some(AppError::DrawingOnly));
+        assert_eq!(
+            app_error_errno(AppError::DrawingOnly),
+            Errno::PermissionDenied
+        );
+        let foreign = gate_load_at(&fs, [0x11; 32], bundle, LoadMode::Drawing);
+        assert_eq!(
+            foreign.err(),
+            Some(AppError::Signature),
+            "a system saver answers to the anchor"
+        );
+    }
+
+    #[test]
+    fn a_users_own_saver_loads_on_its_own_signature_without_a_system_feed() {
+        let bundle = "/Users/ada/Library/Screensavers/waves.app";
+        let (fs, _) = composed_saver(bundle, &SAVER_SEED, SaverFeeds::NONE);
+        let drawn = gate_load_at(&fs, [0x11; 32], bundle, LoadMode::Drawing)
+            .expect("an own saver needs no anchor");
+        assert_eq!(drawn.kind(), ProgramKind::Screensaver);
+        let fed = SaverFeeds::from_bits(tairix_abi::APPINFO_FLAG_FEED_MACHINE).expect("a feed");
+        let (fs, _) = composed_saver(bundle, &SAVER_SEED, fed);
+        assert_eq!(
+            gate_load_at(&fs, [0x11; 32], bundle, LoadMode::Drawing).err(),
+            Some(AppError::PrivilegedFeed)
+        );
+        assert_eq!(
+            app_error_errno(AppError::PrivilegedFeed),
+            Errno::PermissionDenied
+        );
     }
 
     #[test]

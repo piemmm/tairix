@@ -113,9 +113,9 @@ mod tests;
 
 #[cfg(feature = "render")]
 pub use client::{
-    defer_fetches, families, fetch_deferred, has_deferred, outline_run, set_font_transport,
-    set_glyph_cache, set_outline_cache, text_generation, trim_glyph_cache, FontTransport,
-    GlyphCache, GlyphKey, OutlineReply, OwnedContour, OwnedOutline, OwnedSegment,
+    defer_fetches, families, fetch_deferred, has_deferred, install_caches, outline_run,
+    set_font_transport, set_glyph_cache, set_outline_cache, text_generation, trim_glyph_cache,
+    FontTransport, GlyphCache, GlyphKey, OutlineReply, OwnedContour, OwnedOutline, OwnedSegment,
 };
 #[cfg(feature = "test-util")]
 pub use client::{install_test_transport, note_text_landed, SolidTestTransport};

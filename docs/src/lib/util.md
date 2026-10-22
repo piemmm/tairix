@@ -185,7 +185,7 @@ and panic-free throughout.
   (Rodrigues' formula), or carrying one direction onto another, and composed
   with another; `Pose` a rigid placement taking points into and out of a
   shape's own coordinates. The ray tracer (`lib/raytrace`) traces in it and the
-  desktop session's retro games screensaver turns and places its wireframe
+  Retro Games screensaver turns and places its wireframe
   craft in it, so the two share one arithmetic rather than a copy each.
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"
   windows shared by the same two apps: `ByteWindow` and `LineWindow`

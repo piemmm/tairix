@@ -8,12 +8,7 @@ use crate::catalog;
 use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{PointerSpeed, PrimaryButton, RepeatRate};
 use crate::notify::NotifyLevel;
-use crate::saver::{
-    CellSize, ClockOptions, CpuUse, LifeOptions, Pace, RaytraceOptions, RetroGamesOptions,
-    RibbonOptions, SceneDetail, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions,
-    StarDensity, StarfieldOptions, SystemMonitorOptions, WallpaperCategory, SLIDE_INTERVAL_DEFAULT,
-};
-use tairix_abi::desktop::ScreensaverKind;
+use crate::saver::{SaverValues, ScreensaverChoice, SlideSource, TaskNames, WallpaperCategory};
 use tairix_abi::time::Duration64;
 
 /// The settings a document naming exactly `text` yields under the strict
@@ -143,9 +138,11 @@ fn every_key_moved() -> DesktopSettings {
         repeat_delay: Duration64::from_millis(250),
         repeat_rate: RepeatRate::Off,
         screensaver_after: IdleAfter::Minutes(5),
-        screensaver: ScreensaverKind::Starfield,
+        screensaver: ScreensaverChoice::from_value("os.tairix.saver.starfield").expect("a saver"),
         display_off_after: DisplayOffAfter::Minutes(0),
-        screensaver_options: retuned_scenes(),
+        slides: SlideSource::Category(WallpaperCategory::new("TAIRiX").expect("a category")),
+        task_names: TaskNames::All,
+        saver_values: retuned_savers(),
         lock_after: IdleAfter::Minutes(15),
         region: RegionCode::new("FI"),
         time_zone: ZoneName::new("Europe/Helsinki"),
@@ -189,30 +186,19 @@ fn the_render_is_canonical_and_round_trips() {
          key.repeat_delay_ms = 250\n\
          key.repeat_rate = off\n\
          screensaver.after_min = 5\n\
-         screensaver.kind = starfield\n\
+         screensaver.saver = os.tairix.saver.starfield\n\
          screensaver.display_off_min = 0\n\
-         screensaver.slideshow.interval_s = 120\n\
-         screensaver.slideshow.order = shuffled\n\
-         screensaver.slideshow.category = TAIRiX\n\
-         screensaver.clock.date = false\n\
-         screensaver.clock.identity = false\n\
-         screensaver.ribbon.date = false\n\
-         screensaver.starfield.stars = dense\n\
-         screensaver.starfield.warp = false\n\
-         screensaver.life.cells = large\n\
-         screensaver.life.speed = fast\n\
-         screensaver.raytrace.cpu = performance\n\
-         screensaver.raytrace.save = true\n\
-         screensaver.raytrace.detail = maximum\n\
-         screensaver.retro_games.speed = slow\n\
-         screensaver.system_monitor.tasks = false\n\
+         screensaver.slides.source = TAIRiX\n\
+         screensaver.machine.tasks = all\n\
          lock.after_min = 15\n\
          region = FI\n\
          time.zone = Europe/Helsinki\n\
          audio.output = 0000000000000051.0\n\
          audio.input = \"\"\n\
          audio.levels = 0000000000000051.0:-6.5dB\n\
-         audio.muted = 0000000000000052.0\n"
+         audio.muted = 0000000000000052.0\n\
+         saver.os.tairix.saver.life.speed = fast\n\
+         saver.os.tairix.saver.starfield.stars = dense\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);
 }
@@ -231,35 +217,37 @@ fn quietened() -> NotifyPolicy {
     policy
 }
 
-/// Screensaver options distinguishable from the defaults in every key.
-fn retuned_scenes() -> ScreensaverOptions {
-    ScreensaverOptions {
-        slideshow: SlideshowOptions {
-            interval: Duration64::from_secs(120),
-            order: SlideOrder::Shuffled,
-            source: SlideSource::Category(WallpaperCategory::new("TAIRiX").expect("a category")),
-        },
-        clock: ClockOptions {
-            date: false,
-            identity: false,
-        },
-        ribbon: RibbonOptions { date: false },
-        starfield: StarfieldOptions {
-            stars: StarDensity::Dense,
-            warp: false,
-        },
-        life: LifeOptions {
-            cells: CellSize::Large,
-            speed: Pace::Fast,
-        },
-        raytrace: RaytraceOptions {
-            cpu: CpuUse::Performance,
-            save: true,
-            detail: SceneDetail::Maximum,
-        },
-        retro_games: RetroGamesOptions { speed: Pace::Slow },
-        system_monitor: SystemMonitorOptions { tasks: false },
-    }
+/// Saver option values a render must carry after every closed key.
+fn retuned_savers() -> SaverValues {
+    let mut values = SaverValues::default();
+    assert!(values.read("saver.os.tairix.saver.starfield.stars", "dense"));
+    assert!(values.read("saver.os.tairix.saver.life.speed", "fast"));
+    values
+}
+
+/// A document naming the screensaver carries every saver's values, so one it
+/// leaves out — a value returned to its default — is no longer set; one that
+/// does not name the screensaver leaves them all as they were.
+#[test]
+fn a_saver_value_returned_to_its_default_is_dropped() {
+    let base = DesktopSettings {
+        saver_values: retuned_savers(),
+        ..DesktopSettings::default()
+    };
+    let back = merge_applied(
+        &base,
+        "screensaver.saver = os.tairix.saver.starfield\n\
+         saver.os.tairix.saver.life.speed = fast\n",
+    )
+    .expect("an applied document");
+    let mut kept = SaverValues::default();
+    assert!(kept.read("saver.os.tairix.saver.life.speed", "fast"));
+    assert_eq!(
+        back.saver_values, kept,
+        "the stars went back to their default"
+    );
+    let other = merge_applied(&base, "screensaver.after_min = 5\n").expect("applied");
+    assert_eq!(other.saver_values, base.saver_values, "untouched");
 }
 
 #[test]
@@ -280,7 +268,7 @@ fn the_input_keys_default_to_the_documented_policy() {
     assert_eq!(settings.repeat_delay, crate::input::REPEAT_DELAY_DEFAULT);
     assert_eq!(settings.repeat_rate, RepeatRate::PerSecond(30));
     assert_eq!(settings.screensaver_after, IdleAfter::Minutes(10));
-    assert_eq!(settings.screensaver, ScreensaverKind::Ribbon);
+    assert_eq!(settings.screensaver, ScreensaverChoice::default_saver());
     assert_eq!(settings.display_off_after, DisplayOffAfter::Minutes(30));
     assert_eq!(settings.lock_after, IdleAfter::Minutes(15));
 }
@@ -298,7 +286,10 @@ fn an_input_value_outside_its_bounds_is_refused_whole() {
         ("key.repeat_delay_ms = 3000", SettingsKey::RepeatDelay),
         ("key.repeat_rate = 0", SettingsKey::RepeatRate),
         ("screensaver.after_min = 0", SettingsKey::ScreensaverAfter),
-        ("screensaver.kind = fireworks", SettingsKey::ScreensaverKind),
+        (
+            "screensaver.saver = Fireworks",
+            SettingsKey::ScreensaverSaver,
+        ),
         (
             "screensaver.display_off_min = 1441",
             SettingsKey::DisplayOffAfter,
@@ -975,125 +966,36 @@ fn a_group_document_names_only_its_own_keys() {
 }
 
 #[test]
-fn the_screensaver_options_default_to_each_scene_as_it_draws_unasked() {
-    let options = DesktopSettings::default().screensaver_options;
-    assert_eq!(options.slideshow.interval, SLIDE_INTERVAL_DEFAULT);
-    assert_eq!(options.slideshow.order, SlideOrder::Sequential);
-    assert_eq!(options.slideshow.source, SlideSource::Every);
-    assert!(options.clock.date && options.clock.identity);
-    assert!(options.ribbon.date);
-    assert_eq!(options.starfield.stars, StarDensity::Normal);
-    assert!(options.starfield.warp);
-    assert_eq!(options.life.cells, CellSize::Medium);
-    assert_eq!(options.life.speed, Pace::Normal);
+fn the_screensaver_keys_default_to_the_documented_policy_and_refuse_the_rest() {
+    let settings = DesktopSettings::default();
+    assert_eq!(settings.slides, SlideSource::Every);
     assert_eq!(
-        options.raytrace.cpu,
-        CpuUse::Idle,
-        "the ray tracer asks for one core unless told otherwise"
+        settings.task_names,
+        TaskNames::Own,
+        "another account's names are withheld"
     );
-    assert!(
-        !options.raytrace.save,
-        "nothing is written to the user's pictures unasked"
-    );
-    assert_eq!(
-        options.raytrace.detail,
-        SceneDetail::Simple,
-        "a scene is set out plainly unless more is asked"
-    );
-    assert_eq!(options.retro_games.speed, Pace::Normal);
-}
-
-#[test]
-fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
-    let settings = read(
-        "screensaver.slideshow.interval_s = 600\n\
-         screensaver.slideshow.category = Nature\n\
-         screensaver.clock.identity = off\n\
-         screensaver.ribbon.date = false\n\
-         screensaver.life.cells = small\n\
-         screensaver.raytrace.cpu = performance\n\
-         screensaver.raytrace.save = on\n\
-         screensaver.raytrace.detail = maximum\n\
-         screensaver.retro_games.speed = fast\n",
-    )
-    .expect("a well-formed document");
-    let options = &settings.screensaver_options;
-    assert_eq!(options.slideshow.interval, Duration64::from_secs(600));
-    assert_eq!(
-        options.slideshow.source.category(),
-        WallpaperCategory::new("Nature").as_ref()
-    );
-    assert!(!options.clock.identity);
-    assert!(options.clock.date, "a key not named keeps its value");
-    assert!(!options.ribbon.date);
-    assert_eq!(options.life.cells, CellSize::Small);
-    assert_eq!(options.raytrace.cpu, CpuUse::Performance);
-    assert!(options.raytrace.save);
-    assert_eq!(options.raytrace.detail, SceneDetail::Maximum);
-    assert_eq!(options.retro_games.speed, Pace::Fast);
-    assert_eq!(
-        options.life.speed,
-        Pace::Normal,
-        "one scene's pace is its own"
-    );
-    // An empty category is every category, which a stored one can go back to.
-    assert_eq!(
-        read("screensaver.slideshow.category = \"\"\n")
-            .expect("every category")
-            .screensaver_options
-            .slideshow
-            .source,
-        SlideSource::Every
-    );
-    for (text, key) in [
+    assert_eq!(settings.saver_values, SaverValues::default());
+    for (line, key) in [
         (
-            "screensaver.slideshow.interval_s = 4",
-            SettingsKey::SlideInterval,
+            "screensaver.saver = os..clock",
+            SettingsKey::ScreensaverSaver,
         ),
+        ("screensaver.slides.source = a/b", SettingsKey::SlidesSource),
         (
-            "screensaver.slideshow.interval_s = 1h",
-            SettingsKey::SlideInterval,
-        ),
-        (
-            "screensaver.slideshow.order = random",
-            SettingsKey::SlideOrder,
-        ),
-        (
-            "screensaver.slideshow.category = a/b",
-            SettingsKey::SlideCategory,
-        ),
-        ("screensaver.clock.date = maybe", SettingsKey::ClockDate),
-        ("screensaver.clock.identity = 1", SettingsKey::ClockIdentity),
-        ("screensaver.ribbon.date = someday", SettingsKey::RibbonDate),
-        (
-            "screensaver.starfield.stars = thousands",
-            SettingsKey::StarDensity,
-        ),
-        ("screensaver.starfield.warp = fast", SettingsKey::StarWarp),
-        ("screensaver.life.cells = huge", SettingsKey::LifeCells),
-        ("screensaver.life.speed = ludicrous", SettingsKey::LifeSpeed),
-        ("screensaver.raytrace.cpu = turbo", SettingsKey::RaytraceCpu),
-        ("screensaver.raytrace.cpu = Idle", SettingsKey::RaytraceCpu),
-        ("screensaver.raytrace.save = yes", SettingsKey::RaytraceSave),
-        (
-            "screensaver.raytrace.detail = fine",
-            SettingsKey::RaytraceDetail,
-        ),
-        (
-            "screensaver.raytrace.detail = Maximum",
-            SettingsKey::RaytraceDetail,
-        ),
-        (
-            "screensaver.retro_games.speed = warp",
-            SettingsKey::RetroGamesSpeed,
+            "screensaver.machine.tasks = everyone",
+            SettingsKey::MachineTasks,
         ),
     ] {
         assert_eq!(
-            read(&alloc::format!("{text}\n")),
+            read(line),
             Err(DocumentRefusal::InvalidValue(key)),
-            "{text}"
+            "{line}"
         );
     }
+    assert_eq!(
+        read("screensaver.saver = dim\n").map(|settings| settings.screensaver),
+        Ok(ScreensaverChoice::Dim)
+    );
 }
 
 #[test]
@@ -1101,19 +1003,43 @@ fn a_group_reading_admits_its_own_keys_and_refuses_any_other_whole() {
     let base = DesktopSettings::default();
     let preview = merge_within(
         &base,
-        "screensaver.kind = life\nscreensaver.life.speed = slow\n",
+        "screensaver.saver = os.tairix.saver.life\nsaver.os.tairix.saver.life.speed = slow\n",
         &SettingsKey::SCREENSAVER,
     )
     .expect("the screensaver keys");
-    assert_eq!(preview.screensaver, ScreensaverKind::Life);
-    assert_eq!(preview.screensaver_options.life.speed, Pace::Slow);
+    assert_eq!(preview.screensaver.as_str(), "os.tairix.saver.life");
+    let mut rendered = Document::new();
+    preview.saver_values.spell(&mut rendered);
+    assert_eq!(
+        rendered.get("saver.os.tairix.saver.life.speed"),
+        Some("slow")
+    );
     assert_eq!(
         merge_within(
             &base,
-            "screensaver.kind = life\nappearance = light\n",
+            "screensaver.saver = os.tairix.saver.life\nappearance = light\n",
             &SettingsKey::SCREENSAVER
         ),
         Err(DocumentRefusal::OutsideGroup(SettingsKey::Appearance))
+    );
+    // A saver value travels with the chosen saver's key, and no further.
+    assert_eq!(
+        merge_within(
+            &base,
+            "saver.os.tairix.saver.life.speed = slow\n",
+            &SettingsKey::APPEARANCE
+        ),
+        Err(DocumentRefusal::OutsideGroup(SettingsKey::ScreensaverSaver))
+    );
+    assert_eq!(
+        merge_within(
+            &base,
+            "saver.os.tairix.saver.life.speed = Slow\n",
+            &SettingsKey::SCREENSAVER
+        ),
+        Err(DocumentRefusal::InvalidOpenValue(String::from(
+            "saver.os.tairix.saver.life.speed"
+        )))
     );
     // An unknown key is still an unknown key, whatever the group.
     assert!(matches!(
@@ -1124,6 +1050,8 @@ fn a_group_reading_admits_its_own_keys_and_refuses_any_other_whole() {
         ),
         Err(DocumentRefusal::UnknownKey(_))
     ));
+    let document = base.document_of(&SettingsKey::SCREENSAVER);
+    assert!(document.get(SettingsKey::ScreensaverSaver.name()).is_some());
 }
 
 /// The remembered sound controls are the session's alone: an application's

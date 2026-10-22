@@ -98,13 +98,18 @@ Three layers, each fail-closed, each with its own tests:
    and before any handler runs:
 
    `yield`, `exit`, `stream_read`, `stream_write`, `fs_read`,
-   `fs_write`, `fs_close`, `mem_map`, `mem_unmap`
+   `fs_write`, `fs_close`, `mem_map`, `mem_unmap`, `thread_create`,
+   `thread_exit`, `futex_wait`, `futex_wake`, `share_map`, `clock_get`
 
    These are exactly the self-scoped and descriptor-scoped operations a
-   worker needs: run, block on and talk over the wired descriptors, and
-   manage its own heap. Everything that names an object outside the
-   task — a path (`fs_open`), an IPC endpoint, a resource reference, a
-   process (`spawn`/`signal`/`wait`), a device, system state — is
+   worker needs: run, block on and talk over the wired descriptors,
+   manage its own heap, run threads in its own address space under its own
+   empty record and block them on words of its own, map the one region a
+   drawing sandbox was handed, and read the monotonic clock to pace its own
+   work, coarsened because no sandbox holds `CAP_TIME_HIRES`. Everything
+   that names an object outside the task — a path (`fs_open`), an IPC
+   endpoint, a resource reference, a process (`spawn`/`signal`/`wait`), a
+   device, system state — is
    refused, so a compromised parser cannot even probe those surfaces.
    Each denial is audited with the stable `SyscallPermissionDenied`
    event. Widening the list is a security decision held to the
@@ -126,6 +131,38 @@ only a `wait` naming its pid reaps it, and a wait for any child — the
 hosting program's own job control, say — never takes it or becomes ready
 for it. The sandbox host is library code inside someone else's program,
 and it can only explain a worker's end if nothing else reaped it first.
+
+## The drawing sandbox
+
+A *drawing sandbox* is the sandbox above with one thing more: its spawner
+hands it one shared-memory region at spawn (`SpawnAttach::drawing`), which
+the child maps once with `share_map` — the only memory beyond its own it can
+ever reach. The same spawn holds the child to the address space and the
+threads the spawner grants. It is what a screensaver runs in
+(`plans/SCREENSAVERS.md`): the region carries the frames it presents and,
+for a saver given a feed, one screen-sized picture the two sides hand back
+and forth.
+
+- `share_map` maps the spawn share once: a task handed none is refused
+  `NotFound`, and any later call `AlreadyExists`, even after a first call
+  that failed, so no unwind the task cannot see leaves the region mappable
+  twice.
+- The load gate (`lib/appload`) admits a bundle of the `screensaver` kind
+  only into a drawing spawn, so a saver never runs with authority
+  (`APP_DRAWING_ONLY`), and no other kind is admitted into one.
+- A saver in the user's own store, `/Users/<name>/Library/Screensavers`, at a
+  plain path whose only bundle is the saver itself (`is_user_saver_bundle`),
+  is admitted self-signed: its signature proves the bundle is whole and grants
+  nothing, and its admission is recorded with `signer=own`. It may claim its
+  threads and memory (`APPINFO_FLAGS_SAVER_OWN`) and nothing else, so one
+  that declares a feed only a system saver is given is refused
+  (`APP_FEED_REFUSED`).
+- A drawing spawn that names a boot-floor program is refused before anything
+  is admitted (`drawing_needs_bundle`): only the load gate a store bundle
+  meets can tell a screensaver.
+- The spawn share is the saver's for the rest of its life: a drawing sandbox
+  may not unmap, so `tairix_rt::shm::SpawnShare` never tries, and the kernel
+  reclaims it at exit.
 
 ## The user-space seam: `lib/sandbox`
 
@@ -184,9 +221,10 @@ sandboxes a parse imports it:
   inbound bound, and a stream that ends part-way through one, are both
   protocol violations that contain the session.
   Deadlock-freedom is structural rather than argued: the allow-list gives
-  the worker no wait-set call, no clock, and no RNG, so its pipe is the
-  only thing that can ever wake it, and it may therefore use the ordinary
-  blocking channel — a worker blocked writing is freed by the parent's
+  the worker no wait-set call and no channel but its pipes, so its pipe is
+  the only thing outside it that can ever wake it — a timed futex wait or a
+  read of the clock reaches nothing beyond the worker — and it may therefore
+  use the ordinary blocking channel — a worker blocked writing is freed by the parent's
   read readiness, and one blocked reading by the parent's room readiness.
   That second leg is why `StreamRoom` exists at all. `recv` lends each
   frame in place rather than copying it out, so taking a frame never

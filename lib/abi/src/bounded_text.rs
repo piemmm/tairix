@@ -43,7 +43,7 @@ pub(crate) fn is_forbidden_character(c: char, allow_newline: bool) -> bool {
 /// ABI, which validate identically and differ only in their bounds — the
 /// size is the type parameter, so there is no second copy of the validator
 /// to drift.
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct BoundedText<const MIN: usize, const MAX: usize> {
     bytes: [u8; MAX],
     len: u8,

@@ -44,8 +44,8 @@ use tairix_abi::driver::display::{DamageList, DisplayFormat, DisplayMode};
 use tairix_abi::origin::{AppIdentity, ProcId};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
-    encode_authorised_output_reply, AuthorisedOutcome, SystemTask,
-    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+    encode_authorised_output_reply, encode_screensaver_reply, AuthorisedOutcome, SystemTask,
+    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX, WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::window_ipc::{
     encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
@@ -99,7 +99,7 @@ pub const WINDOW_REPLY_MAX: usize = {
                 wider(
                     WINDOW_TERRAIN_REPLY_MAX,
                     wider(
-                        WINDOW_WALLPAPERS_REPLY_MAX,
+                        wider(WINDOW_WALLPAPERS_REPLY_MAX, WINDOW_SCREENSAVER_REPLY_MAX),
                         wider(
                             WINDOW_CURSOR_SETS_REPLY_MAX,
                             wider(
@@ -956,11 +956,12 @@ pub trait WindowHost {
     /// [`WindowEvent::PreviewRendered`]: tairix_abi::window_ipc::WindowEvent::PreviewRendered
     fn preview_render_requested(
         &mut self,
+        caller: Option<&AppIdentity>,
         window_id: u64,
         region: ClientRegion,
         request: PreviewSize,
     ) -> Result<(), Errno> {
-        let _ = (window_id, region, request);
+        let _ = (caller, window_id, region, request);
         Err(Errno::NotSupported)
     }
 
@@ -992,6 +993,23 @@ pub trait WindowHost {
     fn lock_screen(&mut self, caller: Option<&AppIdentity>) -> Result<(), Errno> {
         let _ = caller;
         Err(Errno::NotSupported)
+    }
+
+    /// Write entry `index` of the screensaver catalogue into `out` at the
+    /// request of `caller`, the application the kernel attests is asking,
+    /// answering the bytes written (`encode_screensaver_reply`).
+    ///
+    /// The host decides who may ask: which savers a user installed is theirs.
+    /// The default refuses, because a host with no catalogue has none to
+    /// describe.
+    fn screensaver_entry(
+        &mut self,
+        caller: Option<&AppIdentity>,
+        index: u16,
+        out: &mut [u8; WINDOW_SCREENSAVER_REPLY_MAX],
+    ) -> usize {
+        let _ = (caller, index);
+        encode_screensaver_reply(out, Err(Errno::NotSupported))
     }
 
     /// Show the screensaver `document` describes now, as a preview, at the
@@ -1717,6 +1735,35 @@ impl<M: ShmMapper> WindowServer<M> {
                 });
                 return status(reply, shown);
             }
+            WindowRequest::RenderPreview { .. } => {
+                let rendered = preview_request(&decoded)
+                    .ok_or(Errno::NotSupported)
+                    .and_then(|(to, size)| {
+                        // A screensaver's picture says what the user installed,
+                        // so the host is told who is asking for one.
+                        let app = match size.subject {
+                            PreviewSubject::Screensaver(_) => identity.caller_app(ticket)?,
+                            PreviewSubject::Wallpaper(_) => None,
+                        };
+                        self.render_preview(host, &*sink, (caller, app.as_ref()), to, size)
+                    });
+                return status(reply, rendered);
+            }
+            WindowRequest::QueryScreensaver { index } => {
+                let app = match identity.caller_app(ticket) {
+                    Ok(app) => app,
+                    Err(err) => return screensaver_refusal(reply, err),
+                };
+                let mut frame = [0u8; WINDOW_SCREENSAVER_REPLY_MAX];
+                let len = host.screensaver_entry(app.as_ref(), index, &mut frame);
+                // A host that answers past its own frame is refused, never
+                // trusted with a slice.
+                let (Some(answered), Some(out)) = (frame.get(..len), reply.get_mut(..len)) else {
+                    return screensaver_refusal(reply, Errno::LengthOutOfRange);
+                };
+                out.copy_from_slice(answered);
+                return len;
+            }
             WindowRequest::TakeZoneStore => {
                 let granted = identity
                     .caller_app(ticket)
@@ -1833,7 +1880,7 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::QueryDragSpot { .. } => {
                 self.dispatch_transfer(host, caller, decoded, reply)
             }
-            ref other => self.dispatch_status_op(host, &*sink, caller, other, reply),
+            ref other => self.dispatch_status_op(host, caller, other, reply),
         }
     }
 
@@ -2022,13 +2069,43 @@ impl<M: ShmMapper> WindowServer<M> {
         }
     }
 
+    /// Act on a request that sets how one of the caller's windows is shown:
+    /// its size, title, sizing, size state, icon-bar declaration or backdrop.
+    fn dispatch_setting(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        request: &WindowRequest,
+    ) -> Result<(), Errno> {
+        match *request {
+            WindowRequest::Resize { .. } => {
+                let spec = resize_request(request).ok_or(Errno::NotSupported)?;
+                self.resize(host, caller, spec)
+            }
+            WindowRequest::SetTitle { window_id, title } => {
+                self.set_title(host, caller, window_id, title.as_str())
+            }
+            WindowRequest::SetSizing { window_id, sizing } => {
+                self.set_sizing(host, caller, window_id, sizing)
+            }
+            WindowRequest::SetSizeState { window_id, state } => {
+                self.set_size_state(host, caller, window_id, state)
+            }
+            WindowRequest::SetAppBar(ref bar) => self.set_app_bar(host, caller, bar),
+            WindowRequest::SetBackdropBlur {
+                window_id,
+                radius_px,
+            } => self.set_backdrop_blur(host, caller, window_id, radius_px),
+            _ => Err(Errno::NotSupported),
+        }
+    }
+
     /// Act on one decoded request that answers with a plain status frame —
     /// everything but the two create requests, which mint a window id and so
     /// answer with the create-reply frame instead.
     fn dispatch_status_op(
         &mut self,
         host: &mut dyn WindowHost,
-        sink: &dyn EventSink,
         caller: ProcId,
         decoded: &WindowRequest,
         reply: &mut [u8; WINDOW_REPLY_MAX],
@@ -2061,41 +2138,15 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::GetClipboard { .. } => {
                 self.dispatch_seat(host, caller, decoded, reply)
             }
-            WindowRequest::Resize { .. } => {
-                let asked = resize_request(decoded).ok_or(Errno::NotSupported);
-                status(
-                    reply,
-                    asked.and_then(|spec| self.resize(host, caller, spec)),
-                )
+            WindowRequest::Resize { .. }
+            | WindowRequest::SetTitle { .. }
+            | WindowRequest::SetSizing { .. }
+            | WindowRequest::SetSizeState { .. }
+            | WindowRequest::SetAppBar(_)
+            | WindowRequest::SetBackdropBlur { .. } => {
+                status(reply, self.dispatch_setting(host, caller, decoded))
             }
-            WindowRequest::SetTitle { window_id, title } => status(
-                reply,
-                self.set_title(host, caller, window_id, title.as_str()),
-            ),
-            WindowRequest::SetSizing { window_id, sizing } => {
-                status(reply, self.set_sizing(host, caller, window_id, sizing))
-            }
-            WindowRequest::SetSizeState { window_id, state } => {
-                status(reply, self.set_size_state(host, caller, window_id, state))
-            }
-            WindowRequest::SetAppBar(ref bar) => status(reply, self.set_app_bar(host, caller, bar)),
-            WindowRequest::SetBackdropBlur {
-                window_id,
-                radius_px,
-            } => status(
-                reply,
-                self.set_backdrop_blur(host, caller, window_id, radius_px),
-            ),
-            WindowRequest::RenderPreview { .. } => {
-                let asked = preview_request(decoded).ok_or(Errno::NotSupported);
-                status(
-                    reply,
-                    asked.and_then(|(to, size)| self.render_preview(host, sink, caller, to, size)),
-                )
-            }
-            // Read-only and ungated: the reply describes the caller's own
-            // seat, holding nothing another principal owns and granting
-            // no authority, so every client on the desktop may ask.
+            // Ungated: it describes the caller's own seat and grants nothing.
             WindowRequest::QueryDesktop => desktop_reply(reply, host.desktop(), self.server),
             // A create mints a window id and is answered by the caller with
             // the create-reply frame; refusing it here keeps this total
@@ -2117,6 +2168,9 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::TakeOpenTarget => open_target_reply(reply, Err(Errno::NotSupported)),
             // ...and a catalog page, likewise.
             WindowRequest::QueryWallpapers { .. } => wallpapers_refusal(reply, Errno::NotSupported),
+            WindowRequest::QueryScreensaver { .. } => {
+                screensaver_refusal(reply, Errno::NotSupported)
+            }
             WindowRequest::QueryCursorSets => cursor_sets_refusal(reply, Errno::NotSupported),
             // ...and the requests answered before this is reached: those
             // `serve` decides against the attested application, and those
@@ -2130,6 +2184,7 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::Close { .. }
             | WindowRequest::CloseAlert { .. }
             | WindowRequest::PreviewScreensaver { .. }
+            | WindowRequest::RenderPreview { .. }
             | WindowRequest::PickFile { .. }
             | WindowRequest::BeginDrag { .. }
             | WindowRequest::TakeDropTarget { .. }
@@ -2700,7 +2755,7 @@ impl<M: ShmMapper> WindowServer<M> {
         &mut self,
         host: &mut dyn WindowHost,
         sink: &dyn EventSink,
-        caller: ProcId,
+        (caller, app): (ProcId, Option<&AppIdentity>),
         (window_id, shm_handle): (u64, u64),
         request: PreviewSize,
     ) -> Result<(), Errno> {
@@ -2717,7 +2772,12 @@ impl<M: ShmMapper> WindowServer<M> {
             .renders_pending
             .try_reserve(1)
             .map_err(|_| Errno::OutOfMemory)?;
-        host.preview_render_requested(window_id, ClientRegion::of(caller, shm_handle), request)?;
+        host.preview_render_requested(
+            app,
+            window_id,
+            ClientRegion::of(caller, shm_handle),
+            request,
+        )?;
         record.renders_pending.push(request);
         Ok(())
     }
@@ -4009,6 +4069,14 @@ fn notify_sources_reply(
         &mut frame,
         answered.map(|sources| sources.iter().map(|source| source.as_str().as_bytes())),
     );
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
+}
+
+/// Write a screensaver-catalogue refusal into `reply`, answering its length.
+fn screensaver_refusal(reply: &mut [u8; WINDOW_REPLY_MAX], err: Errno) -> usize {
+    let mut frame = [0u8; WINDOW_SCREENSAVER_REPLY_MAX];
+    let len = encode_screensaver_reply(&mut frame, Err(err));
     reply[..len].copy_from_slice(&frame[..len]);
     len
 }

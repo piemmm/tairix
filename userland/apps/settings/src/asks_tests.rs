@@ -11,7 +11,9 @@ use super::*;
 use crate::test_support::showing;
 
 fn preview() -> DesktopAsk {
-    DesktopAsk::Preview(PinboardDocument::new("screensaver.kind = clock\n").expect("a document"))
+    DesktopAsk::Preview(
+        PinboardDocument::new("screensaver.saver = os.tairix.saver.clock\n").expect("a document"),
+    )
 }
 
 /// One of each kind is outstanding at a time: a second asked while the
@@ -35,6 +37,7 @@ fn a_second_ask_of_a_kind_waits_for_the_first_to_be_answered() {
         DesktopAsk::Lock,
         preview(),
         DesktopAsk::NotifySources,
+        DesktopAsk::Savers,
         DesktopAsk::Authorise {
             window_id: 3,
             task: SystemTask::SetClock,
@@ -56,8 +59,10 @@ fn a_second_ask_of_a_kind_waits_for_the_first_to_be_answered() {
 fn a_preview_of_another_document_is_asked_once_the_first_is_answered() {
     let of = |kind: &str| {
         DesktopAsk::Preview(
-            PinboardDocument::new(&alloc::format!("screensaver.kind = {kind}\n"))
-                .expect("a document"),
+            PinboardDocument::new(&alloc::format!(
+                "screensaver.saver = os.tairix.saver.{kind}\n"
+            ))
+            .expect("a document"),
         )
     };
     let document = |ask: Option<DesktopAsk>| match ask {

@@ -9,9 +9,10 @@
 use alloc::string::String;
 
 use tairix_abi::{
-    decode_capability_ids, resolve_library as resolve_library_policy, validate_bundle_layout,
-    AppInfoHeader, CapabilityId, Duration64, Errno, LibraryScope, LoadImage, PublisherBinding,
-    PublisherId, APPINFO_MAX_CAPABILITIES, SYSCALL_TABLE_HASH_LEN,
+    decode_capability_ids, is_user_saver_bundle, resolve_library as resolve_library_policy,
+    validate_bundle_layout, validate_saver_options, AppInfoHeader, CapabilityId, Duration64, Errno,
+    LibraryScope, LoadImage, ProgramKind, PublisherBinding, PublisherId, APPINFO_FLAGS_SAVER,
+    APPINFO_FLAGS_SAVER_OWN, APPINFO_MAX_CAPABILITIES, SYSCALL_TABLE_HASH_LEN,
 };
 use tairix_caps::CapabilitySet;
 use tairix_crypto::{sha256, Ed25519PublicKey, Ed25519Signature};
@@ -112,6 +113,17 @@ pub struct AppLoaderConfig<'a> {
     pub sink: &'a dyn Sink,
 }
 
+/// How the process a bundle is loaded for is spawned, which a screensaver's
+/// admission turns on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LoadMode {
+    /// A spawn that hands the child no shared region: an ordinary one, or a
+    /// parser sandbox.
+    Ordinary,
+    /// A drawing sandbox: a sandbox handed the one region it presents through.
+    Drawing,
+}
+
 /// The application-bundle loader (Stage 6).
 pub struct AppLoader<'a> {
     cfg: AppLoaderConfig<'a>,
@@ -130,6 +142,14 @@ impl<'a> AppLoader<'a> {
     /// `user_grants` is the launching user's capability set; the granted
     /// ceiling is the manifest request intersected with it. The loader never widens a request.
     ///
+    /// `mode` is how the child is spawned. A screensaver loads only into a
+    /// [`LoadMode::Drawing`] spawn, and nothing else does. A bundle in a
+    /// user's own saver store is
+    /// verified against its own signer key rather than the configured
+    /// [`Verifier`]'s anchor, so it must be a screensaver loading into a
+    /// drawing spawn and declare no privileged feed — it is admitted with
+    /// nothing a signature could have granted.
+    ///
     /// # Errors
     ///
     /// Returns the first [`AppError`] encountered: [`AppError::Store`] for an
@@ -138,9 +158,17 @@ impl<'a> AppLoader<'a> {
     /// for a syscall-hash mismatch, [`AppError::Signature`] for a failed
     /// signature, [`AppError::PublisherCert`] for a publisher the bundle
     /// cannot prove it belongs to, [`AppError::Misplaced`] for a bundle
-    /// launched from a store its signed kind does not run from, or
-    /// [`AppError::ContentHashMismatch`] for tampered contents.
-    pub fn load(&self, bundle: &str, user_grants: &CapabilitySet) -> Result<LoadedApp, AppError> {
+    /// launched from a store its signed kind does not run from,
+    /// [`AppError::DrawingOnly`] for a screensaver outside a drawing spawn or
+    /// another kind inside one,
+    /// [`AppError::PrivilegedFeed`] for a user's saver declaring a privileged
+    /// feed, or [`AppError::ContentHashMismatch`] for tampered contents.
+    pub fn load(
+        &self,
+        bundle: &str,
+        user_grants: &CapabilitySet,
+        mode: LoadMode,
+    ) -> Result<LoadedApp, AppError> {
         let start_ns = self.cfg.clock.now_ns();
         let mut load_ns = 0u64;
         let names = self
@@ -192,19 +220,20 @@ impl<'a> AppLoader<'a> {
             return Err(AppError::InterfaceHashMismatch);
         }
 
-        self.verify_manifest_signature(bundle, &bytes, &header)?;
+        let own_signer = is_user_saver_bundle(bundle);
+        self.verify_manifest_signature(bundle, &bytes, &header, own_signer)?;
         let publisher = self.verify_publisher(bundle, &header)?;
-        if !header
-            .program_kind()
-            .is_some_and(|kind| kind.launchable_from(bundle))
-        {
+        let kind = self.admit_kind(bundle, &header, mode, own_signer)?;
+        // Checked before the bundle is read and hashed, so a manifest that is
+        // refused anyway costs no pass over its contents.
+        if let Err(e) = validate_saver_options(&bytes[AppInfoHeader::WIRE_LEN..], &header) {
             self.audit(
-                events::APP_MISPLACED,
+                events::APP_MANIFEST_INVALID,
                 Level::Warn,
                 bundle,
-                "signed kind does not run from this store",
+                "screensaver options invalid",
             );
-            return Err(AppError::Misplaced);
+            return Err(AppError::Manifest(e));
         }
 
         // One pass reads and hashes the bundle contents and hands back the
@@ -238,13 +267,19 @@ impl<'a> AppLoader<'a> {
         // content-hash, and entry-point verification) is the verify cost.
         let total_ns = self.cfg.clock.now_ns().saturating_sub(start_ns);
         let verify_ns = total_ns.saturating_sub(load_ns);
-        self.audit_loaded(bundle, header.bundle_name(), load_ns, verify_ns, read_bytes);
+        self.audit_loaded(
+            (bundle, header.bundle_name(), own_signer),
+            load_ns,
+            verify_ns,
+            read_bytes,
+        );
         Ok(LoadedApp::new(
             BundleIdentity {
                 id: header.bundle_id().into(),
                 name: header.bundle_name().into(),
                 version: header.bundle_version().into(),
                 publisher,
+                kind,
             },
             run_path,
             run_image,
@@ -357,27 +392,82 @@ impl<'a> AppLoader<'a> {
         })
     }
 
+    /// The signed kind of `bundle`'s manifest `header`, admitted to run from
+    /// where the bundle is and in `mode`: a screensaver only in a drawing
+    /// spawn, and a user's own, self-signed one only when it declares no
+    /// privileged feed.
+    fn admit_kind(
+        &self,
+        bundle: &str,
+        header: &AppInfoHeader,
+        mode: LoadMode,
+        own_signer: bool,
+    ) -> Result<ProgramKind, AppError> {
+        let Some(kind) = header
+            .program_kind()
+            .filter(|kind| kind.launchable_from(bundle))
+        else {
+            self.audit(
+                events::APP_MISPLACED,
+                Level::Warn,
+                bundle,
+                "signed kind does not run from this store",
+            );
+            return Err(AppError::Misplaced);
+        };
+        if !runs_in(kind, mode) {
+            self.audit(
+                events::APP_DRAWING_ONLY,
+                Level::Warn,
+                bundle,
+                drawing_refusal(kind),
+            );
+            return Err(AppError::DrawingOnly);
+        }
+        if own_signer && header.flags & APPINFO_FLAGS_SAVER & !APPINFO_FLAGS_SAVER_OWN != 0 {
+            self.audit(
+                events::APP_FEED_REFUSED,
+                Level::Warn,
+                bundle,
+                "own screensaver declares a privileged feed",
+            );
+            return Err(AppError::PrivilegedFeed);
+        }
+        Ok(kind)
+    }
+
     /// Verify the manifest's Ed25519 signature over the whole manifest
     /// except the signature field: the header prefix concatenated with the
     /// capability/MIME body, so a swapped capability id in the body breaks
     /// it rather than hiding behind a header-only signature.
+    ///
+    /// `own_signer` verifies against the key the manifest names instead of
+    /// the configured [`Verifier`]: proof the bundle is whole, which the
+    /// caller must not take for proof of anything else.
     fn verify_manifest_signature(
         &self,
         bundle: &str,
         bytes: &[u8],
         header: &AppInfoHeader,
+        own_signer: bool,
     ) -> Result<(), AppError> {
         let mut signed = alloc::vec::Vec::with_capacity(
             AppInfoHeader::signed_range().end + (bytes.len() - AppInfoHeader::WIRE_LEN),
         );
         signed.extend_from_slice(&bytes[AppInfoHeader::signed_range()]);
         signed.extend_from_slice(&bytes[AppInfoHeader::WIRE_LEN..]);
-        if self
-            .cfg
-            .verifier
-            .verify(&signed, &header.signature, &header.signer_pubkey)
-            .is_err()
-        {
+        let verified = if own_signer {
+            Ed25519PublicKey::from_bytes(&header.signer_pubkey).is_ok_and(|key| {
+                key.verify(&signed, &Ed25519Signature(header.signature))
+                    .is_ok()
+            })
+        } else {
+            self.cfg
+                .verifier
+                .verify(&signed, &header.signature, &header.signer_pubkey)
+                .is_ok()
+        };
+        if !verified {
             self.audit(
                 events::APP_SIGNATURE_INVALID,
                 Level::Warn,
@@ -464,11 +554,11 @@ impl<'a> AppLoader<'a> {
     ///
     /// `read_bytes` is what the load span moved, so the record states a
     /// throughput rather than a bare duration — a slow store and a large
-    /// bundle look identical without it.
+    /// bundle look identical without it. The signer says whose key admitted
+    /// it: the system's, or a user's own saver's own.
     fn audit_loaded(
         &self,
-        bundle: &str,
-        name: &str,
+        (bundle, name, own_signer): (&str, &str, bool),
         load_ns: u64,
         verify_ns: u64,
         read_bytes: usize,
@@ -489,6 +579,14 @@ impl<'a> AppLoader<'a> {
                         value: tairix_log::FieldValue::Str(name),
                     },
                     Field {
+                        key: "signer",
+                        value: tairix_log::FieldValue::Str(if own_signer {
+                            "own"
+                        } else {
+                            "system"
+                        }),
+                    },
+                    Field {
                         key: "load",
                         value: tairix_log::FieldValue::Duration(Duration64::from_nanos(load_ns)),
                     },
@@ -506,25 +604,68 @@ impl<'a> AppLoader<'a> {
     }
 
     fn audit(&self, id: EventId, level: Level, bundle: &str, detail: &str) {
-        log(
-            self.cfg.sink,
-            &Event {
-                level,
-                id,
-                message: event_message(id),
-                fields: &[
-                    Field {
-                        key: "bundle",
-                        value: tairix_log::FieldValue::Str(bundle),
-                    },
-                    Field {
-                        key: "detail",
-                        value: tairix_log::FieldValue::Str(detail),
-                    },
-                ],
-            },
-        );
+        audit_to(self.cfg.sink, id, level, bundle, detail);
     }
+}
+
+/// Which way a bundle of `kind` broke the drawing sandbox's one rule.
+const fn drawing_refusal(kind: ProgramKind) -> &'static str {
+    if matches!(kind, ProgramKind::Screensaver) {
+        "a screensaver outside the drawing sandbox"
+    } else {
+        "another kind inside the drawing sandbox"
+    }
+}
+
+/// Whether a program of `kind` may run in a spawn of `mode`: a screensaver
+/// in a drawing spawn alone, and a drawing spawn runs nothing else.
+fn runs_in(kind: ProgramKind, mode: LoadMode) -> bool {
+    (kind == ProgramKind::Screensaver) == (mode == LoadMode::Drawing)
+}
+
+/// Hold a bundle a launch cache serves without the gate to the one rule that
+/// turns on the spawn rather than on the bundle: a screensaver loads only into
+/// a [`LoadMode::Drawing`] spawn, and nothing else does. Audited as the gate's
+/// own refusal is.
+///
+/// # Errors
+///
+/// [`AppError::DrawingOnly`] for a screensaver outside a drawing spawn or
+/// another kind inside one.
+pub fn admit_cached(app: &LoadedApp, mode: LoadMode, sink: &dyn Sink) -> Result<(), AppError> {
+    if runs_in(app.kind(), mode) {
+        return Ok(());
+    }
+    let run = app.run_path();
+    audit_to(
+        sink,
+        events::APP_DRAWING_ONLY,
+        Level::Warn,
+        run.strip_suffix("/Run").unwrap_or(run),
+        drawing_refusal(app.kind()),
+    );
+    Err(AppError::DrawingOnly)
+}
+
+fn audit_to(sink: &dyn Sink, id: EventId, level: Level, bundle: &str, detail: &str) {
+    log(
+        sink,
+        &Event {
+            level,
+            id,
+            message: event_message(id),
+            fields: &[
+                Field {
+                    key: "bundle",
+                    value: tairix_log::FieldValue::Str(bundle),
+                },
+                Field {
+                    key: "detail",
+                    value: tairix_log::FieldValue::Str(detail),
+                },
+            ],
+        },
+    );
 }
 
 /// Constant-time inequality over two 32-byte digests, so a hostile bundle
@@ -549,13 +690,18 @@ fn event_message(id: EventId) -> &'static str {
         events::LIBRARY_REFUSED => "shared library refused",
         events::APP_RUN_IMAGE_INVALID => "application run image invalid",
         events::APP_PUBLISHER_INVALID => "application publisher unattributable",
+        events::APP_MISPLACED => "application launched from the wrong store",
+        events::APP_DRAWING_ONLY => {
+            "screensaver refused outside the drawing sandbox, or another kind inside it"
+        }
+        events::APP_FEED_REFUSED => "own screensaver refused a system feed",
         _ => "load gate event",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{event_message, AppLoader, AppLoaderConfig};
+    use super::{event_message, AppLoader, AppLoaderConfig, LoadMode};
     use crate::bundle::{BundleContents, BundleStore, Verifier};
     use crate::error::AppError;
     use crate::events;
@@ -619,7 +765,7 @@ mod tests {
             mime_count: 1,
             browse_count: 0,
             kind: ProgramKind::Application.to_wire(),
-            reserved: 0,
+            option_count: 0,
             id_len: u8::try_from("com.example.app".len()).unwrap(),
             name_len: u8::try_from("Example".len()).unwrap(),
             version_len: u8::try_from("1.0".len()).unwrap(),
@@ -773,6 +919,8 @@ mod tests {
         /// The `read_bytes` the last `APP_LOADED` record carried — the load
         /// span's denominator.
         loaded_bytes: RefCell<Option<u64>>,
+        /// Whose key the last `APP_LOADED` record says admitted the bundle.
+        loaded_signer: RefCell<Option<&'static str>>,
     }
     impl RecordingSink {
         fn new() -> Self {
@@ -780,6 +928,7 @@ mod tests {
                 events: RefCell::new(Vec::new()),
                 loaded_phases: RefCell::new(None),
                 loaded_bytes: RefCell::new(None),
+                loaded_signer: RefCell::new(None),
             }
         }
         fn count(&self, id: EventId) -> usize {
@@ -802,6 +951,12 @@ mod tests {
                 *self.loaded_bytes.borrow_mut() =
                     event.fields.iter().find_map(|f| match (f.key, f.value) {
                         ("read_bytes", tairix_log::FieldValue::UnsignedInt(n)) => Some(n),
+                        _ => None,
+                    });
+                *self.loaded_signer.borrow_mut() =
+                    event.fields.iter().find_map(|f| match (f.key, f.value) {
+                        ("signer", tairix_log::FieldValue::Str("own")) => Some("own"),
+                        ("signer", tairix_log::FieldValue::Str("system")) => Some("system"),
                         _ => None,
                     });
             }
@@ -857,7 +1012,11 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         let app = loader
-            .load("/System/Applications/Example.app", &CapabilitySet::empty())
+            .load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary,
+            )
             .expect("loads");
 
         let header = AppInfoHeader::from_bytes(&store.appinfo).expect("decodes");
@@ -903,7 +1062,11 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::PublisherCert)
         );
         assert_eq!(sink.count(events::APP_PUBLISHER_INVALID), 1);
@@ -925,7 +1088,11 @@ mod tests {
             let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
             assert_eq!(
-                loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+                loader.load(
+                    "/System/Applications/Example.app",
+                    &CapabilitySet::empty(),
+                    LoadMode::Ordinary
+                ),
                 Err(AppError::Manifest(Errno::SignatureInvalid))
             );
             assert_eq!(sink.count(events::APP_PUBLISHER_INVALID), 1);
@@ -944,7 +1111,11 @@ mod tests {
         // The user holds only NET_RAW, so FS_MOUNT is dropped on intersect.
         let user = cap_set(&[CapabilityId::NET_RAW]);
         let app = loader
-            .load("/System/Applications/Example.app", &user)
+            .load(
+                "/System/Applications/Example.app",
+                &user,
+                LoadMode::Ordinary,
+            )
             .expect("loads");
 
         assert_eq!(app.id(), "com.example.app");
@@ -996,6 +1167,7 @@ mod tests {
             .load(
                 "/System/Applications/Example.app",
                 &cap_set(&[CapabilityId::NET_RAW]),
+                LoadMode::Ordinary,
             )
             .expect("loads");
 
@@ -1026,7 +1198,7 @@ mod tests {
             header.kind = kind.to_wire();
             store.appinfo[..AppInfoHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
             AppLoader::new(cfg(&store, &AcceptVerifier, &clock, &sink))
-                .load(bundle, &CapabilitySet::empty())
+                .load(bundle, &CapabilitySet::empty(), LoadMode::Ordinary)
                 .map(|_| ())
         };
         assert_eq!(
@@ -1057,7 +1229,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         let app = loader
-            .load("/System/Applications/Example.app", &CapabilitySet::empty())
+            .load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary,
+            )
             .expect("loads");
         assert!(app.granted().is_empty());
     }
@@ -1071,7 +1247,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::Layout(BundleLayoutError::UnknownEntry))
         );
         assert_eq!(sink.count(events::APP_LAYOUT_REJECTED), 1);
@@ -1086,7 +1266,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::Layout(BundleLayoutError::MissingRun))
         );
     }
@@ -1100,7 +1284,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::Manifest(Errno::BadMagic))
         );
         assert_eq!(sink.count(events::APP_MANIFEST_INVALID), 1);
@@ -1116,7 +1304,11 @@ mod tests {
         config.accepted_abi_version = ABI_VERSION_CURRENT + 1;
         let loader = AppLoader::new(config);
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::Manifest(Errno::AbiVersionUnsupported))
         );
     }
@@ -1136,7 +1328,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::InterfaceHashMismatch)
         );
         assert_eq!(sink.count(events::APP_INTERFACE_MISMATCH), 1);
@@ -1150,7 +1346,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::Signature)
         );
         assert_eq!(sink.count(events::APP_SIGNATURE_INVALID), 1);
@@ -1165,7 +1365,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::ContentHashMismatch)
         );
         assert_eq!(sink.count(events::APP_CONTENT_MISMATCH), 1);
@@ -1180,7 +1384,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::Store(Errno::NotFound))
         );
         assert_eq!(sink.count(events::APP_STORE_ERROR), 1);
@@ -1197,7 +1405,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::Manifest(Errno::BufferTooSmall))
         );
     }
@@ -1284,7 +1496,11 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         let app = loader
-            .load("/System/Applications/Example.app", &CapabilitySet::empty())
+            .load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary,
+            )
             .expect("loads");
         let libs = app.libraries();
         assert_eq!(libs.len(), 2);
@@ -1311,7 +1527,11 @@ mod tests {
 
         let user = cap_set(&[CapabilityId::NET_RAW]);
         let app = loader
-            .load("/System/Applications/Example.app", &user)
+            .load(
+                "/System/Applications/Example.app",
+                &user,
+                LoadMode::Ordinary,
+            )
             .expect("loads");
         assert!(app.granted().contains(CapabilityId::NET_RAW));
         assert!(!app.granted().contains(CapabilityId::FS_MOUNT));
@@ -1329,7 +1549,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::Library(LibraryError::OutsidePolicy))
         );
         assert_eq!(sink.count(events::LIBRARY_REFUSED), 1);
@@ -1344,7 +1568,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::RunImage(RxeError::InterfaceHashMismatch))
         );
         assert_eq!(sink.count(events::APP_RUN_IMAGE_INVALID), 1);
@@ -1359,7 +1587,11 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert!(matches!(
-            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
+            loader.load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary
+            ),
             Err(AppError::RunImage(_))
         ));
         assert_eq!(sink.count(events::APP_RUN_IMAGE_INVALID), 1);
@@ -1382,7 +1614,11 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         loader
-            .load("/System/Applications/Example.app", &CapabilitySet::empty())
+            .load(
+                "/System/Applications/Example.app",
+                &CapabilitySet::empty(),
+                LoadMode::Ordinary,
+            )
             .expect("loads");
 
         assert_eq!(sink.count(events::APP_LOADED), 1);
@@ -1404,6 +1640,8 @@ mod tests {
         );
     }
 
+    /// Regression: a refused misplaced bundle was logged under the generic
+    /// message, telling a reader nothing.
     #[test]
     fn event_messages_are_total() {
         assert_eq!(
@@ -1411,5 +1649,202 @@ mod tests {
             "application bundle loaded"
         );
         assert_eq!(event_message(EventId(1)), "load gate event");
+        for id in events::ALL {
+            assert_ne!(event_message(id), "load gate event", "{id:?}");
+        }
+    }
+
+    const SYSTEM_SAVER: &str = "/System/Screensavers/Clock.app";
+    const OWN_SAVER: &str = "/Users/ada/Library/Screensavers/Waves.app";
+    const OWN_SEED: [u8; 32] = [0x5A; 32];
+
+    fn keep_option() -> tairix_abi::saver::SaverOption {
+        tairix_abi::saver::SaverOption::new(
+            tairix_abi::saver::OptionKey::new("keep").unwrap(),
+            (
+                tairix_abi::bounded_text::BoundedText::new("Keep").unwrap(),
+                tairix_abi::bounded_text::BoundedText::EMPTY,
+            ),
+            tairix_abi::saver::SaverOptionKind::Switch { default: true },
+        )
+        .unwrap()
+    }
+
+    /// A screensaver manifest declaring `flags` and `options`, signed by
+    /// `seed`'s key over exactly the message the gate verifies.
+    fn saver_manifest(
+        flags: u32,
+        options: &[[u8; tairix_abi::saver::SAVER_OPTION_ENTRY_LEN]],
+        seed: [u8; 32],
+    ) -> Vec<u8> {
+        let key = tairix_crypto::Ed25519SecretKey::from_seed(&seed);
+        let signer = *key.public_key().as_bytes();
+        let mut header =
+            AppInfoHeader::from_bytes(&build_manifest(&[], KERNEL_HASH, CONTENT_HASH)).unwrap();
+        header.kind = ProgramKind::Screensaver.to_wire();
+        header.mime_count = 0;
+        header.flags = flags;
+        header.option_count = u8::try_from(options.len()).unwrap();
+        header.signer_pubkey = signer;
+        header.publisher_pubkey = signer;
+        let mut body = Vec::new();
+        for entry in options {
+            body.extend_from_slice(entry);
+        }
+        let wire = header.to_le_bytes();
+        let mut message = wire[AppInfoHeader::signed_range()].to_vec();
+        message.extend_from_slice(&body);
+        header.signature = *key.sign(&message).as_bytes();
+        let mut out = header.to_le_bytes().to_vec();
+        out.extend_from_slice(&body);
+        out
+    }
+
+    fn saver_store(appinfo: Vec<u8>) -> MockStore {
+        MockStore {
+            appinfo,
+            ..MockStore::good(&[])
+        }
+    }
+
+    fn load_with(
+        store: &MockStore,
+        verifier: &dyn Verifier,
+        bundle: &str,
+        mode: LoadMode,
+    ) -> (Result<crate::bundle::LoadedApp, AppError>, RecordingSink) {
+        let sink = RecordingSink::new();
+        let clock = StepClock::new();
+        let result = AppLoader::new(cfg(store, verifier, &clock, &sink)).load(
+            bundle,
+            &CapabilitySet::empty(),
+            mode,
+        );
+        (result, sink)
+    }
+
+    #[test]
+    fn a_screensaver_loads_only_into_a_drawing_spawn() {
+        let store = saver_store(saver_manifest(0, &[keep_option().to_entry()], OWN_SEED));
+        let (refused, sink) = load_with(&store, &AcceptVerifier, SYSTEM_SAVER, LoadMode::Ordinary);
+        assert_eq!(refused, Err(AppError::DrawingOnly));
+        assert_eq!(sink.count(events::APP_DRAWING_ONLY), 1);
+        let (loaded, _) = load_with(&store, &AcceptVerifier, SYSTEM_SAVER, LoadMode::Drawing);
+        let app = loaded.expect("a system saver loads into a drawing spawn");
+        assert_eq!(app.kind(), ProgramKind::Screensaver);
+        assert!(app.granted().is_empty());
+    }
+
+    #[test]
+    fn a_cached_screensaver_is_held_to_its_spawn_again() {
+        let store = saver_store(saver_manifest(0, &[], OWN_SEED));
+        let (loaded, _) = load_with(&store, &AcceptVerifier, SYSTEM_SAVER, LoadMode::Drawing);
+        let app = loaded.expect("loads");
+        let sink = RecordingSink::new();
+        assert_eq!(super::admit_cached(&app, LoadMode::Drawing, &sink), Ok(()));
+        assert_eq!(
+            super::admit_cached(&app, LoadMode::Ordinary, &sink),
+            Err(AppError::DrawingOnly)
+        );
+        assert_eq!(sink.count(events::APP_DRAWING_ONLY), 1);
+        let (command, _) = load_with(
+            &MockStore::good(&[]),
+            &AcceptVerifier,
+            "/System/Applications/Example.app",
+            LoadMode::Ordinary,
+        );
+        let command = command.expect("loads");
+        assert_eq!(
+            super::admit_cached(&command, LoadMode::Ordinary, &sink),
+            Ok(())
+        );
+        assert_eq!(
+            super::admit_cached(&command, LoadMode::Drawing, &sink),
+            Err(AppError::DrawingOnly),
+            "a drawing spawn runs savers alone"
+        );
+        assert_eq!(sink.count(events::APP_DRAWING_ONLY), 2);
+    }
+
+    #[test]
+    fn a_system_saver_answers_to_the_anchor() {
+        let store = saver_store(saver_manifest(0, &[], OWN_SEED));
+        let (refused, _) = load_with(&store, &RejectVerifier, SYSTEM_SAVER, LoadMode::Drawing);
+        assert_eq!(refused, Err(AppError::Signature));
+    }
+
+    #[test]
+    fn a_users_own_saver_is_verified_against_its_own_key() {
+        let store = saver_store(saver_manifest(0, &[keep_option().to_entry()], OWN_SEED));
+        let (loaded, sink) = load_with(&store, &RejectVerifier, OWN_SAVER, LoadMode::Drawing);
+        assert!(loaded.is_ok(), "the anchor is not asked: {loaded:?}");
+        assert_eq!(
+            *sink.loaded_signer.borrow(),
+            Some("own"),
+            "its admission names its own key"
+        );
+        let mut forged = store.appinfo.clone();
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        let (refused, sink) = load_with(
+            &saver_store(forged),
+            &AcceptVerifier,
+            OWN_SAVER,
+            LoadMode::Drawing,
+        );
+        assert_eq!(refused, Err(AppError::Signature));
+        assert_eq!(sink.count(events::APP_SIGNATURE_INVALID), 1);
+        let (ordinary, _) = load_with(&store, &AcceptVerifier, OWN_SAVER, LoadMode::Ordinary);
+        assert_eq!(ordinary, Err(AppError::DrawingOnly));
+    }
+
+    #[test]
+    fn a_users_own_saver_may_not_ask_for_a_privileged_feed() {
+        for feed in [
+            tairix_abi::APPINFO_FLAG_FEED_MACHINE,
+            tairix_abi::APPINFO_FLAG_FEED_KEEP,
+            tairix_abi::APPINFO_FLAG_FEED_SLIDES,
+        ] {
+            let store = saver_store(saver_manifest(feed, &[], OWN_SEED));
+            let (refused, sink) = load_with(&store, &AcceptVerifier, OWN_SAVER, LoadMode::Drawing);
+            assert_eq!(refused, Err(AppError::PrivilegedFeed));
+            assert_eq!(sink.count(events::APP_FEED_REFUSED), 1);
+            let (system, _) = load_with(&store, &AcceptVerifier, SYSTEM_SAVER, LoadMode::Drawing);
+            assert!(system.is_ok(), "a system saver is given its feed");
+        }
+        let resources =
+            tairix_abi::APPINFO_FLAG_SAVER_PARALLEL | tairix_abi::APPINFO_FLAG_SAVER_LARGE_MEMORY;
+        let store = saver_store(saver_manifest(resources, &[], OWN_SEED));
+        let (loaded, _) = load_with(&store, &AcceptVerifier, OWN_SAVER, LoadMode::Drawing);
+        assert!(loaded.is_ok(), "resource needs are not feeds");
+    }
+
+    /// A program of another kind dropped in a saver store is not one, however
+    /// it is signed.
+    #[test]
+    fn a_users_saver_store_holds_only_screensavers() {
+        let mut header = AppInfoHeader::from_bytes(&saver_manifest(0, &[], OWN_SEED)).unwrap();
+        header.kind = ProgramKind::Command.to_wire();
+        let key = tairix_crypto::Ed25519SecretKey::from_seed(&OWN_SEED);
+        let wire = header.to_le_bytes();
+        header.signature = *key.sign(&wire[AppInfoHeader::signed_range()]).as_bytes();
+        let command = saver_store(header.to_le_bytes().to_vec());
+        let (misplaced, sink) = load_with(&command, &AcceptVerifier, OWN_SAVER, LoadMode::Drawing);
+        assert_eq!(misplaced, Err(AppError::Misplaced));
+        assert_eq!(sink.count(events::APP_MISPLACED), 1);
+    }
+
+    #[test]
+    fn a_saver_whose_options_do_not_decode_is_refused() {
+        let mut entry = keep_option().to_entry();
+        entry[0] = 0;
+        let store = saver_store(saver_manifest(0, &[entry], OWN_SEED));
+        let (refused, sink) = load_with(&store, &AcceptVerifier, SYSTEM_SAVER, LoadMode::Drawing);
+        assert_eq!(refused, Err(AppError::Manifest(Errno::BadMagic)));
+        assert_eq!(sink.count(events::APP_MANIFEST_INVALID), 1);
+        let twice = [keep_option().to_entry(), keep_option().to_entry()];
+        let store = saver_store(saver_manifest(0, &twice, OWN_SEED));
+        let (refused, _) = load_with(&store, &AcceptVerifier, SYSTEM_SAVER, LoadMode::Drawing);
+        assert_eq!(refused, Err(AppError::Manifest(Errno::OutOfRange)));
     }
 }

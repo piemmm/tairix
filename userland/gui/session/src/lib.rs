@@ -314,7 +314,12 @@ pub use resolution::{
     DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE,
     TRIAL_SECONDS, TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE,
 };
-pub use saver::{SaverIdentity, SaverSetup, Screensaver, Waking, PREVIEW_STEADY_NS};
+pub use saver::{
+    SaverContext, SaverEnd, SaverLaunch, SaverLauncher, SaverSetup, Screensaver, Waking,
+    PREVIEW_STEADY_NS, SAVER_CATALOGUE_SHOWN, SAVER_CATALOGUE_SHOWN_MESSAGE, SAVER_DISMISSED,
+    SAVER_DISMISSED_MESSAGE, SAVER_ENDED, SAVER_ENDED_MESSAGE, SAVER_REFUSED,
+    SAVER_REFUSED_MESSAGE, SAVER_SHOWN, SAVER_SHOWN_MESSAGE,
+};
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{
@@ -341,9 +346,9 @@ pub use tasks::TaskBridge;
 pub use thumbs::WindowThumbnails;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use wallpaper::{
-    land_preview, preview_source, Acquisition, Prepared, PreviewBudget, PreviewDone, PreviewJob,
-    PreviewRequest, PreviewRun, PreviewTarget, WallpaperDesk, WallpaperJob, WallpaperService,
-    WallpaperSource,
+    land_preview, preview_source, slide_positions, slide_source, Acquisition, Prepared,
+    PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, SlideWant,
+    WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
 };
 pub use windows::{
     chain_geometry, desktop_info, focus_reports, resize_drag_event, resolve_window_identities,

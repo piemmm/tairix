@@ -17,7 +17,7 @@ use tairix_abi::driver::display::{
 };
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::switchboard_ipc::{
-    CommandSection, FrameReport, SeatReport, SwitchboardCommand, SwitchboardRequest,
+    CommandSection, FrameReport, MachineReport, SeatReport, SwitchboardCommand, SwitchboardRequest,
     OWNER_BUNDLE_MAX, SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
@@ -62,7 +62,6 @@ use tairix_wm::{
 };
 
 use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind};
-use crate::saver::monitor_fixtures::unread;
 use crate::shell::SettleWork;
 use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, load_icon_set, load_library,
@@ -72,12 +71,11 @@ use crate::{
     ArtworkSandbox, BundleIndex, DesktopSession, DesktopShell, DocumentAuthority, DocumentRelay,
     FrameContent, FramePacer, FrameReportGate, Handover, IconRasteriser, InputSource, Launch,
     LaunchHost, LaunchTable, LaunchTarget, LockOutcome, OwnerBundleGate, OwnerWindow,
-    PresentedOwners, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver,
-    SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome,
-    ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
-    SwitchboardServe, TaskBridge, TaskbarPresenter, UnlockAnswer, UnlockAsk, DESKTOP_REVEALED,
-    DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
-    MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
+    PresentedOwners, ScreenFade, ScreenLock, SessionFileReader, SessionInputResponse,
+    SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox,
+    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
+    UnlockAnswer, UnlockAsk, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
+    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_svg::font::NoFonts;
 use tairix_window::WindowSizing;
@@ -101,11 +99,20 @@ pub(crate) struct MemoryAssets {
     /// Every path read, in order, so a test can count reads. Shared rather
     /// than owned because the store walk reads through a shared borrow.
     reads: core::cell::RefCell<Vec<String>>,
+    /// A directory whose listing is refused, as a store the session may not
+    /// read is.
+    unlistable: Option<String>,
 }
 
 impl MemoryAssets {
     pub(crate) fn with(mut self, path: &str, bytes: &[u8]) -> Self {
         self.files.push((String::from(path), bytes.to_vec()));
+        self
+    }
+
+    /// These assets with the directory `path` refusing to be listed.
+    pub(crate) fn with_unlistable(mut self, path: &str) -> Self {
+        self.unlistable = Some(String::from(path));
         self
     }
 
@@ -146,6 +153,9 @@ impl SessionFileReader for MemoryAssets {
 /// which is how an absent store root reads.
 impl tairix_appstore::StoreReader for MemoryAssets {
     fn list_dir(&self, path: &str) -> Result<Option<Vec<tairix_appstore::DirEntry>>, Errno> {
+        if self.unlistable.as_deref() == Some(path) {
+            return Err(Errno::PermissionDenied);
+        }
         let prefix = format!("{path}/");
         let mut entries: Vec<tairix_appstore::DirEntry> = Vec::new();
         for (held, _) in &self.files {
@@ -8278,7 +8288,7 @@ fn a_settings_only_request_refused_to_another_caller_is_recorded() {
     shell.set_own_app(Some(own));
     let refused = || REFUSALS.0.load(core::sync::atomic::Ordering::Relaxed);
     let desktop = tairix_wallpaper::DesktopSettings::default();
-    let document = "screensaver.kind = life\n";
+    let document = "screensaver.saver = os.tairix.saver.life\n";
 
     assert_eq!(shell.notify_sources(Some(&settings)).map(<[_]>::len), Ok(0));
     assert_eq!(
@@ -8303,7 +8313,11 @@ fn a_settings_only_request_refused_to_another_caller_is_recorded() {
 /// only while nothing holds the seat, and only by the screensaver's keys.
 #[test]
 fn a_screensaver_preview_is_asked_for_by_settings_alone_by_its_own_keys() {
-    use tairix_wallpaper::{DesktopSettings, Pace, ScreensaverKind};
+    use tairix_abi::bounded_text::BoundedText;
+    use tairix_abi::saver::{
+        Choice, ChoiceValue, Choices, OptionKey, SaverOption, SaverOptionKind, SaverValue,
+    };
+    use tairix_wallpaper::DesktopSettings;
 
     let (mut shell, _comp) = headless_desktop();
     let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
@@ -8313,7 +8327,8 @@ fn a_screensaver_preview_is_asked_for_by_settings_alone_by_its_own_keys() {
     let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
     shell.set_own_app(Some(own));
     let desktop = DesktopSettings::default();
-    let document = "screensaver.kind = life\nscreensaver.life.speed = fast\n";
+    let document =
+        "screensaver.saver = os.tairix.saver.life\nsaver.os.tairix.saver.life.speed = fast\n";
     let mut ask = |caller: Option<&tairix_abi::AppIdentity>, document: &str, seat_free: bool| {
         shell.request_screensaver_preview(caller, document, (&desktop, seat_free))
     };
@@ -8330,8 +8345,13 @@ fn a_screensaver_preview_is_asked_for_by_settings_alone_by_its_own_keys() {
         "a key outside the screensaver's own"
     );
     assert_eq!(
-        ask(Some(&settings), "screensaver.life.speed = warp\n", true),
-        Err(Errno::OutOfRange)
+        ask(
+            Some(&settings),
+            "saver.os.tairix.saver.life.speed = Fast\n",
+            true
+        ),
+        Err(Errno::OutOfRange),
+        "a value no option could hold"
     );
     assert!(shell.take_screensaver_preview().is_none());
 
@@ -8340,10 +8360,32 @@ fn a_screensaver_preview_is_asked_for_by_settings_alone_by_its_own_keys() {
         Ok(())
     );
     let asked = shell.take_screensaver_preview().expect("a preview");
-    assert_eq!(asked.kind, ScreensaverKind::Life);
-    assert_eq!(asked.options.life.speed, Pace::Fast);
+    assert_eq!(asked.choice.as_str(), "os.tairix.saver.life");
+    let choice = |value: &str| Choice {
+        value: ChoiceValue::new(value).expect("a value"),
+        label: BoundedText::new(value).expect("a label"),
+    };
+    let speed = SaverOption::new(
+        OptionKey::new("speed").expect("a key"),
+        (
+            BoundedText::new("Speed").expect("a label"),
+            BoundedText::EMPTY,
+        ),
+        SaverOptionKind::Choice {
+            choices: Choices::new(&[choice("slow"), choice("normal"), choice("fast")])
+                .expect("three"),
+            default: 1,
+        },
+    )
+    .expect("an option");
+    let life = tairix_abi::BundleId::new("os.tairix.saver.life").expect("an identifier");
     assert_eq!(
-        asked.options.life.cells, desktop.screensaver_options.life.cells,
+        asked.values.value(&life, &speed),
+        SaverValue::Choice(ChoiceValue::new("fast").expect("a value"))
+    );
+    assert_eq!(
+        (&asked.slides, asked.names),
+        (&desktop.slides, desktop.task_names),
         "a key the pane did not name keeps what the desktop holds"
     );
     assert!(
@@ -8913,7 +8955,7 @@ fn a_caller_launched_from_another_bundle_is_refused() {
     let mut launched = monitor_launched();
     launched.record(41, "Editor", "/System/Applications/Editor.app/Run");
     let mut relaunches = Relaunches::default();
-    let mut saver = Screensaver::new();
+    let mut saver = unwatched;
 
     let refusal = serve_switchboard_request(
         SwitchboardServe {
@@ -8927,8 +8969,7 @@ fn a_caller_launched_from_another_bundle_is_refused() {
                     .push((String::from(run_path), String::from(label)));
             },
             self_proc_id: session_proc_id(),
-            saver: &mut saver,
-            now_ns: 0,
+            machine: &mut saver,
         },
         41,
         &SwitchboardRequest::PublishSummary {
@@ -9117,19 +9158,19 @@ fn serve_as_monitor(
         launched,
         owners,
         relaunches,
-        &mut Screensaver::new(),
+        &mut unwatched,
         &request.to_le_bytes(),
     )
 }
 
 /// Serve one frame of `bytes` as the attested monitor would send it, with
-/// `saver` the screensaver a machine report is handed to.
+/// `machine` handing a machine report to the screensaver.
 fn serve_frame_as_monitor(
     (shell, comp): (&mut DesktopShell, &mut Compositor),
     launched: &mut LaunchTable,
     owners: &dyn OwnerWindow,
     relaunches: &mut Relaunches,
-    saver: &mut Screensaver,
+    machine: &mut dyn FnMut(MachineReport, &mut Compositor) -> bool,
     bytes: &[u8],
 ) -> Result<SwitchboardOutcome, SwitchboardRefusal> {
     serve_switchboard_request(
@@ -9144,8 +9185,7 @@ fn serve_frame_as_monitor(
                     .push((String::from(run_path), String::from(label)));
             },
             self_proc_id: session_proc_id(),
-            saver,
-            now_ns: 0,
+            machine,
         },
         MONITOR_PID,
         bytes,
@@ -9211,7 +9251,7 @@ fn an_unattested_caller_is_refused_for_every_operation() {
         let mut launched = monitor_launched();
         launched.record(41, "Editor", "/System/Applications/Editor.app/Run");
         let mut relaunches = Relaunches::default();
-        let mut saver = Screensaver::new();
+        let mut saver = unwatched;
 
         let refusal = serve_switchboard_request(
             SwitchboardServe {
@@ -9225,8 +9265,7 @@ fn an_unattested_caller_is_refused_for_every_operation() {
                         .push((String::from(run_path), String::from(label)));
                 },
                 self_proc_id: session_proc_id(),
-                saver: &mut saver,
-                now_ns: 0,
+                machine: &mut saver,
             },
             // No launch record of its own: an orphan, a foreign process,
             // or a copy launched by hand.
@@ -9266,7 +9305,7 @@ fn a_malformed_switchboard_frame_is_refused() {
         &mut launched,
         &FakeOwnerWindows::none(),
         &mut relaunches,
-        &mut Screensaver::new(),
+        &mut unwatched,
         b"not a switchboard frame",
     )
     .expect_err("a malformed frame is refused");
@@ -9644,30 +9683,23 @@ fn a_refused_send_leaves_the_owner_to_be_told_on_the_next_strip_change() {
     assert_eq!(owner_bundles(&accepting).len(), 1);
 }
 
-/// A screensaver showing the System Monitor on `comp`.
-fn monitoring(comp: &mut Compositor) -> Screensaver {
-    let mut saver = Screensaver::new();
-    let identity = SaverIdentity::default();
-    let theme = Theme::dark();
-    let options = tairix_wallpaper::ScreensaverOptions::default();
-    assert!(saver.start(
-        tairix_wallpaper::ScreensaverKind::SystemMonitor,
-        SaverSetup {
-            ground: None,
-            catalog: &[],
-            wall: None,
-            civil: tairix_tz::CivilClock::UTC,
-            identity: &identity,
-            theme: &theme,
-            options: &options,
-            tracers: None,
-            memory: crate::saver::raytrace::PLAIN.memory,
-            tell_detail: crate::saver::raytrace::PLAIN.tell,
-        },
-        comp,
-        0,
-    ));
-    saver
+/// A machine report nobody draws: no screensaver given the machine feed is
+/// up.
+fn unwatched(_: MachineReport, _: &mut Compositor) -> bool {
+    false
+}
+
+/// A machine report a saver given the machine feed draws.
+fn watched(_: MachineReport, _: &mut Compositor) -> bool {
+    true
+}
+
+/// A report that read nothing.
+fn unread() -> MachineReport {
+    MachineReport::unread(
+        tairix_abi::switchboard_ipc::ReportPeriod::from_millis(2_000).expect("a period"),
+        tairix_abi::switchboard_ipc::MachineScope::Machine,
+    )
 }
 
 #[test]
@@ -9675,8 +9707,7 @@ fn a_machine_report_reaches_a_system_monitor_that_is_up() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = monitor_launched();
-    let mut saver = monitoring(&mut comp);
-    assert!(saver.wants_machine_reports());
+    let mut saver = watched;
 
     let outcome = serve_frame_as_monitor(
         (&mut shell, &mut comp),
@@ -9697,7 +9728,7 @@ fn a_machine_report_nobody_watches_is_answered_as_unread() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = monitor_launched();
-    let mut saver = Screensaver::new();
+    let mut saver = unwatched;
 
     let outcome = serve_frame_as_monitor(
         (&mut shell, &mut comp),
@@ -9716,7 +9747,6 @@ fn a_machine_report_nobody_watches_is_answered_as_unread() {
         tairix_abi::reply::decode_status_reply(&reply[..len]),
         Err(Errno::BrokenPipe)
     );
-    assert!(!saver.is_shown());
 }
 
 /// The report is drawn over the lock, so who sent it is checked before a byte
@@ -9726,7 +9756,7 @@ fn a_machine_report_from_anyone_but_the_launched_monitor_is_refused_unread() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = monitor_launched();
-    let mut saver = monitoring(&mut comp);
+    let mut saver = watched;
 
     let refusal = serve_switchboard_request(
         SwitchboardServe {
@@ -9736,8 +9766,7 @@ fn a_machine_report_from_anyone_but_the_launched_monitor_is_refused_unread() {
             owner_windows: &FakeOwnerWindows::none(),
             relaunch: &mut |_: &mut LaunchTable, _: &str, _: &str| {},
             self_proc_id: session_proc_id(),
-            saver: &mut saver,
-            now_ns: 0,
+            machine: &mut saver,
         },
         MONITOR_PID + 1,
         b"SWM1 and then nothing a decoder should ever see",
@@ -9751,7 +9780,7 @@ fn a_malformed_machine_report_is_refused() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = monitor_launched();
-    let mut saver = monitoring(&mut comp);
+    let mut saver = watched;
     let mut bytes = unread().to_le_bytes();
     bytes[6] = 0xff;
     bytes[7] = 0xff;
@@ -9818,7 +9847,7 @@ fn a_network_report_from_the_launched_monitor_reaches_the_bar() {
         &mut launched,
         &FakeOwnerWindows::none(),
         &mut Relaunches::default(),
-        &mut Screensaver::new(),
+        &mut unwatched,
         &connected_network().to_le_bytes(),
     );
 
@@ -9840,7 +9869,7 @@ fn a_network_report_from_anyone_but_the_launched_monitor_is_refused_unread() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = monitor_launched();
-    let mut saver = Screensaver::new();
+    let mut saver = unwatched;
 
     let refusal = serve_switchboard_request(
         SwitchboardServe {
@@ -9850,8 +9879,7 @@ fn a_network_report_from_anyone_but_the_launched_monitor_is_refused_unread() {
             owner_windows: &FakeOwnerWindows::none(),
             relaunch: &mut |_: &mut LaunchTable, _: &str, _: &str| {},
             self_proc_id: session_proc_id(),
-            saver: &mut saver,
-            now_ns: 0,
+            machine: &mut saver,
         },
         MONITOR_PID + 1,
         &connected_network().to_le_bytes(),
@@ -9874,7 +9902,7 @@ fn a_malformed_network_report_is_refused_and_states_nothing() {
         &mut launched,
         &FakeOwnerWindows::none(),
         &mut Relaunches::default(),
-        &mut Screensaver::new(),
+        &mut unwatched,
         &bytes,
     );
 
@@ -11540,28 +11568,18 @@ fn a_lock_refused_its_frame_over_a_grown_screen_stays_uncovered_without_spinning
 /// whole screen each time.
 #[test]
 fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
+    type Blank = crate::Screensaver<crate::saver::fixtures::Pipes, tairix_log::DiscardSink>;
     let blank = |comp: &mut Compositor| {
-        let mut saver = crate::Screensaver::new();
-        let identity = crate::SaverIdentity::default();
-        let theme = Theme::dark();
-        let options = tairix_wallpaper::ScreensaverOptions::default();
-        let setup = crate::SaverSetup {
+        let mut saver = Blank::new(tairix_log::DiscardSink);
+        let setup = crate::SaverSetup::<crate::saver::fixtures::Launches> {
             ground: None,
-            catalog: &[],
-            wall: None,
-            civil: tairix_tz::CivilClock::UTC,
-            identity: &identity,
-            theme: &theme,
-            options: &options,
-            tracers: None,
-            memory: crate::saver::raytrace::PLAIN.memory,
-            tell_detail: crate::saver::raytrace::PLAIN.tell,
+            launch: None,
         };
-        assert!(saver.start(tairix_wallpaper::ScreensaverKind::Blank, setup, comp, 0));
+        assert_eq!(saver.start(setup, comp, 0), Ok(true));
         saver
     };
     let shell = shell();
-    let keep = |saver: &crate::Screensaver, lock: &mut ScreenLock, comp: &mut Compositor| {
+    let keep = |saver: &Blank, lock: &mut ScreenLock, comp: &mut Compositor| {
         saver.keep_topmost(comp);
         lock.keep_topmost(&shell, comp, saver.window());
     };

@@ -1,8 +1,8 @@
 //! The ribbon of light: five soft strands of ember light roaming a dark
 //! screen, kept clear of the text drawn over it.
 //!
-//! Two embedders draw it, and neither may depend on the other: the desktop
-//! session's minimal-clock screensaver keeps it clear of the time, and the
+//! Two embedders draw it, and neither may depend on the other: the Ribbon
+//! screensaver bundle keeps it clear of the time, and the
 //! graphical login screen keeps it clear of its login column. One scene
 //! drawn in two places is the duplication the charter forbids, so the scene
 //! lives here and each embedder owns only where its pixels go.

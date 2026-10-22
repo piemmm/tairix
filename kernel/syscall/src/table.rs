@@ -137,8 +137,10 @@ impl CallerContext<'_> {
 /// parent handed over), no `spawn`/`signal`/`wait` (a sandbox spawns
 /// nothing), no `ipc_*`/`pipe_create`/`resource_open` (no new channels),
 /// and no `cap_*` (a sandbox holds nothing and may never be handed
-/// anything). Widening this list is a security decision reviewed under the
-/// charter's capability-minimalism bar, never a convenience.
+/// anything). `share_map` maps only the one region the spawner handed a
+/// drawing sandbox at spawn, and `clock_get` reads the monotonic clock,
+/// which names nothing. Widening this list is a security decision reviewed
+/// under the charter's capability-minimalism bar, never a convenience.
 #[must_use]
 pub fn sandbox_allows(number: SyscallNumber) -> bool {
     matches!(
@@ -162,6 +164,11 @@ pub fn sandbox_allows(number: SyscallNumber) -> bool {
             | SyscallNumber::THREAD_EXIT
             | SyscallNumber::FUTEX_WAIT
             | SyscallNumber::FUTEX_WAKE
+            | SyscallNumber::SHARE_MAP
+            // A pure observer of time, read coarsened because no sandbox
+            // holds `CAP_TIME_HIRES`; one that paces its work by the clock
+            // rather than by spinning is strictly better behaved.
+            | SyscallNumber::CLOCK_GET
     )
 }
 
@@ -2461,6 +2468,19 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Map the caller's spawn share, writing the region's byte length to the
+    /// `len_out` pointer.
+    ///
+    /// Ungated by the dispatcher: the grant minted at the drawing spawn is the
+    /// authority, and the implementation maps that grant alone, once.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn share_map(&self, _caller: &CallerContext<'_>, _len_out: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Create a caller-owned wait-set that multiplexes the readiness of
     /// several event sources, returning its kernel-minted handle
     /// (`plans/USB.md`).
@@ -4477,6 +4497,8 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.console_damage(caller, args.0[0], len)
             }
             SyscallNumber::CONSOLE_RELINQUISH => self.handlers.console_relinquish(caller),
+            // args[0] is the non-null `len_out` `UserPtr` (dispatcher-checked).
+            SyscallNumber::SHARE_MAP => self.handlers.share_map(caller, args.0[0]),
             SyscallNumber::SYSINFO_INTROSPECT => {
                 // args[0] is the `IntrospectDomain` discriminant (validated by
                 // the handler); args[1] is the domain-specific selector/offset;
@@ -6252,6 +6274,11 @@ mod tests {
             self.record("console_relinquish");
             Ok(0)
         }
+
+        fn share_map(&self, _c: &CallerContext<'_>, _len_out: u64) -> SyscallResult {
+            self.record("share_map");
+            Ok(0)
+        }
     }
 
     /// A double that wires nothing: it implements only the trait's
@@ -6529,6 +6556,7 @@ mod tests {
         assert_eq!(
             allowed,
             [
+                "clock_get",
                 "exit",
                 "fs_close",
                 "fs_read",
@@ -6537,6 +6565,7 @@ mod tests {
                 "futex_wake",
                 "mem_map",
                 "mem_unmap",
+                "share_map",
                 "stream_read",
                 "stream_write",
                 "thread_create",

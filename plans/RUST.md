@@ -216,6 +216,10 @@ still need a host or the network:
     - The system app-signing anchor and the first-party publisher are honoured
       only for bundles under the system stores.
     - A user's own stores admit bundles signed by that user's developer key.
+      The one exception is the user's screensaver store, whose bundles are
+      self-signed: the signature proves a bundle whole and grants nothing,
+      because a saver runs only in the capability-empty drawing sandbox and is
+      refused any privileged feed (`plans/SCREENSAVERS.md` SV4).
     - Release signatures are detached from the reproducible content, so
       deterministic first-party signing and secret release keys stop being in
       tension.

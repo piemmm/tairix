@@ -1,6 +1,6 @@
 [package]
 name = "tairix-raytrace"
-description = "TAIRiX ray tracer: scenes composed at random from a seed (still lifes, architecture, and landscapes of terrain, sea, trees, grass and cloud), traced a pixel at a time by distributed ray tracing with adaptive, stratified sampling, for the desktop's ray-traced screensaver."
+description = "TAIRiX ray tracer: scenes composed at random from a seed (still lifes, architecture, and landscapes of terrain, sea, trees, grass and cloud), traced a pixel at a time by distributed ray tracing with adaptive, stratified sampling, for the Ray Tracer screensaver bundle."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -699,6 +699,7 @@ tairix/
 │   ├── rng/             # RNG: CSPRNG + entropy seam + fast non-crypto generator.
 │   ├── rt/              # The pure-Rust userland runtime.
 │   ├── sandbox/         # The parser-sandbox seam.
+│   ├── saver/           # The saver side of a screensaver: its loop, region, font relay.
 │   ├── scatter/         # Keyed scatter: places on a land-fixed lattice, thinned by rank.
 │   ├── seat/            # Arch-neutral seat model.
 │   ├── sound/           # Sound-file decoding: AU, WAV, FLAC (native, Ogg),
@@ -729,10 +730,10 @@ tairix/
 │   ├── virtio_net/      # Arch-neutral virtio-net device logic.
 │   ├── vt/              # Shared ANSI/VT/xterm vocabulary.
 │   ├── wallpaper/       # Desktop user-scope settings document, wallpaper
-│   │                    #   catalog, fit geometry, the screensavers' options,
+│   │                    #   catalog, fit geometry, the savers' option values,
 │   │                    #   the apply client, the shipped masters in
-│   │                    #   `assets/` and the screensaver previews in
-│   │                    #   `screensavers/`.
+│   │                    #   `assets/` and the previews of the desktop's own
+│   │                    #   two screensavers in `screensavers/`.
 │   ├── wgsl/            # WGSL shader front end: source to SPIR-V.
 │   ├── window/          # Window-channel protocol engine.
 │   ├── writeback/       # Shared filesystem write-back core: dirty set, bound, commit window.
@@ -757,7 +758,8 @@ tairix/
 │   │   ├── wm/          # Compositing window manager.
 │   │   ├── taskbar/     # Desktop icon bar: launchers + per-application slots.
 │   │   ├── session/     # Desktop session glue (theme + taskbar model).
-│   │   └── switchboard/ # System-overview monitor service (tray feed).
+│   │   ├── switchboard/ # System-overview monitor service (tray feed).
+│   │   └── screensavers/ # The shipped screensavers, one sandboxed bundle each.
 │   ├── net/             # Userland networking services.
 │   │   ├── netstack/    # The dual-stack network service (IPv4/IPv6/TCP/UDP).
 │   │   └── discoveryd/  # Link-local service discovery (mDNS / DNS-SD).
@@ -1612,6 +1614,7 @@ You are not exempt from any rule above. In addition:
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
     | Diagnosing a desktop pause: the per-thread frame budget, the overrun report, the user-stack backtrace of the stalling call | `plans/FIX-STALLTRACE.md` |
     | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, the per-user settings the session publishes), the `Desktop` folder's icon arrangement and sort order, and the backdrop context menu | `plans/PINBOARD.md` |
+    | Screensavers: the `screensaver` bundle kind and its system and per-user stores, the drawing sandbox and `share_map`, self-signed user savers, the declared options and feeds, the saver protocol, the session's saver host, and the catalogue the Settings pane shows | `plans/SCREENSAVERS.md` |
     | The ray tracer (`lib/raytrace`) and its screensaver: the scene families and what they set out (countryside, water, buildings, nature, sky and space), sampling and reconstruction, the preparation budget and progress, the *Simple* and *Maximum* detail profiles, the smooth reveal, keeping finished pictures, and the land generator WinterSun is to share | `plans/RAYTRACE.md` |
     | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, the per-application slot strip with its app-declared menu and hover window picker, the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
     | The Switchboard window: its sections, chrome, the controls it composes, and which readings are real measurements versus awaiting an interface | `plans/NEW-SWITCHBOARD.md` |
@@ -1819,8 +1822,8 @@ Authoritative subdirectories:
 │             #   glyphs) and raster icon masters, plus their rasterised
 │             #   caches (§10). Icons live in `Icons/<asset-id>.{png,svg}`;
 │             #   the shipped desktop wallpapers live in `Wallpapers/`
-│             #   and each screensaver's preview in `Screensavers/`
-│             #   (plans/PINBOARD.md).
+│             #   and the previews of the desktop's own two screensavers
+│             #   in `Screensavers/` (plans/PINBOARD.md).
 ├── Audio/       # System audio service assets.
 ├── Network/     # Network stack configuration and service binaries.
 ├── Security/    # Users, Groups, machine-id, capability authority, keys, policy.
@@ -1839,6 +1842,11 @@ Authoritative subdirectories:
 │             #   session and the file manager, Settings and Date & Time
 │             #   it opens. One §16.5 bundle each, never searched by a
 │             #   typed word (§16.8); a component runs only from here.
+├── Screensavers/ # The system screensaver store: one §16.5 bundle per
+│             #   shipped saver, never searched by a typed word (§16.8).
+│             #   The desktop starts the one chosen in the drawing
+│             #   sandbox, and a saver runs nowhere else
+│             #   (plans/SCREENSAVERS.md).
 └── Services/    # Long-running system services. A service is an app:
                  #   each ships as its own self-contained, signed
                  #   `<name>.app` bundle (§16.5) under /System/Services/,
@@ -1898,6 +1906,11 @@ defect.
   mirroring the system pair and organisable in nested plain
   subdirectories), and `Desktop/`. The shape is fixed; applications may
   not invent sibling directories at this level.
+  `Library/Screensavers/` is the user's own screensaver store, given every
+  home with the rest of its shape: a saver bundle put there is self-signed —
+  its signature proves it whole and grants nothing — and is admitted only
+  into the drawing sandbox, and only while it declares no feed a system
+  saver alone is given (`plans/SCREENSAVERS.md`).
   `Settings/Apps/<bundle-id>/` and `Library/Apps/<bundle-id>/` are the
   **per-app data roots**, keyed on the app's *signed bundle identifier* and
   never on its display name. An application never reaches them itself: the
@@ -2079,12 +2092,14 @@ or help may live.
 and declares at minimum:
 
 - Bundle identifier, human-readable name, version.
-- The program's kind — `command`, `application`, `service`, or
-  `component` — which is what decides the store the bundle installs into
-  (§16.2, §16.8) and is the only place that decision is recorded. It is
+- The program's kind — `command`, `application`, `service`, `component`,
+  or `screensaver` — which is what decides the store the bundle installs
+  into (§16.2, §16.8) and is the only place that decision is recorded. It is
   signed with the rest of the manifest, and the load gate refuses a bundle
-  launched from a store its kind does not name: a service or component runs
-  only from its own store, and each system store holds only its own kind.
+  launched from a store its kind does not name: a service, component or
+  screensaver runs only from its own store, and each system store holds only
+  its own kind. A screensaver runs only in the drawing sandbox, and the
+  drawing sandbox runs nothing else.
 - Target ABI version (`abi-vN`) and required syscall hashes.
 - The exact set of capabilities the app requests (§5.2). The kernel
   grants only the intersection of these with the launching user's
@@ -2256,8 +2271,8 @@ four directories, followed by the user's `PATH`. The order is binding:
   "Try everything until one runs" is forbidden (§2.1).
 
 Which store a shipped bundle lands in is decided by that bundle's own signed
-manifest kind (`command`, `application`, `service`, `component`) and by
-nothing else — no
+manifest kind (`command`, `application`, `service`, `component`,
+`screensaver`) and by nothing else — no
 list of "which programs are commands" exists in the kernel, the image
 builder, or a fixture (§16.5, §2.2). The build refuses two bundles claiming
 the same name, so one store can never shadow a name in another by accident.

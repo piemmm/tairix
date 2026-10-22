@@ -117,8 +117,8 @@ pub use host::{Launcher, ParserSandbox, SandboxError, Unbelieved, WorkerEnd};
 pub use memory::WorkerMemory;
 pub use proto::{Channel, ProtoError, MAX_FRAME};
 pub use session::{
-    serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionError,
-    SessionService, SessionStep, SessionTransport,
+    let_go, serve_session, FrameOut, Reaper, SandboxSession, SessionBounds, SessionDescriptors,
+    SessionError, SessionService, SessionStep, SessionTransport,
 };
 pub use supervise::{SessionLauncher, SupervisedSession};
 pub use worker::{serve, ServeEnd, Service, WorkerExit};

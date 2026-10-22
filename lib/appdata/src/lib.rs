@@ -674,6 +674,12 @@ impl Lookup for Settings<'_> {
     fn get(&self, key: &str) -> Option<&str> {
         Self::get(self, key)
     }
+
+    fn settings_under(&self, prefix: &str) -> Vec<Setting<'_>> {
+        let mut under = self.settings();
+        under.retain(|setting| setting.key.starts_with(prefix));
+        under
+    }
 }
 
 /// `value` in its decimal spelling.

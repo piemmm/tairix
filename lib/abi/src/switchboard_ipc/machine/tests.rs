@@ -6,8 +6,8 @@ use super::{
     is_machine_report, DeviceCapacity, MachineCommitted, MachineComposition, MachineCores,
     MachineCpu, MachineDevice, MachineDeviceName, MachineHistory, MachineHost, MachineInterface,
     MachineInterfaceName, MachineMemory, MachineNetwork, MachineReport, MachineScope,
-    MachineStorage, MachineTask, MachineTasks, ReportPeriod, CPU_OFFSET, HOST_LEN_OFFSET,
-    HOST_OFFSET, MACHINE_CORES_MAX, MACHINE_DEVICES_MAX, MACHINE_HISTORY_MAX,
+    MachineStorage, MachineTask, MachineTasks, ReportPeriod, TaskOwner, CPU_OFFSET,
+    HOST_LEN_OFFSET, HOST_OFFSET, MACHINE_CORES_MAX, MACHINE_DEVICES_MAX, MACHINE_HISTORY_MAX,
     MACHINE_INTERFACES_MAX, MACHINE_PERIOD_MAX_MS, MACHINE_PERIOD_MIN_MS, MACHINE_TASKS_MAX,
     MEMORY_OFFSET, NETWORK_OFFSET, PERIOD_OFFSET, SCOPE_OFFSET, STORAGE_OFFSET, TASKS_OFFSET,
     UPTIME_OFFSET,
@@ -24,7 +24,8 @@ fn share(value: u16) -> Permille {
 
 fn task(name: &str, cpu: u16, memory_bytes: u64) -> MachineTask {
     MachineTask {
-        name: TrayTaskName::new(name).expect("a name"),
+        name: Some(TrayTaskName::new(name).expect("a name")),
+        owner: TaskOwner::Own,
         cpu: share(cpu),
         memory_bytes,
     }
@@ -123,17 +124,8 @@ fn full() -> MachineReport {
 
 /// A report with nothing read: every optional reading absent.
 fn unread() -> MachineReport {
-    MachineReport {
-        period: ReportPeriod::from_millis(MACHINE_PERIOD_MIN_MS).expect("a period"),
-        scope: MachineScope::Own,
-        host: None,
-        uptime: None,
-        cpu: MachineCpu::UNREAD,
-        memory: MachineMemory::UNREAD,
-        tasks: MachineTasks::UNREAD,
-        storage: None,
-        network: None,
-    }
+    let period = ReportPeriod::from_millis(MACHINE_PERIOD_MIN_MS).expect("a period");
+    MachineReport::unread(period, MachineScope::Own)
 }
 
 #[test]
@@ -451,7 +443,7 @@ fn a_census_cannot_name_more_than_it_counts() {
     assert_eq!(
         named
             .busiest()
-            .map(|task| task.name.as_str())
+            .map(|task| task.name.as_ref().map_or("", TrayTaskName::as_str))
             .collect::<alloc::vec::Vec<_>>(),
         ["a", "b", "c"]
     );
@@ -466,7 +458,14 @@ fn a_corrupt_named_task_is_refused() {
     nameless[first] = 0;
     assert_eq!(
         MachineReport::from_bytes(&nameless),
-        Err(Errno::LengthOutOfRange)
+        Err(Errno::BadMagic),
+        "a withheld name leaves no bytes behind"
+    );
+    let mut ownerless = bytes;
+    ownerless[first + 33] = 0;
+    assert_eq!(
+        MachineReport::from_bytes(&ownerless),
+        Err(Errno::OutOfRange)
     );
     let mut hot = bytes;
     hot[first + 34..first + 36].copy_from_slice(&1001u16.to_le_bytes());
@@ -557,4 +556,34 @@ fn an_unknown_link_is_carried_as_unknown() {
             .map(|interface| interface.link_up)
     });
     assert_eq!(link, Some(None));
+}
+
+/// Regression for D496: another account's busiest tasks were named to every
+/// reader of a machine-wide report. A name is now withheld by its owner before
+/// the report is handed on, and a withheld name travels as none at all.
+#[test]
+fn a_withheld_name_travels_as_none_and_withholding_follows_the_owner() {
+    let mine = task("mine", 300, 1 << 20);
+    let theirs = MachineTask {
+        owner: TaskOwner::Other,
+        ..task("theirs", 600, 1 << 21)
+    };
+    let mut tasks = MachineTasks::new(Some(4), 0, 0, &[theirs, mine]).expect("tasks");
+    tasks.withhold_names(|owner| owner == TaskOwner::Own);
+    let names: alloc::vec::Vec<Option<&str>> = tasks
+        .busiest()
+        .map(|task| task.name.as_ref().map(TrayTaskName::as_str))
+        .collect();
+    assert_eq!(names, [None, Some("mine")]);
+    let report = MachineReport {
+        tasks: tasks.clone(),
+        ..full()
+    };
+    let decoded = MachineReport::from_bytes(&report.to_le_bytes()).expect("decodes");
+    assert_eq!(decoded.tasks, tasks);
+    let owners: alloc::vec::Vec<TaskOwner> =
+        decoded.tasks.busiest().map(|task| task.owner).collect();
+    assert_eq!(owners, [TaskOwner::Other, TaskOwner::Own]);
+    tasks.withhold_names(|_| false);
+    assert!(tasks.busiest().all(|task| task.name.is_none()));
 }

@@ -1612,11 +1612,19 @@ mod tests {
     /// order discovery sorts them. PID 1 `init` is deliberately absent: it is
     /// the boot floor the boot path enters directly, never a store bundle.
     const STORE_INVENTORY: &[(&str, ProgramKind, &[CapabilityId])] = &[
+        ("Clock", ProgramKind::Screensaver, &[]),
+        ("Life", ProgramKind::Screensaver, &[]),
         (
             "Paint",
             ProgramKind::Application,
             SANDBOXED_DOCUMENT_APP_REQUEST,
         ),
+        ("Raytrace", ProgramKind::Screensaver, &[]),
+        ("RetroGames", ProgramKind::Screensaver, &[]),
+        ("Ribbon", ProgramKind::Screensaver, &[]),
+        ("Slideshow", ProgramKind::Screensaver, &[]),
+        ("Starfield", ProgramKind::Screensaver, &[]),
+        ("SystemMonitor", ProgramKind::Screensaver, &[]),
         (
             "TextEdit",
             ProgramKind::Application,

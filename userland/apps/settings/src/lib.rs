@@ -60,7 +60,7 @@ pub use registry::{
 };
 pub use renders::Renders;
 pub use round::Round;
-pub use saver::SaverOption;
+pub use saver::{SaverEntry, SaverRow};
 pub use shell::{Authorised, Shell, ShellOutcome};
 pub use sound::SoundReading;
 pub use volumes::{Readings, VolumeReading};

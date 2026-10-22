@@ -151,28 +151,15 @@ const KEYS: &[RegistryRow] = &[
         &["0", "1441"],
     ),
     (
-        "screensaver.kind",
+        "screensaver.saver",
         &[
             "blank",
             "dim",
-            "slideshow",
-            "clock",
-            "ribbon",
-            "starfield",
-            "life",
-            "raytrace",
-            "retro_games",
-            "system_monitor",
+            "os.tairix.saver.clock",
+            "os.tairix.saver.retro-games",
+            "com.example.waves",
         ],
-        &[
-            "fireworks",
-            "Raytrace",
-            "horizon",
-            "RetroGames",
-            "retro-games",
-            "monitor",
-            "SystemMonitor",
-        ],
+        &["Blank", "os..clock", "os/clock", "-waves", "fire works"],
     ),
     (
         "screensaver.display_off_min",
@@ -180,68 +167,22 @@ const KEYS: &[RegistryRow] = &[
         &["1441", "-1"],
     ),
     (
-        "screensaver.slideshow.interval_s",
-        &["5", "30", "600", "3600"],
-        &["4", "3601", "30s"],
-    ),
-    (
-        "screensaver.slideshow.order",
-        &["sequential", "shuffled"],
-        &["random"],
-    ),
-    (
-        "screensaver.slideshow.category",
+        "screensaver.slides.source",
         // The empty value is every category; a quoted name round-trips too.
         &["\"\"", "Nature", "TAIRiX", "\"Gone Away\""],
         &["a/b", ".."],
     ),
     (
-        "screensaver.clock.date",
-        &["true", "false", "on", "off"],
-        &["maybe"],
+        "screensaver.machine.tasks",
+        &["none", "own", "all"],
+        &["everyone", "Own"],
     ),
-    ("screensaver.clock.identity", &["true", "false"], &["1"]),
-    ("screensaver.ribbon.date", &["true", "false"], &["someday"]),
+    // The open family of saver option values, under keys the generator also
+    // spells outside the registry.
     (
-        "screensaver.starfield.stars",
-        &["sparse", "normal", "dense"],
-        &["thousands"],
-    ),
-    ("screensaver.starfield.warp", &["true", "false"], &["fast"]),
-    (
-        "screensaver.life.cells",
-        &["small", "medium", "large"],
-        &["huge"],
-    ),
-    (
-        "screensaver.life.speed",
-        &["slow", "normal", "fast"],
-        &["ludicrous"],
-    ),
-    (
-        "screensaver.raytrace.cpu",
-        &["idle", "performance"],
-        &["turbo", "Idle"],
-    ),
-    (
-        "screensaver.raytrace.save",
-        &["true", "false", "on", "off"],
-        &["yes"],
-    ),
-    (
-        "screensaver.raytrace.detail",
-        &["simple", "maximum"],
-        &["fine", "Maximum"],
-    ),
-    (
-        "screensaver.retro_games.speed",
-        &["slow", "normal", "fast"],
-        &["warp"],
-    ),
-    (
-        "screensaver.system_monitor.tasks",
-        &["true", "false", "on", "off"],
-        &["named"],
+        "saver.os.tairix.saver.life.speed",
+        &["slow", "fast", "true", "-30", "120"],
+        &["Slow", "two words", "1h"],
     ),
     (
         "lock.after_min",
@@ -348,11 +289,15 @@ fn the_generator_names_every_registry_key() {
         .iter()
         .map(|key| key.name())
         .collect();
-    let generated: Vec<&str> = KEYS.iter().map(|(name, _, _)| *name).collect();
+    let (open, generated): (Vec<&str>, Vec<&str>) = KEYS
+        .iter()
+        .map(|(name, _, _)| *name)
+        .partition(|name| name.starts_with(tairix_wallpaper::SAVER_VALUE_PREFIX));
     assert_eq!(
         registry, generated,
         "the generator and the registry disagree"
     );
+    assert!(!open.is_empty(), "the open family goes unfuzzed");
 }
 
 #[test]

@@ -350,7 +350,7 @@ external = "1"
         let ctx = crate::Context::discover().expect("workspace context");
         let feature = super::super::SCENE_TESTS_FEATURE;
         let tier = declared(&ctx.workspace_root, feature).expect("declared");
-        for package in ["tairix-raytrace", "tairix-desktop-session"] {
+        for package in ["tairix-raytrace", "tairix-saver-raytrace"] {
             assert!(
                 tier.get(package)
                     .is_some_and(|features| features.contains(feature)),

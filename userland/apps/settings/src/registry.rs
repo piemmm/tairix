@@ -30,7 +30,7 @@ use crate::machine::MachineSetting;
 use crate::network::{ADDRESSING_FACTS, RESOLVER_FACTS};
 use crate::notices::SOURCE_FACTS;
 use crate::pictures::Chooser;
-use crate::saver::SaverOption;
+use crate::saver::{SAVER_FACTS, SLIDES_LABEL, TASKS_LABEL};
 use crate::sound::SOUND_FACTS;
 use crate::volumes::VOLUME_FACTS;
 
@@ -618,27 +618,15 @@ const LOCK_SETTINGS: &[&str] = &[Setting::LockAfter.label(), Action::LockNow.lab
 /// The Language & Region pane's setting labels.
 const LANGUAGE_SETTINGS: &[&str] = &[Setting::Region.label(), Setting::TimeZone.label()];
 
-/// The Screensaver pane's setting labels: every screensaver's own options,
-/// though the pane shows the chosen one's alone, so a search for one reaches
-/// the pane that sets it.
+/// The Screensaver pane's setting labels: the subject a saver's own rows,
+/// which each saver declares, are searched by, beside the feeds' rows and the
+/// preview its group carries.
 const SCREENSAVER_SETTINGS: &[&str] = &[
     Setting::ScreensaverAfter.label(),
     Chooser::Screensaver.label(),
-    SaverOption::SlideInterval.label(),
-    SaverOption::SlideOrder.label(),
-    SaverOption::SlideSource.label(),
-    SaverOption::ClockDate.label(),
-    SaverOption::ClockIdentity.label(),
-    SaverOption::RibbonDate.label(),
-    SaverOption::StarDensity.label(),
-    SaverOption::StarWarp.label(),
-    SaverOption::LifeCells.label(),
-    SaverOption::LifeSpeed.label(),
-    SaverOption::RaytraceCpu.label(),
-    SaverOption::RaytraceSave.label(),
-    SaverOption::RaytraceDetail.label(),
-    SaverOption::RetroGamesSpeed.label(),
-    SaverOption::MonitorTasks.label(),
+    SAVER_FACTS[0],
+    SLIDES_LABEL,
+    TASKS_LABEL,
     Action::PreviewScreensaver.label(),
     Setting::DisplayOff.label(),
 ];

@@ -764,7 +764,7 @@ pub fn admit_errno(err: AdmitError) -> Errno {
         AdmitError::OutOfMemory => Errno::OutOfMemory,
         AdmitError::NodeBusy => Errno::Busy,
         AdmitError::NodeGone => Errno::DeviceOffline,
-        AdmitError::GrantsWithoutNode => Errno::PermissionDenied,
+        AdmitError::GrantsWithoutNode | AdmitError::ShareNotHeld => Errno::PermissionDenied,
         AdmitError::NotForeground => Errno::NotForeground,
     }
 }
@@ -995,6 +995,9 @@ pub enum AdmitError {
     /// The terminal the spawn was to hand its child changed hands while the
     /// child was admitted, to a task the spawner has no authority over.
     NotForeground,
+    /// The spawner holds no live grant for the region it asked to hand a
+    /// drawing sandbox.
+    ShareNotHeld,
 }
 
 /// The hardware-tree node a driver is loaded for, and the tree that must
@@ -1793,6 +1796,10 @@ mod tests {
             Errno::PermissionDenied
         );
         assert_eq!(admit_errno(AdmitError::NotForeground), Errno::NotForeground);
+        assert_eq!(
+            admit_errno(AdmitError::ShareNotHeld),
+            Errno::PermissionDenied
+        );
     }
 
     /// The shared caller-errno mapping keeps the stable codes: a denied

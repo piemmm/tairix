@@ -4,13 +4,14 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::{
-    manifest_header, Errno, APPINFO_WIRE_MAX, SYSTEM_COMPONENT_STORE, SYSTEM_SERVICE_STORE,
+    manifest_header, Errno, APPINFO_WIRE_MAX, SYSTEM_COMPONENT_STORE, SYSTEM_SCREENSAVER_STORE,
+    SYSTEM_SERVICE_STORE,
 };
 
 use crate::{
-    bundle_of_entry, entry_path, identity_roots, is_machine_bundle, manifest_path, store_roots,
-    user_roots, walk, Bundle, DirEntry, StoreReader, Verdict, WalkError, IDENTITY_MACHINE_ROOTS,
-    MACHINE_ROOTS, MAX_WALK_DEPTH, MAX_WALK_ENTRIES,
+    bundle_of_entry, entry_path, identity_roots, is_machine_bundle, manifest_path, saver_roots,
+    store_roots, user_roots, walk, Bundle, DirEntry, StoreReader, Verdict, WalkError,
+    IDENTITY_MACHINE_ROOTS, MACHINE_ROOTS, MAX_WALK_DEPTH, MAX_WALK_ENTRIES,
 };
 
 /// A decodable manifest naming bundle `id`.
@@ -117,6 +118,39 @@ fn the_roots_are_the_stores_in_resolution_precedence_and_a_homeless_session_gets
     );
 }
 
+/// The screensaver stores are the system's, then the account's own under its
+/// `Library`, and a session without a home still finds the system's.
+#[test]
+fn the_screensaver_stores_are_the_systems_then_the_accounts() {
+    assert_eq!(
+        saver_roots(Some("/Users/ada/")),
+        ["/System/Screensavers", "/Users/ada/Library/Screensavers"]
+    );
+    assert_eq!(saver_roots(None), ["/System/Screensavers"]);
+    let user = saver_roots(Some("/Users/ada"))
+        .pop()
+        .expect("the user's store");
+    assert!(tairix_abi::is_user_saver_bundle(&alloc::format!(
+        "{user}/Waves.app"
+    )));
+}
+
+/// A user's own screensaver store is under their home in `/Users` alone: a
+/// self-signed saver runs from nowhere else, so none found under another home
+/// is offered as theirs.
+#[test]
+fn only_a_home_in_users_has_a_screensaver_store() {
+    assert_eq!(
+        saver_roots(Some("/Storage/home/ada")),
+        ["/System/Screensavers"]
+    );
+    assert_eq!(
+        user_roots(Some("/Storage/home/ada")).len(),
+        2,
+        "its program stores stand"
+    );
+}
+
 /// A home that is relative, or that could climb out of or restate itself, is
 /// not a home: it contributes no store rather than one somewhere else.
 #[test]
@@ -133,6 +167,7 @@ fn a_home_that_could_name_somewhere_else_contributes_no_store() {
         assert!(user_roots(Some(home)).is_empty(), "{home:?} was a home");
         assert_eq!(identity_roots(Some(home)), IDENTITY_MACHINE_ROOTS);
         assert_eq!(store_roots(Some(home)), MACHINE_ROOTS);
+        assert_eq!(saver_roots(Some(home)), ["/System/Screensavers"]);
     }
     // A name merely containing dots is a name, not a climb.
     assert_eq!(user_roots(Some("/Users/a..b")).len(), 2);
@@ -151,6 +186,7 @@ fn the_identity_roots_add_the_system_started_stores_among_the_system_stores() {
             "/System/Applications",
             "/System/Services",
             "/System/Components",
+            "/System/Screensavers",
             "/Users/ada/Commands",
             "/Users/ada/Applications",
         ]
@@ -158,7 +194,14 @@ fn the_identity_roots_add_the_system_started_stores_among_the_system_stores() {
     assert_eq!(identity_roots(None), IDENTITY_MACHINE_ROOTS);
     let programs: Vec<String> = identity_roots(Some("/Users/ada"))
         .into_iter()
-        .filter(|root| root != SYSTEM_SERVICE_STORE && root != SYSTEM_COMPONENT_STORE)
+        .filter(|root| {
+            ![
+                SYSTEM_SERVICE_STORE,
+                SYSTEM_COMPONENT_STORE,
+                SYSTEM_SCREENSAVER_STORE,
+            ]
+            .contains(&root.as_str())
+        })
         .collect();
     assert_eq!(
         programs,
@@ -472,4 +515,17 @@ fn the_visitor_sees_the_whole_manifest_beside_its_decoded_header() {
     })
     .expect("the walk completes");
     assert_eq!(saw, Some(("os.tairix.example".to_string(), bytes)));
+}
+
+/// A walk that could not be finished says what stopped it.
+#[test]
+fn a_walk_error_says_what_stopped_it() {
+    assert_eq!(
+        WalkError::Listing(Errno::PermissionDenied).to_string(),
+        alloc::format!("a store could not be listed: {}", Errno::PermissionDenied)
+    );
+    assert_eq!(
+        WalkError::TreeTooLarge.to_string(),
+        alloc::format!("the stores hold more than {MAX_WALK_ENTRIES} entries")
+    );
 }

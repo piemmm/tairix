@@ -416,7 +416,7 @@ pub use text::{
     TextField,
 };
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
-pub use value::{Progress, Slider, SliderAction};
+pub use value::{Progress, Slider, SliderAction, SLIDER_STOPS_MAX};
 pub use window::{
     BandCorner, FrameInsets, FrameLayout, FrameRim, FurniturePart, GrabReach, ResizeEdge,
     ResizeEvent, ResizeGrabber, ScrollCorner, TitleBar, TitleBarCommands, TitleBarEvent,

@@ -508,6 +508,7 @@ pub(crate) fn composed_bundle_published_by(
         icon_bar: true,
         multi_instance: false,
         writes_documents: false,
+        saver: tairix_itest_harness::app_image::SaverDeclaration::default(),
     };
     let composed = compose_signed_appinfo(
         seed,
@@ -552,9 +553,83 @@ impl Clock for NullClock {
     }
 }
 
+/// Compose a signed screensaver bundle at `bundle` (`<store>/<Name>.app`)
+/// signed by `seed` and self-published, declaring `feeds`, returning the
+/// filesystem and the signer's public key.
+pub(crate) fn composed_saver(
+    bundle: &str,
+    seed: &[u8; 32],
+    feeds: tairix_abi::saver::SaverFeeds,
+) -> (MemFs, [u8; 32]) {
+    let run = tiny_run();
+    let preview = b"picture";
+    let manifest = AppManifestSource {
+        id: "os.tairix.waves".to_string(),
+        name: "waves".to_string(),
+        title: Some("Waves".to_string()),
+        version: "1.0".to_string(),
+        kind: ProgramKind::Screensaver,
+        capabilities: Vec::new(),
+        associations: Vec::new(),
+        browses: Vec::new(),
+        library: None,
+        library_icon: None,
+        purpose: None,
+        author: None,
+        icon_bar: true,
+        multi_instance: false,
+        writes_documents: false,
+        saver: tairix_itest_harness::app_image::SaverDeclaration {
+            feeds,
+            ..Default::default()
+        },
+    };
+    let composed = compose_signed_appinfo(
+        seed,
+        PublisherSource::SelfPublished,
+        &manifest,
+        SYSCALL_TABLE_HASH,
+        &[
+            BundleFileDigest {
+                path: "Resources/Preview.png",
+                bytes: preview,
+            },
+            BundleFileDigest {
+                path: "Run",
+                bytes: &run,
+            },
+        ],
+    )
+    .expect("composes");
+    let fs = MemFs::new(&[
+        (&format!("{bundle}/AppInfo"), composed.bytes.as_slice()),
+        (&format!("{bundle}/Run"), run.as_slice()),
+        (
+            &format!("{bundle}/Resources/Preview.png"),
+            preview.as_slice(),
+        ),
+    ]);
+    (fs, composed.signer_pubkey)
+}
+
 /// Run the full `tairix_appload` gate over `fs`, exactly as the spawn
 /// path does.
 pub(crate) fn gate_load(fs: &MemFs, anchor: [u8; 32]) -> Result<LoadedApp, AppError> {
+    gate_load_at(
+        fs,
+        anchor,
+        "/System/Commands/ps.app",
+        tairix_appload::LoadMode::Ordinary,
+    )
+}
+
+/// The gate over `fs` for `bundle`, spawned in `mode`.
+pub(crate) fn gate_load_at(
+    fs: &MemFs,
+    anchor: [u8; 32],
+    bundle: &str,
+    mode: tairix_appload::LoadMode,
+) -> Result<LoadedApp, AppError> {
     let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
     let store = FsBundleStore::new(fs, 1000, &NoCaps);
     let verifier = AnchorVerifier::new(anchor);
@@ -567,10 +642,7 @@ pub(crate) fn gate_load(fs: &MemFs, anchor: [u8; 32]) -> Result<LoadedApp, AppEr
         clock: &clock,
         sink,
     });
-    loader.load(
-        "/System/Commands/ps.app",
-        &CapabilitySet::from_words([u64::MAX; 4]),
-    )
+    loader.load(bundle, &CapabilitySet::from_words([u64::MAX; 4]), mode)
 }
 
 /// A verified [`LoadedApp`] straight from the shared load gate, over the

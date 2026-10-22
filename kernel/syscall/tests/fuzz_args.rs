@@ -744,6 +744,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn share_map(&self, _c: &CallerContext<'_>, _len_out: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn shm_map_from(
         &self,
         _c: &CallerContext<'_>,

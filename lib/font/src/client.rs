@@ -118,11 +118,9 @@ pub type GlyphKey = (u32, [u8; FONT_FAMILY_KEY_LEN], u32, u16);
 pub type GlyphCache = ReclaimCache<GlyphKey, CachedGlyph, (), BuildSipHash13>;
 
 /// The audit label the client's own cache is named by in reclaim records.
-#[cfg(feature = "rt")]
 const CLIENT_CACHE_LABEL: &str = "font.client.glyphs";
 
 /// The audit label the client's measurement memo is named by.
-#[cfg(feature = "rt")]
 const MEASURE_CACHE_LABEL: &str = "font.client.measure";
 
 /// The owner the client's own cache charges its bytes to.
@@ -130,7 +128,6 @@ const MEASURE_CACHE_LABEL: &str = "font.client.measure";
 /// The cache names *itself*, not the program it is linked into: this client
 /// is embedded in every text-drawing program, and a reader of the audit trail
 /// wants to know which subsystem inside the process is holding the memory.
-#[cfg(feature = "rt")]
 const CLIENT_CACHE_OWNER: &str = "font-client";
 
 /// A metrics cache key: the family (its NUL-padded wire bytes), the pixel
@@ -1439,38 +1436,9 @@ fn connect_font_service() {
 /// band rather than a fail-closed guess.
 #[cfg(feature = "rt")]
 fn default_cache() -> GlyphCache {
-    use tairix_reclaim::ReclaimOwner;
-
-    static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
-
     let _ = tairix_procinfo::pressure::refresh();
-    let key = tairix_rt::hash_seed();
-    // The index is keyed under this process's hash key, because the caller
-    // chooses the characters and sizes it is keyed by. A process that could
-    // draw none takes a zero budget instead: it retains nothing and pays the
-    // round trip per glyph, which is slower and never a predictable table.
-    let total = match key {
-        Some(_) => tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0),
-        None => 0,
-    };
-    let cache = ReclaimCache::new(
-        CLIENT_CACHE_LABEL,
-        crate::glyph_cache::glyph_cache_candidate(ReclaimOwner::UserlandProcess(
-            CLIENT_CACHE_OWNER,
-        )),
-        crate::glyph_cache::client_glyph_cache_budget(total),
-        tairix_rt::pressure::gauge(),
-        &LOG_SINK,
-        BuildSipHash13::with_seed(key.unwrap_or(tairix_hash::HashSeed::UNKEYED)),
-    );
-    // This cache is built here, on the process's behalf, so it is this
-    // library — not the program linking it — that tells the process-wide
-    // reporter about it; the program never sees the cache to register it
-    // itself.
-    if let Some(ledger) = cache.ledger() {
-        tairix_rt::cachereport::register(ledger);
-    }
-    cache
+    let (total, key) = default_budget_inputs();
+    glyph_cache(total, key)
 }
 
 /// Build the client's measurement memo, on the same RAM-derived ceiling the
@@ -1486,25 +1454,75 @@ fn default_cache() -> GlyphCache {
 /// walking advances the client already holds, so pressure may take all of it.
 #[cfg(feature = "rt")]
 fn default_measure_cache() -> MeasureCache {
+    let (total, key) = default_budget_inputs();
+    measure_cache(total, key)
+}
+
+/// The RAM total and hash key the default caches are sized and keyed by. Both
+/// caches are keyed by text the caller chooses, so a process that could draw
+/// no key takes a zero budget instead: it retains nothing and pays the round
+/// trip per glyph, which is slower and never a predictable table.
+#[cfg(feature = "rt")]
+fn default_budget_inputs() -> (u64, tairix_hash::HashSeed) {
+    match tairix_rt::hash_seed() {
+        Some(key) => (
+            tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0),
+            key,
+        ),
+        None => (0, tairix_hash::HashSeed::UNKEYED),
+    }
+}
+
+/// Install the glyph cache and measurement memo sized for `total_bytes` of
+/// memory and keyed by `key`, in place of the defaults the `rt` feature builds
+/// from the machine's RAM and the kernel's randomness.
+///
+/// For a program that can ask for neither — a sandboxed screensaver, which
+/// its host tells both. Installed before the first draw, so no default is
+/// built.
+pub fn install_caches(total_bytes: u64, key: tairix_hash::HashSeed) {
+    let glyphs = glyph_cache(total_bytes, key);
+    let measure = measure_cache(total_bytes, key);
+    let mut caches = CACHES.lock();
+    caches.glyphs = Some(glyphs);
+    caches.measure = Some(measure);
+}
+
+static CACHE_LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+
+/// The glyph cache for `total` bytes of memory, keyed by `key`, registered
+/// with the process's cache reporter: this library builds it on the
+/// process's behalf, so it is this library that tells the reporter.
+fn glyph_cache(total: u64, key: tairix_hash::HashSeed) -> GlyphCache {
     use tairix_reclaim::ReclaimOwner;
 
-    static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+    let cache = ReclaimCache::new(
+        CLIENT_CACHE_LABEL,
+        crate::glyph_cache::glyph_cache_candidate(ReclaimOwner::UserlandProcess(
+            CLIENT_CACHE_OWNER,
+        )),
+        crate::glyph_cache::client_glyph_cache_budget(total),
+        tairix_rt::pressure::gauge(),
+        &CACHE_LOG_SINK,
+        BuildSipHash13::with_seed(key),
+    );
+    if let Some(ledger) = cache.ledger() {
+        tairix_rt::cachereport::register(ledger);
+    }
+    cache
+}
 
-    // Keyed, and zero-budgeted without a key, for the reason
-    // [`default_cache`] states: the memo is keyed by a fingerprint of the
-    // caller's own text.
-    let key = tairix_rt::hash_seed();
-    let total = match key {
-        Some(_) => tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0),
-        None => 0,
-    };
+/// The measurement memo for `total` bytes of memory, keyed by `key`.
+fn measure_cache(total: u64, key: tairix_hash::HashSeed) -> MeasureCache {
+    use tairix_reclaim::ReclaimOwner;
+
     let cache = ReclaimCache::new(
         MEASURE_CACHE_LABEL,
         measure::measure_cache_candidate(ReclaimOwner::UserlandProcess(CLIENT_CACHE_OWNER)),
         measure::measure_cache_budget(total),
         tairix_rt::pressure::gauge(),
-        &LOG_SINK,
-        BuildSipHash13::with_seed(key.unwrap_or(tairix_hash::HashSeed::UNKEYED)),
+        &CACHE_LOG_SINK,
+        BuildSipHash13::with_seed(key),
     );
     if let Some(ledger) = cache.ledger() {
         tairix_rt::cachereport::register(ledger);

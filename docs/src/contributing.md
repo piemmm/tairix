@@ -232,8 +232,8 @@ sequence the dependency explicitly — never by hoping for an order.
 
 ## The scene tier runs in `ci-long`, not `ci`
 
-The ray tracer's long tests that compose or prepare a whole scene, the
-screensaver's that prepare or trace one, and `WinterSun`'s that survey whole
+The ray tracer's long tests that compose or prepare a whole scene, its
+screensaver bundle's that prepare or trace one, and `WinterSun`'s that survey whole
 realms cost more with every detail the scenes and the land gain. They build
 only with their package's `scene-tests` feature, so neither the workspace pass
 nor `ci` runs them. `ci-long` does, its concurrent

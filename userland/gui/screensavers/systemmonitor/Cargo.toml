@@ -1,0 +1,55 @@
+[package]
+name = "tairix-saver-systemmonitor"
+description = "TAIRiX System Monitor screensaver: the machine's own readings at a glance, set out to be read from across a room. The host-tested scene is the crate's [lib]; the freestanding `Run` binary is the on-disk SystemMonitor.app bundle's entry point, serving it over lib/saver in the drawing sandbox."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tairix_saver_systemmonitor"
+path = "src/lib.rs"
+
+# The `Run` entry point of the on-disk `SystemMonitor.app` bundle: freestanding on
+# the native Tier-1 targets, an inert host stub elsewhere (`build.rs`).
+[[bin]]
+name = "tairix-saver-systemmonitor-run"
+path = "src/run.rs"
+
+[dependencies]
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+# The board's ink and the stale dimming.
+tairix-colour = { path = "../../../../lib/colour", version = "=0.0.0" }
+# The shared controls the board is built from, so it reads as the Switchboard does.
+tairix-controls = { path = "../../../../lib/controls", version = "=0.0.0" }
+# The board's text, relayed through the host.
+tairix-font = { path = "../../../../lib/font", version = "=0.0.0" }
+tairix-geometry = { path = "../../../../lib/geometry", version = "=0.0.0" }
+# The readings spelled as every other system surface spells them.
+tairix-procinfo = { path = "../../../../lib/procinfo", version = "=0.0.0" }
+tairix-raster = { path = "../../../../lib/raster", version = "=0.0.0" }
+tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0" }
+# The dark theme the board is drawn in, and the scene clock.
+tairix-theme = { path = "../../../../lib/theme", version = "=0.0.0" }
+
+# The `Run` binary is a userland program serving the saver protocol over its
+# standard streams. Bare-metal only.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0" }
+tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0", features = ["program"] }
+
+[dev-dependencies]
+# The unread machine report the board's tests begin from.
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0", features = ["test-util"] }
+tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0", features = ["test-support"] }
+# The board's text drawn through the shared test transport, never a running
+# font service.
+tairix-font = { path = "../../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

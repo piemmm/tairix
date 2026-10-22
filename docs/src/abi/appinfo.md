@@ -43,7 +43,7 @@ honest view of the format rather than a second, differently-ordered spelling
 of it; `appinfo_header_repr_c_layout_is_the_wire_layout` pins that field by
 field. It carries:
 
-- `magic` (`"RAI1"`), `abi_version`, `flags`. Three flag bits are defined,
+- `magic` (`"RAI1"`), `abi_version`, `flags`. Eight flag bits are defined,
   and a manifest setting any bit outside `APPINFO_FLAG_MASK` is refused rather
   than read as if the bit were clear:
   - `APPINFO_FLAG_NO_ICON_BAR` (`1 << 0`, manifest key `icon-bar = false`) —
@@ -66,6 +66,13 @@ field. It carries:
     handed over read-only. Signed for the same reason: a process cannot
     promote itself to writing what the user only asked it to show.
     `writes_documents()` is the reader.
+  - Five bits only a screensaver may set (`APPINFO_FLAGS_SAVER`): the
+    privileged feeds `APPINFO_FLAG_FEED_MACHINE` (`1 << 3`),
+    `APPINFO_FLAG_FEED_KEEP` (`1 << 4`) and `APPINFO_FLAG_FEED_SLIDES`
+    (`1 << 5`), given only to a system-signed saver, and
+    `APPINFO_FLAG_SAVER_PARALLEL` (`1 << 6`) and
+    `APPINFO_FLAG_SAVER_LARGE_MEMORY` (`1 << 7`), its threads and memory,
+    which are all a user's own saver may claim (`APPINFO_FLAGS_SAVER_OWN`).
 - The bundle identity: inline `id` / `name` / `version` (length byte plus a
   fixed buffer, validated as non-empty UTF-8 on decode), plus the optional
   inline `title`.
@@ -91,9 +98,14 @@ field. It carries:
     `Origin`.
 - `capability_count`, `mime_count`, and `browse_count` describing the body.
 - `kind` — the program's `ProgramKind` byte (`command` 1, `application` 2,
-  `service` 3, `component` 4; `TAIRIX_PROGRAM_KIND_*` in C), signed with the
-  rest, then a reserved byte that must be zero — the explicit padding, so no
-  byte of the signed prefix is unnamed. A kind byte naming no kind is
+  `service` 3, `component` 4, `screensaver` 5; `TAIRIX_PROGRAM_KIND_*` in C),
+  signed with the rest, then `option_count`: how many option entries a
+  screensaver's body carries after its browsed services, at most
+  `SAVER_MAX_OPTIONS`, and zero for any other kind. Each entry is a fixed
+  `SAVER_OPTION_ENTRY_LEN` bytes — a key, a label and a note, and a switch, a
+  choice of two to `SAVER_MAX_CHOICES` labelled words, or a range of at most
+  `SAVER_RANGE_VALUES_MAX` values with its unit, each with its default
+  (`tairix_abi::saver`); no two share a key. A kind byte naming no kind is
   refused. The load gate refuses a bundle launched from a store its kind
   does not run from (`ProgramKind::launchable_from`): each system store holds
   only its own kind, and a service or component runs only from its own

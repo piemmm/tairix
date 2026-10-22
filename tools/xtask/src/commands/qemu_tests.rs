@@ -507,6 +507,15 @@ enum FsDisk {
     /// desktop vertical's library rows out from under the coordinates their
     /// scripts click.
     HoverRootDisk,
+    /// The [`Self::AutoloadRootDisk`] layout, whose seeded account's own
+    /// screensaver store holds two savers a user installed
+    /// ([`user_saver_plants`]): the screensaver vertical's backing
+    /// (`plans/SCREENSAVERS.md` SV10).
+    ///
+    /// Its own disk, because a saver in the account's store is listed in the
+    /// Settings chooser every other desktop vertical's script would otherwise
+    /// walk past unchanged.
+    ScreensaverRootDisk,
     /// The [`Self::AutoloadRootDisk`] layout — the same graphical world, with
     /// the signed input and display driver bundles and the text-login
     /// document — whose store additionally carries the test-only `svgtext`
@@ -10153,6 +10162,44 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // `plans/SCREENSAVERS.md` SV10: the screensaver vertical. The graphical
+    // world of the autoload disk, its account's own store holding two savers
+    // a user installed. The script opens Settings, walks to Screensaver and,
+    // once the catalogue reaches the chooser, chooses the saver asking for no
+    // feed and previews it; a key typed once its first frame is on screen
+    // takes it down. PASS needs, in the guest: the other saver refused for
+    // asking for the machine feed, the chosen one loaded from the account's
+    // store, its first frame, and its dismissal.
+    QemuTest {
+        package: "tairix-test-screensaver-qemu-aarch64",
+        binary: "tairix-test-screensaver-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::Ramfb,
+        crypto: false,
+        fs_disk: FsDisk::ScreensaverRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            TypedStep::text(
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
+            TypedStep::text(tairix_desktop_session::SAVER_SHOWN_MESSAGE, 1, " "),
+        ],
+        screendumps: &[],
+        pointer_script: Some(screensaver_pointer_script),
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     // `plans/NETMAP.md` NM2c: the network-map vertical. It boots the same
     // graphical world as the Settings and file-pick verticals, but with a NIC
     // on the shared wire and a router-advertising peer behind it, so the guest's
@@ -11997,6 +12044,162 @@ fn sound_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
     Ok(Some((components, quiet.document_of(&keys).render())))
 }
 
+/// The key the screensaver vertical's account signed its own savers with: one
+/// of the user's own, as any saver put in that store is. The load gate checks
+/// such a saver against the key its own manifest carries, so it grants
+/// nothing.
+const USER_SAVER_SEED: [u8; 32] = [0x5A; 32];
+
+/// The manifest source of the system screensaver whose program and preview
+/// the account's own savers are made of. A program reads exactly the options
+/// its manifest declares, so a copy of it declares the same ones.
+const USER_SAVER_TEMPLATE: &str =
+    include_str!("../../../../userland/gui/screensavers/clock/AppInfo.toml");
+
+/// The template saver's manifest source, and those of the two savers the
+/// screensaver vertical's account installed:
+/// [`tairix_test_screensaver_qemu_aarch64::GOOD_SAVER`], asking for no feed,
+/// and [`tairix_test_screensaver_qemu_aarch64::ROGUE_SAVER`], asking for the
+/// machine feed only the system's own savers are given.
+fn user_saver_manifests() -> Result<
+    (
+        tairix_itest_harness::app_image::AppManifestSource,
+        [tairix_itest_harness::app_image::AppManifestSource; 2],
+    ),
+    String,
+> {
+    use tairix_test_screensaver_qemu_aarch64 as contract;
+
+    let template = tairix_itest_harness::app_image::AppManifestSource::parse(USER_SAVER_TEMPLATE)
+        .map_err(|e| format!("the user savers' template manifest: {e}"))?;
+    let installed = |(id, name, title): (&str, &str, &str), feeds: u32| {
+        let mut manifest = template.clone();
+        manifest.id = String::from(id);
+        manifest.name = String::from(name);
+        manifest.title = Some(String::from(title));
+        manifest.saver.feeds = tairix_abi::saver::SaverFeeds::from_bits(feeds)
+            .map_err(|e| format!("the user saver {name}'s feeds: {e:?}"))?;
+        Ok::<_, String>(manifest)
+    };
+    let good = installed(
+        (
+            contract::GOOD_SAVER,
+            contract::GOOD_SAVER_NAME,
+            contract::GOOD_SAVER_TITLE,
+        ),
+        0,
+    )?;
+    let rogue = installed(
+        (
+            contract::ROGUE_SAVER,
+            contract::ROGUE_SAVER_NAME,
+            contract::ROGUE_SAVER_TITLE,
+        ),
+        tairix_abi::APPINFO_FLAG_FEED_MACHINE,
+    )?;
+    Ok((template, [good, rogue]))
+}
+
+/// `manifest`'s `AppInfo` signed with the user's own key over `contents`.
+fn user_saver_appinfo(
+    manifest: &tairix_itest_harness::app_image::AppManifestSource,
+    contents: &[tairix_abi::appinfo::BundleFileDigest<'_>],
+) -> Result<Vec<u8>, String> {
+    tairix_itest_harness::app_image::compose_signed_appinfo(
+        &USER_SAVER_SEED,
+        tairix_itest_harness::app_image::PublisherSource::SelfPublished,
+        manifest,
+        tairix_kernel_syscall::SYSCALL_TABLE_HASH,
+        contents,
+    )
+    .map(|composed| composed.bytes)
+    .map_err(|e| format!("the user saver {}'s AppInfo: {e}", manifest.name))
+}
+
+/// The seeded account's own screensaver store, as root-volume components.
+fn user_saver_store() -> [&'static str; 4] {
+    [
+        tairix_abi::home::USERS_DIR,
+        tairix_test_arxfs_image::USERS_FIXTURE_USERNAME,
+        tairix_abi::home::HOME_LIBRARY_DIR,
+        tairix_abi::HOME_SCREENSAVER_STORE_DIR,
+    ]
+}
+
+/// The two screensavers the screensaver vertical's account installed in its
+/// own store ([`user_saver_manifests`]), each bundle whole: the template
+/// saver's program from `apps` and its preview from the shipped resource
+/// files, under a manifest of its own signed over them by the user's own key.
+fn user_saver_plants(
+    t: &QemuTest,
+    apps: &[super::image_apps::AppStoreFile],
+) -> Result<Vec<RootPlant>, String> {
+    use tairix_abi::appinfo::BundleFileDigest;
+    use tairix_abi::appinfo::{BundleEntry, ProgramKind};
+
+    if t.fs_disk != FsDisk::ScreensaverRootDisk {
+        return Ok(Vec::new());
+    }
+    let fail = |what: String| format!("test --qemu ({}): {what}", t.package);
+    let (template, savers) = user_saver_manifests().map_err(fail)?;
+    let template_dir = template.bundle_dir();
+    let run_at = [
+        ProgramKind::Screensaver.store_dir(),
+        template_dir.as_str(),
+        BundleEntry::Run.as_str(),
+    ];
+    let run = apps
+        .iter()
+        .find(|file| {
+            file.components
+                .iter()
+                .map(Vec::as_slice)
+                .eq(run_at.iter().map(|part| part.as_bytes()))
+        })
+        .map(|file| file.bytes.as_slice())
+        .ok_or_else(|| fail(format!("the store holds no {template_dir} program")))?;
+    let preview = tairix_syshelp::RESOURCE_FILES
+        .iter()
+        .find(|res| {
+            res.bundle == template_dir
+                && format!("{}/{}", BundleEntry::Resources.as_str(), res.file)
+                    == tairix_wallpaper::SAVER_PREVIEW_PATH
+        })
+        .map(|res| res.bytes)
+        .ok_or_else(|| fail(format!("{template_dir} ships no preview")))?;
+    let contents = [
+        BundleFileDigest {
+            path: tairix_wallpaper::SAVER_PREVIEW_PATH,
+            bytes: preview,
+        },
+        BundleFileDigest {
+            path: BundleEntry::Run.as_str(),
+            bytes: run,
+        },
+    ];
+    let mut plants = Vec::new();
+    for manifest in &savers {
+        let appinfo = user_saver_appinfo(manifest, &contents).map_err(fail)?;
+        let bundle = manifest.bundle_dir();
+        let at = |file: &str| {
+            user_saver_store()
+                .into_iter()
+                .chain([bundle.as_str()])
+                .chain(file.split('/'))
+                .map(String::from)
+                .collect::<Vec<String>>()
+        };
+        plants.push((at(BundleEntry::AppInfo.as_str()), appinfo));
+        plants.push((at(BundleEntry::Run.as_str()), run.to_vec()));
+        plants.push((at(tairix_wallpaper::SAVER_PREVIEW_PATH), preview.to_vec()));
+    }
+    Ok(plants)
+}
+
+/// One file a vertical plants on its encrypted root volume: its path
+/// components from the volume root, and its bytes.
+type RootPlant = (Vec<String>, Vec<u8>);
+
 /// Every document a vertical plants on its encrypted root volume, as the
 /// borrowed `(components, bytes)` pairs the image builder takes. The one
 /// place root-volume plants are assembled, so each encrypted-root builder
@@ -12004,22 +12207,27 @@ fn sound_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
 fn root_plants(
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
-) -> Result<Vec<(Vec<String>, String)>, String> {
-    let mut plants = vec![library_plant(t, apps)?];
-    plants.extend(login_type_plant(t)?);
-    plants.extend(sound_plant(t)?);
+) -> Result<Vec<RootPlant>, String> {
+    let documents = [library_plant(t, apps)?]
+        .into_iter()
+        .chain(login_type_plant(t)?)
+        .chain(sound_plant(t)?);
+    let mut plants: Vec<RootPlant> = documents
+        .map(|(components, text)| (components, text.into_bytes()))
+        .collect();
+    plants.extend(user_saver_plants(t, apps)?);
     Ok(plants)
 }
 
 /// Borrow [`root_plants`] output as the component-slice pairs the image
 /// builder's argument type needs.
-fn root_plant_refs(plants: &[(Vec<String>, String)]) -> Vec<(Vec<&[u8]>, &[u8])> {
+fn root_plant_refs(plants: &[RootPlant]) -> Vec<(Vec<&[u8]>, &[u8])> {
     plants
         .iter()
         .map(|(components, bytes)| {
             (
                 components.iter().map(String::as_bytes).collect(),
-                bytes.as_bytes(),
+                bytes.as_slice(),
             )
         })
         .collect()
@@ -12123,6 +12331,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         | FsDisk::PlaintextRootDisk
         | FsDisk::NetToolRootDisk
         | FsDisk::AutoloadRootDisk
+        | FsDisk::ScreensaverRootDisk
         | FsDisk::RtcRootDisk
         | FsDisk::GreeterRootDisk
         | FsDisk::VirtioGpuRootDisk => super::image_apps::app_store_files(ctx, arch, profile)?,
@@ -12137,6 +12346,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     } = fixture_stores(ctx, t, arch, profile)?;
     let autoload_drivers = match t.fs_disk {
         FsDisk::AutoloadRootDisk
+        | FsDisk::ScreensaverRootDisk
         | FsDisk::GreeterRootDisk
         | FsDisk::HoverRootDisk
         | FsDisk::SvgTextRootDisk => {
@@ -15330,6 +15540,299 @@ fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     Ok(pen.steps())
 }
 
+/// The screensaver stores as the screensaver vertical's disk lays them out,
+/// for the session's own walk: each bundle by its directory, with its
+/// manifest.
+#[derive(Default)]
+struct PlantedSavers(std::collections::BTreeMap<String, Vec<u8>>);
+
+impl tairix_appstore::StoreReader for PlantedSavers {
+    fn list_dir(
+        &self,
+        path: &str,
+    ) -> Result<Option<Vec<tairix_appstore::DirEntry>>, tairix_abi::Errno> {
+        let prefix = format!("{path}/");
+        let entries: Vec<tairix_appstore::DirEntry> = self
+            .0
+            .keys()
+            .filter_map(|bundle| bundle.strip_prefix(&prefix))
+            .filter(|name| !name.contains('/'))
+            .map(|name| tairix_appstore::DirEntry {
+                name: String::from(name),
+                directory: true,
+            })
+            .collect();
+        Ok((!entries.is_empty()).then_some(entries))
+    }
+
+    fn read_appinfo(&self, bundle: &str) -> Result<Option<Vec<u8>>, tairix_abi::Errno> {
+        Ok(self.0.get(bundle).cloned())
+    }
+}
+
+/// The screensaver catalogue the screensaver vertical's desktop lists, as its
+/// Settings window holds it: the session's own walk and judgement over the
+/// stores the disk plants, read out entry by entry through the listing's own
+/// wire spelling and folded as Settings folds them.
+///
+/// The catalogue reads what a manifest declares, never its signature or the
+/// files it covers, so each manifest here is composed over no contents: the
+/// system's savers from their sources, the account's own as
+/// [`user_saver_plants`] declares them.
+fn reconstructed_savers() -> Result<Vec<tairix_settings::SaverEntry>, String> {
+    use tairix_abi::appinfo::ProgramKind;
+    use tairix_abi::window_ipc::{
+        decode_screensaver_reply, encode_screensaver_reply, WINDOW_SCREENSAVER_REPLY_MAX,
+    };
+
+    let fail = |what: &dyn core::fmt::Display| format!("screensaver script: {what}");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or_else(|| fail(&"workspace root unreachable"))?;
+    let discovered =
+        tairix_itest_harness::app_image::discover_app_manifests(&root.join("userland"))
+            .map_err(|e| fail(&format_args!("manifest discovery: {e}")))?;
+    let mut stores = PlantedSavers::default();
+    for app in discovered
+        .iter()
+        .filter(|app| app.manifest.kind == ProgramKind::Screensaver)
+    {
+        let appinfo = user_saver_appinfo(&app.manifest, &[]).map_err(|e| fail(&e))?;
+        let bundle = format!(
+            "{}/{}",
+            tairix_abi::SYSTEM_SCREENSAVER_STORE,
+            app.manifest.bundle_dir()
+        );
+        stores.0.insert(bundle, appinfo);
+    }
+    let home = user_saver_store()[..2].join("/");
+    let (_, installed) = user_saver_manifests().map_err(|e| fail(&e))?;
+    for manifest in &installed {
+        let bundle = format!(
+            "/{}/{}",
+            user_saver_store().join("/"),
+            manifest.bundle_dir()
+        );
+        stores.0.insert(
+            bundle,
+            user_saver_appinfo(manifest, &[]).map_err(|e| fail(&e))?,
+        );
+    }
+    let (catalog, refused) =
+        tairix_desktop_session::saver::load_savers(&stores, Some(&format!("/{home}")));
+    if let Some(e) = refused {
+        return Err(fail(&e));
+    }
+    let mut savers = Vec::new();
+    let mut frame = [0u8; WINDOW_SCREENSAVER_REPLY_MAX];
+    for index in 0..catalog.total() {
+        let (entry, options) = catalog
+            .entry(index)
+            .ok_or_else(|| fail(&format_args!("no catalogue entry {index}")))?;
+        let len = encode_screensaver_reply(&mut frame, Ok((catalog.total(), &entry, options)));
+        let (_, answered) = decode_screensaver_reply(&frame[..len])
+            .map_err(|e| fail(&format_args!("entry {index} answers no entry: {e:?}")))?;
+        tairix_settings::SaverEntry::list(&mut savers, index, &answered);
+    }
+    Ok(savers)
+}
+
+/// Every press the screensaver vertical makes, reconstructed as the Settings
+/// walk's are: through the production bar, the production menu chain and the
+/// application's own shell, over the catalogue the guest's desktop lists.
+struct SaverWalk {
+    capsule: tairix_geometry::Point,
+    settings_row: tairix_geometry::Point,
+    screensaver_row: tairix_geometry::Point,
+    /// Where the wheel turns over the pane.
+    pane_wheel: tairix_geometry::Point,
+    /// The detents that bring the pane to its end, the user's saver's picture
+    /// among what it then shows.
+    to_saver: u32,
+    saver_picture: tairix_geometry::Point,
+    /// The detents that bring the pane, rebuilt for the chosen saver, to its
+    /// end again.
+    to_preview: u32,
+    preview: tairix_geometry::Point,
+}
+
+/// The most detents a wheel turn may take to bring the pane to its end
+/// before the reconstruction is taken to have found a pane that never stops.
+const SAVER_PANE_DETENTS_MAX: u32 = 64;
+
+/// Turn the wheel toward the user over the pane at `at`, a detent at a time,
+/// until a detent moves its thumb no further: the detents it took, the last
+/// of them the one that moved nothing. The guest's seat may accelerate a turn
+/// of many detents, but acceleration only ever scrolls further, and the pane
+/// stops at its end, so the guest arrives exactly where this does.
+fn saver_wheel_pane_to_end(
+    shell: &mut tairix_settings::Shell,
+    at: tairix_geometry::Point,
+    viewport: tairix_geometry::Rect,
+    theme: &tairix_theme::Theme,
+) -> Result<u32, String> {
+    use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
+    use tairix_controls::ScrollPart;
+    use tairix_input::InputEvent;
+
+    let mut damage = tairix_geometry::Region::new();
+    let thumb = |shell: &tairix_settings::Shell| {
+        shell.pane_scroll_rect(ScrollPart::Thumb, viewport, RECONSTRUCTION_SCALE, theme)
+    };
+    shell.on_pointer(
+        &InputEvent::PointerMoved { to: at },
+        viewport,
+        RECONSTRUCTION_SCALE,
+        theme,
+        &mut damage,
+    );
+    for detents in 1..=SAVER_PANE_DETENTS_MAX {
+        let before = thumb(shell);
+        shell.on_pointer(
+            &InputEvent::PointerScrolled {
+                dx: 0,
+                dy: SCROLL_UNITS_PER_DETENT,
+            },
+            viewport,
+            RECONSTRUCTION_SCALE,
+            theme,
+            &mut damage,
+        );
+        if thumb(shell) == before {
+            return Ok(detents);
+        }
+    }
+    Err(format!(
+        "screensaver script: {SAVER_PANE_DETENTS_MAX} detents never brought the pane to its end"
+    ))
+}
+
+/// The screensaver walk, reconstructed once per process.
+fn saver_walk() -> Result<&'static SaverWalk, String> {
+    static WALK: std::sync::OnceLock<Result<SaverWalk, String>> = std::sync::OnceLock::new();
+    WALK.get_or_init(reconstruct_saver_walk)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// Reconstruct the whole screensaver walk (see [`SaverWalk`]).
+fn reconstruct_saver_walk() -> Result<SaverWalk, String> {
+    use tairix_geometry::{Point, Rect};
+    use tairix_settings::{Category, Chooser, Shell, ShellOutcome, WIN_HEIGHT, WIN_WIDTH};
+    use tairix_taskbar::SystemAction;
+    use tairix_test_screensaver_qemu_aarch64::GOOD_SAVER;
+    let scale = RECONSTRUCTION_SCALE;
+    let theme = booted_theme();
+    let viewport = Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT);
+    let window = settings_window_layout(&theme);
+    let to_screen = |local: Point| settings_press(window, local, &theme);
+    let chosen = format!("screensaver.saver = {GOOD_SAVER}");
+
+    let (capsule, settings_row) = system_menu_aim(SystemAction::Settings)?;
+    let mut shell = Shell::new(tairix_wallpaper::DesktopSettings::default())
+        .ok_or_else(|| "screensaver script: the registry holds no category".to_string())?;
+    shell.adopt_output(ramfb_screen());
+    shell.lay_out(viewport, scale, &theme);
+    let screensaver_row = settings_walk_to(&mut shell, Category::Screensaver, viewport, &theme)?;
+    // What the guest's pane holds once the catalogue reaches it, which is the
+    // gate every press below waits on.
+    shell.adopt_savers(Some(reconstructed_savers()?));
+    shell.lay_out(viewport, scale, &theme);
+
+    let good = tairix_wallpaper::ScreensaverChoice::from_value(GOOD_SAVER)
+        .ok_or_else(|| format!("screensaver script: {GOOD_SAVER} is no screensaver choice"))?;
+    let picture = shell
+        .screensaver_picture(good)
+        .ok_or_else(|| format!("screensaver script: the chooser offers no {GOOD_SAVER}"))?;
+    let pane_wheel = rect_centre(shell.frame(viewport, scale, &theme).content, "pane")?;
+    let to_saver = saver_wheel_pane_to_end(&mut shell, pane_wheel, viewport, &theme)?;
+    let shown = shell
+        .picture_rect(Chooser::Screensaver, picture, viewport, scale, &theme)
+        .ok_or_else(|| {
+            format!("screensaver script: the pane's end does not show {GOOD_SAVER}'s picture")
+        })?;
+    let saver_picture = rect_centre(shown, "the user's saver's picture")?;
+    let posted = settings_click(&mut shell, saver_picture, viewport, &theme);
+    if !posted
+        .document()
+        .is_some_and(|document| document.contains(&chosen))
+    {
+        return Err(format!(
+            "screensaver script: choosing {GOOD_SAVER} asked for {posted:?}, not `{chosen}`"
+        ));
+    }
+
+    let to_preview = saver_wheel_pane_to_end(&mut shell, pane_wheel, viewport, &theme)?;
+    let preview = shell
+        .preview_rect(viewport, scale, &theme)
+        .ok_or_else(|| "screensaver script: the pane's end does not show Preview".to_string())?;
+    let preview = rect_centre(preview, "Preview")?;
+    match settings_click(&mut shell, preview, viewport, &theme) {
+        ShellOutcome::PreviewScreensaver(document) if document.contains(&chosen) => {}
+        other => {
+            return Err(format!(
+                "screensaver script: Preview asked for {other:?}, not a preview of {GOOD_SAVER}"
+            ))
+        }
+    }
+
+    Ok(SaverWalk {
+        capsule,
+        settings_row,
+        screensaver_row: to_screen(screensaver_row)?,
+        pane_wheel: to_screen(pane_wheel)?,
+        to_saver,
+        saver_picture: to_screen(saver_picture)?,
+        to_preview,
+        preview: to_screen(preview)?,
+    })
+}
+
+/// Open Settings from the capsule's system menu, walk to Screensaver, and —
+/// once the desktop says its catalogue reached the chooser — wheel the pane
+/// to its end, choose the user's own saver, wheel the rebuilt pane to its end
+/// and press Preview.
+///
+/// The catalogue is what lays the pane out below its first row, and it
+/// arrives on Settings' own worker, so no press into the pane may be aimed
+/// until the desktop's record that a chooser asked for one of its pictures:
+/// Settings can ask for none before it holds the list. Every later press
+/// shares that gate, because nothing after it changes the pane but the
+/// presses themselves, which the application applies strictly in order.
+fn screensaver_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::{MouseButton, WheelTurn};
+
+    let walk = saver_walk()?;
+    let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let listed = tairix_desktop_session::SAVER_CATALOGUE_SHOWN_MESSAGE;
+    let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
+    pen.click(revealed, 1, MouseButton::Secondary, walk.capsule);
+    pen.click(
+        MENU_SHOWN_MARKER,
+        1,
+        MouseButton::Primary,
+        walk.settings_row,
+    );
+    pen.click(
+        WINDOW_SHOWN_MARKER,
+        1,
+        MouseButton::Primary,
+        walk.screensaver_row,
+    );
+    pen.wheel(listed, 1, walk.pane_wheel, WheelTurn::Toward, walk.to_saver);
+    pen.click(listed, 1, MouseButton::Primary, walk.saver_picture);
+    pen.wheel(
+        listed,
+        1,
+        walk.pane_wheel,
+        WheelTurn::Toward,
+        walk.to_preview,
+    );
+    pen.click(listed, 1, MouseButton::Primary, walk.preview);
+    Ok(pen.steps())
+}
+
 /// The largest per-channel difference a pixel of an application's own opaque
 /// fill may show against the theme colour it was filled with: the window
 /// content is converted and copied, not blended, so any more is another
@@ -18046,6 +18549,22 @@ fn image_total_sectors(bytes: &[u8]) -> u64 {
     u64::try_from(bytes.len() / tairix_test_encrypted_root_image::SECTOR_BYTES).unwrap_or(0)
 }
 
+/// The encrypted-root disk planting `apps` and no driver store, its backing
+/// file named `extension`.
+fn plain_root_image(
+    t: &QemuTest,
+    apps: &[AppStoreFile],
+    extension: &'static str,
+) -> Result<FsImage, String> {
+    let bytes = root_disk_bytes(t, apps, ENCRYPTED_ROOT)?;
+    let total_sectors = image_total_sectors(&bytes);
+    Ok(FsImage {
+        extension,
+        bytes,
+        total_sectors,
+    })
+}
+
 /// The filesystem volume `t` plants on its virtio-blk backing image, or
 /// `None` for an enrolment with no filesystem disk. The bytes come from a
 /// single-source-of-truth image fixture the kernel-side tail also names, so
@@ -18109,47 +18628,28 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
                 total_sectors,
             })
         }
-        // The memsoak vertical uses the plain encrypted-root author (no
-        // driver store): the same builder as `EncryptedRootDisk`, planting
-        // the standard store plus the one test-only fixture bundle.
+        // The memsoak, stall-trace and liveness-watchdog verticals need no
+        // driver store: the standard store plus a test-only fixture bundle,
+        // or with the watchdog's fixture in `netstack`'s place.
         FsDisk::MemsoakRootDisk => {
-            let bytes = root_disk_bytes(t, apps_with_memsoak, ENCRYPTED_ROOT)?;
-            let total_sectors = image_total_sectors(&bytes);
-            Some(FsImage {
-                extension: "memsoak-root.img",
-                bytes,
-                total_sectors,
-            })
+            Some(plain_root_image(t, apps_with_memsoak, "memsoak-root.img")?)
         }
-        // The stall-trace vertical likewise uses the plain encrypted-root
-        // author: it needs no driver store, only the standard store plus its
-        // one test-only fixture bundle.
-        FsDisk::StalltraceRootDisk => {
-            let bytes = root_disk_bytes(t, apps_with_stalltrace, ENCRYPTED_ROOT)?;
-            let total_sectors = image_total_sectors(&bytes);
-            Some(FsImage {
-                extension: "stalltrace-root.img",
-                bytes,
-                total_sectors,
-            })
-        }
-        // The liveness-watchdog vertical likewise uses the plain
-        // encrypted-root author: the standard store, with its `netstack`
-        // bundle substituted for the fixture.
-        FsDisk::WatchdogRootDisk => {
-            let bytes = root_disk_bytes(t, apps_with_watchdog, ENCRYPTED_ROOT)?;
-            let total_sectors = image_total_sectors(&bytes);
-            Some(FsImage {
-                extension: "watchdog-root.img",
-                bytes,
-                total_sectors,
-            })
-        }
+        FsDisk::StalltraceRootDisk => Some(plain_root_image(
+            t,
+            apps_with_stalltrace,
+            "stalltrace-root.img",
+        )?),
+        FsDisk::WatchdogRootDisk => Some(plain_root_image(
+            t,
+            apps_with_watchdog,
+            "watchdog-root.img",
+        )?),
         // Every driver-store vertical (the autoload disk plus the net-only
         // TCP / ping / static / bond / DHCP disks) shares one whole-disk
         // author, selected in `net_root_fs_disk_image` — never a per-fixture
         // copy.
         FsDisk::AutoloadRootDisk
+        | FsDisk::ScreensaverRootDisk
         | FsDisk::GreeterRootDisk
         | FsDisk::VirtioGpuRootDisk
         | FsDisk::HoverRootDisk
@@ -18199,6 +18699,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
     } = stores;
     let (drivers, app_set, extension) = match t.fs_disk {
         FsDisk::AutoloadRootDisk => (autoload_drivers, apps, "autoload-root.img"),
+        FsDisk::ScreensaverRootDisk => (autoload_drivers, apps, "screensaver-root.img"),
         FsDisk::GreeterRootDisk => (autoload_drivers, apps, "greeter-root.img"),
         FsDisk::VirtioGpuRootDisk => (virtio_gpu_drivers, apps, "virtio-gpu-root.img"),
         FsDisk::HoverRootDisk => (autoload_drivers, apps_with_framestats, "hover-root.img"),
@@ -19191,19 +19692,20 @@ mod tests {
         desktop_hover_pointer_script, fatal_verdict, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, netmap_pointer_script, persist_serial,
         qemu_host_budget_for, qemu_job_weight, row_holds_track, screendump_ext, screendump_path,
-        settings_pointer_script, sidecar_path, touch_pointer_script, Expect, FsDisk, NetPeerMode,
-        PrimePlan, QemuTest, TypedStep, AARCH64_TARGET, APPBAR_SETTLED_MARKER, AUDIOCUE_LINE,
-        AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
-        AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
-        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
-        KEYBOARD_ONLY_ARMED_OCCURRENCES, LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL,
-        LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER, MEMSOAK_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL,
-        RISCV64_TARGET, SCRIPTED_LIFECYCLE, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
-        STARTUP_PLAYED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
-        SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX,
-        TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
-        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
-        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
+        screensaver_pointer_script, settings_pointer_script, sidecar_path, touch_pointer_script,
+        Expect, FsDisk, NetPeerMode, PrimePlan, QemuTest, TypedStep, AARCH64_TARGET,
+        APPBAR_SETTLED_MARKER, AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL,
+        AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER,
+        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES,
+        LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL, LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER,
+        MEMSOAK_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL, RISCV64_TARGET, SCRIPTED_LIFECYCLE,
+        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, STARTUP_PLAYED_MARKER,
+        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
+        SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
+        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
+        VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -19317,6 +19819,7 @@ mod tests {
             ("picker delegation", filepick_pointer_script()),
             ("hand-over", handover_pointer_script()),
             ("settings", settings_pointer_script()),
+            ("screensaver", screensaver_pointer_script()),
             ("network map", netmap_pointer_script()),
             ("wintersun client", super::wintersun_pointer_script()),
         ] {

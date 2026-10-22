@@ -1511,7 +1511,8 @@ mod program {
         let home = tairix_rt::env_var(b"HOME")
             .and_then(|home| core::str::from_utf8(home).ok())
             .map(alloc::string::String::from);
-        let mut service = Service::new(pid, home, probe_scopes(&transport), &authority);
+        let uid = tairix_rt::self_origin().ok().map(|origin| origin.uid());
+        let mut service = Service::new(pid, (home, uid), probe_scopes(&transport), &authority);
 
         loop {
             let cycled = service.cycle(&mut host, &transport, tairix_rt::clock_get(), &authority);

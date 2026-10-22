@@ -13,7 +13,6 @@ use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
-use tairix_appconf::Registry;
 use tairix_controls::testkit::{keystroke, premul};
 use tairix_controls::{ground_fill, plate_border, ChromeLayer, FieldGroup, MenuItem, WHEEL_STEP};
 use tairix_font::install_test_transport;
@@ -28,7 +27,7 @@ use crate::form::{Composition, FormPlace, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
 use crate::pictures::Chooser;
 use crate::registry::{Category, Location, Pane, PaneContent, StripRow, CATEGORIES};
-use crate::saver::SaverOption;
+use crate::saver::SaverEntry;
 use crate::shell::{Shell, ShellOutcome};
 use crate::test_support::{click, clicked, damage, opaque, row_at, rows, theme, WIDE};
 use crate::volumes::VolumeReading;
@@ -1795,36 +1794,29 @@ fn the_display_off_row_counts_in_minutes_and_hours() {
     }
 }
 
-/// Every kind the registry closes over is one a reader can choose, by its
-/// picture.
+/// Every saver the desktop lists that can be chosen is one a reader can
+/// choose, by its picture; until the list arrives there is none to choose.
 #[test]
-fn the_screensaver_chooser_offers_every_kind() {
-    let shell = shell_at(Location {
+fn the_screensaver_chooser_offers_every_saver_that_can_be_chosen() {
+    let mut shell = shell_at(Location {
         category: Category::Screensaver,
         pane: Pane::Screensaver,
     });
-    let form = shell.form_for_test().expect("a form");
-    let chooser = form.groups()[0]
-        .pictures()
-        .expect("the kind is chosen by its picture");
-    let labels: alloc::vec::Vec<&str> = (0..chooser.len())
-        .filter_map(|index| chooser.item(index))
-        .map(tairix_controls::PictureItem::label)
-        .collect();
+    let labels = |shell: &Shell| -> alloc::vec::Vec<alloc::string::String> {
+        let form = shell.form_for_test().expect("a form");
+        let chooser = form.groups()[0]
+            .pictures()
+            .expect("the saver is chosen by its picture");
+        (0..chooser.len())
+            .filter_map(|index| chooser.item(index))
+            .map(|item| alloc::string::String::from(item.label()))
+            .collect()
+    };
+    assert!(labels(&shell).is_empty(), "nothing listed yet");
+    shell.adopt_savers(Some(savers()));
     assert_eq!(
-        labels,
-        [
-            "Black",
-            "Dimmed desktop",
-            "Slideshow",
-            "Clock",
-            "Minimal Clock",
-            "Starfield",
-            "Game of Life",
-            "Ray Tracer",
-            "Retro Games",
-            "System Monitor"
-        ]
+        labels(&shell),
+        ["Black", "Dimmed desktop", "Waves", "Starfield"]
     );
 }
 
@@ -4000,53 +3992,187 @@ fn row_labels(shell: &Shell, group: usize) -> alloc::vec::Vec<&str> {
         .collect()
 }
 
-/// The Screensaver pane showing `settings`, laid out for [`WIDE`].
+/// The savers the desktop lists: its own two; Waves, declaring a choice, a
+/// switch and a range and given the slides and machine feeds; Starfield,
+/// declaring a switch; and one of the user's own that cannot be chosen.
+fn savers() -> alloc::vec::Vec<SaverEntry> {
+    use tairix_abi::bounded_text::BoundedText;
+    use tairix_abi::saver::{
+        Choice, ChoiceValue, Choices, OptionKey, Range, SaverFeeds, SaverOption, SaverOptionKind,
+    };
+    use tairix_abi::window_ipc::{SaverOrigin, SaverStanding};
+    let text = |value: &str| BoundedText::new(value).expect("a text");
+    let option = |key: &str, label: &str, kind| {
+        SaverOption::new(
+            OptionKey::new(key).expect("a key"),
+            (text(label), BoundedText::EMPTY),
+            kind,
+        )
+        .expect("an option")
+    };
+    let choice = |value: &str, label: &str| Choice {
+        value: ChoiceValue::new(value).expect("a word"),
+        label: BoundedText::new(label).expect("a label"),
+    };
+    let saver = |index: u16, id: &str, title: &str, options, feeds: u32| SaverEntry {
+        index,
+        choice: tairix_wallpaper::ScreensaverChoice::from_value(id).expect("a choice"),
+        title: alloc::string::String::from(title),
+        purpose: alloc::string::String::new(),
+        origin: SaverOrigin::System,
+        standing: SaverStanding::Offered,
+        feeds: SaverFeeds::from_bits(feeds).expect("feeds"),
+        options,
+    };
+    let waves = alloc::vec![
+        option(
+            "speed",
+            "Speed",
+            SaverOptionKind::Choice {
+                choices: Choices::new(&[choice("slow", "Slow"), choice("fast", "Fast")])
+                    .expect("choices"),
+                default: 0,
+            },
+        ),
+        option("foam", "Foam", SaverOptionKind::Switch { default: true }),
+        option(
+            "height",
+            "Wave height",
+            SaverOptionKind::Range {
+                range: Range::new(1, 9, 2).expect("a range"),
+                default: 5,
+                unit: BoundedText::new("metres").expect("a unit"),
+            },
+        ),
+    ];
+    let mut broken = saver(5, "org.example.broken", "Broken", alloc::vec::Vec::new(), 0);
+    broken.origin = SaverOrigin::User;
+    broken.standing = SaverStanding::Damaged;
+    alloc::vec![
+        saver(0, "blank", "Black", alloc::vec::Vec::new(), 0),
+        saver(1, "dim", "Dimmed desktop", alloc::vec::Vec::new(), 0),
+        saver(
+            2,
+            WAVES,
+            "Waves",
+            waves,
+            tairix_abi::APPINFO_FLAG_FEED_SLIDES | tairix_abi::APPINFO_FLAG_FEED_MACHINE,
+        ),
+        saver(
+            3,
+            STARFIELD,
+            "Starfield",
+            alloc::vec![option(
+                "warp",
+                "Warp",
+                SaverOptionKind::Switch { default: true }
+            )],
+            0,
+        ),
+        broken,
+    ]
+}
+
+const WAVES: &str = "os.tairix.saver.waves";
+const STARFIELD: &str = "os.tairix.saver.starfield";
+
+/// The settings with the saver `choice` chosen.
+fn choosing(choice: &str) -> DesktopSettings {
+    DesktopSettings {
+        screensaver: tairix_wallpaper::ScreensaverChoice::from_value(choice).expect("a choice"),
+        ..DesktopSettings::default()
+    }
+}
+
+/// The Screensaver pane showing `settings` over the desktop's [`savers`],
+/// laid out for [`WIDE`].
 fn screensaver_showing(settings: DesktopSettings) -> Shell {
     let mut shell = Shell::new(settings).expect("a shell");
     let mut sink = damage();
     assert!(shell.go_to_pane("screensaver", WIDE, Scale::ONE, &theme(), &mut sink));
+    shell.adopt_savers(Some(savers()));
     shell.lay_out(WIDE, Scale::ONE, &theme());
     shell
 }
 
+/// The screensavers are asked for each time their pane comes on show, and
+/// again whenever the window is focused while it shows; an answer that
+/// lands is not asked for twice.
+#[test]
+fn the_screensavers_are_asked_for_when_their_pane_shows_and_on_focus() {
+    let mut shell = Shell::new(DesktopSettings::default()).expect("a shell");
+    assert!(!shell.savers_wanted(), "not before the pane shows");
+    shell.focused();
+    assert!(!shell.savers_wanted(), "nor on focus elsewhere");
+    let mut sink = damage();
+    assert!(shell.go_to_pane("screensaver", WIDE, Scale::ONE, &theme(), &mut sink));
+    assert!(shell.savers_wanted());
+    shell.adopt_savers(Some(savers()));
+    assert!(!shell.savers_wanted(), "answered");
+    shell.focused();
+    assert!(
+        shell.savers_wanted(),
+        "what moved meanwhile is asked for again"
+    );
+    shell.adopt_savers(None);
+    assert!(!shell.savers_wanted(), "a refusal answers it too");
+    shell.focused();
+    shell.focused();
+    shell.adopt_savers(Some(savers()));
+    assert!(
+        shell.savers_wanted(),
+        "focused again while a listing was out, so that listing may predate it"
+    );
+    shell.adopt_savers(Some(savers()));
+    assert!(!shell.savers_wanted(), "the later listing answers it");
+}
+
 /// Choosing a screensaver's picture posts it and brings that screensaver's own
-/// group — its options, then the button that shows it — in place of the last
-/// one's, laid out afresh and repainted.
+/// group — the options it declares, the feeds it is given, then the button
+/// that shows it — in place of the last one's, laid out afresh and repainted.
 #[test]
 fn choosing_a_screensaver_brings_its_own_options_in_place_of_the_last() {
     let theme = theme();
-    let mut shell = screensaver_showing(DesktopSettings {
-        screensaver: tairix_wallpaper::ScreensaverKind::Ribbon,
-        ..DesktopSettings::default()
-    });
+    let mut shell = screensaver_showing(choosing(STARFIELD));
     assert_eq!(
         captions(&shell),
-        ["SCREENSAVER", "MINIMAL CLOCK", "ENERGY SAVING"]
+        ["SCREENSAVER", "STARFIELD", "ENERGY SAVING"]
     );
+    assert_eq!(row_labels(&shell, 1), ["Warp", "Preview"]);
+    let place = |id: &str| {
+        shell.screensaver_picture(
+            tairix_wallpaper::ScreensaverChoice::from_value(id).expect("a choice"),
+        )
+    };
+    assert_eq!(place(WAVES), Some(2), "after the desktop's own two");
     assert_eq!(
-        row_labels(&shell, 1),
-        [SaverOption::RibbonDate.label(), "Preview"]
+        place("org.example.broken"),
+        None,
+        "a saver that cannot be chosen is no picture"
     );
-    let life = shell
-        .picture_rect(Chooser::Screensaver, 6, WIDE, Scale::ONE, &theme)
-        .expect("the Game of Life shows");
+    let waves = shell
+        .picture_rect(Chooser::Screensaver, 2, WIDE, Scale::ONE, &theme)
+        .expect("Waves shows");
     let mut drew = damage();
-    let acted = clicked(&mut shell, life.center(), WIDE, &theme, &mut drew);
+    let acted = clicked(&mut shell, waves.center(), WIDE, &theme, &mut drew);
     let document = acted.document().expect("the choice posts a document");
-    assert!(document.contains("screensaver.kind = life"), "{document}");
+    assert!(
+        document.contains(&alloc::format!("screensaver.saver = {WAVES}")),
+        "{document}"
+    );
     assert!(
         !document.contains(SettingsKey::Wallpaper.name()),
         "{document}"
     );
-    assert_eq!(
-        captions(&shell),
-        ["SCREENSAVER", "GAME OF LIFE", "ENERGY SAVING"]
-    );
+    assert_eq!(captions(&shell), ["SCREENSAVER", "WAVES", "ENERGY SAVING"]);
     assert_eq!(
         row_labels(&shell, 1),
         [
-            SaverOption::LifeCells.label(),
-            SaverOption::LifeSpeed.label(),
+            "Speed",
+            "Foam",
+            "Wave height",
+            crate::saver::SLIDES_LABEL,
+            crate::saver::TASKS_LABEL,
             "Preview"
         ]
     );
@@ -4055,11 +4181,8 @@ fn choosing_a_screensaver_brings_its_own_options_in_place_of_the_last() {
         covers(&drew, frame.content),
         "the new rows were not repainted"
     );
-    // Laid out exactly as a pane opened on the Game of Life is.
-    let fresh = screensaver_showing(DesktopSettings {
-        screensaver: tairix_wallpaper::ScreensaverKind::Life,
-        ..DesktopSettings::default()
-    });
+    // Laid out exactly as a pane opened on Waves is.
+    let fresh = screensaver_showing(choosing(WAVES));
     assert_eq!(frame, fresh.frame(WIDE, Scale::ONE, &theme));
     assert_eq!(
         shell.row_rect_for_test((2, 0), WIDE, Scale::ONE, &theme),
@@ -4071,32 +4194,36 @@ fn choosing_a_screensaver_brings_its_own_options_in_place_of_the_last() {
     );
 }
 
-/// Test asks for the screensaver exactly as the pane shows it, and only for
-/// that: it is not a setting, so it posts nothing.
+/// Preview asks for the screensaver exactly as the pane shows it, its own
+/// values with it, and only for that: it is not a setting, so it posts
+/// nothing.
 #[test]
-fn the_test_button_asks_for_the_screensaver_as_the_pane_shows_it() {
+fn the_preview_button_asks_for_the_screensaver_as_the_pane_shows_it() {
     let theme = theme();
-    let mut settings = DesktopSettings {
-        screensaver: tairix_wallpaper::ScreensaverKind::Life,
-        ..DesktopSettings::default()
-    };
-    settings.screensaver_options.life.speed = tairix_wallpaper::Pace::Fast;
-    let mut shell = screensaver_showing(settings);
-    // Tall enough to show the chooser and the Game of Life's group whole.
-    let tall = Rect::new(0, 0, WIDE.width, 1000);
+    let mut shell = screensaver_showing(choosing(WAVES));
+    let form = shell.form_mut_for_test().expect("a form");
+    assert!(matches!(
+        form.choose_for_test(1, 0, 1),
+        crate::FormOutcome::Apply(_)
+    ));
+    let tall = Rect::new(0, 0, WIDE.width, 1400);
     shell.lay_out(tall, Scale::ONE, &theme);
-    let test = shell
-        .row_control_rect_for_test((1, 2), tall, Scale::ONE, &theme)
-        .expect("the Test button shows");
+    let preview = shell
+        .row_control_rect_for_test((1, 5), tall, Scale::ONE, &theme)
+        .expect("the Preview button shows");
+    assert_eq!(shell.preview_rect(tall, Scale::ONE, &theme), Some(preview));
     let mut sink = damage();
-    let acted = clicked(&mut shell, test.center(), tall, &theme, &mut sink);
+    let acted = clicked(&mut shell, preview.center(), tall, &theme, &mut sink);
     let ShellOutcome::PreviewScreensaver(document) = &acted else {
-        panic!("Test asks for a preview: {acted:?}");
+        panic!("Preview asks for a preview: {acted:?}");
     };
     assert!(acted.document().is_none(), "a preview posts nothing");
-    assert!(document.contains("screensaver.kind = life"), "{document}");
     assert!(
-        document.contains("screensaver.life.speed = fast"),
+        document.contains(&alloc::format!("screensaver.saver = {WAVES}")),
+        "{document}"
+    );
+    assert!(
+        document.contains(&alloc::format!("saver.{WAVES}.speed = fast")),
         "{document}"
     );
     assert!(
@@ -4114,10 +4241,7 @@ fn the_test_button_asks_for_the_screensaver_as_the_pane_shows_it() {
 #[test]
 fn a_refused_preview_is_stated_on_its_row() {
     // Black has nothing to set, so its Preview row is its group's first.
-    let mut shell = screensaver_showing(DesktopSettings {
-        screensaver: tairix_wallpaper::ScreensaverKind::Blank,
-        ..DesktopSettings::default()
-    });
+    let mut shell = screensaver_showing(choosing("blank"));
     let description = |shell: &Shell| {
         shell.form_for_test().expect("a form").groups()[1].rows()[0]
             .description()
@@ -4140,205 +4264,52 @@ fn a_refused_preview_is_stated_on_its_row() {
 }
 
 /// The value `document` gives `key`, if it names it.
-fn value_of(document: &str, key: SettingsKey) -> Option<&str> {
+fn value_of<'a>(document: &'a str, key: &str) -> Option<&'a str> {
     document.lines().find_map(|line| {
         let (name, value) = line.split_once('=')?;
-        (name.trim() == key.name()).then(|| value.trim())
+        (name.trim() == key).then(|| value.trim())
     })
 }
 
-/// The ray tracer's group sets how much of the machine it traces on, idle
-/// time first and chosen until told otherwise, whether its pictures are
-/// kept, off until told otherwise, and how much its scenes set out, simply
-/// until told otherwise, above the button that shows it.
+/// Every row of a saver's group posts its own key: each option the saver's,
+/// under its identifier, and each feed's the desktop's.
 #[test]
-fn the_ray_tracer_offers_its_processor_use_its_pictures_its_detail_and_its_preview() {
-    let mut shell = screensaver_showing(DesktopSettings {
-        screensaver: tairix_wallpaper::ScreensaverKind::Raytrace,
-        ..DesktopSettings::default()
-    });
-    assert_eq!(
-        captions(&shell),
-        ["SCREENSAVER", "RAY TRACER", "ENERGY SAVING"]
-    );
-    assert_eq!(
-        row_labels(&shell, 1),
-        ["Processor use", "Save pictures", "Detail", "Preview"]
-    );
-    let form = shell.form_mut_for_test().expect("a form");
-    let tairix_controls::FieldControl::Combo(combo) = form.groups()[1].rows()[0].control() else {
-        panic!("processor use is a choice");
-    };
-    assert_eq!(combo.choices(), ["Idle time", "Performance"]);
-    assert_eq!(combo.selected(), Some(0));
-    let tairix_controls::FieldControl::Combo(save) = form.groups()[1].rows()[1].control() else {
-        panic!("saving pictures is a choice");
-    };
-    assert_eq!(save.choices(), ["On", "Off"]);
-    assert_eq!(save.selected(), Some(1), "pictures are not kept unasked");
-    let tairix_controls::FieldControl::Combo(detail) = form.groups()[1].rows()[2].control() else {
-        panic!("the detail is a choice");
-    };
-    assert_eq!(detail.choices(), ["Simple", "Maximum realism"]);
-    assert_eq!(
-        detail.selected(),
-        Some(0),
-        "scenes are set out simply unasked"
-    );
-}
-
-/// The System Monitor names the busiest tasks until told not to, and the row
-/// that says so warns that the names show on a locked screen.
-#[test]
-fn the_system_monitor_offers_to_hide_its_task_names() {
-    let mut shell = screensaver_showing(DesktopSettings {
-        screensaver: tairix_wallpaper::ScreensaverKind::SystemMonitor,
-        ..DesktopSettings::default()
-    });
-    assert_eq!(
-        captions(&shell),
-        ["SCREENSAVER", "SYSTEM MONITOR", "ENERGY SAVING"]
-    );
-    assert_eq!(row_labels(&shell, 1), ["Name the busiest tasks", "Preview"]);
-    let form = shell.form_mut_for_test().expect("a form");
-    let row = &form.groups()[1].rows()[0];
-    assert!(
-        row.description()
-            .is_some_and(|text| text.contains("locked")),
-        "{:?}",
-        row.description()
-    );
-    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
-        panic!("naming the tasks is a choice");
-    };
-    assert_eq!(combo.choices(), ["On", "Off"]);
-    assert_eq!(combo.selected(), Some(0));
-}
-
-/// Every option a screensaver offers posts its own key.
-#[test]
-fn every_screensaver_option_posts_its_own_key() {
-    for (kind, keys) in [
-        (
-            tairix_wallpaper::ScreensaverKind::Slideshow,
-            &[SettingsKey::SlideInterval, SettingsKey::SlideOrder][..],
-        ),
-        (
-            tairix_wallpaper::ScreensaverKind::Clock,
-            &[SettingsKey::ClockDate, SettingsKey::ClockIdentity],
-        ),
-        (
-            tairix_wallpaper::ScreensaverKind::Ribbon,
-            &[SettingsKey::RibbonDate],
-        ),
-        (
-            tairix_wallpaper::ScreensaverKind::Starfield,
-            &[SettingsKey::StarDensity, SettingsKey::StarWarp],
-        ),
-        (
-            tairix_wallpaper::ScreensaverKind::Life,
-            &[SettingsKey::LifeCells, SettingsKey::LifeSpeed],
-        ),
-        (
-            tairix_wallpaper::ScreensaverKind::Raytrace,
-            &[
-                SettingsKey::RaytraceCpu,
-                SettingsKey::RaytraceSave,
-                SettingsKey::RaytraceDetail,
-            ],
-        ),
-        (
-            tairix_wallpaper::ScreensaverKind::RetroGames,
-            &[SettingsKey::RetroGamesSpeed],
-        ),
-        (
-            tairix_wallpaper::ScreensaverKind::SystemMonitor,
-            &[SettingsKey::MonitorTasks],
-        ),
-    ] {
-        let mut shell = screensaver_showing(DesktopSettings {
-            screensaver: kind,
-            ..DesktopSettings::default()
-        });
-        for (row, key) in keys.iter().enumerate() {
-            let form = shell.form_mut_for_test().expect("a form");
-            let tairix_controls::FieldControl::Combo(combo) =
-                form.groups()[1].rows()[row].control()
-            else {
-                panic!("{kind:?} row {row} is a choice");
-            };
-            let other = (combo.selected().unwrap_or(0) + 1) % combo.choices().len();
-            let before = DesktopSettings::default().document_of(&[*key]).render();
-            let crate::FormOutcome::Apply(document) = form.choose_for_test(1, row, other) else {
-                panic!("{kind:?} row {row} posts a document");
-            };
-            let (was, now) = (value_of(&before, *key), value_of(&document, *key));
-            assert!(now.is_some() && now != was, "{key:?}: {was:?} -> {now:?}");
-        }
+fn every_row_of_a_savers_group_posts_its_own_key() {
+    let mut shell = screensaver_showing(choosing(WAVES));
+    shell.adopt_catalog(alloc::vec![tairix_wallpaper::CatalogItem {
+        category: alloc::string::String::from("Space"),
+        file: alloc::string::String::from("orbit.jpg"),
+    }]);
+    let keys = [
+        alloc::format!("saver.{WAVES}.speed"),
+        alloc::format!("saver.{WAVES}.foam"),
+        alloc::format!("saver.{WAVES}.height"),
+        alloc::string::String::from(SettingsKey::SlidesSource.name()),
+        alloc::string::String::from(SettingsKey::MachineTasks.name()),
+    ];
+    for (row, key) in keys.iter().enumerate() {
+        let form = shell.form_mut_for_test().expect("a form");
+        let crate::FormOutcome::Apply(document) = form.choose_for_test(1, row, 1) else {
+            panic!("row {row} posts a document");
+        };
+        assert!(value_of(&document, key).is_some(), "{key} in {document}");
     }
 }
 
-/// The kept-pictures sentence names the folders a home keeps them in, outermost
-/// first.
+/// The pane says, beneath the chooser, why a saver it lists cannot be chosen,
+/// and in the chosen saver's group that the saver chosen is not installed.
 #[test]
-fn the_kept_pictures_option_names_where_pictures_go() {
-    use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_DOCUMENTS_DIR, HOME_FILES_PICTURES_DIR};
-    let text = SaverOption::RaytraceSave.description();
-    let at = |name: &str| {
-        text.find(name)
-            .unwrap_or_else(|| panic!("{name} in {text}"))
-    };
-    assert!(at(HOME_FILES_DIR) < at(HOME_FILES_PICTURES_DIR), "{text}");
-    assert!(at(HOME_FILES_PICTURES_DIR) < at("Raytracing"), "{text}");
-    assert!(!text.contains(HOME_FILES_DOCUMENTS_DIR), "{text}");
-}
-
-/// The slideshow is narrowed to a category the catalog files a picture under,
-/// or to one an update has since taken away, which is still offered.
-#[test]
-fn the_slideshow_offers_every_category_and_keeps_one_the_store_lost() {
-    let mut settings = DesktopSettings {
-        screensaver: tairix_wallpaper::ScreensaverKind::Slideshow,
-        ..DesktopSettings::default()
-    };
-    settings.screensaver_options.slideshow.source =
-        tairix_wallpaper::WallpaperCategory::new("Gone").map_or(
-            tairix_wallpaper::SlideSource::Every,
-            tairix_wallpaper::SlideSource::Category,
-        );
-    settings.screensaver_options.slideshow.interval = tairix_abi::time::Duration64::from_secs(90);
-    let mut shell = screensaver_showing(settings);
-    shell.adopt_catalog(
-        ["Abstract", "Nature", "Nature"]
-            .iter()
-            .enumerate()
-            .map(|(at, category)| tairix_wallpaper::CatalogItem {
-                category: alloc::string::String::from(*category),
-                file: alloc::format!("{at}.jpg"),
-            })
-            .collect(),
+fn what_cannot_be_chosen_is_stated() {
+    let shell = screensaver_showing(choosing("os.tairix.saver.gone"));
+    let groups = shell.form_for_test().expect("a form").groups();
+    let beneath_chooser = groups[0].footnote().expect("a statement");
+    assert!(
+        beneath_chooser.starts_with("Broken (yours) cannot be chosen:"),
+        "{beneath_chooser}"
     );
-    let form = shell.form_for_test().expect("a form");
-    let combo = |row: usize| match form.groups()[1].rows()[row].control() {
-        tairix_controls::FieldControl::Combo(combo) => combo,
-        _ => panic!("row {row} is a choice"),
-    };
-    assert_eq!(
-        combo(2).choices(),
-        ["Every category", "Abstract", "Nature", "Gone"]
-    );
-    assert_eq!(combo(2).selected_text(), Some("Gone"));
-    let intervals = combo(0).choices();
-    assert_eq!(
-        intervals.first().map(alloc::string::String::as_str),
-        Some("5 seconds")
-    );
-    assert_eq!(
-        intervals.last().map(alloc::string::String::as_str),
-        Some("1 hour")
-    );
-    assert_eq!(combo(0).selected_text(), Some("1 minute 30 seconds"));
-    assert!(intervals.iter().any(|choice| choice == "2 minutes"));
+    let missing = groups[1].footnote().expect("a statement");
+    assert!(missing.contains("os.tairix.saver.gone"), "{missing}");
+    assert_eq!(row_labels(&shell, 1), ["Preview"]);
 }
 
 /// The pane asks for the pictures on screen first and a screen's height
@@ -4826,4 +4797,45 @@ fn a_sound_reading_landing_mid_drag_waits_for_the_settle() {
         shell.sound_wanted(),
         "a change the service announces is read again"
     );
+}
+
+/// The pane's scrollbar is reported where it is drawn, and a wheel turned
+/// over the pane moves its thumb toward the pane's end.
+#[test]
+fn the_panes_thumb_follows_a_wheel_turned_over_it() {
+    let theme = theme();
+    let mut shell = screensaver_showing(choosing(WAVES));
+    let short = Rect::new(0, 0, WIDE.width, 320);
+    shell.lay_out(short, Scale::ONE, &theme);
+    let thumb = |shell: &Shell| {
+        shell
+            .pane_scroll_rect(
+                tairix_controls::ScrollPart::Thumb,
+                short,
+                Scale::ONE,
+                &theme,
+            )
+            .expect("a pane taller than its window has a thumb")
+    };
+    let before = thumb(&shell);
+    let over = shell.frame(short, Scale::ONE, &theme).content.center();
+    let mut sink = damage();
+    shell.on_pointer(
+        &InputEvent::PointerMoved { to: over },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    shell.on_pointer(
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    assert!(thumb(&shell).top() > before.top(), "the thumb moved down");
 }

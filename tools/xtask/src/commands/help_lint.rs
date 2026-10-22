@@ -48,7 +48,8 @@ pub fn run(ctx: &Context) -> Result<(), String> {
 
     // Coverage: every discovered program a user works with — a command, a
     // graphical application, or a component of the desktop, never a service,
-    // which opens no surface — ships its own name's canonical document. The
+    // which opens no surface, nor a screensaver, which a user only watches —
+    // ships its own name's canonical document. The
     // discovery walk is the store's build-time source of truth; a program
     // absent from the discovered help rows shipped no `Help/` tree at all.
     let userland = ctx.workspace_root.join("userland");
@@ -59,7 +60,10 @@ pub fn run(ctx: &Context) -> Result<(), String> {
         .map(|row| (row.bundle, row.file))
         .collect();
     for app in &discovered {
-        if app.manifest.kind == ProgramKind::Service {
+        if matches!(
+            app.manifest.kind,
+            ProgramKind::Service | ProgramKind::Screensaver
+        ) {
             continue;
         }
         let bundle = app.manifest.bundle_dir();

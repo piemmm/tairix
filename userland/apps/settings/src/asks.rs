@@ -1,7 +1,7 @@
 //! What only the desktop session answers — lock the screen now, put a
-//! screensaver preview up, say which programs have notified, perform a system
-//! task behind its own prompt and hand back what it printed — and which of
-//! those requests are outstanding.
+//! screensaver preview up, say which programs have notified and which
+//! screensavers it offers, perform a system task behind its own prompt and
+//! hand back what it printed — and which of those requests are outstanding.
 //!
 //! Each is a round trip to the session's serve loop, which the window's own
 //! loop must not wait on, so the caller carries them on a worker and adopts
@@ -21,6 +21,7 @@ use tairix_abi::pinboard_ipc::PinboardDocument;
 use tairix_abi::window_ipc::{NameList, SystemTask};
 use tairix_abi::{validate_bundle_id, BundleId, Errno};
 
+use crate::saver::SaverEntry;
 use crate::shell::{Authorised, Shell};
 
 /// A request only the desktop session answers.
@@ -36,6 +37,8 @@ pub enum DesktopAsk {
     Preview(PinboardDocument),
     /// Say which sources have posted a notification.
     NotifySources,
+    /// Say which screensavers the desktop offers.
+    Savers,
     /// Perform `task` for window `window_id`, behind the system's prompt.
     Authorise {
         /// The window the outcome is told to.
@@ -63,6 +66,9 @@ pub enum DesktopAnswer {
     /// To [`DesktopAsk::NotifySources`]: the sources named that this build
     /// accepts as bundle identities.
     NotifySources(Result<Vec<BundleId>, Errno>),
+    /// To [`DesktopAsk::Savers`]: the catalogue's entries this build can
+    /// name, in its order.
+    Savers(Result<Vec<SaverEntry>, Errno>),
     /// To [`DesktopAsk::Authorise`]: whether the prompt came up. What the
     /// task came to arrives later, as an event.
     Authorise(Result<(), Errno>),
@@ -83,6 +89,7 @@ impl DesktopAnswer {
             Self::Lock(Err(err)) => Some(("lock the screen", *err)),
             Self::Preview(Err(err)) => Some(("show the screensaver", *err)),
             Self::NotifySources(Err(err)) => Some(("say which programs have notified", *err)),
+            Self::Savers(Err(err)) => Some(("say which screensavers it offers", *err)),
             Self::Authorise(Err(err)) => Some(("ask for authorisation", *err)),
             Self::Output {
                 output: Err(err), ..
@@ -98,6 +105,7 @@ impl DesktopAnswer {
             Self::Lock(answer) => shell.adopt_lock_answer(answer),
             Self::Preview(answer) => shell.adopt_preview_answer(answer),
             Self::NotifySources(sources) => shell.adopt_notify_sources(sources.ok()),
+            Self::Savers(savers) => shell.adopt_savers(savers.ok()),
             Self::Authorise(Ok(())) => {}
             Self::Authorise(Err(err)) => {
                 shell.adopt_authorisation(Authorised::Refused(String::from(not_asked(err))));
@@ -127,7 +135,7 @@ fn not_asked(err: Errno) -> &'static str {
 
 /// The most requests outstanding at once: one of each kind, which is what a
 /// desk carrying them must hold.
-pub const MOST_OUTSTANDING: usize = 5;
+pub const MOST_OUTSTANDING: usize = 6;
 
 /// A kind of [`DesktopAsk`] held at most once, by the bit it is outstanding
 /// under. A preview and a system task are not: the newest asked behind each
@@ -137,6 +145,7 @@ enum Single {
     Lock = 1,
     Sources = 1 << 1,
     Output = 1 << 2,
+    Savers = 1 << 3,
 }
 
 impl Single {
@@ -145,6 +154,7 @@ impl Single {
         match ask {
             DesktopAsk::Lock => Some(Self::Lock),
             DesktopAsk::NotifySources => Some(Self::Sources),
+            DesktopAsk::Savers => Some(Self::Savers),
             DesktopAsk::TakeOutput { .. } => Some(Self::Output),
             DesktopAsk::Preview(_) | DesktopAsk::Authorise { .. } => None,
         }
@@ -155,6 +165,7 @@ impl Single {
         match answer {
             DesktopAnswer::Lock(_) => Some(Self::Lock),
             DesktopAnswer::NotifySources(_) => Some(Self::Sources),
+            DesktopAnswer::Savers(_) => Some(Self::Savers),
             DesktopAnswer::Output { .. } => Some(Self::Output),
             DesktopAnswer::Preview(_) | DesktopAnswer::Authorise(_) => None,
         }

@@ -1,0 +1,19 @@
+# Signed-AppInfo manifest source for Ray Tracer, a desktop screensaver. It runs
+# in the drawing sandbox and asks for no capability. It traces on up to one
+# thread per core and sets its larger scenes out in the large memory ceiling,
+# and it needs the keeping feed: each finished picture is handed to its host,
+# which keeps it as a PNG where the user asked for that.
+id = "os.tairix.saver.raytrace"
+name = "Raytrace"
+title = "Ray Tracer"
+version = "0.1.0"
+kind = "screensaver"
+purpose = "Studios, ruins, coasts and night skies, each ray-traced coarse to fine, held, then another"
+author = "The TAIRiX Project"
+capabilities = []
+feeds = ["keep"]
+threads = "cores"
+memory = "large"
+option.cpu = { label = "Processor use", note = "Idle time traces on one core and leaves the rest of the machine free. Performance traces on every core, so each picture is finished sooner.", choice = ["idle:Idle time", "performance:Performance"], default = "idle" }
+option.save = { label = "Save pictures", note = "Whether each finished picture is kept as a PNG in your Home folder, under Pictures and then Ray Tracer.", switch = false }
+option.detail = { label = "Detail", note = "Simple sets each scene out plainly, in a fraction of the memory. Maximum realism stands its woods further out and gathers its light more finely, in many times the memory; while that is not free, scenes are set out simply.", choice = ["simple:Simple", "maximum:Maximum realism"], default = "simple" }

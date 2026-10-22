@@ -1090,6 +1090,17 @@ struct TaskGrants {
     next_handle: u64,
     /// The grant behind each issued handle.
     by_handle: BTreeMap<u64, Grant>,
+    /// The region a drawing sandbox was handed at spawn, if this task is one.
+    spawn_share: Option<SpawnShare>,
+}
+
+/// The grant a drawing sandbox was handed at spawn: what `share_map` maps,
+/// once.
+#[derive(Clone, Copy)]
+struct SpawnShare {
+    handle: u64,
+    grantor: ProcId,
+    claimed: bool,
 }
 
 /// One device-resource grant and where its authority comes from.
@@ -1114,6 +1125,14 @@ impl Grant {
     fn live(&self) -> Option<&HwResource> {
         (!self.revoked).then_some(&self.resource)
     }
+}
+
+/// What live grants covering a resource hand a grant delegated from them.
+#[derive(Clone, Copy)]
+struct Covered {
+    /// The origin the delegated grant carries: none when any covering grant
+    /// has none, so no device's removal can end authority that outlives it.
+    origin: Option<u32>,
 }
 
 /// The one-shot file delegations minted **to** one task and not yet
@@ -1808,18 +1827,71 @@ impl AddressSpaceRegistry {
         to: ProcessId,
         wanted: HwResource,
     ) -> Option<u64> {
-        let origin = self
-            .grants
-            .get(&from)?
-            .by_handle
-            .values()
-            .filter(|grant| grant.live().is_some_and(|held| held.covers(&wanted)))
-            .map(|grant| grant.origin)
-            .reduce(|kept, next| if next.is_none() { None } else { kept })?;
+        let Covered { origin } = self.covered(from, &wanted)?;
         if !self.tasks.contains_key(&to) {
             return None;
         }
         Some(self.mint_with_origin(to, wanted, origin, Some(grantor)))
+    }
+
+    /// What `from`'s live grants covering `wanted` hand a grant delegated
+    /// from them; `None` when no grant covers it.
+    fn covered(&self, from: ProcessId, wanted: &HwResource) -> Option<Covered> {
+        self.grants
+            .get(&from)?
+            .by_handle
+            .values()
+            .filter(|grant| grant.live().is_some_and(|held| held.covers(wanted)))
+            .map(|grant| grant.origin)
+            .reduce(|kept, next| if next.is_none() { None } else { kept })
+            .map(|origin| Covered { origin })
+    }
+
+    /// Hand `to`, a child being admitted, the shared region `region` from its
+    /// spawner `from` as its spawn share, returning `to`'s handle; `None` if
+    /// `from` holds no live grant covering it.
+    ///
+    /// Delegated as [`Self::delegate_grant`] delegates, but before the child's
+    /// address space exists: admission owns the fresh id, so there is no
+    /// withdrawn task to refuse.
+    pub fn hand_spawn_share(
+        &mut self,
+        from: ProcessId,
+        grantor: ProcId,
+        to: ProcessId,
+        region: u64,
+    ) -> Option<u64> {
+        let wanted = HwResource::shared(region);
+        let Covered { origin } = self.covered(from, &wanted)?;
+        let handle = self.mint_with_origin(to, wanted, origin, Some(grantor));
+        self.grants.entry(to).or_default().spawn_share = Some(SpawnShare {
+            handle,
+            grantor,
+            claimed: false,
+        });
+        Some(handle)
+    }
+
+    /// Claim `task`'s spawn share to map it: its grant handle and the spawner
+    /// that delegated it. A claim is never given back, so a share is mapped by
+    /// one call at most, however many threads ask and whatever that call
+    /// answers.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a task handed none, [`Errno::AlreadyExists`]
+    /// once it is claimed.
+    pub fn claim_spawn_share(&mut self, task: ProcessId) -> Result<(u64, ProcId), Errno> {
+        let share = self
+            .grants
+            .get_mut(&task)
+            .and_then(|grants| grants.spawn_share.as_mut())
+            .ok_or(Errno::NotFound)?;
+        if share.claimed {
+            return Err(Errno::AlreadyExists);
+        }
+        share.claimed = true;
+        Ok((share.handle, share.grantor))
     }
 
     /// Whether `task` holds the [`HwResourceKind::LinkDuty`] duty for the

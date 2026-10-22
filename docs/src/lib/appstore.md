@@ -1,7 +1,7 @@
 # `tairix-appstore` — the installed-bundle walk
 
 `lib/appstore` (`tairix-appstore`) is the one bounded walk of TAIRiX's program
-stores (`AGENTS.md` §16.2, §16.5, §16.8). Three consumers need the same answer
+stores (`AGENTS.md` §16.2, §16.5, §16.8). Four consumers need the same answer
 to "which bundles are installed, and what does each one's own signed manifest
 say?":
 
@@ -10,7 +10,9 @@ say?":
 - the file manager's "Open With…" table (`userland/apps/files`), which reads
   the file types each bundle claims,
 - the [desktop session](../desktop/session.md)'s icon-bar identity index, which
-  resolves the bundle a kernel-attested `AppIdentity` names.
+  resolves the bundle a kernel-attested `AppIdentity` names,
+- the desktop session's screensaver catalogue, which lists the saver bundles
+  of both screensaver stores.
 
 Each carried its own copy of the walk, its own depth and entry bounds, and its
 own manifest decode. This crate is that walk, defined once (§2.2).
@@ -57,6 +59,11 @@ own desktop windows — so the bundle it was admitted from has to be found for
 its slot and title band to read its signed manifest; ranking those stores with
 the system stores keeps a bundle planted in a writable store from claiming a
 shipped program's identity.
+
+`saver_roots(home)` is the two screensaver stores the catalogue walks:
+`/System/Screensavers`, then the account's own `Library/Screensavers` for a
+usable `HOME` — the precedence by which the system's saver keeps an identifier
+a user's own one also claims. No word resolves against either.
 
 `manifest_path(bundle)` and `decode_manifest(bytes)` are the same
 bundle-relative path and the same `APPINFO_WIRE_MAX`-bounded decode the walk

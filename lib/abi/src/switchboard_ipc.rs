@@ -80,7 +80,7 @@ pub use machine::{
     is_machine_report, DeviceCapacity, MachineCommitted, MachineComposition, MachineCores,
     MachineCpu, MachineDevice, MachineDeviceName, MachineHistory, MachineHost, MachineInterface,
     MachineInterfaceName, MachineMemory, MachineNetwork, MachineReport, MachineScope,
-    MachineStorage, MachineTask, MachineTasks, ReportPeriod, MACHINE_CORES_MAX,
+    MachineStorage, MachineTask, MachineTasks, ReportPeriod, TaskOwner, MACHINE_CORES_MAX,
     MACHINE_DEVICES_MAX, MACHINE_DEVICE_NAME_MAX, MACHINE_HISTORY_MAX, MACHINE_INTERFACES_MAX,
     MACHINE_PERIOD_MAX_MS, MACHINE_PERIOD_MIN_MS, MACHINE_REPORT_MAGIC, MACHINE_TASKS_MAX,
 };

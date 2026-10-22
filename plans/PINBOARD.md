@@ -393,7 +393,9 @@ is **served** rather than hosted:
   `WindowRequest::QueryWallpapers` from memory, so no directory walk is ever
   on the compositing loop;
 - `WindowRequest::RenderPreview` names a **subject** — a catalog position,
-  or a screensaver kind whose shipped preview the session reads — and a size
+  or a screensaver's place in the catalogue `QueryScreensaver` answers, whose
+  preview the session reads from `/System` for Black and Dim and from the
+  saver's own bundle otherwise — and a size
   within `WINDOW_PREVIEW_MAX_SIDE`, and the session renders it through its own
   sandboxed wallpaper path into a shared-memory region Settings created and
   granted — the one thing its existing `CAP_SHM` already allows — concluding

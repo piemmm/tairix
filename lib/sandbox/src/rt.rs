@@ -23,6 +23,7 @@
 //! wakes; the worker detects [`session_worker_role`] and hands control to
 //! [`serve_session_stdio`].
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::{
@@ -33,7 +34,9 @@ use tairix_rt::io::{Error as IoError, Read, Stdin, Stdout, Stream, Write};
 use crate::host::Launcher;
 use crate::memory::WorkerMemory;
 use crate::proto::Channel;
-use crate::session::{serve_session, SessionDescriptors, SessionService, SessionTransport};
+use crate::session::{
+    let_go, serve_session, Reaper, SessionDescriptors, SessionService, SessionTransport,
+};
 use crate::supervise::SessionLauncher;
 use crate::worker::{serve, ServeEnd, Service};
 
@@ -119,7 +122,7 @@ pub fn serve_session_stdio<S: SessionService>(service: &mut S) -> ServeEnd {
 
 /// The worker's channel: fd 0 in, fd 1 out — the only descriptors a
 /// canonically wired sandbox holds.
-struct StdioChannel;
+pub struct StdioChannel;
 
 impl Channel for StdioChannel {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -208,13 +211,28 @@ fn ceiling_of(memory: WorkerMemory) -> u64 {
 /// Spawn `path` as a sandboxed worker in `role`, serving `service` where one
 /// is named, over a fresh pipe pair, held to `ceiling` bytes of mapped
 /// memory, returning the parent's `(pid, request write end, reply read end)`.
-///
-/// The one place the pipe pair, the `SpawnAttach::sandbox` wiring, and the
-/// unwind are written, for both worker shapes — one-shot and session.
 fn spawn_sandboxed_worker(
     path: &[u8],
     (role, service): (&[u8], Option<&[u8]>),
     ceiling: u64,
+) -> Result<(i64, u32, u32), Errno> {
+    let attach = |wires| SpawnAttach::sandbox(wires, ceiling);
+    match service {
+        Some(service) => spawn_wired(path, &[path, role, service], attach),
+        None => spawn_wired(path, &[path, role], attach),
+    }
+}
+
+/// Spawn `path` with `args` over a fresh pipe pair, its attach block built by
+/// `attach` from the wiring of fd 0 to the request pipe and fd 1 to the reply
+/// pipe, returning the parent's `(pid, request write end, reply read end)`.
+///
+/// The one place the pipe pair, the wiring and the unwind are written, for
+/// every worker shape — one-shot, session and drawing.
+fn spawn_wired(
+    path: &[u8],
+    args: &[&[u8]],
+    attach: impl FnOnce([FdWire; STD_STREAM_COUNT]) -> SpawnAttach,
 ) -> Result<(i64, u32, u32), Errno> {
     // Request pipe: parent writes, worker fd 0 reads.
     let (request_read, request_write) = tairix_rt::pipe_create().map_err(Errno::from_syscall)?;
@@ -230,11 +248,7 @@ fn spawn_sandboxed_worker(
     let mut wires = [FdWire::Closed; STD_STREAM_COUNT];
     wires[STDIN as usize] = FdWire::Handle(request_read);
     wires[STDOUT as usize] = FdWire::Handle(reply_write);
-    let attach = SpawnAttach::sandbox(wires, ceiling);
-    let pid = match service {
-        Some(service) => tairix_rt::spawn_attached(path, &attach, &[path, role, service], &[]),
-        None => tairix_rt::spawn_attached(path, &attach, &[path, role], &[]),
-    };
+    let pid = tairix_rt::spawn_attached(path, &attach(wires), args, &[]);
     // The child holds counted clones of its two wired ends; the parent's
     // own copies are closed regardless of the spawn outcome, so a dead
     // worker's reply pipe reports end-of-stream instead of idling on the
@@ -282,6 +296,11 @@ impl Launcher for RtLauncher {
 /// for ever.
 fn end_worker(pid: i64) -> Option<i32> {
     let _ = tairix_rt::signal(pid, Signal::Kill);
+    wait_worker(pid)
+}
+
+/// Wait for worker `pid`, already told to end, and reap it.
+fn wait_worker(pid: i64) -> Option<i32> {
     let mut code = 0i32;
     let reaped = tairix_rt::wait_exit(pid, &mut code);
     (reaped >= 0).then_some(code)
@@ -344,6 +363,8 @@ pub struct RtSessionChannel {
     pid: i64,
     write_fd: u32,
     read_fd: u32,
+    /// Where its worker is reaped should it still be running at the end.
+    reaper: Option<Arc<dyn Reaper + Send + Sync>>,
 }
 
 impl RtSessionChannel {
@@ -366,7 +387,40 @@ impl RtSessionChannel {
             pid,
             write_fd,
             read_fd,
+            reaper: None,
         })
+    }
+
+    /// Spawn the bundle entry point `path` as a drawing sandbox: held to
+    /// `memory` bytes of mapped memory and `threads` threads, and handed the
+    /// shared region `share`, which the caller holds a grant for.
+    ///
+    /// # Errors
+    ///
+    /// The typed reason the program could not be started.
+    pub fn launch_drawing(
+        path: &[u8],
+        memory: u64,
+        threads: u64,
+        share: u64,
+    ) -> Result<Self, Errno> {
+        let (pid, write_fd, read_fd) = spawn_wired(path, &[path], |wires| {
+            SpawnAttach::drawing(wires, memory, threads, share)
+        })?;
+        Ok(Self {
+            pid,
+            write_fd,
+            read_fd,
+            reaper: None,
+        })
+    }
+
+    /// This channel, its worker reaped by `reaper` if it is still running when
+    /// its session ends, rather than waited for.
+    #[must_use]
+    pub fn reaped_by(mut self, reaper: Arc<dyn Reaper + Send + Sync>) -> Self {
+        self.reaper = Some(reaper);
+        self
     }
 }
 
@@ -388,9 +442,11 @@ impl SessionTransport for RtSessionChannel {
     }
 
     fn dispose(self) -> Option<i32> {
-        let pid = self.pid;
+        let (pid, reaper) = (self.pid, self.reaper.clone());
         drop(self);
-        end_worker(pid)
+        let _ = tairix_rt::signal(pid, Signal::Kill);
+        let reaper = reaper.as_deref().map(|reaper| reaper as &dyn Reaper);
+        let_go(pid, tairix_rt::try_reap(pid), reaper, wait_worker)
     }
 }
 

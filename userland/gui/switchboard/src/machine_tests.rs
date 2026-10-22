@@ -9,8 +9,8 @@ use tairix_abi::net_ipc::{
     NetIfKind, NetInterfaceRatesRecord, NetInterfaceStateRecord, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::switchboard_ipc::{
-    MachineDeviceName, MachineReport, MachineScope, Permille, SeatReport, MACHINE_DEVICES_MAX,
-    MACHINE_DEVICE_NAME_MAX, MACHINE_TASKS_MAX,
+    MachineDeviceName, MachineReport, MachineScope, Permille, SeatReport, TaskOwner,
+    MACHINE_DEVICES_MAX, MACHINE_DEVICE_NAME_MAX, MACHINE_TASKS_MAX,
 };
 use tairix_abi::sysinfo::{
     KernelMemoryStats, LoadAverage, MemoryBand, MemoryPressureBand, MountAvailability,
@@ -24,7 +24,7 @@ use crate::model::{RollingMeters, SessionReport};
 use crate::sample::{CoreBusy, DegradedField, MemoryPressureSample, Sample, ScopeVerdicts};
 use crate::schedule::SAMPLE_PERIOD_NS;
 use crate::test_host::{
-    if_name, iface, mount_of, process_summary, process_summary_with, with_availability,
+    if_name, iface, mount_of, process_summary, process_summary_with, with_availability, DEFAULT_UID,
 };
 
 /// Every scope granted, so a reading's absence is the sample's, not a refusal.
@@ -48,7 +48,7 @@ fn report_after(samples: &[Sample], seat: &SeatReport) -> MachineReport {
         meters.record(sample, hysteresis, &session);
     }
     let last = samples.last().expect("at least one sample");
-    machine_report(last, &meters, seat)
+    machine_report(last, &meters, seat, Some(DEFAULT_UID))
 }
 
 fn report_of(sample: Sample) -> MachineReport {
@@ -288,7 +288,7 @@ fn the_busiest_are_the_cpu_panes_busiest_in_its_order() {
         .busiest()
         .map(|task| {
             (
-                String::from(task.name.as_str()),
+                String::from(task.name.as_ref().map_or("", |name| name.as_str())),
                 task.cpu.as_u16(),
                 task.memory_bytes,
             )
@@ -316,7 +316,7 @@ fn a_name_that_is_not_text_still_names_its_task() {
         .tasks
         .busiest()
         .next()
-        .map(|task| String::from(task.name.as_str()));
+        .map(|task| String::from(task.name.as_ref().map_or("", |name| name.as_str())));
     assert_eq!(name, Some(String::from("bad\u{FFFD}\u{FFFD}name")));
 }
 
@@ -466,4 +466,58 @@ fn a_projected_report_is_a_frame_the_session_accepts_whole() {
     };
     let report = report_of(sample);
     assert_eq!(MachineReport::from_bytes(&report.to_le_bytes()), Ok(report));
+}
+
+/// Regression for D496: the busiest tasks were published with nothing to
+/// tell the session's own from another account's, so a reader could only name
+/// all of them or none.
+#[test]
+fn each_named_task_says_whose_it_is() {
+    let processes = vec![
+        process_summary_with(
+            1,
+            ProcessState::Running,
+            b"mine",
+            Some(400),
+            DEFAULT_UID,
+            0,
+            SchedPriority::Normal,
+        ),
+        process_summary_with(
+            2,
+            ProcessState::Running,
+            b"theirs",
+            Some(600),
+            DEFAULT_UID + 1,
+            0,
+            SchedPriority::Normal,
+        ),
+    ];
+    let sample = Sample {
+        processes,
+        ..granted()
+    };
+    let owners: Vec<(String, TaskOwner)> = report_of(sample.clone())
+        .tasks
+        .busiest()
+        .map(|task| {
+            (
+                String::from(task.name.as_ref().map_or("", |name| name.as_str())),
+                task.owner,
+            )
+        })
+        .collect();
+    assert_eq!(
+        owners,
+        [
+            (String::from("theirs"), TaskOwner::Other),
+            (String::from("mine"), TaskOwner::Own),
+        ]
+    );
+    let meters = RollingMeters::new();
+    let unattested = machine_report(&sample, &meters, &SeatReport::HEALTHY, None);
+    assert!(unattested
+        .tasks
+        .busiest()
+        .all(|task| task.owner == TaskOwner::Other));
 }

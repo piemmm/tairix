@@ -76,6 +76,35 @@ fn a_reading_with_no_zone_spells_utc_the_iso_way() {
     );
 }
 
+/// A saver is told the bar's own spelling and the date written out, and when
+/// the minute turns; an unset clock tells it nothing to show.
+#[test]
+fn a_saver_is_told_the_bars_reading_and_when_it_next_changes() {
+    let mut clock = SessionClock::new(CivilClock::UTC);
+    assert_eq!(
+        clock.saver_reading().next_change_ns,
+        0,
+        "due before any reading"
+    );
+    clock.adopt(at(1_709_214_367, 0), 5 * SEC);
+    let told = clock.saver_reading();
+    assert_eq!(
+        (
+            told.time.as_str(),
+            told.numeric_date.as_str(),
+            told.long_date.as_str()
+        ),
+        ("13:46", "2024-02-29", "Thu 29 Feb 2024")
+    );
+    assert_eq!(told.next_change_ns, 5 * SEC + 53 * SEC);
+    clock.missed(60 * SEC);
+    assert_eq!(clock.saver_reading().next_change_ns, 120 * SEC, "the retry");
+
+    clock.adopt(WallClockReading::UNSET, 0);
+    let unset = clock.saver_reading();
+    assert!(unset.time.is_empty() && unset.numeric_date.is_empty() && unset.long_date.is_empty());
+}
+
 /// The fixture store of real zones and regions, kept for the test.
 fn zones() -> &'static ZoneInfo<'static> {
     let bytes: &'static [u8] = Box::leak(tairix_tz::testkit::store().into_boxed_slice());

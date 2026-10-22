@@ -32,7 +32,9 @@ use std::sync::OnceLock;
 
 use tairix_abi::discovery_policy::{Grant, DISCOVERY_POLICY_PATH};
 use tairix_abi::driver_store::SystemConfigFile;
-use tairix_abi::{browse_type_at, AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
+use tairix_abi::{
+    browse_type_at, AppInfoHeader, BundleEntry, BundleFileDigest, ProgramKind, APPINFO_MAGIC,
+};
 use tairix_fontface::FAMILY_MANIFEST;
 use tairix_image::{DecodeLimits, ImageFormat};
 use tairix_itest_harness::app_image::{
@@ -956,6 +958,16 @@ fn build_bundle(
             .map(|res| (res.file, res.bytes)),
     )?;
 
+    if app.manifest.kind == ProgramKind::Screensaver {
+        verify_saver_preview(
+            &bundle_dir,
+            tairix_syshelp::RESOURCE_FILES
+                .iter()
+                .filter(|res| res.bundle == bundle_dir)
+                .map(|res| (res.file, res.bytes)),
+        )?;
+    }
+
     verify_planted_entries(&app.crate_dir, &bundle_dir)?;
 
     let digests: Vec<BundleFileDigest<'_>> = contents
@@ -979,6 +991,95 @@ fn build_bundle(
         appinfo: composed.bytes,
         run,
     })
+}
+
+/// A saver bundle ships the picture a chooser previews it by at
+/// [`tairix_wallpaper::SAVER_PREVIEW_PATH`] among its `resources`, and it is
+/// one the chooser shows as authored.
+///
+/// # Errors
+///
+/// An actionable build-error message naming the bundle and what is wrong.
+fn verify_saver_preview<'a>(
+    bundle_dir: &str,
+    mut resources: impl Iterator<Item = (&'a str, &'a [u8])>,
+) -> Result<(), String> {
+    let preview = resources.find(|(file, _)| {
+        format!("{}/{file}", BundleEntry::Resources.as_str())
+            == tairix_wallpaper::SAVER_PREVIEW_PATH
+    });
+    let Some((_, bytes)) = preview else {
+        return Err(format!(
+            "image: the screensaver {bundle_dir} ships no {}; a chooser would have no \
+             picture to show for it",
+            tairix_wallpaper::SAVER_PREVIEW_PATH
+        ));
+    };
+    verify_screensaver_preview(
+        &format!("{bundle_dir}/{}", tairix_wallpaper::SAVER_PREVIEW_PATH),
+        bytes,
+    )
+}
+
+/// The largest picture a chooser draws, at the widest scale a desktop may
+/// be set to under any shipped theme.
+fn widest_chooser_picture() -> (u32, u32) {
+    let choice =
+        tairix_controls::PictureChoice::new(tairix_controls::Aspect::WIDESCREEN, Vec::new());
+    let widest = tairix_geometry::Scale::from_percent(tairix_geometry::Scale::MAX_PERCENT)
+        .expect("the widest scale");
+    [tairix_theme::Theme::dark(), tairix_theme::Theme::light()]
+        .iter()
+        .map(|theme| choice.picture_size(widest, theme))
+        .max()
+        .unwrap_or((0, 0))
+}
+
+/// Verify a screensaver preview is a picture a chooser will show as it was
+/// authored: within [`tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES`], a
+/// PNG the desktop's decoder reads, exactly the 16:9 shape the chooser
+/// draws it in — any other would be cut to fit — and at least as large as
+/// the largest picture the chooser draws, so no scale shows it enlarged.
+///
+/// # Errors
+///
+/// Returns an actionable build-error message naming `label` and what is
+/// wrong with the picture.
+fn verify_screensaver_preview(label: &str, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES {
+        return Err(format!(
+            "image: {label} is {} bytes, exceeding the {}-byte preview bound; the \
+             desktop would refuse it before decoding",
+            bytes.len(),
+            tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES
+        ));
+    }
+    if tairix_image::sniff(bytes) != Some(tairix_image::ImageFormat::Png) {
+        return Err(format!("image: {label} is not a PNG"));
+    }
+    let header = tairix_image::probe(bytes)
+        .map_err(|e| format!("image: {label} has no header the desktop can read: {e:?}"))?;
+    let (width, height) = (header.width(), header.height());
+    if u64::from(width) * 9 != u64::from(height) * 16 {
+        return Err(format!(
+            "image: {label} is {width}x{height}, not 16:9; the chooser would cut it to \
+             fit"
+        ));
+    }
+    let (least_width, least_height) = widest_chooser_picture();
+    if width < least_width || height < least_height {
+        return Err(format!(
+            "image: {label} is {width}x{height}, smaller than the {least_width}x\
+             {least_height} a chooser draws at the widest scale; author it at least \
+             that large"
+        ));
+    }
+    let fit = tairix_image::FitBox::new(64, 64);
+    let limits =
+        tairix_image::DecodeLimits::new(width, height, u64::from(width) * u64::from(height), 0);
+    tairix_image::decode_fitted(bytes, &limits, fit)
+        .map(|_| ())
+        .map_err(|e| format!("image: {label} is not a picture the desktop can decode: {e:?}"))
 }
 
 /// Fail-closed sanity check on a freshly composed `AppInfo` before it is
@@ -1281,7 +1382,11 @@ fn verify_vector_master(
 
 #[cfg(test)]
 mod tests {
-    use super::{verify_icon_master, verify_library_icon, zone_store_file, AppStoreFile};
+    use super::{
+        verify_icon_master, verify_library_icon, verify_saver_preview, verify_screensaver_preview,
+        widest_chooser_picture, zone_store_file, AppStoreFile,
+    };
+    use tairix_abi::ProgramKind;
     use tairix_sandbox::imagerender::{MAX_DESTINATION_HEIGHT, MAX_DESTINATION_WIDTH};
     use tairix_svg::font::NoFonts;
 
@@ -1783,8 +1888,8 @@ mod tests {
         }
     }
 
-    /// Every screensaver's shipped preview is a picture a chooser will really
-    /// show, and one per kind ships.
+    /// The desktop's own screensavers' shipped previews are pictures a
+    /// chooser will really show, and each saver bundle's is too.
     ///
     /// Only the preview rows of [`tairix_syshelp::ASSET_FILES`] are judged
     /// here, under their own contract: a preview is drawn in one fixed shape,
@@ -1796,13 +1901,30 @@ mod tests {
             .iter()
             .filter(|asset| asset.family == tairix_syshelp::AssetFamilyKind::ScreensaverPreview)
             .collect();
-        for kind in tairix_wallpaper::ScreensaverKind::ALL {
+        for choice in tairix_wallpaper::ScreensaverChoice::DESKTOP {
             assert!(
-                previews
-                    .iter()
-                    .any(|asset| tairix_wallpaper::preview_kind(asset.file) == Some(kind)),
-                "{kind:?} ships a preview"
+                previews.iter().any(|asset| {
+                    tairix_wallpaper::ScreensaverChoice::of_preview(asset.file) == Some(choice)
+                }),
+                "{choice:?} ships a preview"
             );
+        }
+        let savers = ProgramKind::Screensaver.store_dir();
+        let bundles: std::collections::BTreeSet<&str> = tairix_syshelp::RESOURCE_FILES
+            .iter()
+            .filter(|res| res.store == savers)
+            .map(|res| res.bundle)
+            .collect();
+        assert!(!bundles.is_empty(), "the system ships its savers");
+        for bundle in bundles {
+            verify_saver_preview(
+                bundle,
+                tairix_syshelp::RESOURCE_FILES
+                    .iter()
+                    .filter(|res| res.bundle == bundle)
+                    .map(|res| (res.file, res.bytes)),
+            )
+            .expect("a saver's preview");
         }
         for asset in previews {
             verify_screensaver_preview(
@@ -1830,67 +1952,6 @@ mod tests {
             small.contains(&format!("{width}x{height}")),
             "unexpected refusal: {small}"
         );
-    }
-
-    /// The largest picture a chooser draws, at the widest scale a desktop may
-    /// be set to under any shipped theme.
-    fn widest_chooser_picture() -> (u32, u32) {
-        let choice =
-            tairix_controls::PictureChoice::new(tairix_controls::Aspect::WIDESCREEN, Vec::new());
-        let widest = tairix_geometry::Scale::from_percent(tairix_geometry::Scale::MAX_PERCENT)
-            .expect("the widest scale");
-        [tairix_theme::Theme::dark(), tairix_theme::Theme::light()]
-            .iter()
-            .map(|theme| choice.picture_size(widest, theme))
-            .max()
-            .unwrap_or((0, 0))
-    }
-
-    /// Verify a screensaver preview is a picture a chooser will show as it was
-    /// authored: within [`tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES`], a
-    /// PNG the desktop's decoder reads, exactly the 16:9 shape the chooser
-    /// draws it in — any other would be cut to fit — and at least as large as
-    /// the largest picture the chooser draws, so no scale shows it enlarged.
-    ///
-    /// # Errors
-    ///
-    /// Returns an actionable build-error message naming `label` and what is
-    /// wrong with the picture.
-    fn verify_screensaver_preview(label: &str, bytes: &[u8]) -> Result<(), String> {
-        if bytes.len() > tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES {
-            return Err(format!(
-                "image: {label} is {} bytes, exceeding the {}-byte preview bound; the \
-                 desktop would refuse it before decoding",
-                bytes.len(),
-                tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES
-            ));
-        }
-        if tairix_image::sniff(bytes) != Some(tairix_image::ImageFormat::Png) {
-            return Err(format!("image: {label} is not a PNG"));
-        }
-        let header = tairix_image::probe(bytes)
-            .map_err(|e| format!("image: {label} has no header the desktop can read: {e:?}"))?;
-        let (width, height) = (header.width(), header.height());
-        if u64::from(width) * 9 != u64::from(height) * 16 {
-            return Err(format!(
-                "image: {label} is {width}x{height}, not 16:9; the chooser would cut it to \
-                 fit"
-            ));
-        }
-        let (least_width, least_height) = widest_chooser_picture();
-        if width < least_width || height < least_height {
-            return Err(format!(
-                "image: {label} is {width}x{height}, smaller than the {least_width}x\
-                 {least_height} a chooser draws at the widest scale; author it at least \
-                 that large"
-            ));
-        }
-        let fit = tairix_image::FitBox::new(64, 64);
-        let limits =
-            tairix_image::DecodeLimits::new(width, height, u64::from(width) * u64::from(height), 0);
-        tairix_image::decode_fitted(bytes, &limits, fit)
-            .map(|_| ())
-            .map_err(|e| format!("image: {label} is not a picture the desktop can decode: {e:?}"))
     }
 
     /// Every shipped cursor asset is artwork the desktop will really draw:

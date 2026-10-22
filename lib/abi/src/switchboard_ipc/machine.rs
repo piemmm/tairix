@@ -602,19 +602,49 @@ impl MachineMemory {
     }
 }
 
+/// Whose a task is, as the report's publisher sees it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TaskOwner {
+    /// The publishing principal's own.
+    Own,
+    /// Another account's.
+    Other,
+}
+
+impl TaskOwner {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Own => 1,
+            Self::Other => 2,
+        }
+    }
+
+    const fn from_u8(byte: u8) -> Result<Self, Errno> {
+        match byte {
+            1 => Ok(Self::Own),
+            2 => Ok(Self::Other),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// One of the busiest tasks.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MachineTask {
-    /// The program's name.
-    pub name: TrayTaskName,
+    /// The program's name, or `None` where it is withheld: a name is text its
+    /// owner chose, and a reader shown another account's tasks may be shown
+    /// their cost without it.
+    pub name: Option<TrayTaskName>,
+    /// Whose it is.
+    pub owner: TaskOwner,
     /// Its share of one processor over the last interval.
     pub cpu: Permille,
     /// The memory mapped into it.
     pub memory_bytes: u64,
 }
 
-/// One named task's wire size: name length (1), name, reserved (1), share
-/// (2), reserved (4), memory (8).
+/// One task's wire size: name length (1, zero for a withheld name), name,
+/// owner (1), share (2), reserved (4), memory (8).
 const TASK_LEN: usize = 1 + TRAY_TASK_NAME_MAX + 1 + 2 + 4 + 8;
 /// Within a named task, the offset of its share.
 const TASK_CPU: usize = 1 + TRAY_TASK_NAME_MAX + 1;
@@ -624,21 +654,33 @@ const TASK_MEMORY: usize = TASK_CPU + 2 + 4;
 impl MachineTask {
     /// Write the task into `out`.
     fn encode(&self, out: &mut [u8; TASK_LEN]) {
-        out[0] = self.name.len_byte();
-        out[1..=TRAY_TASK_NAME_MAX].copy_from_slice(self.name.raw_bytes());
+        if let Some(name) = &self.name {
+            out[0] = name.len_byte();
+            out[1..=TRAY_TASK_NAME_MAX].copy_from_slice(name.raw_bytes());
+        }
+        out[TASK_CPU - 1] = self.owner.as_u8();
         put_u16(out, TASK_CPU, self.cpu.as_u16());
         put_u64(out, TASK_MEMORY, self.memory_bytes);
     }
 
     /// Read a task from `bytes`.
     fn decode(bytes: &[u8; TASK_LEN]) -> Result<Self, Errno> {
-        if bytes[TASK_CPU - 1] != 0 || !all_zero(&bytes[TASK_CPU + 2..TASK_MEMORY]) {
+        if !all_zero(&bytes[TASK_CPU + 2..TASK_MEMORY]) {
             return Err(Errno::BadMagic);
         }
         let mut name = [0u8; TRAY_TASK_NAME_MAX];
         name.copy_from_slice(&bytes[1..=TRAY_TASK_NAME_MAX]);
+        let name = if bytes[0] == 0 {
+            if !all_zero(&name) {
+                return Err(Errno::BadMagic);
+            }
+            None
+        } else {
+            Some(TrayTaskName::from_wire(bytes[0], &name)?)
+        };
         Ok(Self {
-            name: TrayTaskName::from_wire(bytes[0], &name)?,
+            name,
+            owner: TaskOwner::from_u8(bytes[TASK_CPU - 1])?,
             cpu: Permille::new(read_u16(bytes, TASK_CPU))?,
             memory_bytes: read_u64(bytes, TASK_MEMORY),
         })
@@ -732,6 +774,16 @@ impl MachineTasks {
     /// The busiest tasks, busiest first.
     pub fn busiest(&self) -> impl Iterator<Item = &MachineTask> {
         self.busiest.iter().map_while(Option::as_ref)
+    }
+
+    /// Withhold the name of every task whose owner `shown` refuses: what a
+    /// reader is handed is decided before it is handed anything.
+    pub fn withhold_names(&mut self, shown: impl Fn(TaskOwner) -> bool) {
+        for task in self.busiest.iter_mut().flatten() {
+            if !shown(task.owner) {
+                task.name = None;
+            }
+        }
     }
 
     /// Write the block into `out`, exactly [`Self::WIRE_LEN`] bytes,
@@ -1257,6 +1309,26 @@ pub struct MachineReport {
 impl MachineReport {
     /// Encoded size on the wire.
     pub const WIRE_LEN: usize = NETWORK_OFFSET + MachineNetwork::WIRE_LEN;
+
+    /// A report over `scope` of `period` that read nothing: every optional
+    /// reading absent, every measurement unread, for a consumer's tests.
+    ///
+    /// Test scaffolding, behind a feature no TAIRiX build enables.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub const fn unread(period: ReportPeriod, scope: MachineScope) -> Self {
+        Self {
+            period,
+            scope,
+            host: None,
+            uptime: None,
+            cpu: MachineCpu::UNREAD,
+            memory: MachineMemory::UNREAD,
+            tasks: MachineTasks::UNREAD,
+            storage: None,
+            network: None,
+        }
+    }
 
     /// Encode `self` little-endian.
     #[must_use]

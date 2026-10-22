@@ -25,7 +25,12 @@ Fails closed at the first problem (`AGENTS.md` §5.4):
 3. **Interface** — constant-time compare of the manifest's syscall-table hash
    against the kernel's (`AppError::InterfaceHashMismatch`, §9 / §19.2).
 4. **Signature** — verify the Ed25519 signature over the manifest's signed
-   range via the `Verifier` seam (`AppError::Signature`).
+   range via the `Verifier` seam (`AppError::Signature`), or for a saver in a
+   user's own store against the key its own manifest names.
+   **Kind** — the signed kind must run from its store and in the spawn's
+   `LoadMode` (`AppError::Misplaced`, `AppError::DrawingOnly`), a user's own
+   saver may claim only `APPINFO_FLAGS_SAVER_OWN` (`AppError::PrivilegedFeed`),
+   and a screensaver's options must decode, all before the bundle is read.
 5. **Contents** — the `BundleStore::contents` seam hashes every file the
    signature covers **and**, in that same walk, returns the entry-point
    `Run` image (the `Run` binary is one of the hashed files, so it is read
@@ -94,6 +99,10 @@ Reserved `EventId` range `11000..12000`:
 - `11009 LIBRARY_REFUSED` — a library reference violated the §16.4 policy (Warn).
 - `11010 APP_RUN_IMAGE_INVALID` — the `Run` binary is not a valid `rxe` image
   or its CFI tag does not match the kernel's hash (Warn, §9 / §19.2).
+- `11013 APP_DRAWING_ONLY` — a screensaver outside the drawing sandbox, or
+  another kind inside it, the detail saying which (Warn).
+- `11014 APP_FEED_REFUSED` — a user's own saver claimed what only a system
+  saver is given (Warn).
 
 ## Layering & safety
 

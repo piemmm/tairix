@@ -2048,220 +2048,81 @@ The screensaver (`saver::Screensaver`) is one full-screen surface, raised over
 everything before each composite, with the lock kept directly beneath it; an
 order that already stands restacks and repaints nothing. It hides the pointer:
 the compositor keeps whether the cursor is shown apart from its artwork, so a
-cursor refresh cannot put the pointer back over the screensaver. What it
-shows, each scene drawn as the user's `screensaver.*` options set it
-(`docs/src/lib/wallpaper.md`):
+cursor refresh cannot put the pointer back over the screensaver.
 
-- **Black**, or **the desktop's own backdrop dimmed** — the only kind the
-  session builds the backdrop's full-screen ground for.
-- **A slideshow** (`saver::slides`) of the shipped pictures, all of them or
-  one category's, in the catalog's order or shuffled — every picture once a
-  pass, and never the same one twice running from one pass into the next —
-  one per chosen interval. Each is prepared at the screen's size on the
-  wallpaper preparers through the sandboxed decode the backdrop uses; a session
-  with no preparer leaves it black rather than decoding on the serve loop. A
-  category the store no longer holds shows every picture rather than none.
-- **A clock** (`saver::clock`): the icon bar's own reading and spelling of the
-  time, so the two never disagree, over the date as the bar writes it and
-  *account · machine*,
-  either of which the options may leave out. The machine's name is read once
-  at bring-up, since the loop may not make a service call. Each minute the
-  block fades out, moves somewhere new on the screen so no pixel stays lit,
-  and fades back in over the theme's stage transition; under reduced motion
-  it simply moves.
-- **A minimal clock** (`saver::ribbon`): the same reading of the time, set in
-  a hairline weight with tabular figures so no digit shifts as the minutes
-  turn, over the local date spelled out (`Mon 28 Sep 2026`, which the options
-  may leave out). The text never moves. A ribbon of orange light roams the screen
-  from edge to edge, each of its five soft strands one smooth Bézier curve
-  that runs on past both edges, so every line is seen passing through them.
-  The ribbon's course rises and falls on travelling waves, and each strand
-  wanders about its own lane on waves of its own, so the strands cross,
-  gather and fan apart independently. Beneath the text they gather and the
-  course keeps low, and any strand whose light that shows would still reach
-  the text's exact clear space is pushed down by a smooth bump of its own
-  control points, so a path bent beneath the text is still one curve; the
-  clear space itself is painted black, the glow's too-faint tail included. A bright point
-  travels along each strand, each hangs a gradient curtain that fades to
-  black, and the ribbon's upper edge glows into the dark above. The exposures
-  add where they overlap before the sum is toned through an ember's heat from
-  deep red to pale gold. The light is sampled every other pixel each way and
-  blended back up as it is toned and dithered; a frame repaints only the rows
-  it reaches and reached. Under reduced motion the ribbon holds still and only
-  the minute turning redraws. The ribbon is
-  [`lib/ribbon`](../lib/ribbon.md), shared with the login screen, which
-  stands over the same scene; both pace it by
-  `tairix_theme::motion::SceneClock`.
-- **A starfield** (`saver::starfield`): stars in a unit volume ahead of the
-  viewer, projected with perspective and drawn as the path each travelled over
-  the frame — a dot while cruising, a streak dimming to its tail in warp —
-  while the flight cruises, surges into warp, holds and settles back, the
-  field turning slowly about the line of flight. The field's density follows
-  the screen's area within fixed bounds, scaled by the chosen density; with
-  warp turned off it only cruises. Under reduced motion it only cruises and
-  does not turn.
-- **The Game of Life** (`saver::life`): Conway's B3/S23 on a torus, bit-packed
-  and stepped a word at a time by bit-sliced neighbour addition. A newborn
-  takes the colour of the colony most of its parents belong to, cells shade
-  as they age, births and deaths fade, and a world that settles into
-  stillness, a cycle or near-emptiness is reseeded after a grace. The cells
-  are the chosen size and the generations pass at the chosen speed. The board
-  is bounded, so a very large screen grows its cells rather than its work.
-  Under reduced motion a cell is born and dies at once.
-- **A ray tracer** (`saver::raytrace`, over `lib/raytrace`): a scene composed
-  at random in one of the tracer's twenty-one settings — still lifes,
-  buildings, and landscapes of land, sea, trees, grass and cloud — is
-  prepared, its work done a bounded unit at a time, and then revealed coarse
-  to fine (`plans/RAYTRACE.md`). The first pass traces every point of a grid
-  at least eight points across the shorter side, so the whole screen shows
-  after a few hundred pixels at most, and each later pass halves the grid's
-  spacing, tracing only the points no earlier pass reached, down to single
-  pixels. The picture shown is a cubic B-spline over the current pass's grid,
-  drawn from every pixel traced so far: a soft blur while the grid is coarse,
-  with no point standing out as a peak or a cross, coming into focus pass by
-  pass. A new point's detail fades in as the points about it are traced,
-  rather than appearing at the point, and no pass jumps where the last left
-  off; every pixel shows its own trace once the reveal is whole. Each pixel is
-  traced once at the tracer's best quality however long the reveal takes, and
-  within a pass the order is scattered, so the whole picture sharpens at once.
-  A readout in its own small window above the picture says *Generating
-  scene... N%* while the scene is prepared and *Rendering... N%* while it is
-  traced, mid-grey in the lower right, redrawn only when the percentage
-  changes and taken down once the picture is whole. It is held a minute,
-  faded out over three seconds, and followed by a scene set elsewhere; under
-  reduced motion it is cut to black.
-  The tracing runs on a thread of its own (`screensaver.raytrace.cpu`): under
-  `idle`, the default, that thread alone, one core's worth; under
-  `performance`, a worker beside it for every other core. The serve loop only
-  collects and paints what has been traced, and the paints come further apart
-  as the picture fills in: half a second apart while the coarse passes form
-  it, then in proportion to the share shown, so each pass, four times as long
-  as the one before, is shown in about as many paints — 1.5 s apart as the 2 px
-  pass begins, and never more than 3 s. Fine detail changes too little between
-  paints for a quicker cadence to show. Until a twentieth of the picture is
-  shown, each paint's change is crossfaded in over the wait until the next,
-  the loop coming back a scene frame at a time to blend only the tiles the
-  change touches; from there each is laid straight on, and the crossfade's two
-  screen-sized pictures are let go. They are taken only where the memory band
-  lets a disposable cache hold them, and let go early once it wants the memory
-  back; under reduced motion every change is laid straight on. While a scene is prepared the loop
-  comes back four times a second to bring the readout up to date, and the
-  thread wakes it through the session's worker wake the moment the scene is
-  ready, so its first passes are shown as they come. The thread prepares a
-  scene a slice at a time — what fits half a desktop frame at the pace the
-  last kept — and traces it a stretch at a time: to the end of the pass under
-  way, a second at most, every core taking the next untraced step as it
-  finishes the last and handing each few it traces straight onto the desk, so
-  no core waits on another's costly pixel but at a pass's end, and a machine
-  whose pixels take milliseconds keeps every core it gave the screensaver
-  busy. It stops once what it laid down has waited two of the loop's longest
-  waits, so a loop that stops drawing holds it back. The threads are made for each reveal and leave
-  once the screensaver comes down, without the loop waiting on them. Where no
-  thread is granted, the loop traces a slice a frame itself, on its own
-  thread alone under `idle`, and paints on the same cadence. With `screensaver.raytrace.save` on, the engine
-  keeps a copy of each picture as it traces it, and once the picture is whole
-  and on screen the tracing thread writes it as a PNG into
-  `Home/Pictures/Raytracing/` under the account's home, making the
-  folders it needs, naming it for the setting and the moment it was finished
-  (its scene's seed when the clock is not set), and taking the next number
-  rather than writing over any picture already there, and a picture that
-  cannot be kept says why on `stderr`. With no thread granted nothing is
-  kept, since nothing off the loop could write it. Each scene is composed at
-  `screensaver.raytrace.detail` (`simple`, the default, or `maximum`), read
-  from the memory the machine holds and the pressure band last reported: a
-  band other than normal holds at most its exit watermark free, so where that
-  is less than `Detail::peak` of the detail asked the scene is composed at
-  Simple instead, and each change from the last scene's detail is said once on
-  `stderr`. Once whole the scene is let go. The painter keeps every traced pixel, so a buffer the compositor
-  lets go is painted afresh from them and nothing is traced again. A scene the
-  heap will not give, or a buffer it will not give the picture, leaves the
-  screen black a minute before another is tried, rather than retrying it
-  every frame with the threads tracing steps nothing can show.
-- **Retro games** (`saver::retro_games`): a flight over a glowing grid towards
-  a banded sun setting between two wireframe mountain ranges. The sky, the
-  sun's glow and the ranges are painted once — the ranges scattered afresh
-  each time from the start instant, drawn far to near so every edge is drawn
-  once, after both faces beside it — and a frame repaints the floor and the
-  sun's banded lower part, laying the mountains back over the bands from a
-  copy kept for them. Every grid line is drawn as the exact area it covers
-  in each pixel: the lines across the floor through the frame's exposure, the
-  lines towards the horizon as the sheared band each crosses a row as, so a
-  shallow one is an unbroken stroke; where they crowd too finely to draw they
-  give way to their mean. The sun's reflection is the disc mirrored and drawn
-  out towards the viewer, narrowing into the horizon, broken by slanted
-  ripples that run with the grid. The flight goes at the chosen speed and
-  sways gently.
+The desktop draws two screensavers itself: **Black**, and **the desktop's own
+backdrop dimmed**, the only one the session builds the backdrop's full-screen
+ground for. Every other is a saver bundle ([Screensavers](./screensavers.md))
+the session hosts (`saver::Hosted`), spawned into the drawing sandbox with a
+region of its own, so none of a saver's code runs in the session:
 
-  Now and then wireframe craft come on to play out retro arcade games, in two
-  lanes that rest between acts and seldom repeat a kind twice running: in the
-  sky, a starfighter sweeping into view and out on one smooth Bézier course,
-  banking through its turns, its twin engine pods trailing clean blue-white
-  plumes; or a flying saucer darting from place to place about the screen,
-  hovering between darts, tilting into its own acceleration with its rim
-  lights chasing round, before it shoots off. On the ground, two small sides
-  of tanks roll out of the haze to either side of the flight's path and trade
-  fire — turrets swinging onto the nearest enemy, shells streaking across, a
-  hit blowing a tank apart — until one side is gone or time runs out, when
-  whoever is left drives off; or two or three riders on spoked motorbikes race
-  onto an arena marked out on the grid, each laying a lattice fence along the
-  grid's lines and turning only where they cross, a rider running into a
-  fence or out of the arena going up in a blast and the last one riding off
-  as the fences sink. Every craft is a convex hull built from its corners,
-  its faces turned from the camera culled and the rest dark with glowing
-  edges, drawn far to near, a multi-part craft ordered across the planes that
-  part its pieces. Every act is a closed course between decisions timed by
-  its own course, drawn from a random stream of its own, so it plays the same
-  however the frames fall; the ground acts stand on the grid and are set far
-  enough ahead for the flight to close on them as they play. Explosions throw
-  a flash, a ring racing out over the floor, sparks, and the wreck's shards,
-  which tumble and come to rest where they land.
+- **The catalogue** (`saver::SaverCatalog`) is read off the loop, on the saver
+  file worker, from the system store and then the user's own
+  (`tairix_appstore::saver_roots`, the user's only under a home in `/Users`),
+  each walked alone so the system's savers claim their identifiers first and a
+  user's store that cannot be read leaves them standing: at bring-up, when a
+  watch on the user's store reports a change, and when Settings reads the list
+  to its end, so the stores move under its next listing rather than this one;
+  a read the worker's queue cannot take yet is asked again once it drains.
+  Each saver is listed with whether it can be chosen — a user's own declaring
+  a privileged feed cannot, nor a damaged, unkeyable or duplicate one — and
+  each newly refused is said on standard error and recorded (`SAVER_REFUSED`,
+  naming it and why) when the catalogue changes. Only Settings reads the list
+  (`QueryScreensaver`) or asks for a saver's picture, one entry at a time; any
+  other caller is refused and recorded. The first screensaver picture Settings
+  asks for once a listing reached its end is recorded too
+  (`SAVER_CATALOGUE_SHOWN`): a chooser can ask for none before it holds the
+  list.
+- **Starting** a saver gives it a fresh region the size of the screen and the
+  `Start` its manifest and the desktop make: every option at the user's value
+  or its default, the look, a CSPRNG seed, the account and machine names, the
+  pressure band, and its ceilings — twice its region and 128 MiB of address
+  space (2 GiB more for the large ceiling), never more than half the machine,
+  and one thread, or one per core for a saver that asks. A saver the desktop
+  does not offer, or one that cannot be started, leaves the screen black, and
+  why is said on standard error; a saver that could not be started, or that
+  said it cannot start (`Unstarted`, recorded as "could not start" with its
+  reason), is recorded as ended (`SAVER_ENDED`). A start while a screensaver
+  is up — the idle deadline over a preview — leaves it as it is.
+- **The conversation** (`saver/talk.rs`, `lib/abi` `saver_ipc`) is checked
+  turn by turn. A saver says `Ready` within `SAVER_START_DEADLINE_NS` and
+  presents each frame within `SAVER_FRAME_DEADLINE_NS`, naming damage on the
+  screen alone, the time a font call spends being relayed not counted against
+  it; it makes at most `SAVER_FONT_CALLS_MAX` font calls while starting or
+  from one frame asked for to the next. A frame is asked for only once the
+  last is presented, after each feed message, and never faster than the
+  display shows frames. A message out of turn or that does not decode, a
+  missed deadline, a closed pipe or a pipe the session cannot watch ends the
+  saver and the screen goes black, with why on standard error and in the
+  record of its end (`SAVER_ENDED`). An ended saver still running is killed
+  and reaped when the kernel reports its exit, a child member of the serve
+  loop's wait set, never waited for on the loop. Its pipes are watched in the
+  directions it wants (`SessionMembers`), on the same wait set.
+- **Presenting** decodes the rectangles a frame names out of the region into
+  the screensaver's surface, every pixel laid opaque so no saver can show
+  what it covers, the alpha filled as each pixel is converted; a surface the
+  compositor has let go is decoded whole. A saver's first frame laid on the
+  screen is recorded (`SAVER_SHOWN`, saying whether it is a preview), and a
+  saver taken down on purpose — dismissed on input, an output change or the
+  session going to the background, or its display switched off — is recorded
+  too (`SAVER_DISMISSED`).
+- **Feeds** are served off the loop and answered as they land, each answer
+  carrying which saver asked, so none reaches a saver started after it: font
+  calls relayed to the font service on a thread of their own; a picture to
+  keep written by the saver file worker into `Home/Pictures/<saver's title>/`
+  (`saver::keep`), to a hidden scratch file first and then renamed onto a name
+  no picture holds, named in the user's own zone, at most one every
+  `SAVER_KEEP_SPACING_NS` and `SAVER_KEEPS_MAX` a run, any more answered as
+  not kept; a slide prepared by the
+  wallpaper preparers at the screen's size; and the machine's readings from
+  the Switchboard watch, each task's name kept only where
+  `screensaver.machine.tasks` allows. The readings and the pressure band are
+  held while anything is queued for a saver, so one slow to read is told the
+  latest rather than a backlog.
 
-  A frame's craft are set out as parts, projected once into a list of
-  polygons, and replayed a band of rows at a time across the compositor's
-  participants. Over the sky, what lies under each box they reach is kept
-  before they are drawn, and laid back by copying it the next frame: painting
-  the ranges again there would cost every one of the tiny faces near the
-  horizon. Ground craft never stand as tall as the camera, so they stay below
-  the horizon, on the floor every frame repaints. Under reduced motion the
-  scene holds still, nothing comes on, and nothing is drawn after the first
-  frame.
-- **A system monitor** (`saver::system_monitor`): the machine's own readings,
-  laid out to be read from across a room. A header gives the machine's name,
-  the time, and a verdict naming the worst concern first. Panels show:
-  - the processors' busy share, trend, load and one cell per core;
-  - memory committed, its trend and where it went;
-  - the tasks, what needs recovery, and the busiest by name;
-  - each storage device's health, throughput and fullness;
-  - each interface's traffic and link.
-
-  The readings come from the Switchboard's machine report
-  (`docs/src/desktop/switchboard.md`). While the board is up, the session
-  watches the monitor, spawning it once if it is not running, and each report
-  lands on the loop's existing wait set. The verdict is the monitor's own
-  pressure latches and the storage health; it invents no thresholds.
-
-  Readings are never shown as live once they stop. Before the first one the
-  board waits, then says the monitor is not answering. After three of the
-  monitor's periods without a report, the verdict says when readings stopped
-  and the panels dim. A monitor that exits is named as not running.
-
-  A report repaints only the parts whose readings it changed, and nothing is
-  drawn between reports. Each minute the board steps round a small orbit
-  against burn-in. The busiest tasks' names can be read by anyone who sees the
-  screen, the lock included, so `screensaver.system_monitor.tasks` can leave
-  them out.
-
-The animated scenes draw on whole frames of the output's rate, at most thirty a
-second (`SceneClock::frame_on`, the one idle-scene clock in
-`tairix_theme::motion`), each
-frame repainting only what changed through `Compositor::repaint_window` — the
-footprints the stars left and reached, the cells whose look moved, the block
-where it was and is, the cells about the points the ray tracer traced since
-its last paint (marked as whole tiles, at most 128 rectangles, its paints
-coming on the reveal's own cadence above), the retro games' floor, its
-sun's bands and the boxes its craft reached and reach — and each parks the
-loop to its next frame and no sooner. A late
-wake moves the scene at most a few frames, never all at once.
+A saver's frame is asked for by the session's frame step, so it is drawn on
+the session's own frame clock; what each saver asks for next is folded into
+the park, and nothing at all is owed while the display is off.
 
 The wake that takes the screensaver down is drained into nothing: the gesture
 that wakes the screen reaches nothing behind it, and the next one goes where
@@ -2269,7 +2130,7 @@ input goes — to a lock, when one came up beneath. The drain follows the
 pointer, so it comes back where the device put it, in the shape of whatever it
 is over.
 
-Settings' **Test** shows a screensaver now (`PreviewScreensaver`,
+Settings' **Preview** shows a screensaver now (`PreviewScreensaver`,
 `docs/src/desktop/settings.md`). Only the desktop's own Settings may ask — the
 attested bundle signed by the session's own publisher — as only it may ask for
 the lock or the sources that have notified, and any other caller's request is
@@ -2278,12 +2139,13 @@ caller). It is served only while nothing holds the seat; the request carries the
 them, read strictly as those keys over what the desktop holds (a key from any
 other group, or a value the registry refuses, refuses the request), and keeps
 none of it. The preview goes up through the same start as the idle deadline's.
-Because the hand that pressed Test is still on the mouse, pointer motion in a
+Because the hand that pressed Preview is still on the mouse, pointer motion in a
 preview's first `PREVIEW_STEADY_NS` leaves it up; a key, a press or a scroll
 ends it at once, and so does motion after that.
 
-When the display-off wait runs out the session asks the display service to
-switch the display off (`SetPower`, `docs/src/drivers/display.md`), through
+When the display-off wait runs out the session ends the saver drawing, since
+nothing it drew could be seen, and asks the display service to switch the
+display off (`SetPower`, `docs/src/drivers/display.md`), through
 `lib/display`'s `DisplaySleep`, the one state machine the login screen's own
 energy saving sleeps its display through too. A display
 that is off is presented nothing and arms no frame deadline: its damage waits
@@ -2834,7 +2696,7 @@ frame is presented. When a fetch lands, the end of that turn lays out and draws
 again everything drawn from a provisional answer (`refit_text`): the icon bar,
 every window title band and nothing else of the window, the desktop's icon
 cells and nothing of the ground between them, an open menu chain (a plate the user dragged keeps its place), the tooltip, a
-carried drag's plate, the lock and the screensaver's text, the trusted picker,
+carried drag's plate, the lock, the trusted picker,
 and the prompts and alerts, which are measured again and keep their centre if
 their size changed. That redraw of all the text the session shows is also the
 contract the font client's held glyphs rest on: what the glyph cache let go of
@@ -3166,10 +3028,6 @@ while the session was still coming up, because the kernel reports *changes*.
 
 ## Tests
 
-The ray-traced screensaver's long tests, those that prepare or trace a whole
-scene, build only with the `scene-tests` feature, as the ray tracer's own do:
-`ci-long` and `cargo xtask test --scenes` run them, and `ci` only lints them.
-
 `cargo test -p tairix-desktop-session` covers: the default light start with an
 empty library and a closed popup; `set_theme` relaying the new metrics to the
 taskbar (observed through a custom theme with a distinctive corner radius);
@@ -3310,3 +3168,12 @@ refuses leaving the column empty; a reported change merged in place with only
 the cells it moved repainted and the selection kept or dropped by name; and
 the selection following a renamed-or-reordered entry by name across a re-list
 rather than by index.
+
+`saver_tests.rs` and the `saver/` tests cover the screensaver and its host
+over pipes held in memory: the catalogue's order, standing and refusals; a
+start's options and ceilings; the conversation's turns, pacing and deadlines,
+a relayed font call holding no deadline against the saver; a frame laid on the
+window where it changed and opaque; each feed answered to the saver that
+asked and to no other; readings and the pressure band held behind a queue; a
+kept picture written aside and renamed onto a free name in the user's own
+zone; and each way a saver is ended leaving the screen black.

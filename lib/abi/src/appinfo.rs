@@ -35,6 +35,7 @@
 //! ships in `abi-v2`.
 
 use crate::le::{read_u16, read_u32};
+use crate::saver::{SaverFeeds, SaverOption, SAVER_MAX_OPTIONS, SAVER_OPTION_ENTRY_LEN};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::Errno;
 
@@ -91,14 +92,15 @@ pub const MIME_ENTRY_LEN: usize = 1 + MIME_TYPE_MAX;
 /// [`SERVICE_NAME_MAX`](crate::discovery_ipc::SERVICE_NAME_MAX) buffer.
 pub const BROWSE_ENTRY_LEN: usize = 2 + crate::discovery_ipc::SERVICE_NAME_MAX;
 
-/// Largest possible encoded `AppInfo` manifest: the fixed header plus the
-/// maximal capability and MIME bodies. A longer file cannot be a valid
-/// manifest, so every reader bounds its manifest read here and refuses a
-/// bigger file before decoding a byte of it.
+/// Largest possible encoded `AppInfo` manifest: the fixed header plus every
+/// body table at its bound. A longer file cannot be a valid manifest, so every
+/// reader bounds its manifest read here and refuses a bigger file before
+/// decoding a byte of it.
 pub const APPINFO_WIRE_MAX: usize = AppInfoHeader::WIRE_LEN
     + APPINFO_MAX_CAPABILITIES as usize * 2
     + APPINFO_MAX_MIME as usize * MIME_ENTRY_LEN
-    + APPINFO_MAX_BROWSE as usize * BROWSE_ENTRY_LEN;
+    + APPINFO_MAX_BROWSE as usize * BROWSE_ENTRY_LEN
+    + SAVER_MAX_OPTIONS as usize * SAVER_OPTION_ENTRY_LEN;
 
 /// Maximum length, in bytes, of the library icon asset name a manifest may
 /// declare — a plain file name inside the bundle's own `Resources/`
@@ -143,10 +145,48 @@ pub const APPINFO_FLAG_MULTI_INSTANCE: u32 = 1 << 1;
 /// running process cannot widen the authority it is handed.
 pub const APPINFO_FLAG_DOCUMENT_WRITE: u32 = 1 << 2;
 
+/// [`AppInfoHeader::flags`] bit: this screensaver is fed the machine's
+/// readings — load, memory, tasks — by its host. A privileged feed.
+pub const APPINFO_FLAG_FEED_MACHINE: u32 = 1 << 3;
+
+/// [`AppInfoHeader::flags`] bit: this screensaver hands its host the pictures
+/// it finishes to keep in the user's `Pictures`. A privileged feed.
+pub const APPINFO_FLAG_FEED_KEEP: u32 = 1 << 4;
+
+/// [`AppInfoHeader::flags`] bit: this screensaver shows pictures its host
+/// decodes for it. A privileged feed.
+pub const APPINFO_FLAG_FEED_SLIDES: u32 = 1 << 5;
+
+/// [`AppInfoHeader::flags`] bit: this screensaver runs up to one thread per
+/// online core.
+pub const APPINFO_FLAG_SAVER_PARALLEL: u32 = 1 << 6;
+
+/// [`AppInfoHeader::flags`] bit: this screensaver is granted its host's large
+/// memory ceiling.
+pub const APPINFO_FLAG_SAVER_LARGE_MEMORY: u32 = 1 << 7;
+
+/// The privileged feeds, which only a system-signed screensaver is admitted
+/// with. Claimed in the *signed* manifest, so a running saver cannot widen
+/// what its host hands it.
+pub const APPINFO_FLAGS_SAVER_FEEDS: u32 =
+    APPINFO_FLAG_FEED_MACHINE | APPINFO_FLAG_FEED_KEEP | APPINFO_FLAG_FEED_SLIDES;
+
+/// Every flag bit only a screensaver may set, and the only ones it may.
+pub const APPINFO_FLAGS_SAVER: u32 =
+    APPINFO_FLAGS_SAVER_FEEDS | APPINFO_FLAG_SAVER_PARALLEL | APPINFO_FLAG_SAVER_LARGE_MEMORY;
+
+/// The screensaver flags a user's own, self-signed saver may set: its threads
+/// and its memory, which its host bounds whoever signed it. Any other is
+/// refused, so a flag added later is a system saver's until it is put here.
+pub const APPINFO_FLAGS_SAVER_OWN: u32 =
+    APPINFO_FLAG_SAVER_PARALLEL | APPINFO_FLAG_SAVER_LARGE_MEMORY;
+
 /// Every [`AppInfoHeader::flags`] bit `abi-v1` defines. A manifest setting
 /// any other bit is refused rather than read as if the bit were clear.
-pub const APPINFO_FLAG_MASK: u32 =
-    APPINFO_FLAG_NO_ICON_BAR | APPINFO_FLAG_MULTI_INSTANCE | APPINFO_FLAG_DOCUMENT_WRITE;
+pub const APPINFO_FLAG_MASK: u32 = APPINFO_FLAG_NO_ICON_BAR
+    | APPINFO_FLAG_MULTI_INSTANCE
+    | APPINFO_FLAG_DOCUMENT_WRITE
+    | APPINFO_FLAGS_SAVER;
 
 /// A bundle identifier as a validated, inline, fixed-width field.
 ///
@@ -511,6 +551,17 @@ pub const SYSTEM_SERVICE_STORE: &str = "/System/Services";
 /// searched: the OS starts a component by its path.
 pub const SYSTEM_COMPONENT_STORE: &str = "/System/Components";
 
+/// Absolute path of the **system screensaver store**: the OS-provided,
+/// read-only, system-signed screensaver bundles. Not searched: the desktop
+/// starts the chosen saver in the drawing sandbox (`plans/SCREENSAVERS.md`).
+pub const SYSTEM_SCREENSAVER_STORE: &str = "/System/Screensavers";
+
+/// The directory, inside a home's [`crate::home::HOME_LIBRARY_DIR`], of the
+/// user's own **screensaver store** (`/Users/<name>/Library/Screensavers`):
+/// the savers the user installed, admitted self-signed and only into the
+/// drawing sandbox. Pinned to [`SYSTEM_SCREENSAVER_STORE`]'s final component.
+pub const HOME_SCREENSAVER_STORE_DIR: &str = "Screensavers";
+
 /// The entry point of the desktop session component.
 pub const DESKTOP_RUN_PATH: &str = "/System/Components/desktop.app/Run";
 
@@ -556,15 +607,19 @@ pub enum ProgramKind {
     /// A part of the OS the system starts by path, planted in
     /// [`SYSTEM_COMPONENT_STORE`].
     Component,
+    /// A screensaver the desktop runs in the drawing sandbox, planted in
+    /// [`SYSTEM_SCREENSAVER_STORE`] or installed in a user's own saver store.
+    Screensaver,
 }
 
 impl ProgramKind {
     /// Every kind, in canonical order — the closed set.
-    pub const ALL: [ProgramKind; 4] = [
+    pub const ALL: [ProgramKind; 5] = [
         ProgramKind::Command,
         ProgramKind::Application,
         ProgramKind::Service,
         ProgramKind::Component,
+        ProgramKind::Screensaver,
     ];
 
     /// The canonical `kind = "…"` spelling a manifest source declares.
@@ -575,6 +630,7 @@ impl ProgramKind {
             ProgramKind::Application => "application",
             ProgramKind::Service => "service",
             ProgramKind::Component => "component",
+            ProgramKind::Screensaver => "screensaver",
         }
     }
 
@@ -587,6 +643,7 @@ impl ProgramKind {
             ProgramKind::Application => 2,
             ProgramKind::Service => 3,
             ProgramKind::Component => 4,
+            ProgramKind::Screensaver => 5,
         }
     }
 
@@ -612,6 +669,7 @@ impl ProgramKind {
             ProgramKind::Application => SYSTEM_APPLICATION_STORE,
             ProgramKind::Service => SYSTEM_SERVICE_STORE,
             ProgramKind::Component => SYSTEM_COMPONENT_STORE,
+            ProgramKind::Screensaver => SYSTEM_SCREENSAVER_STORE,
         }
     }
 
@@ -626,8 +684,8 @@ impl ProgramKind {
 
     /// `true` when a user launches programs of this kind **by name**: both
     /// program stores are on the fixed search prefix, so a command and a
-    /// graphical application are each typeable, while a service or a
-    /// component is started by the system, never by a typed word.
+    /// graphical application are each typeable, while a service, a component
+    /// or a screensaver is started by the system, never by a typed word.
     ///
     /// This is the one predicate that separates the user-facing programs
     /// from the system's own, so the help gates — every named program ships
@@ -644,14 +702,21 @@ impl ProgramKind {
     /// Each system store holds only its own kind, and the kinds the system
     /// starts — services and components — run only from their own store, so
     /// a system-signed service copied anywhere else is not a command. A
-    /// command or application may also run from outside every system store:
-    /// a user's own stores, or a directory on `PATH`.
+    /// user's own saver store holds screensavers alone, and a screensaver runs
+    /// from nowhere else. A command or application may also run from outside
+    /// every system store: a user's own stores, or a directory on `PATH`.
     #[must_use]
     pub fn launchable_from(self, bundle: &str) -> bool {
-        match Self::of_system_store(bundle) {
-            Some(store) => store == self,
-            None => self.is_searched(),
+        if let Some(store) = Self::of_system_store(bundle) {
+            return store == self;
         }
+        if bundle
+            .strip_prefix('/')
+            .is_some_and(|rest| in_user_saver_store(rest.split('/')))
+        {
+            return self == ProgramKind::Screensaver;
+        }
+        self.is_searched()
     }
 
     /// The kind whose system store `path` lies inside, or `None` outside
@@ -885,6 +950,71 @@ fn has_dotdot(path: &str) -> bool {
     path.split('/').any(|component| component == "..")
 }
 
+/// Whether a path component is plain: not empty, `.` or `..`.
+fn is_plain(component: &str) -> bool {
+    !component.is_empty() && component != "." && component != ".."
+}
+
+/// Whether `component` names a bundle: a stem before [`BUNDLE_SUFFIX`].
+fn is_bundle(component: &str) -> bool {
+    component.len() > BUNDLE_SUFFIX.len() && component.ends_with(BUNDLE_SUFFIX)
+}
+
+/// Take a user's own screensaver store, `Users/<name>/Library/Screensavers`,
+/// off the front of root-first `components`, the account name plain; whether
+/// they began with it.
+fn take_user_saver_store<'a>(components: &mut impl Iterator<Item = &'a str>) -> bool {
+    components.next() == Some(crate::home::USERS_DIR)
+        && components.next().is_some_and(is_plain)
+        && components.next() == Some(crate::home::HOME_LIBRARY_DIR)
+        && components.next() == Some(HOME_SCREENSAVER_STORE_DIR)
+}
+
+/// Whether root-first `components` name a user's own screensaver store,
+/// `/Users/<name>/Library/Screensavers`, or something in it: a bundle, a plain
+/// folder filed there, or what either holds. Every component must be plain.
+#[must_use]
+pub fn in_user_saver_store<'a>(components: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut components = components.into_iter();
+    take_user_saver_store(&mut components) && components.all(is_plain)
+}
+
+/// Whether the absolute `bundle` is a bundle in a user's own screensaver
+/// store, filed there or in plain folders of it, every component plain and
+/// none before the last a bundle: the one place a self-signed saver is
+/// admitted from, and never from inside another bundle.
+#[must_use]
+pub fn is_user_saver_bundle(bundle: &str) -> bool {
+    let Some(rest) = bundle.strip_prefix('/') else {
+        return false;
+    };
+    let mut components = rest.split('/');
+    if !take_user_saver_store(&mut components) {
+        return false;
+    }
+    let mut last = None;
+    for component in components {
+        if !is_plain(component) || last.is_some_and(is_bundle) {
+            return false;
+        }
+        last = Some(component);
+    }
+    last.is_some_and(is_bundle)
+}
+
+/// `home` when it is a user's own account folder, `/Users/<name>` with a plain
+/// name, a trailing `/` dropped: the only home a user's own screensaver store
+/// is under, so a saver found anywhere else is never offered as theirs.
+#[must_use]
+pub fn user_saver_home(home: &str) -> Option<&str> {
+    let home = home.strip_suffix('/').unwrap_or(home);
+    let mut components = home.strip_prefix('/')?.split('/');
+    let own = components.next() == Some(crate::home::USERS_DIR)
+        && components.next().is_some_and(is_plain)
+        && components.next().is_none();
+    own.then_some(home)
+}
+
 /// `true` if `path` names a file strictly inside directory `dir`.
 ///
 /// `dir` is normalised by stripping a single trailing `/`; `path` must then
@@ -911,8 +1041,10 @@ fn is_within(path: &str, dir: &str) -> bool {
 /// is the requested capability-id list (`capability_count` little-endian
 /// `u16`s, decoded by [`crate::decode_capability_ids`]) immediately followed
 /// by the MIME-type table (`mime_count` entries of [`MIME_ENTRY_LEN`] bytes,
-/// read by [`mime_type_at`]) and the browsed service types (`browse_count`
-/// entries of [`BROWSE_ENTRY_LEN`] bytes, read by [`browse_type_at`]). The
+/// read by [`mime_type_at`]), the browsed service types (`browse_count`
+/// entries of [`BROWSE_ENTRY_LEN`] bytes, read by [`browse_type_at`]) and a
+/// screensaver's options (`option_count` entries of
+/// [`SAVER_OPTION_ENTRY_LEN`] bytes, read by [`saver_option_at`]). The
 /// Ed25519 signature covers the **whole
 /// manifest except the signature field itself**:
 /// `bytes[signed_range()] ‖ bytes[WIRE_LEN..]` — the header prefix
@@ -943,9 +1075,9 @@ pub struct AppInfoHeader {
     /// where a bundle may run is the publisher's statement, not the directory
     /// it was found in. A byte naming no kind is refused.
     pub kind: u8,
-    /// Always zero, so the header has no padding and its in-memory image is
-    /// its wire image; a non-zero value is refused.
-    pub reserved: u8,
+    /// Number of options a screensaver declares in the body, at most
+    /// [`SAVER_MAX_OPTIONS`]; zero for every other kind.
+    pub option_count: u8,
     /// Valid byte count of the inline `id` buffer (`<= BUNDLE_ID_MAX`).
     pub id_len: u8,
     /// Valid byte count of the inline `name` buffer (`<= BUNDLE_NAME_MAX`).
@@ -1028,7 +1160,7 @@ impl AppInfoHeader {
     const OFF_MIME_COUNT: usize = 14;
     const OFF_BROWSE_COUNT: usize = 16;
     const OFF_KIND: usize = 18;
-    const OFF_RESERVED: usize = 19;
+    const OFF_OPTION_COUNT: usize = 19;
     const OFF_ID_LEN: usize = 20;
     const OFF_NAME_LEN: usize = 21;
     const OFF_VERSION_LEN: usize = 22;
@@ -1080,7 +1212,7 @@ impl AppInfoHeader {
         out[Self::OFF_BROWSE_COUNT..Self::OFF_BROWSE_COUNT + 2]
             .copy_from_slice(&self.browse_count.to_le_bytes());
         out[Self::OFF_KIND] = self.kind;
-        out[Self::OFF_RESERVED] = self.reserved;
+        out[Self::OFF_OPTION_COUNT] = self.option_count;
         out[Self::OFF_ID_LEN] = self.id_len;
         out[Self::OFF_NAME_LEN] = self.name_len;
         out[Self::OFF_VERSION_LEN] = self.version_len;
@@ -1117,17 +1249,21 @@ impl AppInfoHeader {
     ///
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
     /// * [`Errno::BadMagic`] if the magic word does not match, if `flags`
-    ///   sets a bit outside [`APPINFO_FLAG_MASK`], if `kind` names no
-    ///   [`ProgramKind`], or if `reserved` is not zero.
+    ///   sets a bit outside [`APPINFO_FLAG_MASK`], or if `kind` names no
+    ///   [`ProgramKind`].
     /// * [`Errno::AbiVersionUnsupported`] if `abi_version` is not
     ///   [`crate::ABI_VERSION_CURRENT`].
     /// * [`Errno::LengthOutOfRange`] if `capability_count`, `mime_count`,
-    ///   `browse_count`, or any inline string length exceeds its cap.
+    ///   `browse_count`, `option_count`, or any inline string length exceeds
+    ///   its cap.
     /// * [`Errno::OutOfRange`] if a mandatory identity string (`id`, `name`,
     ///   `version`) is empty or is not valid UTF-8, if `id` is outside the
     ///   [`validate_bundle_id`] grammar, if the `library` byte is outside the
-    ///   [`LibraryCategory::from_wire`] encoding, or if the icon bytes are
-    ///   not valid UTF-8.
+    ///   [`LibraryCategory::from_wire`] encoding, if the icon bytes are
+    ///   not valid UTF-8, if a manifest of another kind declares options or a
+    ///   screensaver flag, or if a screensaver requests a capability, claims a
+    ///   file type, browses a service, sets another flag or is listed by the
+    ///   program library.
     ///
     /// Authenticity is **not** judged here. Neither signature is verified and
     /// the publisher binding is not classified: that is the load gate's job,
@@ -1162,9 +1298,12 @@ impl AppInfoHeader {
             return Err(Errno::LengthOutOfRange);
         }
         let kind = bytes[Self::OFF_KIND];
-        let reserved = bytes[Self::OFF_RESERVED];
-        if ProgramKind::from_wire(kind).is_none() || reserved != 0 {
+        let Some(program) = ProgramKind::from_wire(kind) else {
             return Err(Errno::BadMagic);
+        };
+        let option_count = bytes[Self::OFF_OPTION_COUNT];
+        if option_count > SAVER_MAX_OPTIONS {
+            return Err(Errno::LengthOutOfRange);
         }
         let id_len = bytes[Self::OFF_ID_LEN];
         let name_len = bytes[Self::OFF_NAME_LEN];
@@ -1175,6 +1314,10 @@ impl AppInfoHeader {
         let author_len = bytes[Self::OFF_AUTHOR_LEN];
         let title_len = bytes[Self::OFF_TITLE_LEN];
         LibraryCategory::from_wire(library)?;
+        let requests = [capability_count, mime_count, browse_count];
+        if !saver_shape_holds(program, flags, requests, option_count, library) {
+            return Err(Errno::OutOfRange);
+        }
 
         let header = Self {
             magic,
@@ -1184,7 +1327,7 @@ impl AppInfoHeader {
             mime_count,
             browse_count,
             kind,
-            reserved,
+            option_count,
             id_len,
             name_len,
             version_len,
@@ -1338,6 +1481,26 @@ impl AppInfoHeader {
         self.flags & APPINFO_FLAG_DOCUMENT_WRITE != 0
     }
 
+    /// The privileged feeds this screensaver declares; none for another kind.
+    #[must_use]
+    pub const fn saver_feeds(&self) -> SaverFeeds {
+        SaverFeeds::of_flags(self.flags)
+    }
+
+    /// Whether this screensaver runs up to one thread per online core
+    /// ([`APPINFO_FLAG_SAVER_PARALLEL`]).
+    #[must_use]
+    pub const fn runs_parallel(&self) -> bool {
+        self.flags & APPINFO_FLAG_SAVER_PARALLEL != 0
+    }
+
+    /// Whether this screensaver is granted the large memory ceiling
+    /// ([`APPINFO_FLAG_SAVER_LARGE_MEMORY`]).
+    #[must_use]
+    pub const fn needs_large_memory(&self) -> bool {
+        self.flags & APPINFO_FLAG_SAVER_LARGE_MEMORY != 0
+    }
+
     /// Classify how this manifest binds its build signing key to its
     /// publisher identity.
     ///
@@ -1404,7 +1567,8 @@ impl AppInfoHeader {
     }
 
     /// Number of body bytes a manifest with these counts must carry: the
-    /// capability list, the MIME-type table, then the browsed service types.
+    /// capability list, the MIME-type table, the browsed service types, then a
+    /// screensaver's options.
     ///
     /// # Errors
     ///
@@ -1414,12 +1578,14 @@ impl AppInfoHeader {
             usize::from(self.capability_count),
             usize::from(self.mime_count),
             usize::from(self.browse_count),
+            usize::from(self.option_count),
         )
     }
 }
 
 /// Number of body bytes a manifest with `capability_count` capability ids,
-/// `mime_count` MIME entries, and `browse_count` browsed types carries.
+/// `mime_count` MIME entries, `browse_count` browsed types and `option_count`
+/// screensaver options carries.
 ///
 /// # Errors
 ///
@@ -1428,6 +1594,7 @@ pub fn body_len(
     capability_count: usize,
     mime_count: usize,
     browse_count: usize,
+    option_count: usize,
 ) -> Result<usize, Errno> {
     let caps = capability_count
         .checked_mul(2)
@@ -1438,9 +1605,79 @@ pub fn body_len(
     let browses = browse_count
         .checked_mul(BROWSE_ENTRY_LEN)
         .ok_or(Errno::LengthOutOfRange)?;
+    let options = option_count
+        .checked_mul(SAVER_OPTION_ENTRY_LEN)
+        .ok_or(Errno::LengthOutOfRange)?;
     caps.checked_add(mimes)
         .and_then(|len| len.checked_add(browses))
+        .and_then(|len| len.checked_add(options))
         .ok_or(Errno::LengthOutOfRange)
+}
+
+/// Read the `index`-th option a screensaver's manifest `body` declares, which
+/// follows the browsed service types.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for an index past `header.option_count`,
+/// [`Errno::BufferTooSmall`] for a body too short to hold the entry, and the
+/// entry's own refusals ([`SaverOption::from_entry`]).
+pub fn saver_option_at(
+    body: &[u8],
+    header: &AppInfoHeader,
+    index: usize,
+) -> Result<SaverOption, Errno> {
+    if index >= usize::from(header.option_count) {
+        return Err(Errno::OutOfRange);
+    }
+    let entry = body_len(
+        usize::from(header.capability_count),
+        usize::from(header.mime_count),
+        usize::from(header.browse_count),
+        index,
+    )?;
+    let end = entry
+        .checked_add(SAVER_OPTION_ENTRY_LEN)
+        .ok_or(Errno::LengthOutOfRange)?;
+    SaverOption::from_entry(body.get(entry..end).ok_or(Errno::BufferTooSmall)?)
+}
+
+/// Decode every option a screensaver's manifest `body` declares, in order,
+/// handing each to `each`, and check that no two share a key: one pass for a
+/// reader that keeps the options and one that only judges them.
+///
+/// # Errors
+///
+/// The first entry's refusal ([`saver_option_at`]), or [`Errno::OutOfRange`]
+/// for a repeated key. `each` has then seen the options before it.
+pub fn read_saver_options(
+    body: &[u8],
+    header: &AppInfoHeader,
+    mut each: impl FnMut(SaverOption),
+) -> Result<(), Errno> {
+    let mut keys = [crate::saver::OptionKey::BLANK; SAVER_MAX_OPTIONS as usize];
+    for index in 0..usize::from(header.option_count) {
+        let option = saver_option_at(body, header, index)?;
+        let key = *option.key();
+        let (earlier, rest) = keys.split_at_mut_checked(index).ok_or(Errno::OutOfRange)?;
+        let held = rest.first_mut().ok_or(Errno::OutOfRange)?;
+        if earlier.contains(&key) {
+            return Err(Errno::OutOfRange);
+        }
+        *held = key;
+        each(option);
+    }
+    Ok(())
+}
+
+/// Check every option a screensaver's manifest `body` declares decodes, and
+/// that no two share a key.
+///
+/// # Errors
+///
+/// As [`read_saver_options`].
+pub fn validate_saver_options(body: &[u8], header: &AppInfoHeader) -> Result<(), Errno> {
+    read_saver_options(body, header, |_| {})
 }
 
 /// Read the `index`-th browsed service type from a manifest `body`, which
@@ -1463,7 +1700,7 @@ pub fn browse_type_at(
     mime_count: usize,
     index: usize,
 ) -> Result<crate::discovery_ipc::ServiceTypeField<'_>, Errno> {
-    let entry = body_len(capability_count, mime_count, index)?;
+    let entry = body_len(capability_count, mime_count, index, 0)?;
     let end = entry
         .checked_add(BROWSE_ENTRY_LEN)
         .ok_or(Errno::LengthOutOfRange)?;
@@ -1535,8 +1772,6 @@ pub fn mime_type_at(body: &[u8], capability_count: usize, index: usize) -> Resul
     core::str::from_utf8(&body[entry + 1..entry + 1 + len]).map_err(|_| Errno::OutOfRange)
 }
 
-/// Validate one inline identity field: length within bound, non-empty, and
-/// a valid UTF-8 prefix.
 /// Copy one fixed-width inline field out of a wire image at `offset`.
 ///
 /// The caller has already bounds-checked the image against the header's wire
@@ -1548,6 +1783,28 @@ fn inline_field<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
     buf
 }
 
+/// Whether a manifest of kind `program` declares what its kind may and no
+/// more: a screensaver requests no capability, file type or browsed service
+/// (`requests`), sets no flag but a saver's and is not listed by the program
+/// library; any other kind declares no option and sets no saver flag.
+fn saver_shape_holds(
+    program: ProgramKind,
+    flags: u32,
+    requests: [u16; 3],
+    option_count: u8,
+    library: u8,
+) -> bool {
+    if program == ProgramKind::Screensaver {
+        requests == [0; 3]
+            && flags & !APPINFO_FLAGS_SAVER == 0
+            && library == LibraryCategory::to_wire(None)
+    } else {
+        option_count == 0 && flags & APPINFO_FLAGS_SAVER == 0
+    }
+}
+
+/// Validate one inline identity field: length within bound, non-empty, and
+/// a valid UTF-8 prefix.
 fn validate_identity(len: u8, max: usize, buf: &[u8]) -> Result<(), Errno> {
     let len = usize::from(len);
     if len == 0 {
@@ -1692,7 +1949,7 @@ pub fn manifest_header(id: &str, name: &str) -> AppInfoHeader {
         mime_count: 0,
         browse_count: 0,
         kind: ProgramKind::Application.to_wire(),
-        reserved: 0,
+        option_count: 0,
         id_len,
         name_len,
         version_len,
@@ -1732,6 +1989,14 @@ mod tests {
         PUBLISHER_ID_LEN, PUBLISHER_ID_PREIMAGE_LEN, SETTINGS_RUN_PATH, SYSTEM_APPLICATION_STORE,
         SYSTEM_COMMAND_STORE, SYSTEM_COMPONENT_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
     };
+    use super::{
+        in_user_saver_store, is_user_saver_bundle, saver_option_at, user_saver_home,
+        validate_saver_options, APPINFO_FLAGS_SAVER, APPINFO_FLAG_FEED_KEEP,
+        APPINFO_FLAG_FEED_MACHINE, APPINFO_FLAG_FEED_SLIDES, APPINFO_FLAG_SAVER_LARGE_MEMORY,
+        APPINFO_FLAG_SAVER_PARALLEL, APPINFO_WIRE_MAX, HOME_SCREENSAVER_STORE_DIR,
+        SYSTEM_SCREENSAVER_STORE,
+    };
+    use crate::saver::{SaverOption, SAVER_MAX_OPTIONS, SAVER_OPTION_ENTRY_LEN};
     use crate::syscall::SYSCALL_TABLE_HASH_LEN;
     use crate::{Errno, ABI_VERSION_CURRENT};
 
@@ -1758,7 +2023,7 @@ mod tests {
             mime_count: 1,
             browse_count: 1,
             kind: ProgramKind::Application.to_wire(),
-            reserved: 0,
+            option_count: 0,
             id_len,
             name_len,
             version_len,
@@ -1816,6 +2081,7 @@ mod tests {
         assert!(ProgramKind::Application.is_searched());
         assert!(!ProgramKind::Service.is_searched());
         assert!(!ProgramKind::Component.is_searched());
+        assert!(!ProgramKind::Screensaver.is_searched());
     }
 
     #[test]
@@ -1835,12 +2101,40 @@ mod tests {
     /// system-signed service copied into a user's store ran as a command.
     #[test]
     fn a_bundle_runs_only_from_where_its_signed_kind_may() {
-        use ProgramKind::{Application, Command, Component, Service};
+        use ProgramKind::{Application, Command, Component, Screensaver, Service};
         for (kind, bundle, allowed) in [
             (Command, "/System/Commands/ps.app", true),
             (Application, "/System/Applications/terminal.app", true),
             (Service, "/System/Services/sysinfod.app", true),
             (Component, "/System/Components/desktop.app", true),
+            (Screensaver, "/System/Screensavers/clock.app", true),
+            // A saver runs from a user's own saver store and nowhere else.
+            (
+                Screensaver,
+                "/Users/ada/Library/Screensavers/waves.app",
+                true,
+            ),
+            (Screensaver, "/Users/ada/Applications/waves.app", false),
+            (Screensaver, "/Users/ada/Library/waves.app", false),
+            (
+                Screensaver,
+                "/Users/ada/Library/ScreensaversEvil/waves.app",
+                false,
+            ),
+            (
+                Screensaver,
+                "/Storage/stick/Library/Screensavers/waves.app",
+                false,
+            ),
+            (Screensaver, "/System/Components/clock.app", false),
+            (Component, "/System/Screensavers/desktop.app", false),
+            // A user's saver store holds nothing a user could run as a program.
+            (Command, "/Users/ada/Library/Screensavers/tool.app", false),
+            (
+                Application,
+                "/Users/ada/Library/Screensavers/chess.app",
+                false,
+            ),
             // A system store holds only its own kind.
             (Application, "/System/Commands/terminal.app", false),
             (Command, "/System/Services/ps.app", false),
@@ -1867,7 +2161,8 @@ mod tests {
 
     #[test]
     fn a_manifest_without_a_kind_is_refused() {
-        for kind in [0, 5, u8::MAX] {
+        let past_the_last = u8::try_from(ProgramKind::ALL.len() + 1).expect("few kinds");
+        for kind in [0, past_the_last, u8::MAX] {
             let mut h = sample();
             h.kind = kind;
             assert_eq!(
@@ -1925,10 +2220,12 @@ mod tests {
         assert_eq!(ProgramKind::Application.store(), SYSTEM_APPLICATION_STORE);
         assert_eq!(ProgramKind::Service.store(), SYSTEM_SERVICE_STORE);
         assert_eq!(ProgramKind::Component.store(), SYSTEM_COMPONENT_STORE);
+        assert_eq!(ProgramKind::Screensaver.store(), SYSTEM_SCREENSAVER_STORE);
         assert_eq!(ProgramKind::Command.store_dir(), "Commands");
         assert_eq!(ProgramKind::Application.store_dir(), "Applications");
         assert_eq!(ProgramKind::Service.store_dir(), "Services");
         assert_eq!(ProgramKind::Component.store_dir(), "Components");
+        assert_eq!(ProgramKind::Screensaver.store_dir(), "Screensavers");
         for kind in ProgramKind::ALL {
             let store = kind.store();
             assert_eq!(
@@ -1955,11 +2252,212 @@ mod tests {
             SYSTEM_APPLICATION_STORE.strip_prefix("/System/"),
             Some(HOME_APPLICATION_STORE_DIR)
         );
-        for name in [HOME_COMMAND_STORE_DIR, HOME_APPLICATION_STORE_DIR] {
+        assert_eq!(
+            SYSTEM_SCREENSAVER_STORE.strip_prefix("/System/"),
+            Some(HOME_SCREENSAVER_STORE_DIR)
+        );
+        for name in [
+            HOME_COMMAND_STORE_DIR,
+            HOME_APPLICATION_STORE_DIR,
+            HOME_SCREENSAVER_STORE_DIR,
+        ] {
             assert!(!name.is_empty(), "{name:?} is empty");
             assert!(!name.contains('/'), "{name:?} is not one component");
         }
         assert_ne!(HOME_COMMAND_STORE_DIR, HOME_APPLICATION_STORE_DIR);
+    }
+
+    /// A user's own saver may claim its threads and memory, never a feed, and
+    /// every other saver flag is a feed: a flag added later is refused to a
+    /// self-signed saver until it is put among the ones it may claim.
+    #[test]
+    fn a_users_own_saver_claims_its_threads_and_memory_and_nothing_else() {
+        use super::{APPINFO_FLAGS_SAVER_FEEDS, APPINFO_FLAGS_SAVER_OWN};
+        assert_eq!(APPINFO_FLAGS_SAVER_OWN & APPINFO_FLAGS_SAVER_FEEDS, 0);
+        assert_eq!(APPINFO_FLAGS_SAVER_OWN & !APPINFO_FLAGS_SAVER, 0);
+        assert_eq!(
+            APPINFO_FLAGS_SAVER & !APPINFO_FLAGS_SAVER_OWN,
+            APPINFO_FLAGS_SAVER_FEEDS
+        );
+    }
+
+    #[test]
+    fn a_user_saver_store_is_exactly_library_screensavers_under_a_users_home() {
+        let within = |path: &str| {
+            path.strip_prefix('/')
+                .is_some_and(|rest| in_user_saver_store(rest.split('/')))
+        };
+        for (path, store, bundle) in [
+            ("/Users/ada/Library/Screensavers/waves.app", true, true),
+            ("/Users/ada/Library/Screensavers/calm/waves.app", true, true),
+            ("/Users/ada/Library/Screensavers/waves.app/Run", true, false),
+            (
+                "/Users/ada/Library/Screensavers/a.app/Resources/b.app",
+                true,
+                false,
+            ),
+            ("/Users/ada/Library/Screensavers", true, false),
+            ("/Users/ada/Library/Screensavers/.app", true, false),
+            ("/Users/ada/Library/Screensavers/", false, false),
+            (
+                "/Users/ada/Library/Screensavers/../../bob/x.app",
+                false,
+                false,
+            ),
+            ("/Users/ada/Library/Screensavers/./waves.app", false, false),
+            ("/Users//Library/Screensavers/waves.app", false, false),
+            ("/Users/../Library/Screensavers/waves.app", false, false),
+            ("/Users/ada/Library/screensavers/waves.app", false, false),
+            ("Users/ada/Library/Screensavers/waves.app", false, false),
+            ("/System/Screensavers/clock.app", false, false),
+            (
+                "/Storage/Users/ada/Library/Screensavers/waves.app",
+                false,
+                false,
+            ),
+        ] {
+            assert_eq!(within(path), store, "in the store: {path}");
+            assert_eq!(is_user_saver_bundle(path), bundle, "a saver bundle: {path}");
+        }
+        for (home, own) in [
+            ("/Users/ada", Some("/Users/ada")),
+            ("/Users/ada/", Some("/Users/ada")),
+            ("/Users/ada/sub", None),
+            ("/Users/..", None),
+            ("/Users", None),
+            ("/Storage/home/ada", None),
+            ("Users/ada", None),
+        ] {
+            assert_eq!(user_saver_home(home), own, "{home}");
+        }
+    }
+
+    fn saver() -> AppInfoHeader {
+        let mut h = sample();
+        h.kind = ProgramKind::Screensaver.to_wire();
+        h.capability_count = 0;
+        h.mime_count = 0;
+        h.browse_count = 0;
+        h.library = LibraryCategory::to_wire(None);
+        h
+    }
+
+    #[test]
+    fn a_screensaver_requests_nothing_but_its_options_and_feeds() {
+        let mut h = saver();
+        h.flags = APPINFO_FLAGS_SAVER;
+        h.option_count = SAVER_MAX_OPTIONS;
+        let decoded = AppInfoHeader::from_bytes(&h.to_le_bytes()).expect("a saver decodes");
+        assert!(decoded.saver_feeds().machine());
+        assert!(decoded.saver_feeds().keep() && decoded.saver_feeds().slides());
+        assert!(decoded.runs_parallel() && decoded.needs_large_memory());
+        let refused: [fn(&mut AppInfoHeader); 6] = [
+            |h| h.capability_count = 1,
+            |h| h.mime_count = 1,
+            |h| h.browse_count = 1,
+            |h| h.flags |= APPINFO_FLAG_NO_ICON_BAR,
+            |h| h.flags |= APPINFO_FLAG_DOCUMENT_WRITE,
+            |h| h.library = LibraryCategory::to_wire(Some(LibraryCategory::Office)),
+        ];
+        for refuse in refused {
+            let mut bad = saver();
+            refuse(&mut bad);
+            assert_eq!(
+                AppInfoHeader::from_bytes(&bad.to_le_bytes()),
+                Err(Errno::OutOfRange)
+            );
+        }
+        let mut many = saver();
+        many.option_count = SAVER_MAX_OPTIONS + 1;
+        assert_eq!(
+            AppInfoHeader::from_bytes(&many.to_le_bytes()),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn only_a_screensaver_declares_options_or_saver_flags() {
+        for kind in ProgramKind::ALL {
+            if kind == ProgramKind::Screensaver {
+                continue;
+            }
+            for flag in [
+                APPINFO_FLAG_FEED_MACHINE,
+                APPINFO_FLAG_FEED_KEEP,
+                APPINFO_FLAG_FEED_SLIDES,
+                APPINFO_FLAG_SAVER_PARALLEL,
+                APPINFO_FLAG_SAVER_LARGE_MEMORY,
+            ] {
+                let mut h = sample();
+                h.kind = kind.to_wire();
+                h.flags = flag;
+                assert_eq!(
+                    AppInfoHeader::from_bytes(&h.to_le_bytes()),
+                    Err(Errno::OutOfRange),
+                    "{kind:?} flag {flag:#x}"
+                );
+            }
+            let mut h = sample();
+            h.kind = kind.to_wire();
+            h.option_count = 1;
+            assert_eq!(
+                AppInfoHeader::from_bytes(&h.to_le_bytes()),
+                Err(Errno::OutOfRange),
+                "{kind:?} options"
+            );
+            let decoded = AppInfoHeader::from_bytes(&sample().to_le_bytes()).expect("decodes");
+            assert!(decoded.saver_feeds().is_empty());
+        }
+    }
+
+    fn option(key: &str) -> SaverOption {
+        SaverOption::new(
+            crate::saver::OptionKey::new(key).expect("a key"),
+            (
+                crate::bounded_text::BoundedText::new("A label").expect("a label"),
+                crate::bounded_text::BoundedText::EMPTY,
+            ),
+            crate::saver::SaverOptionKind::Switch { default: true },
+        )
+        .expect("an option")
+    }
+
+    #[test]
+    fn a_saver_reads_its_options_after_the_browsed_types() {
+        let mut h = saver();
+        h.option_count = 2;
+        assert_eq!(h.body_len(), Ok(2 * SAVER_OPTION_ENTRY_LEN));
+        let mut body = [0u8; 2 * SAVER_OPTION_ENTRY_LEN];
+        body[..SAVER_OPTION_ENTRY_LEN].copy_from_slice(&option("date").to_entry());
+        body[SAVER_OPTION_ENTRY_LEN..].copy_from_slice(&option("seconds").to_entry());
+        assert_eq!(saver_option_at(&body, &h, 1), Ok(option("seconds")));
+        assert_eq!(saver_option_at(&body, &h, 2), Err(Errno::OutOfRange));
+        assert_eq!(validate_saver_options(&body, &h), Ok(()));
+        assert_eq!(
+            saver_option_at(&body[..SAVER_OPTION_ENTRY_LEN], &h, 1),
+            Err(Errno::BufferTooSmall)
+        );
+        body[SAVER_OPTION_ENTRY_LEN..].copy_from_slice(&option("date").to_entry());
+        assert_eq!(validate_saver_options(&body, &h), Err(Errno::OutOfRange));
+        let options_after_browse = body_len(0, 0, 1, 1).expect("fits");
+        assert_eq!(
+            options_after_browse,
+            BROWSE_ENTRY_LEN + SAVER_OPTION_ENTRY_LEN
+        );
+    }
+
+    /// Regression: the kernel read manifests against its own copy of this
+    /// bound, which left the browsed types out.
+    #[test]
+    fn the_wire_bound_holds_every_table_at_its_ceiling() {
+        let tables = body_len(
+            usize::from(APPINFO_MAX_CAPABILITIES),
+            usize::from(APPINFO_MAX_MIME),
+            usize::from(APPINFO_MAX_BROWSE),
+            usize::from(SAVER_MAX_OPTIONS),
+        )
+        .expect("fits");
+        assert_eq!(APPINFO_WIRE_MAX, AppInfoHeader::WIRE_LEN + tables);
     }
 
     #[test]
@@ -2353,7 +2851,7 @@ mod tests {
     #[test]
     fn body_len_and_mime_read() {
         // 2 caps + 1 mime entry.
-        assert_eq!(body_len(2, 1, 0), Ok(4 + MIME_ENTRY_LEN));
+        assert_eq!(body_len(2, 1, 0, 0), Ok(4 + MIME_ENTRY_LEN));
         // Build a body: two cap ids then one mime entry "text/plain".
         let mut body = [0u8; 4 + MIME_ENTRY_LEN];
         let mime = b"text/plain";
@@ -2372,7 +2870,7 @@ mod tests {
             transport: Transport::Tcp,
         };
         assert_eq!(
-            body_len(1, 1, 2),
+            body_len(1, 1, 2, 0),
             Ok(2 + MIME_ENTRY_LEN + 2 * BROWSE_ENTRY_LEN)
         );
         let mut body = [0u8; 2 + MIME_ENTRY_LEN + 2 * BROWSE_ENTRY_LEN];
@@ -2404,12 +2902,6 @@ mod tests {
         assert_eq!(
             AppInfoHeader::from_bytes(&h.to_le_bytes()),
             Err(Errno::LengthOutOfRange)
-        );
-        let mut h = sample();
-        h.reserved = 1;
-        assert_eq!(
-            AppInfoHeader::from_bytes(&h.to_le_bytes()),
-            Err(Errno::BadMagic)
         );
     }
 
@@ -2599,7 +3091,7 @@ mod tests {
             mime_count => AppInfoHeader::OFF_MIME_COUNT,
             browse_count => AppInfoHeader::OFF_BROWSE_COUNT,
             kind => AppInfoHeader::OFF_KIND,
-            reserved => AppInfoHeader::OFF_RESERVED,
+            option_count => AppInfoHeader::OFF_OPTION_COUNT,
             id_len => AppInfoHeader::OFF_ID_LEN,
             name_len => AppInfoHeader::OFF_NAME_LEN,
             version_len => AppInfoHeader::OFF_VERSION_LEN,

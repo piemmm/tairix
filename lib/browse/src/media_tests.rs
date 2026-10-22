@@ -164,6 +164,7 @@ fn every_type_the_registry_can_produce_is_in_the_round_trip_table() {
         MediaType::InodeDirectory,
         MediaType::TairixApp,
         MediaType::TairixService,
+        MediaType::TairixScreensaver,
         MediaType::ApplicationOctetStream,
     ] {
         assert!(ALL.contains(&media), "{media:?}");
@@ -325,6 +326,27 @@ fn a_bundle_in_the_service_store_is_a_service_and_elsewhere_an_application() {
     }
 }
 
+/// A bundle in a screensaver store, the system's or a user's own, is a
+/// screensaver: the desktop starts it, never a user's open.
+#[test]
+fn a_bundle_in_a_screensaver_store_is_a_screensaver() {
+    for store in [
+        "/System/Screensavers",
+        "/Users/ada/Library/Screensavers",
+        "/Users/ada/Library/Screensavers/kept",
+    ] {
+        let saver = media_for_entry(&bundle("Waves.app"), &components(store));
+        assert_eq!(saver, MediaType::TairixScreensaver, "{store}");
+        assert_eq!(saver.as_str(), "application/x-tairix-screensaver");
+        assert_eq!(saver.icon(), IconKind::Screensaver);
+    }
+    assert_eq!(
+        media_for_entry(&bundle("Waves.app"), &components("/Users/ada/Library")),
+        MediaType::TairixApp,
+        "beside the store is no store"
+    );
+}
+
 #[test]
 fn only_the_exact_service_store_path_makes_a_bundle_a_service() {
     // A prefix of the store path, a longer path beneath it, and a same-named
@@ -460,6 +482,7 @@ const NOT_BYTES: &[MediaType] = &[
     MediaType::InodeDirectory,
     MediaType::TairixApp,
     MediaType::TairixService,
+    MediaType::TairixScreensaver,
 ];
 
 #[test]
@@ -886,6 +909,22 @@ fn a_folder_s_site_is_the_layout_it_stands_in() {
         ("/System/Drivers/input/usb_hid", Site::Drivers),
         ("/System/Services", Site::StartedStore),
         ("/System/Components", Site::StartedStore),
+        ("/System/Screensavers", Site::SaverStore),
+        ("/Users/ann/Library/Screensavers", Site::SaverStore),
+        ("/Users/ann/Library/Screensavers/kept", Site::SaverStore),
+        ("/Users/ann/Library/Apps", Site::Plain),
+        (
+            "/Users/ann/Library/Screensavers/kept/Waves.app",
+            bundle(Some(ProgramKind::Screensaver), false),
+        ),
+        (
+            "/System/Screensavers/Starfield.app",
+            bundle(Some(ProgramKind::Screensaver), false),
+        ),
+        (
+            "/Users/ann/Library/Screensavers/Waves.app",
+            bundle(Some(ProgramKind::Screensaver), false),
+        ),
         (
             "/System/Applications/Paint.app",
             bundle(Some(ProgramKind::Application), false),

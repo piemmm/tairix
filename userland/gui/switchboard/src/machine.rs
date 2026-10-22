@@ -19,7 +19,7 @@ use tairix_abi::net_ipc::{NetIfKind, NetInterfaceFactsRecord, NetInterfaceRatesR
 use tairix_abi::switchboard_ipc::{
     DeviceCapacity, MachineCommitted, MachineComposition, MachineCores, MachineCpu, MachineDevice,
     MachineHistory, MachineInterface, MachineMemory, MachineNetwork, MachineReport, MachineScope,
-    MachineStorage, MachineTask, MachineTasks, Permille, ReportPeriod, SeatReport,
+    MachineStorage, MachineTask, MachineTasks, Permille, ReportPeriod, SeatReport, TaskOwner,
     MACHINE_CORES_MAX, MACHINE_DEVICES_MAX, MACHINE_HISTORY_MAX, MACHINE_INTERFACES_MAX,
     MACHINE_TASKS_MAX,
 };
@@ -45,9 +45,18 @@ const REPORT_PERIOD: ReportPeriod = match ReportPeriod::from_millis(PERIOD_MS as
 };
 
 /// The machine as `sample` saw it, with the histories and pressure latches
-/// `meters` folded from it and the unresponsive owners `seat` reports.
+/// `meters` folded from it and the unresponsive owners `seat` reports, each
+/// task marked as `own_uid`'s own or another account's.
+///
+/// With no attested `own_uid`, every task is another account's, so a reader
+/// told to name only the user's own tasks names none.
 #[must_use]
-pub fn machine_report(sample: &Sample, meters: &RollingMeters, seat: &SeatReport) -> MachineReport {
+pub fn machine_report(
+    sample: &Sample,
+    meters: &RollingMeters,
+    seat: &SeatReport,
+    own_uid: Option<u32>,
+) -> MachineReport {
     MachineReport {
         period: REPORT_PERIOD,
         scope: if sample.scopes.global_process_scope {
@@ -62,7 +71,7 @@ pub fn machine_report(sample: &Sample, meters: &RollingMeters, seat: &SeatReport
         uptime: sample.uptime.map(|uptime| uptime.since_boot),
         cpu: cpu(sample, meters),
         memory: memory(sample, meters),
-        tasks: tasks(sample, seat),
+        tasks: tasks(sample, seat, own_uid),
         storage: storage(sample, meters),
         network: network(sample),
     }
@@ -107,7 +116,7 @@ fn memory(sample: &Sample, meters: &RollingMeters) -> MachineMemory {
 
 /// The census, read through the one classifier the Recovery section lists by,
 /// and the tasks the CPU pane names as costing most.
-fn tasks(sample: &Sample, seat: &SeatReport) -> MachineTasks {
+fn tasks(sample: &Sample, seat: &SeatReport, own_uid: Option<u32>) -> MachineTasks {
     let Some(count) = process_count(sample) else {
         return MachineTasks::UNREAD;
     };
@@ -121,7 +130,12 @@ fn tasks(sample: &Sample, seat: &SeatReport) -> MachineTasks {
         .take(MACHINE_TASKS_MAX)
         .filter_map(|(process, cpu)| {
             Some(MachineTask {
-                name: fitted(&process.name)?,
+                name: Some(fitted(&process.name)?),
+                owner: if own_uid == Some(process.uid) {
+                    TaskOwner::Own
+                } else {
+                    TaskOwner::Other
+                },
                 cpu: share(u16::try_from(cpu).ok()?)?,
                 memory_bytes: process.mem_bytes,
             })

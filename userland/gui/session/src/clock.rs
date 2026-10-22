@@ -16,8 +16,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_abi::bounded_text::BoundedText;
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::fs::DirChangeBatch;
+use tairix_abi::saver_ipc::WallReading;
 use tairix_abi::time::{WallClockReading, NANOS_PER_SEC, SECS_PER_MINUTE};
 use tairix_abi::zone::ZoneName;
 use tairix_abi::Errno;
@@ -113,6 +115,8 @@ pub struct SessionClock {
     civil: CivilClock<'static>,
     lines: ClockLines,
     heading: String,
+    /// The reading as a saver is told it, spelled when the lines are.
+    told: WallReading,
     /// The monotonic instant the lines stop being right, or `None` before the
     /// first reading — there is then nothing to go stale.
     stale_at_ns: Option<u64>,
@@ -129,6 +133,7 @@ impl SessionClock {
                 date: String::new(),
             },
             heading: String::new(),
+            told: WallReading::unset(0),
             stale_at_ns: None,
         }
     }
@@ -157,6 +162,17 @@ impl SessionClock {
     #[must_use]
     pub fn heading(&self) -> &str {
         &self.heading
+    }
+
+    /// The reading as a saver is told it: the bar's own spelling, the date
+    /// written out, and when they next change. Before the first reading it is
+    /// unset and already due, so a saver asks again at the next frame.
+    #[must_use]
+    pub fn saver_reading(&self) -> WallReading {
+        WallReading {
+            next_change_ns: self.stale_at_ns.unwrap_or(0),
+            ..self.told
+        }
     }
 
     /// Each line at its widest in the clock's conventions, for the bar to
@@ -208,8 +224,18 @@ impl SessionClock {
                 "{} {} {}",
                 lines.date, lines.time, local.offset.abbreviation
             );
+            // A spelling too long for the protocol is told as no spelling,
+            // never cut to a shorter one that says something else.
+            self.told = WallReading {
+                time: BoundedText::new(&lines.time).unwrap_or(BoundedText::EMPTY),
+                numeric_date: BoundedText::new(&lines.date).unwrap_or(BoundedText::EMPTY),
+                long_date: BoundedText::new(&tairix_fsmeta::calendar::long_date(&local.civil))
+                    .unwrap_or(BoundedText::EMPTY),
+                next_change_ns: 0,
+            };
             (lines, heading)
         } else {
+            self.told = WallReading::unset(0);
             let lines = ClockLines {
                 time: String::from(UNSET_LABEL),
                 date: String::new(),

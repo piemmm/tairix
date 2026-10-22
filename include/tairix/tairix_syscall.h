@@ -174,6 +174,7 @@ extern "C" {
 #define TAIRIX_SYS_FD_REDEEM_LOCATION 147u
 #define TAIRIX_SYS_CONSOLE_DAMAGE 148u
 #define TAIRIX_SYS_CONSOLE_RELINQUISH 149u
+#define TAIRIX_SYS_SHARE_MAP 150u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -221,8 +222,8 @@ typedef struct tairix_wait_status {
 * other than the values below (including 0) is reserved and refused; a HANDLE
 * wire names a descriptor of the CALLER'S OWN open table (a file, resource, or
 * pipe end), owner-checked kernel-side before any child state exists. */
-#define TAIRIX_SPAWN_ATTACH_VERSION 4u
-#define TAIRIX_SPAWN_ATTACH_LEN 264u
+#define TAIRIX_SPAWN_ATTACH_VERSION 5u
+#define TAIRIX_SPAWN_ATTACH_LEN 272u
 /* Attach-block flags. SANDBOX starts the child as a minimum-capability
 * parser sandbox: empty capability set, closed syscall allow-list, and
 * every wire must be CLOSED or HANDLE (nothing ambient flows in). A
@@ -258,6 +259,10 @@ typedef struct tairix_wait_status {
 * bit, and a limit whose soft bound exceeds its hard one are refused. A
 * SANDBOX spawn must lower ADDRESS_SPACE_BYTES and THREADS to finite hard
 * bounds. */
+/* Spawn share: a SANDBOX spawn naming a non-zero share is a drawing
+* sandbox, handed the shared region of that id the caller holds a live
+* grant for, which the child maps once with tairix_sys_share_map. A share
+* on any other spawn is refused. */
 typedef struct tairix_fd_wire {
     uint32_t kind;
     uint32_t value;
@@ -274,6 +279,7 @@ typedef struct tairix_spawn_attach {
     uint32_t limits_mask;
     uint32_t limits_reserved;
     tairix_resource_limit_t limits[11];
+    uint64_t share;
 } tairix_spawn_attach_t;
 
 /* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected
@@ -695,6 +701,7 @@ uint64_t tairix_sys_fd_grant_location(uint32_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_fd_redeem_location(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
 uint64_t tairix_sys_console_damage(void * a0, uintptr_t a1);
 int32_t tairix_sys_console_relinquish(void);
+uint64_t tairix_sys_share_map(void * a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

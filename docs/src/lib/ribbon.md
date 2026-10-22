@@ -8,11 +8,12 @@ on the other, which is why the scene lives in `lib/*`:
 
 | Embedder | Keeps the ribbon clear of |
 |---|---|
-| the minimal-clock screensaver (`userland/gui/session/src/saver/ribbon.rs`) | the time and the date |
+| the Minimal Clock screensaver (`userland/gui/screensavers/ribbon`) | the time and the date |
 | the graphical login screen (`userland/session/greeter`) | its login column (`AuthSurface::column_rect`) |
 
-Each embedder owns only where the pixels go: the screensaver repaints its
-compositor window, the login screen a layer it composites beneath its column.
+Each embedder owns only where the pixels go: the screensaver repaints the
+surface it presents to the desktop, the login screen a layer it composites
+beneath its column.
 
 ## `Light`
 

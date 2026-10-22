@@ -55,7 +55,7 @@
 //! fails over a picture.
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{TryReserveError, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -64,7 +64,9 @@ use tairix_abi::{Errno, ProcId};
 use tairix_geometry::Rect;
 use tairix_raster::Surface;
 use tairix_reclaim::PressureBand;
-use tairix_wallpaper::{DesktopSettings, WallpaperChoice, WallpaperFit};
+use tairix_wallpaper::{
+    DesktopSettings, SlideSource, WallpaperChoice, WallpaperFit, WallpaperPath,
+};
 use tairix_window::PreviewSize;
 
 /// Everything a prepared wallpaper depends on: the chosen file, how it is
@@ -318,8 +320,19 @@ pub enum PreviewRun {
     Withheld,
 }
 
+/// Which saver wanted a slide, and which of the slides it was offered: what
+/// the prepared picture is handed back with.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SlideWant {
+    /// The saver's instance.
+    pub saver: u64,
+    /// The slide's place among those it was offered.
+    pub index: u16,
+}
+
 /// A slideshow picture a preparer has taken and not yet answered.
 struct Slide {
+    want: SlideWant,
     source: WallpaperSource,
     /// The bytes it holds against the budget.
     reserved: u64,
@@ -380,11 +393,11 @@ pub struct WallpaperDesk {
     /// What renders run within.
     budget: PreviewBudget,
     /// The slideshow picture asked for and not yet taken by a preparer.
-    wanted_slide: Option<WallpaperSource>,
+    wanted_slide: Option<(SlideWant, WallpaperSource)>,
     /// The slideshow picture a preparer has taken and not yet answered.
     preparing_slide: Option<Slide>,
     /// The prepared slideshow picture waiting for the serve loop.
-    slide_done: Option<Result<Surface, String>>,
+    slide_done: Option<(SlideWant, Result<Surface, String>)>,
     /// Set once the embedder is tearing down, so a parked preparer leaves.
     stopping: bool,
 }
@@ -543,8 +556,9 @@ impl WallpaperDesk {
             return Some(WallpaperJob::Backdrop(source));
         }
         if self.has_slide_work() {
-            let source = self.wanted_slide.take()?;
+            let (want, source) = self.wanted_slide.take()?;
             self.preparing_slide = Some(Slide {
+                want,
                 source: source.clone(),
                 reserved: self
                     .budget
@@ -809,11 +823,14 @@ impl WallpaperDesk {
     }
 
     /// Record a wanted slideshow picture, replacing one not yet taken:
-    /// only the newest slide is worth showing.
-    pub fn want_slide(&mut self, source: WallpaperSource) {
-        if !self.stopping {
-            self.wanted_slide = Some(source);
+    /// only the newest slide is worth showing. Answers whether it was taken:
+    /// a desk with no preparer takes none.
+    pub fn want_slide(&mut self, want: SlideWant, source: WallpaperSource) -> bool {
+        if self.stopping {
+            return false;
         }
+        self.wanted_slide = Some((want, source));
+        true
     }
 
     /// Record the result of preparing slide `source`, answering whether the
@@ -835,12 +852,13 @@ impl WallpaperDesk {
         if slide.abandoned {
             return false;
         }
-        self.slide_done = Some(outcome);
+        self.slide_done = Some((slide.want, outcome));
         true
     }
 
-    /// Take the prepared slideshow picture, if one is waiting.
-    pub fn take_slide(&mut self) -> Option<Result<Surface, String>> {
+    /// Take the prepared slideshow picture, if one is waiting, with who
+    /// wanted it.
+    pub fn take_slide(&mut self) -> Option<(SlideWant, Result<Surface, String>)> {
         self.slide_done.take()
     }
 
@@ -927,8 +945,8 @@ pub trait WallpaperService {
 }
 
 /// The file a preview of `subject` is read from and the most bytes it may be,
-/// resolved against `catalog`: `None` for a catalog position the desktop does
-/// not hold.
+/// resolved against the wallpaper `catalog` or the screensaver `savers`:
+/// `None` for a position the desktop does not hold.
 ///
 /// The one place a subject becomes a path, so the window channel can only
 /// ever make the session read a picture it ships itself.
@@ -936,6 +954,7 @@ pub trait WallpaperService {
 pub fn preview_source(
     subject: PreviewSubject,
     catalog: &[tairix_window::WallpaperName],
+    savers: &crate::saver::SaverCatalog,
 ) -> Option<(String, usize)> {
     match subject {
         PreviewSubject::Wallpaper(index) => catalog.get(usize::from(index)).map(|name| {
@@ -944,11 +963,66 @@ pub fn preview_source(
                 tairix_wallpaper::MAX_WALLPAPER_BYTES,
             )
         }),
-        PreviewSubject::Screensaver(kind) => Some((
-            tairix_wallpaper::preview_path(kind),
-            tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES,
-        )),
+        PreviewSubject::Screensaver(index) => savers
+            .preview_path(index)
+            .map(|path| (path, tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES)),
     }
+}
+
+/// Record in `positions` the places of `catalog` the slides feed offers for
+/// `source`, in the catalog's order and no more than a saver can number; a
+/// category the catalog no longer holds offers every picture rather than
+/// none.
+///
+/// # Errors
+///
+/// The heap's refusal to hold them; `positions` is then empty.
+pub fn slide_positions(
+    catalog: &[tairix_window::WallpaperName],
+    source: &SlideSource,
+    positions: &mut Vec<usize>,
+) -> Result<(), TryReserveError> {
+    positions.clear();
+    let category = source.category().filter(|category| {
+        catalog
+            .iter()
+            .any(|name| name.category == category.as_str())
+    });
+    let offered = |name: &tairix_window::WallpaperName| {
+        category.is_none_or(|category| category.as_str() == name.category)
+    };
+    let count = catalog
+        .iter()
+        .filter(|name| offered(name))
+        .count()
+        .min(usize::from(u16::MAX));
+    positions.try_reserve_exact(count)?;
+    positions.extend(
+        catalog
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| offered(name))
+            .map(|(at, _)| at)
+            .take(count),
+    );
+    Ok(())
+}
+
+/// The picture at `catalog` place `position`, fitted to fill a `screen`.
+#[must_use]
+pub fn slide_source(
+    catalog: &[tairix_window::WallpaperName],
+    position: usize,
+    screen: Rect,
+) -> Option<WallpaperSource> {
+    let name = catalog.get(position)?;
+    let path = tairix_wallpaper::wallpaper_path(&name.category, &name.file);
+    Some(WallpaperSource {
+        choice: WallpaperChoice::Image(WallpaperPath::new(&path).ok()?),
+        fit: WallpaperFit::Fill,
+        width: screen.width,
+        height: screen.height,
+    })
 }
 
 #[cfg(test)]

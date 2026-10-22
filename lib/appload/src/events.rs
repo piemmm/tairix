@@ -56,41 +56,47 @@ pub const APP_PUBLISHER_INVALID: EventId = EventId(11_011);
 /// does not run from: a service or component outside its own store, or any
 /// bundle in another kind's system store.
 pub const APP_MISPLACED: EventId = EventId(11_012);
+/// A screensaver was refused because the spawn asking for it was not a
+/// drawing sandbox, or another kind because it was.
+pub const APP_DRAWING_ONLY: EventId = EventId(11_013);
+/// A saver in a user's own store was refused because it declares a privileged
+/// feed.
+pub const APP_FEED_REFUSED: EventId = EventId(11_014);
+
+/// Every event the load gate emits, so a test can hold each to its range and
+/// its message.
+#[cfg(test)]
+pub(crate) const ALL: [EventId; 14] = [
+    APP_LOADED,
+    APP_LAYOUT_REJECTED,
+    APP_MANIFEST_INVALID,
+    APP_INTERFACE_MISMATCH,
+    APP_SIGNATURE_INVALID,
+    APP_CONTENT_MISMATCH,
+    APP_STORE_ERROR,
+    LIBRARY_RESOLVED,
+    LIBRARY_REFUSED,
+    APP_RUN_IMAGE_INVALID,
+    APP_PUBLISHER_INVALID,
+    APP_MISPLACED,
+    APP_DRAWING_ONLY,
+    APP_FEED_REFUSED,
+];
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        APPLOAD_RANGE_END, APPLOAD_RANGE_START, APP_CONTENT_MISMATCH, APP_INTERFACE_MISMATCH,
-        APP_LAYOUT_REJECTED, APP_LOADED, APP_MANIFEST_INVALID, APP_MISPLACED,
-        APP_PUBLISHER_INVALID, APP_RUN_IMAGE_INVALID, APP_SIGNATURE_INVALID, APP_STORE_ERROR,
-        LIBRARY_REFUSED, LIBRARY_RESOLVED,
-    };
-
-    const ALL: [u32; 12] = [
-        APP_LOADED.0,
-        APP_LAYOUT_REJECTED.0,
-        APP_MANIFEST_INVALID.0,
-        APP_INTERFACE_MISMATCH.0,
-        APP_SIGNATURE_INVALID.0,
-        APP_CONTENT_MISMATCH.0,
-        APP_STORE_ERROR.0,
-        LIBRARY_RESOLVED.0,
-        LIBRARY_REFUSED.0,
-        APP_RUN_IMAGE_INVALID.0,
-        APP_PUBLISHER_INVALID.0,
-        APP_MISPLACED.0,
-    ];
+    use super::{ALL, APPLOAD_RANGE_END, APPLOAD_RANGE_START};
 
     #[test]
     fn ids_are_inside_reserved_range() {
         for id in ALL {
-            assert!((APPLOAD_RANGE_START..APPLOAD_RANGE_END).contains(&id));
+            assert!((APPLOAD_RANGE_START..APPLOAD_RANGE_END).contains(&id.0));
         }
     }
 
     #[test]
     fn ids_are_unique() {
-        let mut ids = ALL;
+        let mut ids = ALL.map(|id| id.0);
         ids.sort_unstable();
         for w in ids.windows(2) {
             assert_ne!(w[0], w[1], "duplicate load-gate EventId");

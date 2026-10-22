@@ -88,11 +88,10 @@ pub use input::{
 pub use notify::{NotifyLevel, NotifyPolicy, PolicyFull};
 pub use resolution::Resolution;
 pub use saver::{
-    preview_file, preview_kind, preview_path, CellSize, ClockOptions, CpuUse, LifeOptions, Pace,
-    RaytraceOptions, RetroGamesOptions, RibbonOptions, SceneDetail, ScreensaverOptions, SlideOrder,
-    SlideSource, SlideshowOptions, StarDensity, StarfieldOptions, SystemMonitorOptions,
-    WallpaperCategory, MAX_SCREENSAVER_PREVIEW_BYTES, SCREENSAVER_PREVIEW_STORE,
-    SLIDE_INTERVAL_DEFAULT, SLIDE_INTERVAL_MAX, SLIDE_INTERVAL_MIN,
+    document_key, keeps_values_of, read_value, spell_value, standing_reason, SaverValues,
+    ScreensaverChoice, SlideSource, TaskNames, WallpaperCategory, DEFAULT_SAVER,
+    MAX_SCREENSAVER_PREVIEW_BYTES, SAVER_PREVIEW_PATH, SAVER_VALUES_MAX, SAVER_VALUE_PREFIX,
+    SCREENSAVER_PREVIEW_STORE,
 };
 pub use settings::{
     merge, merge_applied, merge_within, Backdrop, CursorSize, DesktopSettings, DocumentRefusal,
@@ -100,7 +99,6 @@ pub use settings::{
     WallpaperPathError, MAX_WALLPAPER_PATH_LEN,
 };
 pub use sound::{SoundControls, REMEMBERED_LEVELS, REMEMBERED_MUTES};
-pub use tairix_abi::desktop::ScreensaverKind;
 pub use tairix_abi::zone::ZoneName;
 pub use text::{resolve, ResolvedText, TextFamily, TextSize, TEXT_POINTS_MAX, TEXT_POINTS_MIN};
 

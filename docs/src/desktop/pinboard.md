@@ -264,9 +264,10 @@ instead of two, and no picture is ever decoded in the address space of the
 application that browses them.
 
 A render names a **subject**, never a path — a catalog position, or a
-screensaver kind, whose preview the OS ships under
-`/System/Graphics/Screensavers/` — so the request cannot make the session read
-a file the caller chose. It names the width and height to render at too,
+screensaver's place in the catalogue the session lists, whose preview is the
+OS's own under `/System/Graphics/Screensavers/` for Black and the dimmed
+desktop and the saver bundle's `Resources/Preview.png` for any other — so the
+request cannot make the session read a file the caller chose. It names the width and height to render at too,
 within `WINDOW_PREVIEW_MAX_SIDE`, and the region must hold that many pixels. A
 picture in effect that the catalog does not hold — one set before it was
 removed from the store, or from outside it — is still offered and still

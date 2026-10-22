@@ -1,0 +1,45 @@
+[package]
+name = "tairix-saver-starfield"
+description = "TAIRiX Starfield screensaver: a field of stars flown through, surging into warp and back. The host-tested scene is the crate's [lib]; the freestanding `Run` binary is the on-disk Starfield.app bundle's entry point, serving it over lib/saver in the drawing sandbox."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tairix_saver_starfield"
+path = "src/lib.rs"
+
+# The `Run` entry point of the on-disk `Starfield.app` bundle: freestanding on
+# the native Tier-1 targets, an inert host stub elsewhere (`build.rs`).
+[[bin]]
+name = "tairix-saver-starfield-run"
+path = "src/run.rs"
+
+[dependencies]
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+tairix-geometry = { path = "../../../../lib/geometry", version = "=0.0.0" }
+tairix-raster = { path = "../../../../lib/raster", version = "=0.0.0" }
+tairix-rng = { path = "../../../../lib/rng", version = "=0.0.0" }
+tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0" }
+# The scene clock every idle scene is paced by.
+tairix-theme = { path = "../../../../lib/theme", version = "=0.0.0" }
+# The float functions the flight's projection needs.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
+
+# The `Run` binary is a userland program serving the saver protocol over its
+# standard streams. Bare-metal only.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0" }
+tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0", features = ["program"] }
+
+[dev-dependencies]
+tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0", features = ["test-support"] }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -74,6 +74,10 @@ pub enum MediaType {
     /// starts — the service or component store
     /// (`application/x-tairix-service`).
     TairixService,
+    /// A `<Name>.app` bundle listed from a screensaver store, the system's or
+    /// the user's own, which the desktop starts in the drawing sandbox
+    /// (`application/x-tairix-screensaver`).
+    TairixScreensaver,
     /// The TAIRiX executable envelope (`application/x-tairix-rxe`).
     TairixRxe,
     /// A bare WebAssembly module (`application/wasm`).
@@ -193,6 +197,7 @@ impl MediaType {
             Self::InodeDirectory => "Folder",
             Self::TairixApp => "Application",
             Self::TairixService => "Service",
+            Self::TairixScreensaver => "Screensaver",
             Self::TairixRxe => "Program",
             Self::Wasm => "WebAssembly module",
             Self::Elf => "ELF program",
@@ -256,6 +261,7 @@ impl MediaType {
             Self::InodeDirectory => "inode/directory",
             Self::TairixApp => "application/x-tairix-app",
             Self::TairixService => "application/x-tairix-service",
+            Self::TairixScreensaver => "application/x-tairix-screensaver",
             Self::TairixRxe => "application/x-tairix-rxe",
             Self::Wasm => "application/wasm",
             Self::Elf => "application/x-elf",
@@ -367,6 +373,7 @@ impl MediaType {
             Self::InodeDirectory
             | Self::TairixApp
             | Self::TairixService
+            | Self::TairixScreensaver
             | Self::ApplicationOctetStream => None,
             Self::TairixRxe
             | Self::Wasm
@@ -446,6 +453,7 @@ impl MediaType {
             Self::InodeDirectory => IconKind::Folder,
             Self::TairixApp => IconKind::AppBundle,
             Self::TairixService => IconKind::ServiceBundle,
+            Self::TairixScreensaver => IconKind::Screensaver,
             Self::TairixRxe => IconKind::Executable,
             Self::Wasm => IconKind::WasmModule,
             Self::Elf => IconKind::ElfExecutable,
@@ -528,6 +536,7 @@ impl MediaType {
             | Self::InodeDirectory
             | Self::TairixApp
             | Self::TairixService
+            | Self::TairixScreensaver
             | Self::TairixRxe
             | Self::Wasm
             | Self::Elf
@@ -666,6 +675,7 @@ impl MediaType {
             | Self::ArchiveRar => Some(Family::Archive),
             Self::TairixApp
             | Self::TairixService
+            | Self::TairixScreensaver
             | Self::TairixRxe
             | Self::Wasm
             | Self::Elf
@@ -790,6 +800,7 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::InodeDirectory,
     MediaType::TairixApp,
     MediaType::TairixService,
+    MediaType::TairixScreensaver,
     MediaType::TairixRxe,
     MediaType::Wasm,
     MediaType::Elf,
@@ -1114,6 +1125,7 @@ pub fn media_for_named(name: &str, kind: EntryKind, site: Site) -> MediaType {
     match kind.resolved() {
         Some(EntryKind::Directory) => MediaType::InodeDirectory,
         Some(EntryKind::Bundle) if site == Site::StartedStore => MediaType::TairixService,
+        Some(EntryKind::Bundle) if site == Site::SaverStore => MediaType::TairixScreensaver,
         Some(EntryKind::Bundle) => MediaType::TairixApp,
         Some(EntryKind::File) => site
             .file_named(name)
@@ -1231,6 +1243,9 @@ pub enum Site {
     /// A store of programs the system starts — the service or the component
     /// store — whose bundles no user launches.
     StartedStore,
+    /// A screensaver store, the system's or the user's own, whose bundles the
+    /// desktop starts in the drawing sandbox and no user launches.
+    SaverStore,
     /// A bundle's own folder (`code` false) or its `Code/` folder, the bundle
     /// filed in a store of `kind` — `None` for one outside every store, whose
     /// kind its path cannot say.
@@ -1259,8 +1274,15 @@ impl Site {
         }
         // Bundles do not nest, so a folder is in the first bundle its path
         // names.
-        let Some(at) = components.iter().position(|part| is_bundle_name(part)) else {
-            return Self::Plain;
+        let bundle = components.iter().position(|part| is_bundle_name(part));
+        let in_saver_store =
+            is(components, ProgramKind::Screensaver.store()) || in_user_saver_store(components);
+        let Some(at) = bundle else {
+            return if in_saver_store {
+                Self::SaverStore
+            } else {
+                Self::Plain
+            };
         };
         let (store, within) = (&components[..at], &components[at + 1..]);
         let code = match within {
@@ -1304,22 +1326,27 @@ impl Site {
                 kind: Some(ProgramKind::Command),
                 ..
             } => IconKind::CommandProgram,
-            Self::Plain | Self::StartedStore | Self::Drivers | Self::Bundle { .. } => {
-                IconKind::Executable
-            }
+            Self::Plain
+            | Self::StartedStore
+            | Self::SaverStore
+            | Self::Drivers
+            | Self::Bundle { .. } => IconKind::Executable,
         }
     }
 }
 
 /// The kind of program the store of root-first `components` holds: a system
-/// store's own kind, or a command or an application for a user's own stores,
-/// which file bundles in folders of their own.
+/// store's own kind, or a command, an application or a screensaver for a
+/// user's own stores, which file bundles in folders of their own.
 fn store_kind(components: &[String]) -> Option<ProgramKind> {
     if let Some(kind) = ProgramKind::ALL
         .into_iter()
         .find(|kind| is(components, kind.store()))
     {
         return Some(kind);
+    }
+    if in_user_saver_store(components) {
+        return Some(ProgramKind::Screensaver);
     }
     match components {
         [users, _, store, ..] if users == USERS_DIR => {
@@ -1333,6 +1360,12 @@ fn store_kind(components: &[String]) -> Option<ProgramKind> {
         }
         _ => None,
     }
+}
+
+/// Whether root-first `components` are a user's own screensaver store, or a
+/// folder the user filed in it.
+fn in_user_saver_store(components: &[String]) -> bool {
+    tairix_abi::in_user_saver_store(components.iter().map(String::as_str))
 }
 
 /// Whether root-first `components` begin with the absolute `path`'s.

@@ -60,8 +60,9 @@ command and window event mailboxes' ids are derived from the service's pid,
 so both admit only the session serving windows (`port_admit`): no other
 process can fill either, or drive a stated reason per frame into stderr.
 
-`WatchMachine` turns the **machine report** on and off for the session's
-System Monitor screensaver. While it is on, this service sends a
+`WatchMachine` turns the **machine report** on and off for the screensavers
+the session gives the machine feed, the System Monitor among them
+([`screensavers.md`](./screensavers.md)). While it is on, this service sends a
 `MachineReport` over the endpoint after each sample, and once straight away
 from the last sample when the watch begins. The report is a fixed-width frame
 holding:
@@ -76,7 +77,7 @@ These are the readings the Resources section is built from. The endpoint
 tells the frame apart from a summary by its magic and decodes it fail-closed.
 A reading the sample lacks is an absence on the wire, never a zero.
 
-The session answers a report it has no board for with `BrokenPipe`, which
+The session answers a report no shown saver takes with `BrokenPipe`, which
 stops the reports, so a lost stop heals on the next publish. A watch the
 service refused is offered again with that instance's next summary. Reports
 are published only on a sample's own cycle, so watching adds no wake-up.

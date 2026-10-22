@@ -35,7 +35,7 @@ use tairix_sysconfig::SystemConfig;
 use tairix_theme::{CursorSetId, Fonts, Grounds, Theme};
 use tairix_tz::ZoneInfo;
 use tairix_users::Salt;
-use tairix_wallpaper::{CatalogItem, DesktopSettings};
+use tairix_wallpaper::{CatalogItem, DesktopSettings, ScreensaverChoice};
 
 use crate::accounts::{AccountFacts, AccountTool, Roster};
 use crate::body::{self, Body};
@@ -48,10 +48,11 @@ use crate::form::{
 };
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
 use crate::network::{Addressing, NetworkFacts};
-use crate::pictures::{Chooser, PictureWanted};
+use crate::pictures::{Chooser, Offer, PictureWanted};
 use crate::registry::{
     strip_rows, Category, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow, CATEGORIES,
 };
+use crate::saver::SaverEntry;
 use crate::sound::SoundReading;
 use crate::volumes::VolumeReading;
 use tairix_audio::stream::DeviceControl;
@@ -81,6 +82,8 @@ enum Reading {
     Sound,
     /// The user's sound choices and the themes to choose among.
     Effects,
+    /// The screensavers the desktop offers.
+    Savers,
 }
 
 impl Reading {
@@ -94,24 +97,39 @@ impl Reading {
 ///
 /// One set rather than a field per reading: every one obeys the same
 /// rule — armed when its pane comes on show, cleared when its answer
-/// lands — so a field apiece would be four copies of it to keep in step.
+/// lands, unless it was armed again before then — so a field apiece would
+/// be copies of it to keep in step.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-struct Wanted(u8);
+struct Wanted {
+    armed: u8,
+    /// Armed while already wanted: the answer on its way may predate what
+    /// the arming was for, so the reading is asked for again once it lands.
+    again: u8,
+}
 
 impl Wanted {
     /// Ask for `reading`.
     fn arm(&mut self, reading: Reading) {
-        self.0 |= reading.bit();
+        let bit = reading.bit();
+        if self.armed & bit != 0 {
+            self.again |= bit;
+        }
+        self.armed |= bit;
     }
 
-    /// Record that `reading`'s answer has landed.
+    /// Record that `reading`'s answer has landed: it is wanted no more,
+    /// unless it was armed again meanwhile.
     fn landed(&mut self, reading: Reading) {
-        self.0 &= !reading.bit();
+        let bit = reading.bit();
+        if self.again & bit == 0 {
+            self.armed &= !bit;
+        }
+        self.again &= !bit;
     }
 
     /// Whether `reading` is still wanted.
     const fn holds(self, reading: Reading) -> bool {
-        self.0 & reading.bit() != 0
+        self.armed & reading.bit() != 0
     }
 }
 
@@ -343,6 +361,8 @@ pub struct Shell {
     body: Body,
     /// The shipped pictures the desktop answered, empty until it has.
     catalog: Vec<CatalogItem>,
+    /// The screensavers the desktop offers, empty until it has answered.
+    savers: Vec<SaverEntry>,
     /// The cursor sets the desktop offers besides the built-in one, empty
     /// until it has answered.
     cursor_sets: Vec<CursorSetId>,
@@ -453,6 +473,7 @@ impl Shell {
             settings,
             body: Body::Statement,
             catalog: Vec::new(),
+            savers: Vec::new(),
             cursor_sets: Vec::new(),
             output: None,
             civil: None,
@@ -604,6 +625,43 @@ impl Shell {
     pub fn adopt_text_choices(&mut self, families: Vec<FamilyEntry>, theme: Fonts) {
         self.text = Some(TextChoices { families, theme });
         self.restate_body();
+    }
+
+    /// Whether the caller should ask the desktop which screensavers it
+    /// offers.
+    ///
+    /// Set when the Screensaver pane comes on show and whenever this window
+    /// is focused while it shows, so a saver the user installed since is
+    /// listed.
+    #[must_use]
+    pub const fn savers_wanted(&self) -> bool {
+        self.wanted.holds(Reading::Savers)
+    }
+
+    /// Adopt the screensavers the desktop answered, or `None` when it did not
+    /// say: the pane then keeps the list it had.
+    pub fn adopt_savers(&mut self, savers: Option<Vec<SaverEntry>>) {
+        self.wanted.landed(Reading::Savers);
+        let Some(savers) = savers.filter(|savers| *savers != self.savers) else {
+            return;
+        };
+        self.savers = savers;
+        if self.states_savers() {
+            self.restate_body();
+        }
+    }
+
+    /// This window gained the keyboard: a pane that lists what may have
+    /// moved while the reader was elsewhere asks for it again.
+    pub fn focused(&mut self) {
+        if self.states_savers() {
+            self.wanted.arm(Reading::Savers);
+        }
+    }
+
+    /// Whether the pane on show is the Screensaver pane.
+    fn states_savers(&self) -> bool {
+        self.body.composition() == Some(Composition::Screensaver)
     }
 
     /// Adopt the shipped picture catalog the desktop answered.
@@ -1218,12 +1276,14 @@ impl Shell {
         }
         let rostered = self.states_accounts();
         let listed_sources = self.lists_notify_sources();
+        let saved = self.states_savers();
         let staged = self.body.staged().to_vec();
         let staged_accounts = self.body.staged_accounts().to_vec();
         let answered = body::Answered {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
             catalog: &self.catalog,
+            savers: &self.savers,
             text: self.text.as_ref(),
             output: self.output,
             civil: self.civil,
@@ -1280,6 +1340,11 @@ impl Shell {
         // time its pane comes on show.
         if !listed_sources && self.lists_notify_sources() {
             self.wanted.arm(Reading::NotifySources);
+        }
+        // A saver may be installed at any moment too, so the screensavers are
+        // asked for each time their pane comes on show.
+        if !saved && self.states_savers() {
+            self.wanted.arm(Reading::Savers);
         }
         // Rebuilt rather than kept: a band belongs to the pane that offers
         // it, and one carried across a navigation would state the last
@@ -1420,6 +1485,20 @@ impl Shell {
     ) -> Option<Rect> {
         let bar = self.frame(viewport, scale, theme).strip_scrollbar?;
         self.strip_scroll.part_rect(part, bar, scale, theme)
+    }
+
+    /// Where the pane's scrollbar draws `part` in `viewport`, or `None` when
+    /// the pane needs no scrollbar or draws none of that part.
+    #[must_use]
+    pub fn pane_scroll_rect(
+        &self,
+        part: ScrollPart,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let bar = self.frame(viewport, scale, theme).scrollbar?;
+        self.scroll.part_rect(part, bar, scale, theme)
     }
 
     /// Where the pane on show draws `setting`'s control in `viewport`, or
@@ -3158,6 +3237,29 @@ impl Shell {
         let frame = self.frame(viewport, scale, theme);
         let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
         view.to_window(self.body.form()?.row_rect_for_test(group, row, spot)?)
+    }
+
+    /// The place among the Screensaver pane's pictures of the saver `choice`
+    /// names, or `None` while the pane offers no such saver.
+    #[must_use]
+    pub fn screensaver_picture(&self, choice: ScreensaverChoice) -> Option<usize> {
+        self.body
+            .form()?
+            .picture_of(Chooser::Screensaver, &Offer::Screensaver(choice))
+    }
+
+    /// Where the pane on show draws the button that shows its screensaver now,
+    /// in `viewport`, or `None` when it offers none or the column shows none
+    /// of it.
+    #[must_use]
+    pub fn preview_rect(&self, viewport: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let frame = self.frame(viewport, scale, theme);
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
+        view.to_window(
+            self.body
+                .form()?
+                .action_rect(Action::PreviewScreensaver, spot)?,
+        )
     }
 
     /// What the window shows of `chooser`'s picture `index` in `viewport`, or

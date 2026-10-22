@@ -1,0 +1,12 @@
+# Signed-AppInfo manifest source for Life, a desktop screensaver. It runs in
+# the drawing sandbox, so it asks for no capability and no feed.
+id = "os.tairix.saver.life"
+name = "Life"
+title = "Game of Life"
+version = "0.1.0"
+kind = "screensaver"
+purpose = "Conway's Game of Life, its colonies coloured by descent and age"
+author = "The TAIRiX Project"
+capabilities = []
+option.cells = { label = "Cell size", note = "How large each cell is drawn. Smaller cells make a larger board.", choice = ["small:Small", "medium:Medium", "large:Large"], default = "medium" }
+option.speed = { label = "Speed", note = "How fast one generation follows the last.", choice = ["slow:Slow", "normal:Normal", "fast:Fast"], default = "normal" }

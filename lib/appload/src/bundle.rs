@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_caps::CapabilitySet;
 
-use tairix_abi::{Errno, LibraryScope, PublisherId};
+use tairix_abi::{Errno, LibraryScope, ProgramKind, PublisherId};
 
 /// Reads an application bundle from storage.
 ///
@@ -139,9 +139,10 @@ pub trait Verifier {
     ) -> Result<(), Errno>;
 }
 
-/// A bundle's verified identity: what it calls itself, and who published it.
+/// A bundle's verified identity: what it calls itself, who published it, and
+/// what kind of program it is.
 ///
-/// The four values always travel together — a spawner attests the identifier
+/// The values always travel together — a spawner attests the identifier
 /// and the publisher onward, and a desktop surface draws the name and version
 /// — so they are one value rather than four parallel parameters.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,6 +158,9 @@ pub struct BundleIdentity {
     /// The developer identity the bundle proved it belongs to. Per-app state
     /// is *owned* by it, so a re-signed release keeps what it stored.
     pub publisher: PublisherId,
+    /// The kind the signed manifest declares, which decides where and how the
+    /// bundle may run.
+    pub kind: ProgramKind,
 }
 
 /// A bundle the loader has accepted: its identity, the validated entry-point
@@ -228,6 +232,12 @@ impl LoadedApp {
     #[must_use]
     pub fn publisher(&self) -> PublisherId {
         self.identity.publisher
+    }
+
+    /// The kind the signed manifest declares.
+    #[must_use]
+    pub fn kind(&self) -> ProgramKind {
+        self.identity.kind
     }
 
     /// The absolute path of the entry-point `Run` binary.

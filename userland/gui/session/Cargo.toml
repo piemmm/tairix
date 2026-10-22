@@ -8,12 +8,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[features]
-# The long host tests that prepare or trace a whole ray-traced scene, run by
-# `ci-long` and `cargo xtask test --scenes` rather than `ci`, as the ray
-# tracer's are.
-scene-tests = []
-
 [dependencies]
 # The shared latest-wins job desk (`tairix_util::defer`) the settings publisher
 # and the program-catalogue scan hand their work to, the restart pacer a
@@ -131,20 +125,9 @@ tairix-svg = { path = "../../../lib/svg", version = "=0.0.0" }
 # owns only the window, the event routing, and the elevation broker behind
 # the verdict seam.
 tairix-greeter = { path = "../../../lib/greeter", version = "=0.0.0" }
-# The predictable non-cryptographic generator the starfield, the Game of
-# Life and the retro games screensavers scatter and seed from: purely
-# visual, so an observer predicting it costs nothing.
-tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
-# The ray tracer behind the ray-traced screensaver: its scenes, the tracer
-# that answers each pixel, and the order the picture is revealed in.
-tairix-raytrace = { path = "../../../lib/raytrace", version = "=0.0.0" }
-# The PNG encoder the ray-traced screensaver keeps its whole pictures
-# through. Encoding the session's own pixels parses nothing untrusted, so it
-# runs in-process on the tracing thread rather than in the parser sandbox.
+# The PNG encoder a saver's kept pictures are written through. Encoding parses
+# nothing, so it runs on a session worker rather than in the parser sandbox.
 tairix-image = { path = "../../../lib/image", version = "=0.0.0" }
-# The ribbon of light behind the minimal-clock screensaver and the clock that
-# paces it, shared with the login screen, which may not depend on this crate.
-tairix-ribbon = { path = "../../../lib/ribbon", version = "=0.0.0" }
 # The shared control vocabulary (plans/NEW-TASKBAR.md T11): the Switchboard
 # command-channel glue relays the `Section` the taskbar's own capsule
 # gesture already chose onto the wire, rather than re-deciding which panel
@@ -187,15 +170,15 @@ tairix-appstore = { path = "../../../lib/appstore", version = "=0.0.0" }
 # against an on-disk manifest by the same digest the load gate attests it
 # from, so the two can never key the same developer differently.
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+# The duplex session a screensaver bundle is hosted over, host-neutral: the
+# runtime's pipes reach it through the `program` feature below.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
 # The sound settings and the user's layer over them: the session keeps the
 # user's own choices and hands the cue authority the document the one engine
 # reads, and the reading of them the Settings pane is told.
 tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0" }
 
 [dev-dependencies]
-# The secret marker's cadence, which the credential prompt's frame schedule is
-# checked against rather than restated.
-tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # The zone store's fixture of real zones and regions, which the clock's tests
 # read London and New York from.
 tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["rt", "test-support"] }

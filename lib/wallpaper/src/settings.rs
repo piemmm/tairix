@@ -57,11 +57,10 @@ use alloc::string::{String, ToString};
 use core::fmt;
 
 use tairix_abi::desktop::{
-    Appearance, Contrast, Density, Motion, ScreensaverKind, DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX,
-    DOUBLE_CLICK_MIN,
+    Appearance, Contrast, Density, Motion, DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN,
 };
 use tairix_abi::time::Duration64;
-use tairix_appconf::{merge_admitting, Document, Registry};
+use tairix_appconf::{merge_admitting, Document, OpenFamily, Registry};
 use tairix_colour::Rgb;
 use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
@@ -75,10 +74,7 @@ use crate::input::{
 };
 use crate::notify::NotifyPolicy;
 use crate::resolution::Resolution;
-use crate::saver::{
-    CellSize, CpuUse, Pace, SceneDetail, ScreensaverOptions, SlideOrder, SlideSource,
-    SlideshowOptions, StarDensity,
-};
+use crate::saver::{SaverValues, ScreensaverChoice, SlideSource, TaskNames, SAVER_VALUE_PREFIX};
 use crate::sound::SoundControls;
 use crate::text::{TextFamily, TextSize};
 use tairix_abi::zone::ZoneName;
@@ -525,50 +521,18 @@ pub enum SettingsKey {
     /// `screensaver.after_min` — how long the desktop sits idle before the
     /// screensaver starts.
     ScreensaverAfter,
-    /// `screensaver.kind` — what the screensaver shows.
-    ScreensaverKind,
+    /// `screensaver.saver` — the screensaver: `blank`, `dim`, or a saver
+    /// bundle's identifier. Every saver's option values travel with it.
+    ScreensaverSaver,
     /// `screensaver.display_off_min` — how long after the screensaver starts
     /// the display is switched off.
     DisplayOffAfter,
-    /// `screensaver.slideshow.interval_s` — how long the slideshow shows one
-    /// picture.
-    SlideInterval,
-    /// `screensaver.slideshow.order` — whether the slideshow shuffles.
-    SlideOrder,
-    /// `screensaver.slideshow.category` — the one category the slideshow
-    /// draws from, or empty for every category.
-    SlideCategory,
-    /// `screensaver.clock.date` — whether the clock shows the date.
-    ClockDate,
-    /// `screensaver.clock.identity` — whether the clock names the account and
-    /// the machine.
-    ClockIdentity,
-    /// `screensaver.ribbon.date` — whether the minimal clock shows the date.
-    RibbonDate,
-    /// `screensaver.starfield.stars` — how many stars the starfield flies
-    /// through.
-    StarDensity,
-    /// `screensaver.starfield.warp` — whether the starfield surges into warp.
-    StarWarp,
-    /// `screensaver.life.cells` — how large the Game of Life's cells are.
-    LifeCells,
-    /// `screensaver.life.speed` — how fast its generations pass.
-    LifeSpeed,
-    /// `screensaver.raytrace.cpu` — how many of the machine's cores the ray
-    /// tracer traces on.
-    RaytraceCpu,
-    /// `screensaver.raytrace.save` — whether the ray tracer keeps each
-    /// finished picture in the user's pictures.
-    RaytraceSave,
-    /// `screensaver.raytrace.detail` — how much each of the ray tracer's
-    /// scenes sets out.
-    RaytraceDetail,
-    /// `screensaver.retro_games.speed` — how fast the retro games' flight
-    /// crosses the grid.
-    RetroGamesSpeed,
-    /// `screensaver.system_monitor.tasks` — whether the System Monitor names
-    /// the busiest tasks.
-    MonitorTasks,
+    /// `screensaver.slides.source` — the one category the slides feed draws
+    /// from, or empty for every category.
+    SlidesSource,
+    /// `screensaver.machine.tasks` — whose busiest tasks the machine feed
+    /// names.
+    MachineTasks,
     /// `lock.after_min` — how long the desktop sits idle before the screen
     /// locks.
     LockAfter,
@@ -590,7 +554,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 41] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -621,23 +585,10 @@ impl SettingsKey {
         Self::RepeatDelay,
         Self::RepeatRate,
         Self::ScreensaverAfter,
-        Self::ScreensaverKind,
+        Self::ScreensaverSaver,
         Self::DisplayOffAfter,
-        Self::SlideInterval,
-        Self::SlideOrder,
-        Self::SlideCategory,
-        Self::ClockDate,
-        Self::ClockIdentity,
-        Self::RibbonDate,
-        Self::StarDensity,
-        Self::StarWarp,
-        Self::LifeCells,
-        Self::LifeSpeed,
-        Self::RaytraceCpu,
-        Self::RaytraceSave,
-        Self::RaytraceDetail,
-        Self::RetroGamesSpeed,
-        Self::MonitorTasks,
+        Self::SlidesSource,
+        Self::MachineTasks,
         Self::LockAfter,
         Self::Region,
         Self::TimeZone,
@@ -700,28 +651,16 @@ impl SettingsKey {
     /// application's Keyboard pane edits.
     pub const KEYBOARD: [Self; 2] = [Self::RepeatDelay, Self::RepeatRate];
 
-    /// The keys deciding what the screen does once the desktop is idle — and
-    /// every scene's own options: what the Settings application's
+    /// The keys deciding what the screen does once the desktop is idle and
+    /// what it feeds a saver — with every saver's option values, which travel
+    /// with the chosen saver's key: what the Settings application's
     /// Screensaver pane edits, and what a screensaver preview names.
-    pub const SCREENSAVER: [Self; 18] = [
+    pub const SCREENSAVER: [Self; 5] = [
         Self::ScreensaverAfter,
-        Self::ScreensaverKind,
+        Self::ScreensaverSaver,
         Self::DisplayOffAfter,
-        Self::SlideInterval,
-        Self::SlideOrder,
-        Self::SlideCategory,
-        Self::ClockDate,
-        Self::ClockIdentity,
-        Self::RibbonDate,
-        Self::StarDensity,
-        Self::StarWarp,
-        Self::LifeCells,
-        Self::LifeSpeed,
-        Self::RaytraceCpu,
-        Self::RaytraceSave,
-        Self::RaytraceDetail,
-        Self::RetroGamesSpeed,
-        Self::MonitorTasks,
+        Self::SlidesSource,
+        Self::MachineTasks,
     ];
 
     /// The key deciding when an idle desktop locks: what the Settings
@@ -777,23 +716,10 @@ impl SettingsKey {
             Self::RepeatDelay => "key.repeat_delay_ms",
             Self::RepeatRate => "key.repeat_rate",
             Self::ScreensaverAfter => "screensaver.after_min",
-            Self::ScreensaverKind => "screensaver.kind",
+            Self::ScreensaverSaver => "screensaver.saver",
             Self::DisplayOffAfter => "screensaver.display_off_min",
-            Self::SlideInterval => "screensaver.slideshow.interval_s",
-            Self::SlideOrder => "screensaver.slideshow.order",
-            Self::SlideCategory => "screensaver.slideshow.category",
-            Self::ClockDate => "screensaver.clock.date",
-            Self::ClockIdentity => "screensaver.clock.identity",
-            Self::RibbonDate => "screensaver.ribbon.date",
-            Self::StarDensity => "screensaver.starfield.stars",
-            Self::StarWarp => "screensaver.starfield.warp",
-            Self::LifeCells => "screensaver.life.cells",
-            Self::LifeSpeed => "screensaver.life.speed",
-            Self::RaytraceCpu => "screensaver.raytrace.cpu",
-            Self::RaytraceSave => "screensaver.raytrace.save",
-            Self::RaytraceDetail => "screensaver.raytrace.detail",
-            Self::RetroGamesSpeed => "screensaver.retro_games.speed",
-            Self::MonitorTasks => "screensaver.system_monitor.tasks",
+            Self::SlidesSource => "screensaver.slides.source",
+            Self::MachineTasks => "screensaver.machine.tasks",
             Self::LockAfter => "lock.after_min",
             Self::Region => "region",
             Self::TimeZone => "time.zone",
@@ -898,11 +824,16 @@ pub struct DesktopSettings {
     /// How long the desktop sits idle before the screensaver starts.
     pub screensaver_after: IdleAfter,
     /// What the screensaver shows.
-    pub screensaver: ScreensaverKind,
+    pub screensaver: ScreensaverChoice,
     /// How long after the screensaver starts the display is switched off.
     pub display_off_after: DisplayOffAfter,
-    /// How each screensaver draws, kept whichever one is chosen.
-    pub screensaver_options: ScreensaverOptions,
+    /// Which pictures the slides feed offers a saver.
+    pub slides: SlideSource,
+    /// Whose busiest tasks the machine feed names to a saver.
+    pub task_names: TaskNames,
+    /// The option values the user set for their savers, kept whichever saver
+    /// is chosen.
+    pub saver_values: SaverValues,
     /// How long the desktop sits idle before the screen locks.
     pub lock_after: IdleAfter,
     /// The region the user chose, or `None` for the zone store's default.
@@ -943,9 +874,11 @@ impl Default for DesktopSettings {
             repeat_delay: REPEAT_DELAY_DEFAULT,
             repeat_rate: RepeatRate::default(),
             screensaver_after: IdleAfter::Minutes(10),
-            screensaver: ScreensaverKind::Ribbon,
+            screensaver: ScreensaverChoice::default_saver(),
             display_off_after: DisplayOffAfter::Minutes(30),
-            screensaver_options: ScreensaverOptions::default(),
+            slides: SlideSource::default(),
+            task_names: TaskNames::default(),
+            saver_values: SaverValues::default(),
             lock_after: IdleAfter::Minutes(15),
             region: None,
             time_zone: None,
@@ -964,6 +897,10 @@ impl Default for DesktopSettings {
 impl Registry for DesktopSettings {
     type Key = SettingsKey;
     const KEYS: &'static [SettingsKey] = &SettingsKey::ALL;
+    const OPEN: Option<OpenFamily<SettingsKey>> = Some(OpenFamily {
+        prefix: SAVER_VALUE_PREFIX,
+        anchor: SettingsKey::ScreensaverSaver,
+    });
 
     fn name(key: SettingsKey) -> &'static str {
         key.name()
@@ -976,6 +913,18 @@ impl Registry for DesktopSettings {
     fn spell(&self, key: SettingsKey, out: &mut String) -> bool {
         out.push_str(&field_value(self, key));
         true
+    }
+
+    fn read_open(&mut self, key: &str, text: &str) -> bool {
+        self.saver_values.read(key, text)
+    }
+
+    fn spell_open(&self, document: &mut Document) {
+        self.saver_values.spell(document);
+    }
+
+    fn clear_open(&mut self) {
+        self.saver_values = SaverValues::default();
     }
 }
 
@@ -1003,7 +952,6 @@ impl DesktopSettings {
 // One arm per registry key; a split would trade exhaustiveness for a wildcard.
 #[allow(clippy::too_many_lines)]
 fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> bool {
-    let saver = &mut settings.screensaver_options;
     match key {
         SettingsKey::Wallpaper => put(&mut settings.wallpaper, WallpaperChoice::from_value(value)),
         SettingsKey::Fit => put(&mut settings.fit, WallpaperFit::from_value(value)),
@@ -1059,36 +1007,16 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
             &mut settings.screensaver_after,
             IdleAfter::from_value(value),
         ),
-        SettingsKey::ScreensaverKind => put(
+        SettingsKey::ScreensaverSaver => put(
             &mut settings.screensaver,
-            ScreensaverKind::from_value(value),
+            ScreensaverChoice::from_value(value),
         ),
         SettingsKey::DisplayOffAfter => put(
             &mut settings.display_off_after,
             DisplayOffAfter::from_value(value),
         ),
-        SettingsKey::SlideInterval => put(
-            &mut saver.slideshow.interval,
-            SlideshowOptions::interval_from_value(value),
-        ),
-        SettingsKey::SlideOrder => put(&mut saver.slideshow.order, SlideOrder::from_value(value)),
-        SettingsKey::SlideCategory => {
-            put(&mut saver.slideshow.source, SlideSource::from_value(value))
-        }
-        SettingsKey::ClockDate => put_bool(&mut saver.clock.date, value),
-        SettingsKey::ClockIdentity => put_bool(&mut saver.clock.identity, value),
-        SettingsKey::RibbonDate => put_bool(&mut saver.ribbon.date, value),
-        SettingsKey::StarDensity => put(&mut saver.starfield.stars, StarDensity::from_value(value)),
-        SettingsKey::StarWarp => put_bool(&mut saver.starfield.warp, value),
-        SettingsKey::LifeCells => put(&mut saver.life.cells, CellSize::from_value(value)),
-        SettingsKey::LifeSpeed => put(&mut saver.life.speed, Pace::from_value(value)),
-        SettingsKey::RaytraceCpu => put(&mut saver.raytrace.cpu, CpuUse::from_value(value)),
-        SettingsKey::RaytraceSave => put_bool(&mut saver.raytrace.save, value),
-        SettingsKey::RaytraceDetail => {
-            put(&mut saver.raytrace.detail, SceneDetail::from_value(value))
-        }
-        SettingsKey::RetroGamesSpeed => put(&mut saver.retro_games.speed, Pace::from_value(value)),
-        SettingsKey::MonitorTasks => put_bool(&mut saver.system_monitor.tasks, value),
+        SettingsKey::SlidesSource => put(&mut settings.slides, SlideSource::from_value(value)),
+        SettingsKey::MachineTasks => put(&mut settings.task_names, TaskNames::from_value(value)),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
         SettingsKey::Region => put_optional(&mut settings.region, value, RegionCode::new),
         SettingsKey::TimeZone => put_optional(&mut settings.time_zone, value, ZoneName::new),
@@ -1153,7 +1081,6 @@ fn parse_scale(value: &str) -> Option<Scale> {
 
 /// The current value of `key` on `settings`, in its canonical spelling.
 fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
-    let saver = &settings.screensaver_options;
     match key {
         SettingsKey::Wallpaper => settings.wallpaper.render_value(),
         SettingsKey::Fit => settings.fit.as_str().to_string(),
@@ -1189,25 +1116,10 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::RepeatDelay => render_millis(settings.repeat_delay),
         SettingsKey::RepeatRate => settings.repeat_rate.render_value(),
         SettingsKey::ScreensaverAfter => settings.screensaver_after.render_value(),
-        SettingsKey::ScreensaverKind => settings.screensaver.as_str().to_string(),
+        SettingsKey::ScreensaverSaver => settings.screensaver.as_str().to_string(),
         SettingsKey::DisplayOffAfter => settings.display_off_after.render_value(),
-        SettingsKey::SlideInterval => SlideshowOptions::render_interval(saver.slideshow.interval),
-        SettingsKey::SlideOrder => saver.slideshow.order.as_str().to_string(),
-        SettingsKey::SlideCategory => saver.slideshow.source.as_str().to_string(),
-        SettingsKey::ClockDate => tairix_appconf::bool_text(saver.clock.date).to_string(),
-        SettingsKey::ClockIdentity => tairix_appconf::bool_text(saver.clock.identity).to_string(),
-        SettingsKey::RibbonDate => tairix_appconf::bool_text(saver.ribbon.date).to_string(),
-        SettingsKey::StarDensity => saver.starfield.stars.as_str().to_string(),
-        SettingsKey::StarWarp => tairix_appconf::bool_text(saver.starfield.warp).to_string(),
-        SettingsKey::LifeCells => saver.life.cells.as_str().to_string(),
-        SettingsKey::LifeSpeed => saver.life.speed.as_str().to_string(),
-        SettingsKey::RaytraceCpu => saver.raytrace.cpu.as_str().to_string(),
-        SettingsKey::RaytraceSave => tairix_appconf::bool_text(saver.raytrace.save).to_string(),
-        SettingsKey::RaytraceDetail => saver.raytrace.detail.as_str().to_string(),
-        SettingsKey::RetroGamesSpeed => saver.retro_games.speed.as_str().to_string(),
-        SettingsKey::MonitorTasks => {
-            tairix_appconf::bool_text(saver.system_monitor.tasks).to_string()
-        }
+        SettingsKey::SlidesSource => settings.slides.as_str().to_string(),
+        SettingsKey::MachineTasks => settings.task_names.as_str().to_string(),
         SettingsKey::LockAfter => settings.lock_after.render_value(),
         SettingsKey::Region => settings
             .region

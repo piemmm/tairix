@@ -394,7 +394,7 @@ fn manifest(icon: &str) -> Vec<u8> {
         mime_count: 0,
         browse_count: 0,
         kind: tairix_abi::ProgramKind::Application.to_wire(),
-        reserved: 0,
+        option_count: 0,
         id_len,
         name_len,
         version_len,

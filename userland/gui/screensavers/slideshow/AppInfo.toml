@@ -1,0 +1,14 @@
+# Signed-AppInfo manifest source for Slideshow, a desktop screensaver. It runs
+# in the drawing sandbox and asks for no capability; it needs the slides feed,
+# the shipped pictures its host reads and fits to the screen, which only a
+# screensaver the system ships may be given.
+id = "os.tairix.saver.slideshow"
+name = "Slideshow"
+version = "0.1.0"
+kind = "screensaver"
+purpose = "The shipped pictures, one after another"
+author = "The TAIRiX Project"
+capabilities = []
+feeds = ["slides"]
+option.interval = { label = "Change every", note = "How long each picture is shown before the next.", choice = ["s5:5 seconds", "s10:10 seconds", "s15:15 seconds", "s30:30 seconds", "m1:1 minute", "m2:2 minutes", "m5:5 minutes", "m10:10 minutes", "m15:15 minutes", "m30:30 minutes", "h1:1 hour"], default = "s30" }
+option.order = { label = "Order", note = "In order goes through the pictures as they are listed. Shuffled shows every one once before any is shown again.", choice = ["sequential:In order", "shuffled:Shuffled"], default = "sequential" }

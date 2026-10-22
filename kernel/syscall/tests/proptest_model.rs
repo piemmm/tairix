@@ -772,6 +772,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn share_map(&self, _c: &CallerContext<'_>, _len_out: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn msi_alloc(&self, _c: &CallerContext<'_>, _out: u64, _out_len: usize) -> SyscallResult {
         self.bump();
         Ok(0)

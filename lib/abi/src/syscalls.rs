@@ -3614,6 +3614,29 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::MEM_DMA),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::SHARE_MAP,
+        name: "share_map",
+        arg_count: 1,
+        args: [
+            // The out pointer the region's byte length is written to, the
+            // kernel's own record of it.
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The mapped base address, or a negated errno.
+        ret: AbiType::U64,
+        // The grant minted at the drawing spawn is the authority, so a
+        // capability-empty child can map the one region it was handed and no
+        // other. Audited like `shm_map`: a window onto another process's
+        // memory, granted once per spawn.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

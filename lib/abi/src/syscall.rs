@@ -2991,6 +2991,21 @@ impl SyscallNumber {
     /// device.
     pub const CONSOLE_RELINQUISH: Self = Self(149);
 
+    /// Map the caller's spawn share: the shared region its spawner handed it
+    /// in a drawing-sandbox spawn ([`crate::SpawnAttach::drawing`]).
+    ///
+    /// Arguments: `(len_out)`, a user pointer the region's byte length is
+    /// written to. Returns the mapped base address (read-write, never
+    /// executable), or `-errno`: [`Errno::NotFound`] for a caller handed no
+    /// share or one whose region is gone, [`Errno::PermissionDenied`] for a
+    /// region retired with its device, the copy fault's errno for a `len_out`
+    /// that cannot be written, and [`Errno::AlreadyExists`] once an earlier
+    /// call claimed the share, whatever that call answered: a share is mapped
+    /// by one call at most. No capability gates it — the spawn grant is the
+    /// authority — so it is the one memory call the drawing sandbox adds.
+    /// Audited, as every grant of a window onto another process's memory is.
+    pub const SHARE_MAP: Self = Self(150);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3287,6 +3302,7 @@ mod tests {
         assert_eq!(SyscallNumber::FD_REDEEM_LOCATION.as_u16(), 147);
         assert_eq!(SyscallNumber::CONSOLE_DAMAGE.as_u16(), 148);
         assert_eq!(SyscallNumber::CONSOLE_RELINQUISH.as_u16(), 149);
+        assert_eq!(SyscallNumber::SHARE_MAP.as_u16(), 150);
     }
 
     #[test]

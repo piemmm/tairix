@@ -69,5 +69,6 @@ pub use bundle::{
 };
 pub use error::AppError;
 pub use loader::{
-    publisher_id_of, requested_capabilities, AppLoader, AppLoaderConfig, RequestRefused,
+    admit_cached, publisher_id_of, requested_capabilities, AppLoader, AppLoaderConfig, LoadMode,
+    RequestRefused,
 };

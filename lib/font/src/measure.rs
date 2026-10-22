@@ -33,14 +33,12 @@ use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::{FamilyKey, FontWeight, FONT_FAMILY_KEY_LEN};
 use tairix_hash::BuildSipHash13;
-#[cfg(any(feature = "rt", test))]
 use tairix_reclaim::{
     CacheBudget, CacheCandidate, InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner,
     ReclaimRule, Sensitivity,
 };
 use tairix_reclaim::{CachedBytes, ReclaimCache};
 
-#[cfg(any(feature = "rt", test))]
 use crate::glyph_cache::{glyph_cache_ceiling, GLYPH_CACHE_ENTRY_METADATA_BYTES};
 
 /// What one measurement is retained under: the face's wire bytes, its pixel
@@ -81,10 +79,6 @@ pub(crate) fn measure_key(
 /// dropped entry is rebuilt from. The per-entry allowance is the glyph
 /// cache's: a measurement key is the same shape and size class, so one
 /// declared bound covers both of the client's caches.
-///
-/// Declared where a memo can actually be built: a real program's lazy default
-/// and a host test that installs its own.
-#[cfg(any(feature = "rt", test))]
 pub(crate) fn measure_cache_candidate(owner: ReclaimOwner) -> CacheCandidate {
     CacheCandidate {
         class: Some(ReclaimClass::DisposableUi),
@@ -105,7 +99,6 @@ pub(crate) fn measure_cache_candidate(owner: ReclaimOwner) -> CacheCandidate {
 /// an IPC round trip — there is nothing here worth keeping through pressure:
 /// it is speculation all the way down, and the first tightening may take all
 /// of it.
-#[cfg(any(feature = "rt", test))]
 #[must_use]
 pub(crate) fn measure_cache_budget(total_ram_bytes: u64) -> CacheBudget {
     CacheBudget::from_ceiling(glyph_cache_ceiling(total_ram_bytes))

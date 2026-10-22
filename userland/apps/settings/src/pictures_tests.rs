@@ -6,20 +6,23 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_abi::saver::SaverFeeds;
 use tairix_abi::window_ipc::{PreviewSubject, WINDOW_PREVIEW_MAX_SIDE};
+use tairix_abi::window_ipc::{SaverOrigin, SaverStanding};
 use tairix_colour::Rgb;
 use tairix_controls::{FieldGroup, FieldLayout, PictureChoice};
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{
-    wallpaper_path, Backdrop, CatalogItem, DesktopSettings, ScreensaverKind, WallpaperChoice,
+    wallpaper_path, Backdrop, CatalogItem, DesktopSettings, ScreensaverChoice, WallpaperChoice,
     WallpaperPath,
 };
 
 use super::{
-    options_caption, Chooser, Offer, Offered, PictureWanted, Pictured, Pictures, NONE_LABEL,
+    Chooser, Offer, Offered, PictureWanted, Pictured, Pictures, NONE_LABEL, OWN_SAVERS_TITLE,
 };
+use crate::saver::SaverEntry;
 
 fn subjects(offered: &[Offered]) -> Vec<Option<PreviewSubject>> {
     offered.iter().map(|held| held.subject).collect()
@@ -71,7 +74,7 @@ fn labels(choice: &PictureChoice) -> Vec<&str> {
 #[test]
 fn the_wallpaper_chooser_offers_no_picture_then_each_category_in_turn() {
     let settings = showing(&wallpaper_path("Nature", "n1.jpg"));
-    let (choice, offered) = Chooser::Wallpaper.offer(&settings, &catalog());
+    let (choice, offered) = Chooser::Wallpaper.offer(&settings, (&catalog(), &[]));
     assert_eq!(titles(&choice), ["", "Abstract", "Nature", "Space"]);
     assert_eq!(
         labels(&choice),
@@ -98,7 +101,7 @@ fn the_wallpaper_chooser_offers_no_picture_then_each_category_in_turn() {
 #[test]
 fn a_picture_in_effect_the_catalog_lacks_is_listed_where_it_belongs() {
     let removed = showing(&wallpaper_path("Nature", "gone.jpg"));
-    let (choice, offered) = Chooser::Wallpaper.offer(&removed, &catalog());
+    let (choice, offered) = Chooser::Wallpaper.offer(&removed, (&catalog(), &[]));
     assert_eq!(titles(&choice), ["", "Abstract", "Nature", "Space"]);
     assert_eq!(
         labels(&choice),
@@ -111,7 +114,7 @@ fn a_picture_in_effect_the_catalog_lacks_is_listed_where_it_belongs() {
     );
 
     let own = showing("/Users/ann/Pictures/me.png");
-    let (choice, _) = Chooser::Wallpaper.offer(&own, &catalog());
+    let (choice, _) = Chooser::Wallpaper.offer(&own, (&catalog(), &[]));
     assert_eq!(
         titles(&choice),
         ["", "Abstract", "Nature", "Space", "Pictures"]
@@ -124,7 +127,7 @@ fn a_picture_in_effect_the_catalog_lacks_is_listed_where_it_belongs() {
 #[test]
 fn each_picture_sets_the_picture_it_shows() {
     let own = showing("/Users/ann/Pictures/me.png");
-    let (_, offered) = Chooser::Wallpaper.offer(&own, &catalog());
+    let (_, offered) = Chooser::Wallpaper.offer(&own, (&catalog(), &[]));
     let set = |offer: &Offer| {
         let mut settings = own.clone();
         offer.apply(&mut settings);
@@ -151,60 +154,65 @@ fn the_no_picture_choice_follows_the_backdrop() {
             wallpaper: WallpaperChoice::None,
             ..DesktopSettings::default()
         };
-        let (choice, _) = Chooser::Wallpaper.offer(&settings, &[]);
+        let (choice, _) = Chooser::Wallpaper.offer(&settings, (&[], &[]));
         assert_eq!(labels(&choice), [NONE_LABEL]);
         assert_eq!(choice.selected(), Some(0));
     }
 }
 
+/// The savers a desktop's catalogue lists: its own two, a system saver, one
+/// that cannot be chosen, and one of the user's own.
+fn savers() -> Vec<SaverEntry> {
+    let saver = |index: u16, choice: &str, title: &str, origin| SaverEntry {
+        index,
+        choice: ScreensaverChoice::from_value(choice).expect("a choice"),
+        title: String::from(title),
+        purpose: String::new(),
+        origin,
+        standing: SaverStanding::Offered,
+        feeds: SaverFeeds::NONE,
+        options: Vec::new(),
+    };
+    let mut broken = saver(3, "os.tairix.saver.broken", "Broken", SaverOrigin::System);
+    broken.standing = SaverStanding::Damaged;
+    vec![
+        saver(0, "blank", "Black", SaverOrigin::Desktop),
+        saver(1, "dim", "Dimmed desktop", SaverOrigin::Desktop),
+        saver(
+            2,
+            "os.tairix.saver.starfield",
+            "Starfield",
+            SaverOrigin::System,
+        ),
+        broken,
+        saver(4, "org.example.waves", "Waves", SaverOrigin::User),
+    ]
+}
+
+/// The chooser offers every saver that can be chosen, the user's own under a
+/// title of their own, each previewed by its place in the catalogue, and
+/// choosing one sets it.
 #[test]
-fn the_screensaver_chooser_offers_every_kind_with_its_preview() {
+fn the_screensaver_chooser_offers_the_savers_that_can_be_chosen() {
     let settings = DesktopSettings {
-        screensaver: ScreensaverKind::Starfield,
+        screensaver: ScreensaverChoice::from_value("os.tairix.saver.starfield").expect("a choice"),
         ..DesktopSettings::default()
     };
-    let (choice, offered) = Chooser::Screensaver.offer(&settings, &catalog());
+    let (choice, offered) = Chooser::Screensaver.offer(&settings, (&catalog(), &savers()));
     assert_eq!(
         labels(&choice),
-        [
-            "Black",
-            "Dimmed desktop",
-            "Slideshow",
-            "Clock",
-            "Minimal Clock",
-            "Starfield",
-            "Game of Life",
-            "Ray Tracer",
-            "Retro Games",
-            "System Monitor"
-        ]
+        ["Black", "Dimmed desktop", "Starfield", "Waves"],
+        "the damaged one is not a picture to choose"
     );
-    assert_eq!(titles(&choice), [""]);
-    assert_eq!(choice.selected(), Some(5));
-    let expected: Vec<_> = ScreensaverKind::ALL
-        .iter()
-        .map(|kind| Some(PreviewSubject::Screensaver(*kind)))
-        .collect();
-    assert_eq!(subjects(&offered), expected);
-    let mut chosen = settings.clone();
-    offered[6].offer.apply(&mut chosen);
-    assert_eq!(chosen.screensaver, ScreensaverKind::Life);
-    assert_eq!(options_caption(ScreensaverKind::Life), "GAME OF LIFE");
-    let mut chosen = settings.clone();
-    offered[4].offer.apply(&mut chosen);
-    assert_eq!(chosen.screensaver, ScreensaverKind::Ribbon);
-    assert_eq!(options_caption(ScreensaverKind::Ribbon), "MINIMAL CLOCK");
-    let mut chosen = settings.clone();
-    offered[7].offer.apply(&mut chosen);
-    assert_eq!(chosen.screensaver, ScreensaverKind::Raytrace);
-    assert_eq!(options_caption(ScreensaverKind::Raytrace), "RAY TRACER");
-    let mut chosen = settings;
-    offered[9].offer.apply(&mut chosen);
-    assert_eq!(chosen.screensaver, ScreensaverKind::SystemMonitor);
+    assert_eq!(titles(&choice), ["", OWN_SAVERS_TITLE]);
+    assert_eq!(choice.selected(), Some(2));
     assert_eq!(
-        options_caption(ScreensaverKind::SystemMonitor),
-        "SYSTEM MONITOR"
+        subjects(&offered),
+        [0, 1, 2, 4].map(|index| Some(PreviewSubject::Screensaver(index)))
     );
+    let mut chosen = settings;
+    offered[3].offer.apply(&mut chosen);
+    assert_eq!(chosen.screensaver.as_str(), "org.example.waves");
 }
 
 /// `count` shipped pictures, all in one category.
@@ -229,7 +237,7 @@ impl Laid {
             wallpaper: WallpaperChoice::None,
             ..DesktopSettings::default()
         };
-        let (choice, offered) = Chooser::Wallpaper.offer(&settings, catalog);
+        let (choice, offered) = Chooser::Wallpaper.offer(&settings, (catalog, &[]));
         let theme = Theme::dark();
         let group = FieldGroup::new("DESKTOP PICTURE", Vec::new()).with_pictures(choice);
         let height = group.measured_height(600, 0, Scale::ONE, &theme);
@@ -431,7 +439,7 @@ fn a_refused_picture_is_not_asked_for_again_and_a_short_answer_is_a_refusal() {
     assert_eq!(laid.round(everything, false), None, "both refused");
     // An answer for a subject no chooser shows changes nothing.
     let stray = PictureWanted {
-        subject: PreviewSubject::Screensaver(ScreensaverKind::Clock),
+        subject: PreviewSubject::Screensaver(9),
         ..second
     };
     assert!(!laid.answer(stray));
@@ -448,8 +456,10 @@ fn rendered_pictures_survive_a_rebuild_on_whichever_picture_they_render() {
     assert!(!laid.has_art(1), "taken, not copied");
     // Rebuilt over the same catalog with a picture in effect it lacks, listed
     // among its category's and so moving the picture after it along by one.
-    let (choice, offered) =
-        Chooser::Wallpaper.offer(&showing(&wallpaper_path("Nature", "zz.jpg")), &catalog);
+    let (choice, offered) = Chooser::Wallpaper.offer(
+        &showing(&wallpaper_path("Nature", "zz.jpg")),
+        (&catalog, &[]),
+    );
     laid.groups = vec![FieldGroup::new("DESKTOP PICTURE", Vec::new()).with_pictures(choice)];
     laid.pictures.adopt(
         vec![Pictured {
@@ -468,7 +478,7 @@ fn rendered_pictures_survive_a_rebuild_on_whichever_picture_they_render() {
 /// every scale a desktop may be set to.
 #[test]
 fn every_picture_a_chooser_asks_for_is_one_the_desktop_accepts_at_every_scale() {
-    let (choice, _) = Chooser::Screensaver.offer(&DesktopSettings::default(), &[]);
+    let (choice, _) = Chooser::Screensaver.offer(&DesktopSettings::default(), (&[], &savers()));
     for theme in [Theme::dark(), Theme::light()] {
         for percent in (Scale::MIN_PERCENT..=Scale::MAX_PERCENT).step_by(25) {
             let scale = Scale::from_percent(percent).expect("a scale");

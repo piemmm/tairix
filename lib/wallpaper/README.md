@@ -126,15 +126,17 @@ listing a gallery may offer: it performs no I/O of its own, filtering to
 the decodable extensions, rejecting illegal names, skipping oversized
 files, and capping and sorting the result.
 
-Every screensaver's options live in `saver` and are kept whichever
-screensaver is chosen. Each kind also ships one preview picture, a 16:9 PNG
-named for the kind, at `SCREENSAVER_PREVIEW_STORE`
+`saver` holds which screensaver is chosen — Black, the dimmed desktop, or a
+saver bundle by its identifier — every saver's values under
+`saver.<bundle-id>.<key>`, kept whichever saver is chosen and read against
+that saver's own declaration, and the two feeds' settings the desktop applies
+for a saver: the pictures the slides feed offers and whose task names the
+machine feed carries. Black and the dimmed desktop each ship one preview, a
+16:9 PNG named for it, at `SCREENSAVER_PREVIEW_STORE`
 (`/System/Graphics/Screensavers`), discovered at build time from
-`lib/wallpaper/screensavers/`; the image build refuses a kind without one, a
-picture of another shape, or one smaller than the largest a chooser draws. The
-Starfield, Game of Life, Minimal Clock, Ray Tracer, Retro Games and System
-Monitor previews are single frames the session's own scenes drew; the rest are
-composed from the shipped wallpapers and the desktop's own fonts and inks.
+`lib/wallpaper/screensavers/`; a saver bundle ships its own at
+`SAVER_PREVIEW_PATH`. The image build refuses one missing, of another shape,
+or smaller than the largest a chooser draws.
 
 The fit geometry (`place`, `decode_request`) is pure arithmetic with no
 rendering of its own: given a source image size, a screen size, and a

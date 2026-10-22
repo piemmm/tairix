@@ -2,8 +2,8 @@
 
 Stability tier: **experimental**
 
-The ray tracer behind the desktop's ray-traced screensaver: scenes composed at
-random from a seed, and a tracer that answers what one pixel of one shows.
+The ray tracer behind the Ray Tracer screensaver (`Raytrace.app`): scenes
+composed at random from a seed, and a tracer that answers what one pixel of one shows.
 `no_std` + `alloc`, and `#![forbid(unsafe_code)]`.
 
 ## What it provides

@@ -31,7 +31,7 @@ use tairix_abi::appdata_ipc::{
     APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_LIST_MAX, APPDATA_DOCUMENT_MAX, APPDATA_GRANT_REPLY_LEN,
     APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_QUOTA_REPLY_LEN, APPDATA_TEMP_REPLY_LEN,
 };
-use tairix_abi::desktop::{ScreensaverKind, CURSOR_SET_NAME_MAX};
+use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
 use tairix_abi::display_ipc::{
     decode_buffer_reply, decode_configure_reply, decode_mode_reply, decode_planes_reply,
     decode_present_reply, decode_stats_reply, encode_buffer_reply, encode_configure_reply,
@@ -1031,6 +1031,61 @@ fn exercise_switchboard_ipc(bytes: &[u8]) {
     }
 }
 
+/// Drive the screensaver protocol on `bytes` (one arm of [`exercise`]).
+///
+/// Every saver is untrusted code, a user's own included, so the host decodes
+/// whatever it sends; and a saver decodes its host's messages. An accepted
+/// message must re-encode to the bytes it came from: nothing is normalised on
+/// the way in.
+fn exercise_saver_ipc(bytes: &[u8]) {
+    use tairix_abi::saver_ipc::{HostMessage, SaverMessage, SAVER_HOST_MESSAGE_MAX};
+    if let Ok(message) = SaverMessage::decode(bytes) {
+        let mut out = [0u8; tairix_abi::saver_ipc::SAVER_MESSAGE_MAX];
+        let len = message
+            .encode(&mut out)
+            .expect("an accepted saver message re-encodes");
+        assert_eq!(&out[..len], bytes, "a saver message is its own encoding");
+    }
+    if let Ok(message) = HostMessage::decode(bytes) {
+        let mut out = vec![0u8; SAVER_HOST_MESSAGE_MAX];
+        let len = message
+            .encode(&mut out)
+            .expect("an accepted host message re-encodes");
+        assert_eq!(&out[..len], bytes, "a host message is its own encoding");
+    }
+}
+
+/// Drive a screensaver manifest's declared options on `bytes` (one arm of
+/// [`exercise`]): a user's own saver is a self-signed manifest the desktop
+/// reads to list it and the load gate reads to admit it, so every option an
+/// accepted header names must decode or refuse, and one that decodes must
+/// round-trip through its entry.
+fn exercise_saver_options(bytes: &[u8]) {
+    use tairix_abi::saver::{SaverOption, SAVER_OPTION_ENTRY_LEN};
+    if let Some(entry) = bytes.get(..SAVER_OPTION_ENTRY_LEN) {
+        if let Ok(option) = SaverOption::from_entry(entry) {
+            assert_eq!(&option.to_entry()[..], entry, "an option is its own entry");
+        }
+    }
+    let Ok(header) = AppInfoHeader::from_bytes(bytes) else {
+        return;
+    };
+    let body = bytes.get(AppInfoHeader::WIRE_LEN..).unwrap_or(&[]);
+    let all = tairix_abi::validate_saver_options(body, &header);
+    for index in 0..=usize::from(header.option_count) {
+        match tairix_abi::saver_option_at(body, &header, index) {
+            Ok(option) => {
+                let again = SaverOption::from_entry(&option.to_entry());
+                assert_eq!(again, Ok(option));
+            }
+            Err(_) => assert!(
+                index == usize::from(header.option_count) || all.is_err(),
+                "a refused option fails the whole set"
+            ),
+        }
+    }
+}
+
 /// Drive the app-data channel on `bytes` (one arm of [`exercise`]).
 ///
 /// Every application on the machine may post to this endpoint, so the request
@@ -1215,6 +1270,8 @@ fn exercise(bytes: &[u8]) {
     exercise_discovery(bytes);
     exercise_elevate(bytes);
     exercise_session_ipc(bytes);
+    exercise_saver_ipc(bytes);
+    exercise_saver_options(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())
             .expect("round-trip of an accepted instant must succeed");
@@ -1605,6 +1662,7 @@ fn spawn_attach_blocks_with_flipped_bits_round_trip_or_are_refused() {
     let shapes = [
         SpawnAttach::INHERIT,
         SpawnAttach::sandbox(explicit, 16 << 20),
+        SpawnAttach::drawing(explicit, 64 << 20, 4, 0x5A),
         SpawnAttach {
             limits: SpawnLimits::INHERIT.lowering(
                 tairix_abi::LimitKind::OpenStreams,
@@ -1688,6 +1746,81 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
             base[byte] ^= 1 << bit;
             exercise(&base);
             base[byte] ^= 1 << bit;
+        }
+    }
+}
+
+/// Every saver message and every host message, each bit of each flipped in
+/// turn: each must decode to its own encoding or be refused, never panic.
+#[test]
+fn structured_saver_messages_with_corrupted_fields_never_panic() {
+    use tairix_abi::bounded_text::BoundedText;
+    use tairix_abi::saver::SaverFeeds;
+    use tairix_abi::saver_ipc::{
+        HostMessage, NextFrame, SaverMessage, SaverRegion, SlideOutcome, Start, WallReading,
+        SAVER_HOST_MESSAGE_MAX, SAVER_MESSAGE_MAX,
+    };
+    use tairix_abi::Errno;
+    let damage = DamageList::new(&[DamageRect {
+        x: 1,
+        y: 2,
+        width_px: 3,
+        height_px: 4,
+    }])
+    .ok();
+    let saver = [
+        SaverMessage::Ready,
+        SaverMessage::Presented {
+            serial: 9,
+            damage,
+            next: NextFrame::At(77),
+        },
+        SaverMessage::FontCall(FontRequest::Families.to_le_bytes()),
+        SaverMessage::Keep {
+            title: BoundedText::new("Dusk").expect("a title"),
+            width: 8,
+            height: 6,
+        },
+        SaverMessage::WantSlide(3),
+        SaverMessage::Unstarted(Errno::OutOfMemory),
+    ];
+    let region = SaverRegion::new(16, 9, SaverFeeds::NONE).expect("a region");
+    let host = std::vec![
+        HostMessage::Start(Start::new(region, 100, RefreshRate::ASSUMED)),
+        HostMessage::Frame {
+            serial: 4,
+            now_ns: 5,
+            wall: WallReading::unset(6),
+        },
+        HostMessage::Slide {
+            index: 2,
+            outcome: SlideOutcome::Shown,
+        },
+        HostMessage::FontReply(Ok(&[1, 2, 3])),
+        HostMessage::FontReply(Err(Errno::NotFound)),
+        HostMessage::Kept { kept: true },
+        HostMessage::MachineLost,
+    ];
+    let mut seeds: Vec<Vec<u8>> = Vec::new();
+    for message in &saver {
+        let mut out = [0u8; SAVER_MESSAGE_MAX];
+        let len = message.encode(&mut out).expect("encodes");
+        seeds.push(out[..len].to_vec());
+    }
+    for message in &host {
+        let mut out = std::vec![0u8; SAVER_HOST_MESSAGE_MAX];
+        let len = message.encode(&mut out).expect("encodes");
+        out.truncate(len);
+        seeds.push(out);
+    }
+    for mut base in seeds {
+        exercise_saver_ipc(&base);
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise_saver_ipc(&base);
+                base[byte] ^= 1 << bit;
+            }
         }
     }
 }
@@ -2490,13 +2623,13 @@ fn window_request_desktop_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::RenderPreview {
             window_id: 3,
             shm_handle: 11,
-            subject: PreviewSubject::Screensaver(ScreensaverKind::Starfield),
+            subject: PreviewSubject::Screensaver(6),
             width: 288,
             height: 162,
         },
         WindowRequest::PreviewScreensaver {
             document: PinboardDocument::new(
-                "screensaver.kind = life\nscreensaver.life.cells = small\n",
+                "screensaver.saver = os.tairix.saver.life\nsaver.os.tairix.saver.life.cells = small\n",
             )
             .expect("a valid document"),
         },
@@ -2857,7 +2990,7 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         .to_le_bytes(),
         WindowEvent::PreviewRendered {
             window_id: 3,
-            subject: PreviewSubject::Screensaver(ScreensaverKind::Clock),
+            subject: PreviewSubject::Screensaver(3),
             width: 144,
             height: 81,
             outcome: PreviewOutcome::Unavailable,
@@ -3224,12 +3357,14 @@ fn structured_machine_reports_with_corrupted_fields_never_panic() {
             2,
             &[
                 MachineTask {
-                    name: name("postgres"),
+                    name: Some(name("postgres")),
+                    owner: tairix_abi::switchboard_ipc::TaskOwner::Own,
                     cpu: share(600),
                     memory_bytes: 1 << 31,
                 },
                 MachineTask {
-                    name: name("nginx"),
+                    name: Some(name("nginx")),
+                    owner: tairix_abi::switchboard_ipc::TaskOwner::Other,
                     cpu: share(120),
                     memory_bytes: 1 << 27,
                 },

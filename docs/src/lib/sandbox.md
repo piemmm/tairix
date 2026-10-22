@@ -218,7 +218,11 @@ Stability tier: **experimental**.
   duplex transport over that same spawn (one shared pipe-pair-and-attach
   path, `--sandbox-session-worker`), reporting its two descriptor numbers
   so the owner can register them, and `session_worker_role` +
-  `serve_session_stdio` are its worker half.
+  `serve_session_stdio` are its worker half. Ending a session kills its
+  worker and reaps it at once if it has gone; one still running is handed to
+  the channel's `Reaper` where the owner gave it one (`reaped_by`), so a loop
+  that answers a person never waits for a worker's teardown, and is waited
+  for otherwise (`let_go`).
 
 ## Security posture
 

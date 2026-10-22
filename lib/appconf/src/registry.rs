@@ -13,10 +13,22 @@ use crate::{ConfError, Document, Lookup};
 /// The most keys a registry holds: one bit of a [`Keys`] set each.
 pub const MOST_KEYS: usize = 64;
 
-/// A record of settings kept under a closed set of keys.
+/// The open family of keys a registry keeps beside its closed ones: keys it
+/// cannot list in advance, such as one per installed program.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OpenFamily<K> {
+    /// The prefix every key of the family begins with.
+    pub prefix: &'static str,
+    /// The closed key the family travels with: a reading that admits that key
+    /// admits the family, and a document spelling it spells the family too.
+    pub anchor: K,
+}
+
+/// A record of settings kept under a closed set of keys, and at most one open
+/// family beside them.
 ///
 /// Its [`Default`] is what a store holding none of them implies, and a key
-/// outside the set is one the registry neither reads nor removes.
+/// outside both is one the registry neither reads nor removes.
 pub trait Registry: Clone + PartialEq + Default {
     /// One of its settings.
     type Key: Copy + Eq + fmt::Debug + 'static;
@@ -39,8 +51,31 @@ pub trait Registry: Clone + PartialEq + Default {
     /// Bring the record within its bounds once read: by default, it is.
     fn normalise(&mut self) {}
 
+    /// The open family this registry keeps, or `None` for a closed one.
+    const OPEN: Option<OpenFamily<Self::Key>> = None;
+
+    /// Take `text` for `key` of the open family, answering whether the family
+    /// accepts it: a refused value leaves the record as it was.
+    fn read_open(&mut self, key: &str, text: &str) -> bool {
+        let _ = (key, text);
+        false
+    }
+
+    /// Spell every setting of the open family into `document`.
+    fn spell_open(&self, document: &mut Document) {
+        let _ = document;
+    }
+
+    /// Drop every setting of the open family: a document naming the family's
+    /// anchor carries the whole family, so what it leaves out is no longer
+    /// set, a value returned to its default among them.
+    fn clear_open(&mut self) {}
+
     /// The record `source` implies, and every key whose stored value was
     /// refused, its setting left at what the keys read before it imply.
+    ///
+    /// A setting of the open family its reading refuses is passed over: the
+    /// family's own reading decides what it holds.
     fn load<L: Lookup + ?Sized>(source: &L) -> (Self, Vec<Self::Key>) {
         let mut record = Self::default();
         let mut refused = Vec::new();
@@ -49,6 +84,11 @@ pub trait Registry: Clone + PartialEq + Default {
                 if !record.read(key, text) {
                     refused.push(key);
                 }
+            }
+        }
+        if let Some(open) = Self::OPEN {
+            for setting in source.settings_under(open.prefix) {
+                let _ = record.read_open(setting.key, setting.value);
             }
         }
         record.normalise();
@@ -70,6 +110,9 @@ pub trait Registry: Clone + PartialEq + Default {
                 let _ = document.set(Self::name(key), &text);
             }
         }
+        if Self::OPEN.is_some_and(|open| keys.contains(&open.anchor)) {
+            self.spell_open(&mut document);
+        }
         document
     }
 }
@@ -90,6 +133,8 @@ pub enum Refusal<K> {
     InvalidValue(K),
     /// A key of the registry the reading does not admit.
     OutsideGroup(K),
+    /// A key of the open family whose value the family does not accept.
+    InvalidOpenValue(String),
 }
 
 impl<K: fmt::Display> fmt::Display for Refusal<K> {
@@ -100,6 +145,7 @@ impl<K: fmt::Display> fmt::Display for Refusal<K> {
             Self::UnknownKey(key) => write!(f, "unknown settings key `{key}`"),
             Self::InvalidValue(key) => write!(f, "`{key}` is not a value that setting accepts"),
             Self::OutsideGroup(key) => write!(f, "`{key}` is not a setting this request names"),
+            Self::InvalidOpenValue(key) => write!(f, "`{key}` is not a value that setting accepts"),
         }
     }
 }
@@ -124,17 +170,34 @@ pub fn merge_admitting<R: Registry>(
         return Err(Refusal::Unparsed(line.line));
     }
     let mut record = base.clone();
+    if let Some(open) = R::OPEN {
+        let anchor = R::name(open.anchor);
+        if document.settings().any(|setting| setting.key == anchor) {
+            record.clear_open();
+        }
+    }
     for setting in document.settings() {
-        let key = R::KEYS
+        let closed = R::KEYS
             .iter()
             .copied()
-            .find(|&key| R::name(key) == setting.key)
-            .ok_or_else(|| Refusal::UnknownKey(setting.key.into()))?;
-        if !admits(key) {
-            return Err(Refusal::OutsideGroup(key));
+            .find(|&key| R::name(key) == setting.key);
+        if let Some(key) = closed {
+            if !admits(key) {
+                return Err(Refusal::OutsideGroup(key));
+            }
+            if !record.read(key, setting.value) {
+                return Err(Refusal::InvalidValue(key));
+            }
+            continue;
         }
-        if !record.read(key, setting.value) {
-            return Err(Refusal::InvalidValue(key));
+        let open = R::OPEN
+            .filter(|open| setting.key.starts_with(open.prefix))
+            .ok_or_else(|| Refusal::UnknownKey(setting.key.into()))?;
+        if !admits(open.anchor) {
+            return Err(Refusal::OutsideGroup(open.anchor));
+        }
+        if !record.read_open(setting.key, setting.value) {
+            return Err(Refusal::InvalidOpenValue(setting.key.into()));
         }
     }
     record.normalise();

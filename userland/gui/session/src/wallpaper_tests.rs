@@ -738,6 +738,9 @@ fn a_stopped_desk_takes_no_preview() {
     assert!(desk.next_job().is_none());
 }
 
+/// Who wants the slides the tests ask for.
+const WANT: SlideWant = SlideWant { saver: 3, index: 1 };
+
 /// The slide a preparer takes next, failing for any other job.
 fn slide(desk: &mut WallpaperDesk) -> Option<WallpaperSource> {
     match desk.next_job() {
@@ -752,7 +755,7 @@ fn slide(desk: &mut WallpaperDesk) -> Option<WallpaperSource> {
 fn a_wanted_slide_is_prepared_once_and_handed_over_once() {
     let mut desk = WallpaperDesk::new();
     let one = image("/System/Graphics/Wallpapers/one.jpg");
-    desk.want_slide(one.clone());
+    assert!(desk.want_slide(WANT, one.clone()));
     assert!(desk.has_work());
     assert_eq!(slide(&mut desk), Some(one.clone()));
     assert!(
@@ -760,7 +763,9 @@ fn a_wanted_slide_is_prepared_once_and_handed_over_once() {
         "a slide in preparation is not handed out twice"
     );
     assert!(desk.deliver_slide(&one, Ok(screen(&one))));
-    assert!(desk.take_slide().is_some_and(|outcome| outcome.is_ok()));
+    assert!(desk
+        .take_slide()
+        .is_some_and(|(want, outcome)| want == WANT && outcome.is_ok()));
     assert!(desk.take_slide().is_none());
 }
 
@@ -769,7 +774,7 @@ fn the_backdrop_is_prepared_before_a_slide() {
     let mut desk = WallpaperDesk::new();
     let paper = image("/Users/ada/paper.png");
     let one = image("/System/Graphics/Wallpapers/one.jpg");
-    desk.want_slide(one.clone());
+    assert!(desk.want_slide(WANT, one.clone()));
     assert!(matches!(desk.take(&paper), Prepared::Pending));
     assert_eq!(backdrop(&mut desk), Some(paper));
     assert_eq!(slide(&mut desk), Some(one));
@@ -780,7 +785,7 @@ fn the_backdrop_is_prepared_before_a_slide() {
 fn a_slide_for_a_screensaver_that_went_down_is_dropped() {
     let mut desk = WallpaperDesk::new();
     let one = image("/System/Graphics/Wallpapers/one.jpg");
-    desk.want_slide(one.clone());
+    assert!(desk.want_slide(WANT, one.clone()));
     assert_eq!(slide(&mut desk), Some(one.clone()));
     desk.forget_slides();
     assert!(!desk.deliver_slide(&one, Ok(screen(&one))));
@@ -795,9 +800,19 @@ fn a_newer_slide_replaces_one_not_yet_taken() {
         image("/System/Graphics/Wallpapers/one.jpg"),
         image("/System/Graphics/Wallpapers/two.jpg"),
     );
-    desk.want_slide(one);
-    desk.want_slide(two.clone());
+    assert!(desk.want_slide(WANT, one));
+    assert!(desk.want_slide(WANT, two.clone()));
     assert_eq!(slide(&mut desk), Some(two));
+    assert_eq!(slide(&mut desk), None);
+}
+
+/// A desk no preparer serves takes no slide, so the saver that wanted it is
+/// answered at once rather than left waiting.
+#[test]
+fn a_stopped_desk_takes_no_slide() {
+    let mut desk = WallpaperDesk::new();
+    desk.stop();
+    assert!(!desk.want_slide(WANT, image("/System/Graphics/Wallpapers/one.jpg")));
     assert_eq!(slide(&mut desk), None);
 }
 
@@ -810,23 +825,59 @@ fn a_preview_subject_resolves_only_to_a_shipped_picture() {
         category: String::from("Space"),
         file: String::from("low-orbit.jpg"),
     }];
+    let savers = crate::saver::SaverCatalog::of(alloc::vec![crate::saver::Saver {
+        choice: String::from("os.tairix.saver.waves"),
+        id: tairix_abi::BundleId::new("os.tairix.saver.waves").ok(),
+        bundle: String::from("/System/Screensavers/Waves.app"),
+        origin: tairix_abi::window_ipc::SaverOrigin::System,
+        title: String::from("Waves"),
+        purpose: String::new(),
+        feeds: tairix_abi::saver::SaverFeeds::NONE,
+        parallel: false,
+        large_memory: false,
+        options: alloc::vec::Vec::new(),
+        standing: tairix_abi::window_ipc::SaverStanding::Offered,
+    }]);
     assert_eq!(
-        preview_source(PreviewSubject::Wallpaper(0), &catalog),
+        preview_source(PreviewSubject::Wallpaper(0), &catalog, &savers),
         Some((
             String::from("/System/Graphics/Wallpapers/Space/low-orbit.jpg"),
             tairix_wallpaper::MAX_WALLPAPER_BYTES
         ))
     );
-    assert_eq!(preview_source(PreviewSubject::Wallpaper(1), &catalog), None);
-    for kind in tairix_wallpaper::ScreensaverKind::ALL {
-        assert_eq!(
-            preview_source(PreviewSubject::Screensaver(kind), &catalog),
-            Some((
-                tairix_wallpaper::preview_path(kind),
-                tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES
-            ))
-        );
-    }
+    assert_eq!(
+        preview_source(PreviewSubject::Wallpaper(1), &catalog, &savers),
+        None
+    );
+    let screensaver = |index| {
+        preview_source(PreviewSubject::Screensaver(index), &catalog, &savers).map(
+            |(path, bound)| {
+                (
+                    path,
+                    bound == tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES,
+                )
+            },
+        )
+    };
+    assert_eq!(
+        screensaver(0),
+        Some((
+            String::from("/System/Graphics/Screensavers/blank.png"),
+            true
+        ))
+    );
+    assert_eq!(
+        screensaver(1),
+        Some((String::from("/System/Graphics/Screensavers/dim.png"), true))
+    );
+    assert_eq!(
+        screensaver(2),
+        Some((
+            String::from("/System/Screensavers/Waves.app/Resources/Preview.png"),
+            true
+        ))
+    );
+    assert_eq!(screensaver(3), None, "past the last the catalogue lists");
     let request = preview(7, 0).request;
     assert_eq!(request.pixel_bytes(), Some(160 * 90 * 4));
 }
@@ -989,7 +1040,7 @@ fn a_slide_forgotten_in_preparation_holds_its_share_until_it_is_done() {
     let mut desk = WallpaperDesk::new();
     desk.set_budget(machine(PREPARATION * 15, PressureBand::Normal, 4));
     let one = image("/System/Graphics/Wallpapers/one.jpg");
-    desk.want_slide(one.clone());
+    assert!(desk.want_slide(WANT, one.clone()));
     assert_eq!(slide(&mut desk), Some(one.clone()));
     desk.forget_slides();
     assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
@@ -1138,4 +1189,49 @@ fn a_preview_is_drawn_into_exactly_its_pixels_or_not_at_all() {
     assert_eq!(drawn(pixels + 64), Some(pixels));
     assert_eq!(drawn(pixels), Some(pixels));
     assert_eq!(drawn(pixels - 1), None);
+}
+
+/// The slides feed offers every shipped picture, or one category's, in the
+/// catalog's order; each is read fitted to fill the screen.
+#[test]
+fn the_slides_feed_offers_the_pictures_of_its_source() {
+    let name = |category: &str, file: &str| tairix_window::WallpaperName {
+        category: String::from(category),
+        file: String::from(file),
+    };
+    let catalog = [
+        name("Space", "orbit.jpg"),
+        name("Nature", "fern.jpg"),
+        name("Space", "nebula.jpg"),
+    ];
+    let mut positions = Vec::new();
+    slide_positions(
+        &catalog,
+        &tairix_wallpaper::SlideSource::Every,
+        &mut positions,
+    )
+    .expect("held");
+    assert_eq!(positions, [0, 1, 2]);
+    let space = tairix_wallpaper::SlideSource::from_value("Space").expect("a category");
+    slide_positions(&catalog, &space, &mut positions).expect("held");
+    assert_eq!(positions, [0, 2]);
+    let gone = tairix_wallpaper::SlideSource::from_value("Animals").expect("a category");
+    slide_positions(&catalog, &gone, &mut positions).expect("held");
+    assert_eq!(
+        positions,
+        [0, 1, 2],
+        "a category the catalog no longer holds offers every picture"
+    );
+
+    let screen = Rect::new(0, 0, 640, 480);
+    let slide = slide_source(&catalog, 2, screen).expect("a slide");
+    assert_eq!(
+        slide.image_path(),
+        Some("/System/Graphics/Wallpapers/Space/nebula.jpg")
+    );
+    assert_eq!(
+        (slide.width, slide.height, slide.fit),
+        (640, 480, WallpaperFit::Fill)
+    );
+    assert!(slide_source(&catalog, 3, screen).is_none());
 }

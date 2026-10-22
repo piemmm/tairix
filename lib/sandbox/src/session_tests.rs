@@ -687,3 +687,37 @@ fn an_oversize_request_declaration_fails_the_worker_loop_before_allocation() {
         ServeEnd::Failed(ProtoError::Oversize)
     );
 }
+
+/// A reaper that records what it was handed.
+#[derive(Default)]
+struct Handed(core::cell::RefCell<Vec<i64>>);
+
+impl crate::session::Reaper for Handed {
+    fn reap(&self, pid: i64) {
+        self.0.borrow_mut().push(pid);
+    }
+}
+
+/// A worker that has gone is answered at once; one still running is handed to
+/// the reaper where there is one, and waited for only where there is none.
+#[test]
+fn a_worker_let_go_is_reaped_where_it_stands() {
+    use tairix_abi::Reap;
+    let reaper = Handed::default();
+    let never = |_| -> Option<i32> { panic!("a reaper takes it") };
+    assert_eq!(
+        crate::let_go(7, Reap::Exited(3), Some(&reaper), never),
+        Some(3)
+    );
+    assert_eq!(crate::let_go(7, Reap::Gone, Some(&reaper), never), None);
+    assert!(reaper.0.borrow().is_empty(), "nothing left to reap");
+    assert_eq!(crate::let_go(7, Reap::Running, Some(&reaper), never), None);
+    assert_eq!(*reaper.0.borrow(), [7], "handed off, not waited for");
+    let waited = core::cell::Cell::new(None);
+    let wait = |pid| {
+        waited.set(Some(pid));
+        Some(137)
+    };
+    assert_eq!(crate::let_go(9, Reap::Running, None, wait), Some(137));
+    assert_eq!(waited.get(), Some(9), "with no reaper it is waited for");
+}

@@ -35,7 +35,6 @@ use crate::apps::AppGroup;
 use crate::config::SWITCHBOARD_RUN_PATH;
 use crate::confirm::Answer;
 use crate::launch::LaunchTable;
-use crate::saver::Screensaver;
 use crate::shell::DesktopShell;
 use crate::switchuser::park_within;
 
@@ -174,10 +173,9 @@ pub struct SwitchboardServe<'a> {
     /// publish answers with so the publisher can authenticate the commands
     /// the session later sends on its mailbox.
     pub self_proc_id: ProcId,
-    /// The screensaver a machine report is handed to.
-    pub saver: &'a mut Screensaver,
-    /// When the call is served, on the monotonic clock.
-    pub now_ns: u64,
+    /// Hands a machine report to the screensaver, answering whether a saver
+    /// up draws it.
+    pub machine: &'a mut dyn FnMut(MachineReport, &mut Compositor) -> bool,
 }
 
 /// Attest the caller against its own Switchboard launch record, decode
@@ -215,15 +213,14 @@ pub fn serve_switchboard_request(
         owner_windows,
         relaunch,
         self_proc_id,
-        saver,
-        now_ns,
+        machine,
     } = serve;
     if !attested_switchboard(launched, caller_pid) {
         return Err(SwitchboardRefusal::Unattested);
     }
     if is_machine_report(request) {
         let report = MachineReport::from_bytes(request).map_err(SwitchboardRefusal::Malformed)?;
-        return Ok(if saver.adopt_machine_report(report, now_ns, compositor) {
+        return Ok(if machine(report, compositor) {
             SwitchboardOutcome::Plain
         } else {
             SwitchboardOutcome::Unwatched

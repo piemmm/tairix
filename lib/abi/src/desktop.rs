@@ -334,117 +334,6 @@ impl Motion {
     }
 }
 
-/// What the screensaver draws over the desktop.
-///
-/// In the ABI because it crosses the window channel — an application asks for
-/// a screensaver's preview picture by naming one — and the desktop's settings
-/// document re-exports this very type, so the value a document stores and the
-/// byte on the wire are one definition.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub enum ScreensaverKind {
-    /// A black screen.
-    Blank,
-    /// The desktop's own backdrop, dimmed, with no window on it.
-    Dim,
-    /// The shipped pictures, one after another.
-    Slideshow,
-    /// The time and date, the account and the machine, moved about the
-    /// screen so no pixel is lit for long.
-    Clock,
-    /// The time and date, still, over a ribbon of orange light that slowly
-    /// undulates beneath them.
-    Ribbon,
-    /// A field of stars flown through, surging into warp and back.
-    Starfield,
-    /// Conway's Game of Life, its colonies coloured by descent and age.
-    Life,
-    /// A ray-traced scene of glass, metal and stone under several lights,
-    /// revealed a pixel at a time in a random order, held, faded out, and
-    /// followed by another.
-    Raytrace,
-    /// A flight over a glowing wireframe grid towards a banded sun setting
-    /// between wireframe mountains, where wireframe craft now and then play
-    /// out retro arcade games: a spaceship passing, a flying saucer darting
-    /// about, tanks trading fire, and riders walling each other in.
-    RetroGames,
-    /// The machine's own readings at a glance — its processors, memory,
-    /// tasks, storage and network, and whatever needs attention — set out to
-    /// be read from across a room.
-    SystemMonitor,
-}
-
-impl ScreensaverKind {
-    /// Every kind, in the order a chooser offers them.
-    pub const ALL: [Self; 10] = [
-        Self::Blank,
-        Self::Dim,
-        Self::Slideshow,
-        Self::Clock,
-        Self::Ribbon,
-        Self::Starfield,
-        Self::Life,
-        Self::Raytrace,
-        Self::RetroGames,
-        Self::SystemMonitor,
-    ];
-
-    /// This kind's wire code: its place in [`ALL`](Self::ALL), counted from
-    /// one so an all-zero frame names no screensaver.
-    #[must_use]
-    pub const fn code(self) -> u8 {
-        match self {
-            Self::Blank => 1,
-            Self::Dim => 2,
-            Self::Slideshow => 3,
-            Self::Clock => 4,
-            Self::Ribbon => 5,
-            Self::Starfield => 6,
-            Self::Life => 7,
-            Self::Raytrace => 8,
-            Self::RetroGames => 9,
-            Self::SystemMonitor => 10,
-        }
-    }
-
-    /// The kind `code` names.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfRange`] for any other value, including the zero a blank
-    /// frame carries.
-    pub fn from_code(code: u16) -> Result<Self, Errno> {
-        Self::ALL
-            .into_iter()
-            .find(|kind| u16::from(kind.code()) == code)
-            .ok_or(Errno::OutOfRange)
-    }
-
-    /// The canonical settings-document spelling, which is also the stem of the
-    /// kind's shipped preview picture.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Blank => "blank",
-            Self::Dim => "dim",
-            Self::Slideshow => "slideshow",
-            Self::Clock => "clock",
-            Self::Ribbon => "ribbon",
-            Self::Starfield => "starfield",
-            Self::Life => "life",
-            Self::Raytrace => "raytrace",
-            Self::RetroGames => "retro_games",
-            Self::SystemMonitor => "system_monitor",
-        }
-    }
-
-    /// Decode a settings-document spelling; `None` for anything outside the
-    /// closed set.
-    #[must_use]
-    pub fn from_value(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
-    }
-}
-
 /// Longest cursor-set name the desktop offers or stores.
 ///
 /// A fixed format bound, not a capacity: a set's name is the directory it
@@ -554,7 +443,7 @@ const TEXT_OFFSET: usize = DOUBLE_CLICK_OFFSET + Duration64::WIRE_LEN;
 
 /// Byte offset of the output's width in an encoded [`DesktopInfo`]; its
 /// height follows it.
-const OUTPUT_OFFSET: usize = TEXT_OFFSET + 2 + FONT_FAMILY_KEY_LEN;
+const OUTPUT_OFFSET: usize = TEXT_OFFSET + TEXT_WIRE_LEN;
 
 /// Byte offset of the machine zone name's length in an encoded
 /// [`DesktopInfo`]; the name follows it.
@@ -806,10 +695,7 @@ impl DesktopInfo {
         out[13] = self.density.code();
         out[14] = self.motion.code();
         out[DOUBLE_CLICK_OFFSET..TEXT_OFFSET].copy_from_slice(&self.double_click.to_le_bytes());
-        if let Some(text) = self.text {
-            put_u16(out, TEXT_OFFSET, text.size_px);
-            out[TEXT_OFFSET + 2..OUTPUT_OFFSET].copy_from_slice(&text.family.to_wire());
-        }
+        encode_text(self.text, &mut out[TEXT_OFFSET..OUTPUT_OFFSET]);
         put_u32(out, OUTPUT_OFFSET, self.output_width_px);
         put_u32(out, OUTPUT_OFFSET + 4, self.output_height_px);
         if let Some(zone) = self.machine_zone {
@@ -886,8 +772,21 @@ impl DesktopInfo {
     }
 }
 
-/// The text a record's last `2 + FONT_FAMILY_KEY_LEN` bytes carry.
-fn decode_text(field: &[u8]) -> Result<Option<DesktopText>, Errno> {
+/// The encoded length of an optional [`DesktopText`]: its size, then its
+/// family.
+pub(crate) const TEXT_WIRE_LEN: usize = 2 + FONT_FAMILY_KEY_LEN;
+
+/// Write `text` into `field`, [`TEXT_WIRE_LEN`] bytes the caller has zeroed;
+/// no choice is all zeroes.
+pub(crate) fn encode_text(text: Option<DesktopText>, field: &mut [u8]) {
+    if let Some(text) = text {
+        put_u16(field, 0, text.size_px);
+        field[2..TEXT_WIRE_LEN].copy_from_slice(&text.family.to_wire());
+    }
+}
+
+/// The text the [`TEXT_WIRE_LEN`] bytes of `field` carry.
+pub(crate) fn decode_text(field: &[u8]) -> Result<Option<DesktopText>, Errno> {
     let size_px = read_u16(field, 0);
     let mut family = [0u8; FONT_FAMILY_KEY_LEN];
     family.copy_from_slice(&field[2..2 + FONT_FAMILY_KEY_LEN]);
@@ -904,9 +803,9 @@ fn decode_text(field: &[u8]) -> Result<Option<DesktopText>, Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Appearance, Contrast, Density, DesktopInfo, DesktopText, Motion, ScreensaverKind,
-        DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET,
-        OUTPUT_OFFSET, REFRESH_OFFSET, TEXT_OFFSET, ZONE_OFFSET,
+        Appearance, Contrast, Density, DesktopInfo, DesktopText, Motion, DOUBLE_CLICK_DEFAULT,
+        DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET, OUTPUT_OFFSET, REFRESH_OFFSET,
+        TEXT_OFFSET, ZONE_OFFSET,
     };
     use crate::driver::display::RefreshRate;
     use crate::font_ipc::FamilyKey;
@@ -1250,20 +1149,5 @@ mod tests {
         // axis's own: a document key decides which set is read.
         assert_eq!(Contrast::from_value("normal"), Some(Contrast::Normal));
         assert_eq!(Density::from_value("normal"), Some(Density::Normal));
-    }
-
-    #[test]
-    fn every_screensaver_has_one_spelling_and_one_code_and_zero_is_none() {
-        for kind in ScreensaverKind::ALL {
-            assert_eq!(ScreensaverKind::from_value(kind.as_str()), Some(kind));
-            assert_eq!(ScreensaverKind::from_code(u16::from(kind.code())), Ok(kind));
-        }
-        let mut codes = ScreensaverKind::ALL.map(ScreensaverKind::code);
-        codes.sort_unstable();
-        assert_eq!(codes, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        assert_eq!(ScreensaverKind::from_code(0), Err(Errno::OutOfRange));
-        assert_eq!(ScreensaverKind::from_code(11), Err(Errno::OutOfRange));
-        assert_eq!(ScreensaverKind::from_value("Blank"), None);
-        assert_eq!(ScreensaverKind::from_value("fireworks"), None);
     }
 }

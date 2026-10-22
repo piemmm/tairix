@@ -1,28 +1,36 @@
-//! What each screensaver scene draws, and the picture that previews each one.
+//! The screensaver as the desktop's settings hold it: which one is chosen,
+//! what the desktop feeds a saver that asks, the values of every saver's own
+//! options, and the pictures that preview the desktop's own two
+//! (`plans/SCREENSAVERS.md`).
 //!
-//! A kind with something to set keeps its options here, and every kind's
-//! options are kept whichever is chosen, so choosing another screensaver and
-//! coming back restores what was set. Each option is a closed value set or a
-//! bounded number, read and rendered on the registry's own discipline
-//! ([`crate::settings`]).
-//!
-//! Every kind also ships one preview picture under [`SCREENSAVER_PREVIEW_STORE`],
-//! named by its document spelling, so a chooser can show what it would pick.
+//! A saver bundle declares its options in its signed manifest. This document
+//! holds only the values the user changed, under `saver.<bundle-id>.<key>`,
+//! and they are read against the declaration of the saver they belong to: a
+//! value a saver no longer accepts reads as its default, so an update to a
+//! saver never resets the desktop.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use tairix_abi::desktop::ScreensaverKind;
-use tairix_abi::time::Duration64;
+use tairix_abi::saver::{ChoiceValue, OptionKey, SaverOption, SaverValue};
+use tairix_abi::switchboard_ipc::TaskOwner;
+use tairix_abi::window_ipc::SaverStanding;
+use tairix_abi::{validate_bundle_id, BundleId};
+use tairix_appconf::{as_bool, as_i64, bool_text, validate_key, Document};
 
 use crate::catalog::is_wallpaper_category_name;
-use crate::input::parse_decimal;
 
-/// Where the OS ships one preview picture per screensaver kind.
+/// Where the OS ships the preview pictures of the desktop's own two
+/// screensavers, Blank and Dim. A saver bundle ships its own
+/// ([`SAVER_PREVIEW_PATH`]).
 pub const SCREENSAVER_PREVIEW_STORE: &str = "/System/Graphics/Screensavers";
 
 /// The file-name suffix of a screensaver's preview picture.
 const PREVIEW_SUFFIX: &str = ".png";
+
+/// Where, inside a saver bundle, its preview picture lives.
+pub const SAVER_PREVIEW_PATH: &str = "Resources/Preview.png";
 
 /// Largest screensaver preview any consumer reads, in bytes.
 ///
@@ -31,28 +39,83 @@ const PREVIEW_SUFFIX: &str = ".png";
 /// decoded, and the image build refuses a shipped preview over it.
 pub const MAX_SCREENSAVER_PREVIEW_BYTES: usize = 1024 * 1024;
 
-/// A screensaver's preview picture's file name: its document spelling, as a
-/// PNG.
-#[must_use]
-pub fn preview_file(kind: ScreensaverKind) -> String {
-    format!("{}{PREVIEW_SUFFIX}", kind.as_str())
+/// The saver chosen until the user chooses another.
+pub const DEFAULT_SAVER: &str = "os.tairix.saver.ribbon";
+
+/// What the screensaver is: one of the desktop's own display states, or a
+/// saver bundle by its identifier.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ScreensaverChoice {
+    /// A black screen.
+    Blank,
+    /// The desktop's own backdrop, dimmed, with no window on it.
+    Dim,
+    /// The saver bundle with this identifier.
+    Saver(BundleId),
 }
 
-/// A screensaver's preview picture's absolute path.
-#[must_use]
-pub fn preview_path(kind: ScreensaverKind) -> String {
-    format!("{SCREENSAVER_PREVIEW_STORE}/{}", preview_file(kind))
-}
+const BLANK: &str = "blank";
+const DIM: &str = "dim";
 
-/// The screensaver a shipped preview file name previews, or `None` for a name
-/// no kind asks for.
-///
-/// The image build applies this to every file it plants, so a preview nothing
-/// would ever show fails the build rather than shipping.
-#[must_use]
-pub fn preview_kind(file: &str) -> Option<ScreensaverKind> {
-    let stem = file.strip_suffix(PREVIEW_SUFFIX)?;
-    ScreensaverKind::from_value(stem)
+impl ScreensaverChoice {
+    /// The desktop's own two, in the order a chooser offers them.
+    pub const DESKTOP: [Self; 2] = [Self::Blank, Self::Dim];
+
+    /// The saver chosen until the user chooses another, [`DEFAULT_SAVER`].
+    #[must_use]
+    pub fn default_saver() -> Self {
+        Self::from_value(DEFAULT_SAVER).unwrap_or(Self::Blank)
+    }
+
+    /// The spelling a settings document holds: `blank`, `dim`, or the bundle's
+    /// identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Blank => BLANK,
+            Self::Dim => DIM,
+            Self::Saver(id) => id.as_str(),
+        }
+    }
+
+    /// Read a spelling; `None` for anything that is neither of the desktop's
+    /// own nor a bundle identifier. `blank` and `dim` always name the
+    /// desktop's own, so no bundle may be chosen under either.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            BLANK => Some(Self::Blank),
+            DIM => Some(Self::Dim),
+            _ => {
+                validate_bundle_id(value).ok()?;
+                BundleId::new(value).ok().map(Self::Saver)
+            }
+        }
+    }
+
+    /// The shipped preview picture of the desktop's own two; `None` for a
+    /// saver, which ships its own.
+    #[must_use]
+    pub fn preview_path(&self) -> Option<String> {
+        match self {
+            Self::Blank | Self::Dim => Some(format!(
+                "{SCREENSAVER_PREVIEW_STORE}/{}{PREVIEW_SUFFIX}",
+                self.as_str()
+            )),
+            Self::Saver(_) => None,
+        }
+    }
+
+    /// The desktop screensaver a shipped preview file name previews, or `None`
+    /// for a name neither asks for.
+    ///
+    /// The image build applies this to every file it plants, so a preview
+    /// nothing would ever show fails the build rather than shipping.
+    #[must_use]
+    pub fn of_preview(file: &str) -> Option<Self> {
+        let choice = Self::from_value(file.strip_suffix(PREVIEW_SUFFIX)?)?;
+        Self::DESKTOP.contains(&choice).then_some(choice)
+    }
 }
 
 /// A wallpaper category's name as a setting holds it: a legal category
@@ -79,44 +142,7 @@ impl WallpaperCategory {
     }
 }
 
-/// The order a slideshow shows its pictures in.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum SlideOrder {
-    /// The store's own order, round and round.
-    #[default]
-    Sequential,
-    /// Every picture once in a shuffled order before any repeats.
-    Shuffled,
-}
-
-impl SlideOrder {
-    /// Every order, in the order a chooser offers them.
-    pub const ALL: [Self; 2] = [Self::Sequential, Self::Shuffled];
-
-    /// The canonical value spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Sequential => "sequential",
-            Self::Shuffled => "shuffled",
-        }
-    }
-
-    /// Decode a value spelling; `None` for anything outside the closed set.
-    #[must_use]
-    pub fn from_value(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|order| order.as_str() == value)
-    }
-}
-
-/// The shortest a slideshow shows one picture.
-pub const SLIDE_INTERVAL_MIN: Duration64 = Duration64::from_secs(5);
-/// The longest a slideshow shows one picture: an hour.
-pub const SLIDE_INTERVAL_MAX: Duration64 = Duration64::from_secs(3_600);
-/// How long a slideshow shows one picture until it is told otherwise.
-pub const SLIDE_INTERVAL_DEFAULT: Duration64 = Duration64::from_secs(30);
-
-/// Which of the shipped pictures a slideshow shows.
+/// Which of the shipped pictures the slides feed offers a saver.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum SlideSource {
     /// Every category's.
@@ -153,458 +179,201 @@ impl SlideSource {
     }
 }
 
-/// The slideshow's options.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SlideshowOptions {
-    /// How long each picture is shown, within
-    /// [`SLIDE_INTERVAL_MIN`]`..=`[`SLIDE_INTERVAL_MAX`].
-    pub interval: Duration64,
-    /// The order the pictures come in.
-    pub order: SlideOrder,
-    /// Which pictures are shown.
-    pub source: SlideSource,
-}
-
-impl Default for SlideshowOptions {
-    fn default() -> Self {
-        Self {
-            interval: SLIDE_INTERVAL_DEFAULT,
-            order: SlideOrder::default(),
-            source: SlideSource::default(),
-        }
-    }
-}
-
-impl SlideshowOptions {
-    /// Decode an interval spelled in whole seconds, within the bounds.
-    pub(crate) fn interval_from_value(value: &str) -> Option<Duration64> {
-        let span = Duration64::from_secs(i64::from(parse_decimal(value)?));
-        (SLIDE_INTERVAL_MIN..=SLIDE_INTERVAL_MAX)
-            .contains(&span)
-            .then_some(span)
-    }
-
-    /// An interval's spelling in whole seconds.
-    pub(crate) fn render_interval(span: Duration64) -> String {
-        format!("{}", span.saturating_total_nanos() / 1_000_000_000)
-    }
-}
-
-/// The clock's options.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ClockOptions {
-    /// Whether the date is shown beneath the time.
-    pub date: bool,
-    /// Whether the account and the machine are named beneath it.
-    pub identity: bool,
-}
-
-impl Default for ClockOptions {
-    fn default() -> Self {
-        Self {
-            date: true,
-            identity: true,
-        }
-    }
-}
-
-/// The minimal clock's options.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct RibbonOptions {
-    /// Whether the date is shown beneath the time.
-    pub date: bool,
-}
-
-impl Default for RibbonOptions {
-    fn default() -> Self {
-        Self { date: true }
-    }
-}
-
-/// How many stars the starfield flies through.
+/// Whose busiest tasks the machine feed names to a saver: a task's name is
+/// text its owner chose, and a saver draws over a locked screen.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum StarDensity {
-    /// Half as many.
-    Sparse,
-    /// The field's own density.
+pub enum TaskNames {
+    /// None: every task is shown by its cost alone.
+    None,
+    /// The user's own; another account's are shown by their cost alone.
     #[default]
-    Normal,
-    /// Twice as many.
-    Dense,
+    Own,
+    /// Every account's.
+    All,
 }
 
-impl StarDensity {
-    /// Every density, sparsest first.
-    pub const ALL: [Self; 3] = [Self::Sparse, Self::Normal, Self::Dense];
+impl TaskNames {
+    /// Every setting, in the order a chooser offers them.
+    pub const ALL: [Self; 3] = [Self::None, Self::Own, Self::All];
 
     /// The canonical value spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Sparse => "sparse",
-            Self::Normal => "normal",
-            Self::Dense => "dense",
+            Self::None => "none",
+            Self::Own => "own",
+            Self::All => "all",
         }
     }
 
     /// Decode a value spelling; `None` for anything outside the closed set.
     #[must_use]
     pub fn from_value(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|density| density.as_str() == value)
+        Self::ALL.into_iter().find(|names| names.as_str() == value)
     }
 
-    /// How many stars this density flies through for every hundred the
-    /// field's own density would.
+    /// Whether a task `owner` holds is named.
     #[must_use]
-    pub const fn percent(self) -> u64 {
+    pub const fn names(self, owner: TaskOwner) -> bool {
         match self {
-            Self::Sparse => 50,
-            Self::Normal => 100,
-            Self::Dense => 200,
+            Self::None => false,
+            Self::Own => matches!(owner, TaskOwner::Own),
+            Self::All => true,
         }
     }
 }
 
-/// The starfield's options.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct StarfieldOptions {
-    /// How many stars there are.
-    pub stars: StarDensity,
-    /// Whether the flight surges into warp and settles back, rather than only
-    /// cruising.
-    pub warp: bool,
-}
-
-impl Default for StarfieldOptions {
-    fn default() -> Self {
-        Self {
-            stars: StarDensity::default(),
-            warp: true,
+/// Why a catalogued saver standing `standing` cannot be chosen, as a reader
+/// is told: what follows "it cannot be chosen:".
+#[must_use]
+pub const fn standing_reason(standing: SaverStanding) -> &'static str {
+    match standing {
+        SaverStanding::Offered => "it can be",
+        SaverStanding::Damaged => {
+            "its manifest cannot be read, or declares what no screensaver may"
         }
-    }
-}
-
-/// How large the Game of Life's cells are drawn.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum CellSize {
-    /// A fine board of many cells.
-    Small,
-    /// The board's own size.
-    #[default]
-    Medium,
-    /// A coarse board of few.
-    Large,
-}
-
-impl CellSize {
-    /// Every size, smallest first.
-    pub const ALL: [Self; 3] = [Self::Small, Self::Medium, Self::Large];
-
-    /// The canonical value spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Small => "small",
-            Self::Medium => "medium",
-            Self::Large => "large",
+        SaverStanding::AsksForAFeed => {
+            "it asks for what only the system's own screensavers are given"
         }
-    }
-
-    /// Decode a value spelling; `None` for anything outside the closed set.
-    #[must_use]
-    pub fn from_value(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|size| size.as_str() == value)
-    }
-
-    /// A cell's side in logical pixels.
-    #[must_use]
-    pub const fn logical_side(self) -> u32 {
-        match self {
-            Self::Small => 4,
-            Self::Medium => 8,
-            Self::Large => 14,
-        }
+        SaverStanding::Duplicate => "another screensaver already has its identifier",
+        SaverStanding::Unkeyable => "its identifier is too long for its settings to be kept",
     }
 }
 
-/// How fast a scene moves, against the pace it keeps of its own.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum Pace {
-    /// Half its own pace.
-    Slow,
-    /// Its own pace.
-    #[default]
-    Normal,
-    /// Half as fast again.
-    Fast,
-}
+/// The key prefix every saver option value is held under.
+pub const SAVER_VALUE_PREFIX: &str = "saver.";
 
-impl Pace {
-    /// Every pace, slowest first.
-    pub const ALL: [Self; 3] = [Self::Slow, Self::Normal, Self::Fast];
+/// Most saver option values a document holds.
+///
+/// A containment bound, not a capacity: a value is held only where it differs
+/// from its saver's default, and a full document makes room by forgetting the
+/// values of savers no longer installed, so this is never reached by a desktop
+/// someone uses; it bounds what a hostile store can make a reader keep.
+pub const SAVER_VALUES_MAX: usize = 256;
 
-    /// The canonical value spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Slow => "slow",
-            Self::Normal => "normal",
-            Self::Fast => "fast",
-        }
-    }
-
-    /// Decode a value spelling; `None` for anything outside the closed set.
-    #[must_use]
-    pub fn from_value(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|pace| pace.as_str() == value)
-    }
-
-    /// How far a scene moves at this pace for every hundred it would at its
-    /// own.
-    #[must_use]
-    pub const fn percent(self) -> u32 {
-        match self {
-            Self::Slow => 50,
-            Self::Normal => 100,
-            Self::Fast => 150,
-        }
-    }
-}
-
-/// The Game of Life's options.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct LifeOptions {
-    /// How large a cell is drawn.
-    pub cells: CellSize,
-    /// How fast the generations pass: ten a second at the normal pace.
-    pub speed: Pace,
-}
-
-/// How much of the machine the ray tracer traces on.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum CpuUse {
-    /// One core, leaving the rest of the machine idle.
-    #[default]
-    Idle,
-    /// Every core, so each picture is finished sooner.
-    Performance,
-}
-
-impl CpuUse {
-    /// Both, the lighter first.
-    pub const ALL: [Self; 2] = [Self::Idle, Self::Performance];
-
-    /// The canonical value spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Performance => "performance",
-        }
-    }
-
-    /// Decode a value spelling; `None` for anything outside the closed set.
-    #[must_use]
-    pub fn from_value(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|cpu| cpu.as_str() == value)
-    }
-}
-
-/// How much the ray tracer's scenes set out.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum SceneDetail {
-    /// Every scene, plainer, in a fraction of the memory.
-    #[default]
-    Simple,
-    /// All the realism the tracer's budget buys, where the memory is free.
-    Maximum,
-}
-
-impl SceneDetail {
-    /// Both, the lighter first.
-    pub const ALL: [Self; 2] = [Self::Simple, Self::Maximum];
-
-    /// The canonical value spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Simple => "simple",
-            Self::Maximum => "maximum",
-        }
-    }
-
-    /// Decode a value spelling; `None` for anything outside the closed set.
-    #[must_use]
-    pub fn from_value(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|detail| detail.as_str() == value)
-    }
-}
-
-/// The ray tracer's options.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct RaytraceOptions {
-    /// How many of the machine's cores it traces on.
-    pub cpu: CpuUse,
-    /// Whether each finished picture is kept, as a PNG in the user's
-    /// `Home/Pictures/Raytracing/`.
-    pub save: bool,
-    /// How much each scene sets out.
-    pub detail: SceneDetail,
-}
-
-/// The retro games' options.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct RetroGamesOptions {
-    /// How fast the flight crosses the grid.
-    pub speed: Pace,
-}
-
-/// The System Monitor's options.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct SystemMonitorOptions {
-    /// Whether the busiest tasks are named. Anyone who can see the screen can
-    /// read them, the lock included, so a board on a shared wall may count
-    /// its tasks without naming any.
-    pub tasks: bool,
-}
-
-impl Default for SystemMonitorOptions {
-    fn default() -> Self {
-        Self { tasks: true }
-    }
-}
-
-/// Every screensaver's options, kept whichever screensaver is chosen.
+/// The option values the user set for their savers: `saver.<bundle-id>.<key>`
+/// to the value's spelling.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ScreensaverOptions {
-    /// The slideshow's.
-    pub slideshow: SlideshowOptions,
-    /// The clock's.
-    pub clock: ClockOptions,
-    /// The minimal clock's.
-    pub ribbon: RibbonOptions,
-    /// The starfield's.
-    pub starfield: StarfieldOptions,
-    /// The Game of Life's.
-    pub life: LifeOptions,
-    /// The ray tracer's.
-    pub raytrace: RaytraceOptions,
-    /// The retro games'.
-    pub retro_games: RetroGamesOptions,
-    /// The System Monitor's.
-    pub system_monitor: SystemMonitorOptions,
+pub struct SaverValues {
+    values: BTreeMap<(BundleId, OptionKey), StoredValue>,
+}
+
+/// A value as the document spells it: a word or a number, judged against an
+/// option only when it is read for one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StoredValue(String);
+
+impl SaverValues {
+    /// The value `saver` holds for `option`: the one set, where the option
+    /// still accepts it, else its default.
+    #[must_use]
+    pub fn value(&self, saver: &BundleId, option: &SaverOption) -> SaverValue {
+        self.values
+            .get(&(*saver, *option.key()))
+            .and_then(|stored| read_value(option, &stored.0))
+            .unwrap_or_else(|| option.default_value())
+    }
+
+    /// Set `saver`'s `option` to `value`, holding nothing where it is the
+    /// default; `false`, changing nothing, for a value the option does not
+    /// accept or past [`SAVER_VALUES_MAX`].
+    pub fn set(&mut self, saver: &BundleId, option: &SaverOption, value: SaverValue) -> bool {
+        if !option.accepts(&value) {
+            return false;
+        }
+        let key = (*saver, *option.key());
+        if value == option.default_value() {
+            self.values.remove(&key);
+            return true;
+        }
+        if !self.values.contains_key(&key) && self.values.len() >= SAVER_VALUES_MAX {
+            return false;
+        }
+        self.values.insert(key, StoredValue(spell_value(&value)));
+        true
+    }
+
+    /// Keep only the values of the savers `holds` keeps.
+    pub fn retain_savers(&mut self, holds: impl Fn(&BundleId) -> bool) {
+        self.values.retain(|(saver, _), _| holds(saver));
+    }
+
+    /// Take the setting `key` = `text`, answering whether it is one a saver's
+    /// value could be: a key `saver.<bundle-id>.<option>` and a word or a
+    /// number.
+    pub(crate) fn read(&mut self, key: &str, text: &str) -> bool {
+        let Some((saver, option)) = split_key(key) else {
+            return false;
+        };
+        let held = self.values.contains_key(&(saver, option));
+        if !is_stored_value(text) || (!held && self.values.len() >= SAVER_VALUES_MAX) {
+            return false;
+        }
+        self.values
+            .insert((saver, option), StoredValue(text.to_string()));
+        true
+    }
+
+    /// Spell every value into `document`.
+    pub(crate) fn spell(&self, document: &mut Document) {
+        for ((saver, option), stored) in &self.values {
+            let _ = document.set(&document_key(saver, option), &stored.0);
+        }
+    }
+}
+
+/// The document key `saver`'s `option` is held under.
+#[must_use]
+pub fn document_key(saver: &BundleId, option: &OptionKey) -> String {
+    format!("{SAVER_VALUE_PREFIX}{}.{}", saver.as_str(), option.as_str())
+}
+
+/// Whether `saver`'s values can be held at all: its identifier makes a key the
+/// document admits for every option key a saver may declare.
+#[must_use]
+pub fn keeps_values_of(saver: &BundleId) -> bool {
+    let longest = "a".repeat(tairix_abi::saver::SAVER_OPTION_KEY_MAX);
+    OptionKey::new(&longest).is_ok_and(|option| validate_key(&document_key(saver, &option)).is_ok())
+}
+
+fn split_key(key: &str) -> Option<(BundleId, OptionKey)> {
+    let (saver, option) = key.strip_prefix(SAVER_VALUE_PREFIX)?.rsplit_once('.')?;
+    validate_bundle_id(saver).ok()?;
+    Some((BundleId::new(saver).ok()?, OptionKey::new(option).ok()?))
+}
+
+fn is_stored_value(text: &str) -> bool {
+    ChoiceValue::new(text).is_ok() || text.parse::<i32>().is_ok()
+}
+
+/// The value `text` spells for `option`, as this document spells values:
+/// a boolean for a switch, a choice's own word, a decimal number for a range.
+#[must_use]
+pub fn read_value(option: &SaverOption, text: &str) -> Option<SaverValue> {
+    let value = match option.kind() {
+        tairix_abi::saver::SaverOptionKind::Switch { .. } => {
+            SaverValue::Switch(as_bool(text).ok()?)
+        }
+        tairix_abi::saver::SaverOptionKind::Choice { .. } => {
+            SaverValue::Choice(ChoiceValue::new(text).ok()?)
+        }
+        tairix_abi::saver::SaverOptionKind::Range { .. } => {
+            SaverValue::Range(i32::try_from(as_i64(text).ok()?).ok()?)
+        }
+    };
+    option.accepts(&value).then_some(value)
+}
+
+/// `value` as this document spells it.
+#[must_use]
+pub fn spell_value(value: &SaverValue) -> String {
+    match value {
+        SaverValue::Switch(on) => bool_text(*on).to_string(),
+        SaverValue::Choice(word) => word.as_str().to_string(),
+        SaverValue::Range(number) => format!("{number}"),
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use tairix_abi::desktop::ScreensaverKind;
-    use tairix_abi::time::Duration64;
-
-    use super::{
-        preview_file, preview_kind, preview_path, CellSize, CpuUse, Pace, SceneDetail, SlideOrder,
-        SlideSource, SlideshowOptions, StarDensity, WallpaperCategory, SCREENSAVER_PREVIEW_STORE,
-    };
-
-    #[test]
-    fn every_kind_names_one_preview_and_every_preview_one_kind() {
-        for kind in ScreensaverKind::ALL {
-            assert_eq!(preview_kind(&preview_file(kind)), Some(kind));
-            assert_eq!(
-                preview_path(kind),
-                alloc::format!("{SCREENSAVER_PREVIEW_STORE}/{}.png", kind.as_str())
-            );
-        }
-        for stray in [
-            "starfield.jpg",
-            "Starfield.png",
-            "fireworks.png",
-            ".png",
-            "life",
-        ] {
-            assert_eq!(preview_kind(stray), None, "{stray}");
-        }
-    }
-
-    #[test]
-    fn an_interval_is_whole_seconds_within_its_bounds() {
-        assert_eq!(
-            SlideshowOptions::interval_from_value("5"),
-            Some(Duration64::from_secs(5))
-        );
-        assert_eq!(
-            SlideshowOptions::interval_from_value("3600"),
-            Some(Duration64::from_secs(3_600))
-        );
-        for bad in ["4", "3601", "30s", "-30", "", "1e3"] {
-            assert_eq!(SlideshowOptions::interval_from_value(bad), None, "{bad:?}");
-        }
-        let span = Duration64::from_secs(90);
-        assert_eq!(
-            SlideshowOptions::interval_from_value(&SlideshowOptions::render_interval(span)),
-            Some(span)
-        );
-    }
-
-    #[test]
-    fn a_source_is_empty_for_every_category_or_a_plain_name() {
-        assert_eq!(SlideSource::from_value(""), Some(SlideSource::Every));
-        let nature = WallpaperCategory::new("Nature").expect("a category");
-        assert_eq!(
-            SlideSource::from_value("Nature"),
-            Some(SlideSource::Category(nature.clone()))
-        );
-        assert_eq!(SlideSource::Category(nature).as_str(), "Nature");
-        assert_eq!(SlideSource::Every.as_str(), "");
-        for bad in ["a/b", "..", "."] {
-            assert_eq!(SlideSource::from_value(bad), None, "{bad:?}");
-        }
-        let long: alloc::string::String =
-            core::iter::repeat_n('a', tairix_abi::FS_NAME_MAX + 1).collect();
-        assert_eq!(WallpaperCategory::new(&long), None);
-    }
-
-    #[test]
-    fn every_closed_option_has_one_spelling() {
-        for order in SlideOrder::ALL {
-            assert_eq!(SlideOrder::from_value(order.as_str()), Some(order));
-        }
-        for density in StarDensity::ALL {
-            assert_eq!(StarDensity::from_value(density.as_str()), Some(density));
-        }
-        for size in CellSize::ALL {
-            assert_eq!(CellSize::from_value(size.as_str()), Some(size));
-        }
-        for pace in Pace::ALL {
-            assert_eq!(Pace::from_value(pace.as_str()), Some(pace));
-        }
-        for cpu in CpuUse::ALL {
-            assert_eq!(CpuUse::from_value(cpu.as_str()), Some(cpu));
-        }
-        for detail in SceneDetail::ALL {
-            assert_eq!(SceneDetail::from_value(detail.as_str()), Some(detail));
-        }
-        assert_eq!(SlideOrder::from_value("random"), None);
-        assert_eq!(StarDensity::from_value("Normal"), None);
-        assert_eq!(CpuUse::from_value("Performance"), None);
-        assert_eq!(SceneDetail::from_value("Maximum"), None);
-    }
-
-    #[test]
-    fn each_step_of_a_ladder_differs_from_the_next() {
-        let percents = StarDensity::ALL.map(StarDensity::percent);
-        assert!(percents.windows(2).all(|pair| pair[0] < pair[1]));
-        let sides = CellSize::ALL.map(CellSize::logical_side);
-        assert!(sides.windows(2).all(|pair| pair[0] < pair[1]));
-        let paces = Pace::ALL.map(Pace::percent);
-        assert!(paces.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(
-            Pace::Normal.percent(),
-            100,
-            "the normal pace is the scene's own"
-        );
-    }
-}
+#[path = "saver_tests.rs"]
+mod tests;

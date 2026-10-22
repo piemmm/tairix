@@ -1,7 +1,7 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use super::{merge_admitting, overwrite, Keys, Live, Refusal, Registry, MOST_KEYS};
+use super::{merge_admitting, overwrite, Keys, Live, OpenFamily, Refusal, Registry, MOST_KEYS};
 use crate::{as_u32, ConfError, Document};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -255,4 +255,97 @@ impl Registry for Widest {
 fn the_widest_registry_fills_its_set() {
     assert!(WIDEST.iter().all(|&key| Keys::<Widest>::ALL.contains(key)));
     assert_eq!(Keys::<Widest>::ALL, Keys::of(63).union(Keys::<Widest>::ALL));
+}
+
+/// A closed key and an open family of `tag.<name>` numbers travelling with it.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Tagged {
+    size: u32,
+    tags: alloc::collections::BTreeMap<String, u32>,
+}
+
+impl Registry for Tagged {
+    type Key = Key;
+    const KEYS: &'static [Key] = &[Key::Size, Key::Note];
+    const OPEN: Option<OpenFamily<Key>> = Some(OpenFamily {
+        prefix: "tag.",
+        anchor: Key::Size,
+    });
+
+    fn name(key: Key) -> &'static str {
+        Fixture::name(key)
+    }
+
+    fn read(&mut self, key: Key, text: &str) -> bool {
+        match (key, as_u32(text)) {
+            (Key::Size, Ok(size)) => self.size = size,
+            (_, Ok(_)) => {}
+            (_, Err(_)) => return false,
+        }
+        true
+    }
+
+    fn spell(&self, key: Key, out: &mut String) -> bool {
+        key == Key::Size && write!(out, "{}", self.size).is_ok()
+    }
+
+    fn read_open(&mut self, key: &str, text: &str) -> bool {
+        match as_u32(text) {
+            Ok(value) => {
+                self.tags.insert(String::from(key), value);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn spell_open(&self, document: &mut Document) {
+        for (key, value) in &self.tags {
+            let mut text = String::new();
+            let _ = write!(text, "{value}");
+            let _ = document.set(key, &text);
+        }
+    }
+}
+
+#[test]
+fn an_open_family_is_read_spelled_and_merged_through_its_anchor() {
+    let document = Document::parse("size = 3\ntag.a = 1\ntag.b = x\ntag.a = 2\nother = 9\n")
+        .expect("a document");
+    let (record, refused) = Tagged::load(&document);
+    assert!(refused.is_empty());
+    assert_eq!(record.size, 3);
+    assert_eq!(
+        record.tags.get("tag.a"),
+        Some(&2),
+        "the last of a repeated key wins"
+    );
+    assert_eq!(
+        record.tags.get("tag.b"),
+        None,
+        "a refused value is passed over"
+    );
+    let spelled = record.document_of(&[Key::Size]);
+    assert_eq!(spelled.get("tag.a"), Some("2"));
+    assert_eq!(
+        record.document_of(&[Key::Note]).get("tag.a"),
+        None,
+        "without its anchor"
+    );
+    let merged = merge_admitting(&record, "tag.c = 7\n", |_| true).expect("admitted");
+    assert_eq!(merged.tags.get("tag.c"), Some(&7));
+    assert_eq!(
+        merge_admitting(&record, "tag.c = 7\n", |key| key != Key::Size),
+        Err(Refusal::OutsideGroup(Key::Size))
+    );
+    assert_eq!(
+        merge_admitting(&record, "tag.c = seven\n", |_| true),
+        Err(Refusal::InvalidOpenValue(String::from("tag.c")))
+    );
+    assert_eq!(
+        merge_admitting(&record, "label.c = 7\n", |_| true),
+        Err(Refusal::UnknownKey(String::from("label.c")))
+    );
+    let closed = merge_admitting(&Fixture::default(), "tag.c = 7\n", |_| true);
+    assert_eq!(closed, Err(Refusal::UnknownKey(String::from("tag.c"))));
 }

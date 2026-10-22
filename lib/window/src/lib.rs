@@ -81,9 +81,9 @@ pub use appbar::{
     QUIT_LABEL, QUIT_ROW,
 };
 pub use client::{
-    damage_in, key_input_event, pinch_input_events, pointer_input_events, pointer_point,
-    present_damage, present_damage_list, scroll_input_events, DeclaredTip, EventDrain, EventError,
-    EventSource, Owed, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
+    key_input_event, pinch_input_events, pointer_input_events, pointer_point, present_damage,
+    present_damage_list, scroll_input_events, DeclaredTip, EventDrain, EventError, EventSource,
+    Owed, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
     EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
@@ -97,6 +97,7 @@ pub use server::{
     PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec, WallpaperName, WindowHost,
     WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
+pub use tairix_display::winframe::damage_in;
 
 #[cfg(test)]
 mod tests;

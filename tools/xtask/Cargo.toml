@@ -433,6 +433,9 @@ tairix-test-menu-qemu-aarch64 = { path = "../../tests/integration/menu_qemu_aarc
 # The elevated Date & Time vertical's shared interaction contract (the
 # application the elevate path starts and the window count the guest latches).
 tairix-test-datetime-elevate-qemu-aarch64 = { path = "../../tests/integration/datetime_elevate_qemu_aarch64", version = "=0.0.0" }
+# The screensaver vertical's contract: the two savers its fixture plants in
+# the account's own store, which its script and its guest name alike.
+tairix-test-screensaver-qemu-aarch64 = { path = "../../tests/integration/screensaver_qemu_aarch64", version = "=0.0.0" }
 # The Settings vertical's shared contract: the bundle the guest attributes the
 # launch to, which a unit test pins to the one the capsule's row starts.
 tairix-test-settings-qemu-aarch64 = { path = "../../tests/integration/settings_qemu_aarch64", version = "=0.0.0" }

@@ -1,0 +1,48 @@
+[package]
+name = "tairix-saver"
+description = "TAIRiX screensaver side: the loop a sandboxed saver bundle runs its scene through — the protocol, the frame region, the font relay, its options and feeds (plans/SCREENSAVERS.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# `program` adds what a saver's `Run` links: its standard streams and its spawn
+# share. The protocol loop itself is host-testable without it.
+[features]
+program = ["tairix-sandbox/program"]
+# A host for a scene's own tests: a start, a setup and a frame's host with no
+# real one behind it. Test scaffolding; no TAIRiX build enables it.
+test-support = []
+
+[lints]
+workspace = true
+
+[dependencies]
+# The protocol, the region and the option values.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The window frame format the region is laid out in.
+tairix-display = { path = "../display", version = "=0.0.0" }
+# The font transport a saver's text is relayed through, and its caches.
+tairix-font = { path = "../font", version = "=0.0.0" }
+# The UI scale and the damage a scene reports.
+tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# The key the font caches are hashed under.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
+# The runner the frame encode is given, and the pool a scene's own work is
+# spread across.
+tairix-parallel = { path = "../parallel", version = "=0.0.0" }
+# The surface a scene draws into.
+tairix-raster = { path = "../raster", version = "=0.0.0" }
+# The pressure band a saver's caches answer to.
+tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
+# The desktop's built-in themes a scene draws its text and timings from.
+tairix-theme = { path = "../theme", version = "=0.0.0" }
+# The process's pressure gauge, its lock and its spawn share.
+tairix-rt = { path = "../rt", version = "=0.0.0" }
+# The length-framed protocol both pipes carry.
+tairix-sandbox = { path = "../sandbox", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }

@@ -176,11 +176,29 @@ pub trait Lookup {
     /// The value of `key` from the highest layer that sets it, or [`None`]
     /// when no layer does.
     fn get(&self, key: &str) -> Option<&str>;
+
+    /// Every setting whose key begins with `prefix`, each key once with the
+    /// value [`Self::get`] answers, in the order the source writes them: what
+    /// a registry's open family is read from.
+    fn settings_under(&self, prefix: &str) -> Vec<Setting<'_>>;
 }
 
 impl Lookup for Document {
     fn get(&self, key: &str) -> Option<&str> {
         Self::get(self, key)
+    }
+
+    fn settings_under(&self, prefix: &str) -> Vec<Setting<'_>> {
+        let mut seen = alloc::collections::BTreeSet::new();
+        self.settings()
+            .filter(|setting| setting.key.starts_with(prefix) && seen.insert(setting.key))
+            .filter_map(|setting| {
+                Some(Setting {
+                    key: setting.key,
+                    value: Self::get(self, setting.key)?,
+                })
+            })
+            .collect()
     }
 }
 

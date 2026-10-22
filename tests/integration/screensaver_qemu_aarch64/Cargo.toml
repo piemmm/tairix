@@ -1,0 +1,52 @@
+[package]
+name = "tairix-test-screensaver-qemu-aarch64"
+description = "QEMU integration test: boot the graphical desktop on the aarch64 virt board with two screensavers in the account's own store, choose and preview the one asking for no feed through Settings, dismiss it with a key, and hold the run to the one asking for the machine feed being refused and never loaded"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The vertical's shared contract (src/lib.rs): the two savers the host plants
+# and the desktop records the guest latches, read by both the freestanding
+# PASS gate and the host runner's script.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tairix-test-screensaver-qemu-aarch64"
+path = "src/main.rs"
+
+[dependencies]
+# The user screensaver store's spelling test and the bundle suffix, which the
+# contract names a planted saver by.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+# Freestanding "boot the production aarch64 desktop and host a user's saver"
+# integration test: the whole production boot pipeline through
+# `tairix-kernel`'s library half, with one gate in place of both sinks.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+# The load gate's `APP_LOADED` event id, whose `bundle` field names the bundle.
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
+# `fail_point!`, the checked spelling of a finisher's failure code.
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+# The desktop's screensaver records, read here and generated into the
+# contract: linked into the guest, the session would bring the whole desktop
+# into the kernel build.
+tairix-desktop-session = { path = "../../../userland/gui/session", version = "=0.0.0" }
+# What the desktop says when it refuses a saver asking for a feed, generated
+# into the contract so the gate latches that refusal and no other.
+tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

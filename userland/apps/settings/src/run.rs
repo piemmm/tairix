@@ -79,13 +79,13 @@ mod program {
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_raster::Surface;
     use tairix_reclaim::PressureBand;
-    use tairix_settings::SoundReading;
     use tairix_settings::{
         notified, win_sizing, AccountFacts, Authorised, DesktopAnswer, DesktopAsk, DesktopAsks,
         MachineFacts, OwnAccount, Pane, PictureWanted, Renders, Roster, Round, Shell, ShellOutcome,
         VolumeReading, MOST_OUTSTANDING, WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_settings::{EffectsAsk, EffectsAsks, EffectsReading, EffectsTrip};
+    use tairix_settings::{SaverEntry, SoundReading};
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_tz::ZoneInfo;
@@ -623,6 +623,7 @@ mod program {
                         .map(|answered| notified(&answered)),
                 )
             }
+            DesktopAsk::Savers => DesktopAnswer::Savers(fetch_savers(client)),
             DesktopAsk::Authorise { window_id, task } => {
                 DesktopAnswer::Authorise(client.authorise(*window_id, task))
             }
@@ -634,6 +635,46 @@ mod program {
                 output: client.take_authorised_output(*window_id),
             },
         }
+    }
+
+    /// The most times one listing of the screensavers starts over because the
+    /// list moved while it was read.
+    const SAVER_RELISTS: usize = 2;
+
+    /// The screensavers the desktop offers, one round trip apiece: the
+    /// session answers from the catalogue it holds.
+    ///
+    /// Each entry is whole, but the catalogue may move between two of them,
+    /// so a listing whose total moved, or that ran past a catalogue that
+    /// shrank, starts over, a bounded number of times; one still moving after
+    /// the last is refused rather than kept half old.
+    fn fetch_savers(
+        client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+    ) -> Result<Vec<SaverEntry>, Errno> {
+        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_SCREENSAVER_REPLY_MAX];
+        let mut savers: Vec<SaverEntry> = Vec::new();
+        for _ in 0..=SAVER_RELISTS {
+            savers.clear();
+            let (mut total, mut index, mut moved) = (None, 0u16, false);
+            while total.is_none_or(|total| index < total) {
+                let (now, entry) = match client.screensaver(index, &mut frame) {
+                    Ok(answered) => answered,
+                    Err(Errno::NotFound) if index > 0 => {
+                        moved = true;
+                        break;
+                    }
+                    Err(errno) => return Err(errno),
+                };
+                moved |= total.is_some_and(|total| total != now);
+                total = Some(now);
+                SaverEntry::list(&mut savers, index, &entry);
+                index = index.saturating_add(1);
+            }
+            if !moved {
+                return Ok(savers);
+            }
+        }
+        Err(Errno::Interrupted)
     }
 
     /// What the desktop said a system task came to, as the pane adopts it, or
@@ -697,6 +738,12 @@ mod program {
         /// come on show, answering whether an answer landed at once.
         fn request_sources(&mut self, shell: &mut Shell) -> bool {
             shell.notify_sources_wanted() && self.submit(shell, &DesktopAsk::NotifySources)
+        }
+
+        /// Ask which screensavers the desktop offers if their pane wants
+        /// them, answering whether an answer landed at once.
+        fn request_savers(&mut self, shell: &mut Shell) -> bool {
+            shell.savers_wanted() && self.submit(shell, &DesktopAsk::Savers)
         }
 
         /// Adopt every answer that has landed, answering whether any had.
@@ -1473,6 +1520,12 @@ mod program {
             )),
             // The desktop queued at least one target for this instance.
             WindowEvent::OpenRequested => Acted::Opened,
+            // What moved while the reader was elsewhere is asked for again;
+            // the answer redraws whatever it changes.
+            WindowEvent::Focus { focused: true, .. } => {
+                shell.focused();
+                Acted::Idle
+            }
             WindowEvent::Authorised { outcome, .. } => Acted::Authorised(*outcome),
             // A picture a pane asked for. Answered by the loop, which holds
             // the region it was rendered into.
@@ -1509,7 +1562,7 @@ mod program {
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::Pinch { .. }
             | WindowEvent::Key { .. }
-            | WindowEvent::Focus { .. }
+            | WindowEvent::Focus { focused: false, .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }
@@ -2251,6 +2304,7 @@ mod program {
             desks.network.request(shell),
             desks.accounts.request(shell),
             desks.desktop.request_sources(shell),
+            desks.desktop.request_savers(shell),
             desks.sound.request(shell),
             desks.effects.request(shell),
         ];

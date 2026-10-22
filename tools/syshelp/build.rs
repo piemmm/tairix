@@ -131,9 +131,13 @@ const ASSET_FAMILIES: &[AssetFamily] = &[
         categorise: None,
         family_variant: "ScreensaverPreview",
         max_bytes: tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES,
-        // A preview identifies as the screensaver it shows, so two files for
-        // one kind trip the duplicate-id check.
-        identify: |name| tairix_wallpaper::preview_kind(name).map(|kind| kind.as_str().to_string()),
+        // A preview identifies as the desktop screensaver it shows, so two
+        // files for one trip the duplicate-id check. A saver bundle ships its
+        // own preview in its Resources/.
+        identify: |name| {
+            tairix_wallpaper::ScreensaverChoice::of_preview(name)
+                .map(|choice| choice.as_str().to_string())
+        },
         verify: None,
     },
     AssetFamily {

@@ -14,9 +14,9 @@
 //! nothing. Once memory is short only the pictures on screen are kept.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::window_ipc::SaverOrigin;
 use tairix_abi::window_ipc::{PreviewSubject, WINDOW_PREVIEW_MAX_SIDE};
 use tairix_controls::{
     Aspect, FieldGroup, FieldLayout, PictureChoice, PictureItem, PictureSection, Swatch,
@@ -26,9 +26,11 @@ use tairix_icon::IconKind;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{
-    Backdrop, CatalogItem, DesktopSettings, ScreensaverKind, SettingsKey, WallpaperChoice,
+    Backdrop, CatalogItem, DesktopSettings, ScreensaverChoice, SettingsKey, WallpaperChoice,
     WallpaperPath,
 };
+
+use crate::saver::SaverEntry;
 
 /// The label of the choice that shows no picture, only the backdrop colour.
 pub const NONE_LABEL: &str = "No picture";
@@ -48,7 +50,7 @@ impl Chooser {
     pub const fn key(self) -> SettingsKey {
         match self {
             Self::Wallpaper => SettingsKey::Wallpaper,
-            Self::Screensaver => SettingsKey::ScreensaverKind,
+            Self::Screensaver => SettingsKey::ScreensaverSaver,
         }
     }
 
@@ -62,12 +64,12 @@ impl Chooser {
     }
 
     /// The pictures this chooser offers a desktop showing `settings`, the
-    /// shipped ones being `catalog`, with the one in effect chosen, and what
-    /// each of them sets and what renders it.
+    /// shipped ones being `catalog` and the screensavers `savers`, with the
+    /// one in effect chosen, and what each of them sets and what renders it.
     pub(crate) fn offer(
         self,
         settings: &DesktopSettings,
-        catalog: &[CatalogItem],
+        (catalog, savers): (&[CatalogItem], &[SaverEntry]),
     ) -> (PictureChoice, Vec<Offered>) {
         match self {
             Self::Wallpaper => {
@@ -112,26 +114,38 @@ impl Chooser {
                 )
             }
             Self::Screensaver => {
-                let items = ScreensaverKind::ALL
+                // Only a saver that can be chosen is a picture to choose; the
+                // pane says why each other one cannot be. The user's own come
+                // after the desktop's and the system's, under a title of their
+                // own.
+                let (own, shipped): (Vec<&SaverEntry>, Vec<&SaverEntry>) = savers
                     .iter()
-                    .map(|kind| PictureItem::new(screensaver_label(*kind), IconKind::Screensaver))
-                    .collect();
-                let selected = ScreensaverKind::ALL
+                    .filter(|saver| saver.offered())
+                    .partition(|saver| saver.origin == SaverOrigin::User);
+                let item = |saver: &&SaverEntry| {
+                    PictureItem::new(saver.title.as_str(), IconKind::Screensaver)
+                };
+                let mut sections =
+                    alloc::vec![PictureSection::untitled(shipped.iter().map(item).collect())];
+                if !own.is_empty() {
+                    sections.push(PictureSection::new(
+                        OWN_SAVERS_TITLE,
+                        own.iter().map(item).collect(),
+                    ));
+                }
+                let ordered: Vec<&SaverEntry> = shipped.into_iter().chain(own).collect();
+                let selected = ordered
                     .iter()
-                    .position(|kind| *kind == settings.screensaver);
-                let offered = ScreensaverKind::ALL
+                    .position(|saver| saver.choice == settings.screensaver);
+                let offered = ordered
                     .iter()
-                    .map(|kind| Offered {
-                        offer: Offer::Screensaver(*kind),
-                        subject: Some(PreviewSubject::Screensaver(*kind)),
+                    .map(|saver| Offered {
+                        offer: Offer::Screensaver(saver.choice),
+                        subject: Some(PreviewSubject::Screensaver(saver.index)),
                     })
                     .collect();
                 (
-                    PictureChoice::new(
-                        Aspect::WIDESCREEN,
-                        [PictureSection::untitled(items)].into(),
-                    )
-                    .with_selected(selected),
+                    PictureChoice::new(Aspect::WIDESCREEN, sections).with_selected(selected),
                     offered,
                 )
             }
@@ -147,13 +161,16 @@ pub(crate) const fn backdrop_swatch(backdrop: Backdrop) -> Swatch {
     }
 }
 
+/// The title the user's own screensavers are listed under.
+pub const OWN_SAVERS_TITLE: &str = "Your screensavers";
+
 /// What choosing one of a chooser's pictures sets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Offer {
     /// The desktop picture, or none.
     Wallpaper(WallpaperChoice),
     /// The screensaver.
-    Screensaver(ScreensaverKind),
+    Screensaver(ScreensaverChoice),
 }
 
 impl Offer {
@@ -161,7 +178,7 @@ impl Offer {
     pub(crate) fn apply(&self, settings: &mut DesktopSettings) {
         match self {
             Self::Wallpaper(choice) => settings.wallpaper = choice.clone(),
-            Self::Screensaver(kind) => settings.screensaver = *kind,
+            Self::Screensaver(choice) => settings.screensaver = *choice,
         }
     }
 }
@@ -172,22 +189,6 @@ impl Offer {
 pub(crate) struct Offered {
     pub(crate) offer: Offer,
     pub(crate) subject: Option<PreviewSubject>,
-}
-
-/// The display label of a screensaver.
-pub(crate) const fn screensaver_label(kind: ScreensaverKind) -> &'static str {
-    match kind {
-        ScreensaverKind::Blank => "Black",
-        ScreensaverKind::Dim => "Dimmed desktop",
-        ScreensaverKind::Slideshow => "Slideshow",
-        ScreensaverKind::Clock => "Clock",
-        ScreensaverKind::Ribbon => "Minimal Clock",
-        ScreensaverKind::Starfield => "Starfield",
-        ScreensaverKind::Life => "Game of Life",
-        ScreensaverKind::Raytrace => "Ray Tracer",
-        ScreensaverKind::RetroGames => "Retro Games",
-        ScreensaverKind::SystemMonitor => "System Monitor",
-    }
 }
 
 /// A run of pictures under `title`, or under none.
@@ -528,6 +529,16 @@ impl Pictures {
         choice.set_art(index, art).then_some((group, index))
     }
 
+    /// The place among `chooser`'s pictures of the one that sets `offer`.
+    pub(crate) fn position(&self, chooser: Chooser, offer: &Offer) -> Option<usize> {
+        self.choosers
+            .iter()
+            .find(|held| held.chooser == chooser)?
+            .pictures
+            .iter()
+            .position(|held| held.offer == *offer)
+    }
+
     /// What choosing `chooser`'s picture `index` sets, as the chooser was
     /// built.
     pub(crate) fn offer(&self, chooser: Chooser, index: usize) -> Option<&Offer> {
@@ -587,11 +598,6 @@ impl Pictures {
         self.unavailable.clear();
         any
     }
-}
-
-/// The caption of the group a screensaver's own options sit in: its name.
-pub(crate) fn options_caption(kind: ScreensaverKind) -> String {
-    screensaver_label(kind).to_uppercase()
 }
 
 #[cfg(test)]

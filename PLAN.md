@@ -209,6 +209,7 @@ plan's ledger. A `blocked` row names its blocker.
 | FIX-DESKTOP-SPEEDUP | Software redraw speed (`plans/FIX-DESKTOP-SPEEDUP.md`) | in progress |
 | CINDER | The desktop companion and `CAP_DESKTOP_LAYER` (`plans/CINDER.md`) | in progress |
 | RAYTRACE | The ray tracer's scenes, renderer and screensaver (`plans/RAYTRACE.md`) | in progress |
+| SCREENSAVERS | Every screensaver a sandboxed bundle: the kind and its two stores, the drawing sandbox, the protocol, `lib/saver`, the session's host and the Settings pane (`plans/SCREENSAVERS.md`) | done |
 
 ### Games
 
@@ -288,7 +289,7 @@ README requires this file to name them:
 | `seconds` | `ping`, `traceroute` |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field, WinterSun's cached chunks and ground |
 | `size` | `du`, `df` |
-| `space` | `lib/noise`, `lib/raytrace`, the desktop session's retro games screensaver |
+| `space` | `lib/noise`, `lib/raytrace`, the Retro Games screensaver |
 
 ## Stage 2 — Kernel core (architecture-neutral)
 
@@ -522,7 +523,8 @@ farmsteads and village plots WinterSun's settlements are to share; its woods,
 the countryside's villages and WinterSun's scatter are all spaced by
 `lib/scatter`'s one keyed priority rule), and
 `lib/ribbon` (the ribbon of light behind the minimal-clock screensaver and the
-login screen). The service enrolment store is `lib/enrolment`,
+login screen), and `lib/saver` (the saver side of every screensaver bundle,
+`plans/SCREENSAVERS.md`). The service enrolment store is `lib/enrolment`,
 shared by `init` and the editor's validation of it.
 
 **User-memory copy path**, cited by the crates it delivered: A,
@@ -933,6 +935,11 @@ plan's own text is corrected when it is next touched, or sooner.
 
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
+
+- **2026-10-21 — §3, §16.2, §16.3, §16.5, §16.8: the `screensaver` kind.**
+  So that a user can install a screensaver, and none can reach anything,
+  every screensaver is a bundle of its own kind, in `/System/Screensavers` or
+  the user's `Library/Screensavers`, run only in the drawing sandbox.
 
 - **2026-10-18 — §3, §16.2: `/System/Defaults` and the settings service.**
   Elevated programs run as the administrator's own account, so nobody could

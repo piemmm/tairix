@@ -14,9 +14,8 @@
 //! ```
 //!
 //! `PANIC_CTX` is the [`PanicContext`] the arch port builds at boot
-//! and stores in a once-initialised `static` (the per-CPU bootstrap
-//! exception called out by — *"No global mutable static
-//! beyond the per-CPU bootstrap area"*).
+//! and stores in a once-initialised `static`: set once at boot and never
+//! mutated, so it is not the global mutable state the kernel forbids.
 //!
 //! [`handle_panic`] does the rest: it logs a structured
 //! [`AuditEvent::Panic`] record with the failing file, line, column,

@@ -17,6 +17,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use tairix_display::winframe::damage_in;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
@@ -25,7 +26,8 @@ use tairix_abi::input::{
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    decode_authorised_output_reply, SystemTask, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+    decode_authorised_output_reply, decode_screensaver_reply, ScreensaverEntry, SystemTask,
+    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX, WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
@@ -287,26 +289,6 @@ impl Owed {
             Repaint::Whole => DamageList::fitted([DamageRect::full(mode)]),
         }
     }
-}
-
-/// The damage rectangle a client-space `rect` names, clipped to `mode`'s
-/// surface, or `None` when nothing of it survives the clip.
-///
-/// An app that presents what it repainted holds that as a [`Rect`] in its own
-/// coordinates — the very rectangles its controls reported — while the protocol
-/// carries a [`DamageRect`] the session refuses outside the surface. Clipping is
-/// therefore the app's own fail-closed step, with one definition here rather
-/// than a copy per app, and `None` says there is nothing to present at all.
-#[must_use]
-pub fn damage_in(mode: &DisplayMode, rect: Rect) -> Option<DamageRect> {
-    let clipped = rect.intersection(&Rect::new(0, 0, mode.width_px, mode.height_px));
-    let (x, y) = clipped.surface_origin()?;
-    Some(DamageRect {
-        x,
-        y,
-        width_px: clipped.width,
-        height_px: clipped.height,
-    })
 }
 
 /// The tooltip a window last asked the session for, so that pointer samples
@@ -1557,6 +1539,26 @@ impl<T: WindowTransport> WindowClient<T> {
         let n = self.call(&WindowRequest::QueryWallpapers { from }, into)?;
         let frame = into.get(..n).ok_or(Errno::LengthOutOfRange)?;
         decode_wallpapers_reply(frame)
+    }
+
+    /// Entry `index` of the screensaver catalogue, with the catalogue's total,
+    /// for the desktop's own Settings application: the desktop's own two, then
+    /// every saver bundle installed for the system and for the user, each with
+    /// whether it can be chosen. `into` is the caller's own reply buffer, and
+    /// the answer borrows from it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for any other caller, [`Errno::NotFound`]
+    /// past the last entry, a transport failure, or a malformed reply.
+    pub fn screensaver<'a>(
+        &mut self,
+        index: u16,
+        into: &'a mut [u8; WINDOW_SCREENSAVER_REPLY_MAX],
+    ) -> Result<(u16, ScreensaverEntry<'a>), Errno> {
+        let n = self.call(&WindowRequest::QueryScreensaver { index }, into)?;
+        let frame = into.get(..n).ok_or(Errno::LengthOutOfRange)?;
+        decode_screensaver_reply(frame)
     }
 
     /// Every cursor set this desktop offers, in the order a chooser lists

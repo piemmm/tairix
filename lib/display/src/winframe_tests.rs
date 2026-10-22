@@ -17,7 +17,7 @@ use tairix_geometry::Rect;
 use tairix_parallel::{JobRunner, Reversed, SERIAL};
 use tairix_raster::{Color, Pixel, Surface};
 
-use super::{decode, decode_list, encode};
+use super::{decode, decode_list, encode, Alpha};
 
 const WIDTH: u32 = 40;
 const HEIGHT: u32 = 24;
@@ -89,7 +89,8 @@ fn round_trip(source: &Surface, mode: &DisplayMode, runner: &dyn JobRunner) -> (
     let mut frame = frame_for(mode);
     encode(source, &mut frame, mode, whole(), runner).expect("encode");
     let mut target = blank();
-    let changed = decode(&frame, &mut target, mode, whole(), runner).expect("decode");
+    let changed =
+        decode(&frame, &mut target, mode, whole(), Alpha::AsSent, runner).expect("decode");
     (target, changed)
 }
 
@@ -108,6 +109,28 @@ fn a_frame_round_trips_every_pixel_in_both_channel_orders() {
     }
 }
 
+/// An opaque decode fills alpha before it compares, so a transparent frame laid
+/// over a transparent surface changes every pixel, and every one reads opaque.
+#[test]
+fn an_opaque_decode_reports_a_transparent_frame_over_a_transparent_surface() {
+    let mode = packed(DisplayFormat::Rgba8888);
+    let frame = frame_for(&mode);
+    let mut kept = blank();
+    let as_sent = decode(&frame, &mut kept, &mode, whole(), Alpha::AsSent, &SERIAL);
+    assert_eq!(as_sent, Ok(Rect::EMPTY), "the same transparent pixels");
+    let mut laid = blank();
+    let opaque = decode(
+        &frame,
+        &mut laid,
+        &mode,
+        whole(),
+        Alpha::Opaque,
+        &splitting(),
+    );
+    assert_eq!(opaque, Ok(Rect::new(0, 0, WIDTH, HEIGHT)));
+    assert!(laid.pixels().iter().all(|pixel| pixel.a == u8::MAX));
+}
+
 #[test]
 fn a_channel_a_client_wrote_above_its_alpha_decodes_clamped_to_it() {
     let mode = packed(DisplayFormat::Rgba8888);
@@ -115,7 +138,7 @@ fn a_channel_a_client_wrote_above_its_alpha_decodes_clamped_to_it() {
     // Brighter than its own coverage, and colour with no coverage at all.
     frame[..8].copy_from_slice(&[200, 90, 255, 100, 255, 255, 255, 0]);
     let mut target = blank();
-    decode(&frame, &mut target, &mode, whole(), &SERIAL).expect("decode");
+    decode(&frame, &mut target, &mode, whole(), Alpha::AsSent, &SERIAL).expect("decode");
     assert_eq!(
         target.get(0, 0),
         Some(Pixel {
@@ -161,7 +184,7 @@ fn a_stride_wider_than_the_row_leaves_its_padding_alone() {
         assert!(padding.iter().all(|&byte| byte == 0), "padding was written");
     }
     let mut target = blank();
-    decode(&frame, &mut target, &mode, whole(), &SERIAL).expect("decode");
+    decode(&frame, &mut target, &mode, whole(), Alpha::AsSent, &SERIAL).expect("decode");
     assert_eq!(target.pixels(), source.pixels());
 }
 
@@ -182,13 +205,21 @@ fn splitting_the_conversion_changes_nothing_it_produces() {
     let mut serial_target = painted();
     serial_target.set(3, 5, Color::rgba(1, 2, 3, 255).premultiply());
     let mut split_target = serial_target.clone();
-    let serial_changed =
-        decode(&serial_frame, &mut serial_target, &mode, whole(), &SERIAL).expect("decode");
+    let serial_changed = decode(
+        &serial_frame,
+        &mut serial_target,
+        &mode,
+        whole(),
+        Alpha::AsSent,
+        &SERIAL,
+    )
+    .expect("decode");
     let split_changed = decode(
         &split_frame,
         &mut split_target,
         &mode,
         whole(),
+        Alpha::AsSent,
         &splitting(),
     )
     .expect("decode");
@@ -205,7 +236,8 @@ fn an_unchanged_frame_reports_no_damage() {
 
     let mut target = painted();
     for runner in [&SERIAL as &dyn JobRunner, &splitting()] {
-        let changed = decode(&frame, &mut target, &mode, whole(), runner).expect("decode");
+        let changed =
+            decode(&frame, &mut target, &mode, whole(), Alpha::AsSent, runner).expect("decode");
         assert_eq!(changed, Rect::EMPTY, "an identical present reported damage");
     }
 }
@@ -224,7 +256,8 @@ fn the_reported_damage_is_the_box_of_the_pixels_that_really_changed() {
     target.set(9, 11, Color::rgba(255, 255, 255, 255).premultiply());
     for runner in [&SERIAL as &dyn JobRunner, &splitting()] {
         let mut probe = target.clone();
-        let changed = decode(&frame, &mut probe, &mode, whole(), runner).expect("decode");
+        let changed =
+            decode(&frame, &mut probe, &mode, whole(), Alpha::AsSent, runner).expect("decode");
         assert_eq!(changed, Rect::new(4, 6, 6, 6));
         assert_eq!(probe.pixels(), source.pixels(), "the frame did not land");
     }
@@ -244,7 +277,15 @@ fn a_sub_rectangle_touches_nothing_outside_itself() {
     let mut frame = frame_for(&mode);
     encode(&source, &mut frame, &mode, damage, &splitting()).expect("encode");
     let mut target = blank();
-    let changed = decode(&frame, &mut target, &mode, damage, &splitting()).expect("decode");
+    let changed = decode(
+        &frame,
+        &mut target,
+        &mode,
+        damage,
+        Alpha::AsSent,
+        &splitting(),
+    )
+    .expect("decode");
     assert_eq!(changed, Rect::new(8, 4, 6, 3));
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
@@ -283,9 +324,17 @@ fn a_list_converts_each_part_and_refused_anywhere_writes_nothing() {
     let mut target = blank();
     let mut reported = Vec::new();
     let both = DamageList::new(&[first, second]).expect("a list");
-    decode_list(&frame, &mut target, &mode, &both, &splitting(), |rect| {
-        reported.push(rect);
-    })
+    decode_list(
+        &frame,
+        &mut target,
+        &mode,
+        &both,
+        Alpha::AsSent,
+        &splitting(),
+        |rect| {
+            reported.push(rect);
+        },
+    )
     .expect("decode");
     assert_eq!(reported, [Rect::new(0, 0, 4, 2), Rect::new(6, 3, 2, 2)]);
 
@@ -304,6 +353,7 @@ fn a_list_converts_each_part_and_refused_anywhere_writes_nothing() {
             &mut untouched,
             &mode,
             &refused,
+            Alpha::AsSent,
             &splitting(),
             |rect| {
                 reported.push(rect);
@@ -363,7 +413,14 @@ fn a_refused_geometry_writes_nothing() {
 
         let mut target = blank();
         assert_eq!(
-            decode(&frame, &mut target, &mode, damage, &splitting()),
+            decode(
+                &frame,
+                &mut target,
+                &mode,
+                damage,
+                Alpha::AsSent,
+                &splitting()
+            ),
             Err(Errno::OutOfRange)
         );
         assert_eq!(target.pixels(), blank().pixels(), "a refusal wrote pixels");

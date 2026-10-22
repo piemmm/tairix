@@ -301,18 +301,21 @@ pub struct Service {
     /// environment: what lets a task loaded from this user's own program store
     /// draw that bundle's icon.
     home: Option<alloc::string::String>,
+    /// The uid this service runs as, attested by the kernel: whose tasks a
+    /// machine report calls the user's own.
+    uid: Option<u32>,
     panel: Panel,
     next_sample_ns: u64,
 }
 
 impl Service {
-    /// A fresh service owned by the process `self_pid`, sampling within
-    /// `scopes`, with a closed panel whose model already reflects what
-    /// `authority` allows.
+    /// A fresh service owned by the process `self_pid` running as `uid`,
+    /// sampling within `scopes`, with a closed panel whose model already
+    /// reflects what `authority` allows.
     #[must_use]
     pub fn new(
         self_pid: u64,
-        home: Option<alloc::string::String>,
+        (home, uid): (Option<alloc::string::String>, Option<u32>),
         scopes: ScopeVerdicts,
         authority: &dyn CapabilityQuery,
     ) -> Self {
@@ -342,6 +345,7 @@ impl Service {
             pending_power: None,
             bundles,
             home,
+            uid,
             next_sample_ns: 0,
         }
     }
@@ -576,6 +580,7 @@ impl Service {
             &self.last_sample,
             &self.meters,
             &self.panel.session_report().seat,
+            self.uid,
         );
         match host.publish_machine(&report) {
             Ok(()) | Err(Errno::WouldBlock) => {}

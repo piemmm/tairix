@@ -3955,6 +3955,9 @@ pub const PRESSURE_BAND_NAMES: [&str; PRESSURE_BAND_COUNT] =
 pub struct MemoryBand(u8);
 
 impl MemoryBand {
+    /// The shallowest band: no pressure.
+    pub const NORMAL: Self = Self(0);
+
     /// The band at `depth`.
     ///
     /// # Errors

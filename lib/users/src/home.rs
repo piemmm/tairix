@@ -6,7 +6,8 @@
 //! get different homes.
 
 use tairix_abi::driver::filesystem::{NodeId, NodeSecurity};
-use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_SUBDIRS};
+use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_SUBDIRS, HOME_LIBRARY_DIR};
+use tairix_abi::HOME_SCREENSAVER_STORE_DIR;
 
 use crate::policy::{
     appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS, HOME_MODE,
@@ -15,8 +16,9 @@ use crate::policy::{
 use crate::shape::{ensure_dir, ShapeError, ShapeTree};
 
 /// Give `home`, owned by `(uid, gid)`, the fixed shape: every
-/// [`HOME_SUBDIRS`] folder, and every [`HOME_FILES_SUBDIRS`] folder inside
-/// its `Home` folder, each created owner-only for the account.
+/// [`HOME_SUBDIRS`] folder, every [`HOME_FILES_SUBDIRS`] folder inside its
+/// `Home` folder, and the user's own screensaver store inside its `Library`,
+/// each created owner-only for the account.
 ///
 /// A name already present keeps whatever it holds — the account's own data is
 /// never rewritten — and a non-directory there is left alone rather than
@@ -56,6 +58,9 @@ where
         if appdata {
             tree.stamp(node, transit)?;
             ensure_appdata_root(tree, node)?;
+        }
+        if name == HOME_LIBRARY_DIR {
+            ensure_dir(tree, node, HOME_SCREENSAVER_STORE_DIR, private)?;
         } else if name == HOME_FILES_DIR {
             for child in HOME_FILES_SUBDIRS {
                 ensure_dir(tree, node, child, private)?;

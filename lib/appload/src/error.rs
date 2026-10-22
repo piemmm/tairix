@@ -33,6 +33,13 @@ pub enum AppError {
     /// The bundle was launched from a store its signed kind does not run from
     /// ([`tairix_abi::ProgramKind::launchable_from`]).
     Misplaced,
+    /// A screensaver was asked for on a spawn that is not a drawing sandbox,
+    /// where it would run with its spawner's authority, or another kind on one
+    /// that is: a drawing spawn runs savers alone.
+    DrawingOnly,
+    /// A saver in a user's own store declares a privileged feed, which only a
+    /// system-signed saver is given.
+    PrivilegedFeed,
     /// A shared-library reference violated the dynamic-loader policy.
     Library(LibraryError),
     /// The entry-point `Run` binary is not a valid `rxe` load image, or its
@@ -52,6 +59,12 @@ impl core::fmt::Display for AppError {
             Self::ContentHashMismatch => f.write_str("bundle contents do not match signed hash"),
             Self::Misplaced => {
                 f.write_str("bundle is not a program of the store it was launched from")
+            }
+            Self::DrawingOnly => {
+                f.write_str("a screensaver runs only in the drawing sandbox, and nothing else does")
+            }
+            Self::PrivilegedFeed => {
+                f.write_str("a screensaver of your own may not ask for a system feed")
             }
             Self::Library(e) => write!(f, "shared-library reference refused: {e}"),
             Self::RunImage(e) => write!(f, "entry-point binary refused: {e}"),

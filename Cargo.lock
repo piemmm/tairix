@@ -1544,10 +1544,7 @@ dependencies = [
  "tairix-procinfo",
  "tairix-proglib",
  "tairix-raster",
- "tairix-raytrace",
  "tairix-reclaim",
- "tairix-ribbon",
- "tairix-rng",
  "tairix-rt",
  "tairix-sandbox",
  "tairix-soundtheme",
@@ -1559,7 +1556,6 @@ dependencies = [
  "tairix-tz",
  "tairix-users",
  "tairix-util",
- "tairix-vt",
  "tairix-wallpaper",
  "tairix-window",
  "tairix-wm",
@@ -4005,6 +4001,150 @@ dependencies = [
  "tairix-rt",
  "tairix-theme",
  "tairix-window",
+]
+
+[[package]]
+name = "tairix-saver"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-display",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-hash",
+ "tairix-parallel",
+ "tairix-raster",
+ "tairix-reclaim",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-theme",
+]
+
+[[package]]
+name = "tairix-saver-clock"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-raster",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-saver",
+ "tairix-theme",
+]
+
+[[package]]
+name = "tairix-saver-life"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-geometry",
+ "tairix-raster",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-saver",
+ "tairix-theme",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-saver-raytrace"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-parallel",
+ "tairix-raster",
+ "tairix-raytrace",
+ "tairix-reclaim",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-saver",
+ "tairix-theme",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-saver-retrogames"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-geometry",
+ "tairix-inline",
+ "tairix-parallel",
+ "tairix-raster",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-saver",
+ "tairix-theme",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-saver-ribbon"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-raster",
+ "tairix-ribbon",
+ "tairix-rt",
+ "tairix-saver",
+ "tairix-theme",
+]
+
+[[package]]
+name = "tairix-saver-slideshow"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-geometry",
+ "tairix-raster",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-saver",
+]
+
+[[package]]
+name = "tairix-saver-starfield"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-geometry",
+ "tairix-raster",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-saver",
+ "tairix-theme",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-saver-systemmonitor"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-colour",
+ "tairix-controls",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-saver",
+ "tairix-theme",
 ]
 
 [[package]]
@@ -6739,6 +6879,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-screensaver-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-desktop-session",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-wallpaper",
+]
+
+[[package]]
 name = "tairix-test-service-ceiling"
 version = "0.0.0"
 dependencies = [
@@ -8653,6 +8810,7 @@ dependencies = [
  "tairix-test-netstack-wire",
  "tairix-test-rng-soak",
  "tairix-test-rtc-fixture",
+ "tairix-test-screensaver-qemu-aarch64",
  "tairix-test-settings-qemu-aarch64",
  "tairix-test-stalltrace",
  "tairix-test-svgtext",

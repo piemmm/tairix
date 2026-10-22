@@ -65,8 +65,8 @@ use tairix_taskbar::{
 use tairix_theme::{Appearance, CursorSetId, MotionInteraction, Theme};
 use tairix_tz::{CivilClock, ZoneInfo};
 use tairix_wallpaper::{
-    merge_within, Backdrop, CursorSize, DesktopSettings, NotifyPolicy, ScreensaverKind,
-    ScreensaverOptions, SettingsKey,
+    merge_within, Backdrop, CursorSize, DesktopSettings, NotifyPolicy, SaverValues,
+    ScreensaverChoice, SettingsKey, SlideSource, TaskNames,
 };
 use tairix_wm::{
     cursor_cache, Abandoned, Color, Compositor, Corners, CursorController, InputEvent,
@@ -168,14 +168,47 @@ pub enum Stopped {
     AtEdge,
 }
 
-/// A screensaver the desktop's Settings application asked to see: which one,
-/// and how it draws.
+/// A screensaver to start, and what it is started from: the desktop's own
+/// settings at the idle deadline, or the asking pane's for a preview.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScreensaverPreview {
     /// The screensaver.
-    pub kind: ScreensaverKind,
-    /// How each scene draws, as the asking pane set it.
-    pub options: ScreensaverOptions,
+    pub choice: ScreensaverChoice,
+    /// The values given every saver's options.
+    pub values: SaverValues,
+    /// The pictures the slides feed offers.
+    pub slides: SlideSource,
+    /// Which tasks' names the machine feed may carry.
+    pub names: TaskNames,
+}
+
+impl ScreensaverPreview {
+    /// The screensaver `settings` choose, started as they say.
+    #[must_use]
+    pub fn of(settings: &DesktopSettings) -> Self {
+        Self {
+            choice: settings.screensaver,
+            values: settings.saver_values.clone(),
+            slides: settings.slides.clone(),
+            names: settings.task_names,
+        }
+    }
+}
+
+/// What the desktop's Settings application asked for, which the embedder
+/// carries out once the request that asked is answered.
+#[derive(Default)]
+struct SettingsAsked {
+    /// The screen locked.
+    lock: bool,
+    /// A screensaver shown as a preview.
+    preview: Option<ScreensaverPreview>,
+    /// The screensavers listed to their end, so the stores are to be read
+    /// again for the next listing.
+    savers_listed: bool,
+    /// The screensavers listed to their end, and no window has asked for a
+    /// screensaver's picture since.
+    savers_unshown: bool,
 }
 
 /// The desktop session frontend: the session state, the input router, the
@@ -267,12 +300,8 @@ pub struct DesktopShell {
     /// Whether a password can be verified on this session's console, and so
     /// whether the screen may be locked at all.
     can_lock: bool,
-    /// A lock the desktop's Settings application asked for, which the
-    /// embedder puts up once the request that asked is answered.
-    lock_requested: bool,
-    /// A screensaver preview the desktop's Settings application asked for,
-    /// which the embedder shows once the request that asked is answered.
-    preview_requested: Option<ScreensaverPreview>,
+    /// What the desktop's Settings application asked of the embedder.
+    asked: SettingsAsked,
     /// The icon bar clock's reading.
     clock: SessionClock,
     /// The zone store the user's zone and region are resolved against, or
@@ -456,8 +485,7 @@ impl DesktopShell {
             own_app: None,
             audit: sink,
             can_lock: false,
-            lock_requested: false,
-            preview_requested: None,
+            asked: SettingsAsked::default(),
             clock: SessionClock::new(CivilClock::UTC),
             zones: None,
             machine_zone: None,
@@ -2513,13 +2541,13 @@ impl DesktopShell {
         if !self.can_lock {
             return Err(Errno::NotSupported);
         }
-        self.lock_requested = true;
+        self.asked.lock = true;
         Ok(())
     }
 
     /// Take a lock request, answering whether one was made.
     pub fn take_lock_request(&mut self) -> bool {
-        core::mem::take(&mut self.lock_requested)
+        core::mem::take(&mut self.asked.lock)
     }
 
     /// Ask for the screensaver `document` describes to be shown now, on behalf
@@ -2550,16 +2578,31 @@ impl DesktopShell {
         }
         let asked = merge_within(settings, document, &SettingsKey::SCREENSAVER)
             .map_err(|_| Errno::OutOfRange)?;
-        self.preview_requested = Some(ScreensaverPreview {
-            kind: asked.screensaver,
-            options: asked.screensaver_options,
-        });
+        self.asked.preview = Some(ScreensaverPreview::of(&asked));
         Ok(())
     }
 
     /// Take a screensaver preview request, if one was made.
     pub fn take_screensaver_preview(&mut self) -> Option<ScreensaverPreview> {
-        self.preview_requested.take()
+        self.asked.preview.take()
+    }
+
+    /// Note that Settings read the screensavers to the end of the list.
+    pub(crate) fn note_savers_listed(&mut self) {
+        self.asked.savers_listed = true;
+        self.asked.savers_unshown = true;
+    }
+
+    /// Whether this is the first screensaver picture a window has asked for
+    /// since the list was last read to its end.
+    pub(crate) fn take_savers_unshown(&mut self) -> bool {
+        core::mem::take(&mut self.asked.savers_unshown)
+    }
+
+    /// Whether Settings read the screensavers to the end of the list since
+    /// this was last asked: the stores are then to be read again.
+    pub fn take_savers_listed(&mut self) -> bool {
+        core::mem::take(&mut self.asked.savers_listed)
     }
 
     /// The desktop's own backdrop at `width` by `height` — the colour and the

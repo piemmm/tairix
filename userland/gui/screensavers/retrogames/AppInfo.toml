@@ -1,0 +1,13 @@
+# Signed-AppInfo manifest source for Retro Games, a desktop screensaver. It runs
+# in the drawing sandbox, so it asks for no capability and no feed; it paints
+# each frame's bands on up to one thread per core.
+id = "os.tairix.saver.retro-games"
+name = "RetroGames"
+title = "Retro Games"
+version = "0.1.0"
+kind = "screensaver"
+purpose = "A flight over a glowing grid towards a banded sun, where wireframe craft play retro arcade games"
+author = "The TAIRiX Project"
+capabilities = []
+threads = "cores"
+option.speed = { label = "Speed", note = "How fast the flight crosses the grid towards the sun.", choice = ["slow:Slow", "normal:Normal", "fast:Fast"], default = "normal" }

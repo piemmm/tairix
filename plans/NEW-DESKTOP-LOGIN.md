@@ -921,7 +921,7 @@ held the terminal take its control.
 
 The login screen stands over the minimal-clock screensaver's ribbon of
 light, not a wallpaper. The scene is `lib/ribbon` — the one definition the
-screensaver (`userland/gui/session/src/saver/ribbon.rs`) and the greeter
+screensaver (`Ribbon.app`, `userland/gui/screensavers/ribbon`) and the greeter
 share, since neither may depend on the other — and the greeter adds only
 where its pixels go:
 

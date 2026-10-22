@@ -1,26 +1,36 @@
 //! Host tests of the screensaver: what covers the screen, the pointer it
-//! hides, the frames it asks for, and the display it switches off and wakes.
+//! hides, the saver it hosts and the reasons it ends one, and the display it
+//! switches off and wakes.
 
-use crate::saver::TEST_SCENE_FRAME_NS;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, DisplayPower};
-use tairix_abi::time::Duration64;
-use tairix_abi::DriverError;
+use tairix_abi::bounded_text::BoundedText;
+use tairix_abi::desktop::{Appearance, Contrast, Density};
+use tairix_abi::driver::display::{
+    DamageList, DamageRect, DisplayFormat, DisplayMode, DisplayPower, RefreshRate,
+};
+use tairix_abi::saver::{
+    Choice, ChoiceValue, Choices, OptionKey, SaverFeeds, SaverOption, SaverOptionKind,
+};
+use tairix_abi::saver_ipc::{SaverMessage, WallReading, SAVER_START_DEADLINE_NS};
+use tairix_abi::sysinfo::MemoryBand;
+use tairix_abi::window_ipc::{SaverOrigin, SaverStanding};
+use tairix_abi::{BundleId, DriverError, Errno, APPINFO_FLAG_FEED_MACHINE};
 use tairix_display::Presenter;
-use tairix_theme::Theme;
-use tairix_wallpaper::{ScreensaverKind, ScreensaverOptions, SlideOrder};
-use tairix_window::WallpaperName;
-use tairix_wm::{Color, Compositor, Point, Surface};
+use tairix_log::{DiscardSink, Sink};
+use tairix_reclaim::PressureBand;
+use tairix_wallpaper::{SaverValues, TaskNames};
+use tairix_wm::{Color, Compositor, Point, Scale, Surface};
 
+use super::fixtures::{Launches, Pipes, Records};
 use super::{
-    SaverIdentity, SaverSetup, Scene, Screensaver, SwitchedOff, Waking, PREVIEW_STEADY_NS,
+    ceilings, saver_start, Ended, Fault, Saver, SaverContext, SaverEnd, SaverLaunch, SaverSetup,
+    Screensaver, SwitchedOff, Waking, PREVIEW_STEADY_NS, SAVER_DISMISSED, SAVER_ENDED, SAVER_SHOWN,
 };
 use crate::tests::compositor;
 
-const SEC: u64 = 1_000_000_000;
+type Saving = Screensaver<Pipes, DiscardSink>;
 
 /// A panel that records the switches asked of it.
 struct Panel {
@@ -76,57 +86,91 @@ impl Presenter for Panel {
     }
 }
 
-/// What a screensaver in these tests draws from.
-struct Fixture {
-    identity: SaverIdentity,
-    theme: Theme,
-    catalog: Vec<WallpaperName>,
-    options: ScreensaverOptions,
-}
-
-impl Fixture {
-    /// No pictures, and every scene as it comes.
-    fn new() -> Self {
-        Self::with_slides(0)
-    }
-
-    /// `count` pictures, shown in order ten seconds apart.
-    fn with_slides(count: usize) -> Self {
-        let mut options = ScreensaverOptions::default();
-        options.slideshow.interval = Duration64::from_secs(10);
-        options.slideshow.order = SlideOrder::Sequential;
-        Self {
-            identity: SaverIdentity::default(),
-            theme: Theme::dark(),
-            catalog: (0..count)
-                .map(|at| WallpaperName {
-                    category: String::from("Nature"),
-                    file: format!("{at}.jpg"),
-                })
-                .collect(),
-            options,
-        }
-    }
-
-    fn setup(&self) -> SaverSetup<'_> {
-        SaverSetup {
-            ground: None,
-            catalog: &self.catalog,
-            wall: None,
-            civil: tairix_tz::CivilClock::UTC,
-            identity: &self.identity,
-            theme: &self.theme,
-            options: &self.options,
-            tracers: None,
-            memory: crate::saver::raytrace::PLAIN.memory,
-            tell_detail: crate::saver::raytrace::PLAIN.tell,
-        }
+/// A saver bundle offered as Waves, declaring `feeds` and one choice.
+fn saver(feeds: u32) -> Saver {
+    let choice = |value: &str, label: &str| Choice {
+        value: ChoiceValue::new(value).expect("a word"),
+        label: BoundedText::new(label).expect("a label"),
+    };
+    let detail = SaverOption::new(
+        OptionKey::new("detail").expect("a key"),
+        (
+            BoundedText::new("Detail").expect("a label"),
+            BoundedText::EMPTY,
+        ),
+        SaverOptionKind::Choice {
+            choices: Choices::new(&[choice("simple", "Simple"), choice("maximum", "Maximum")])
+                .expect("choices"),
+            default: 0,
+        },
+    )
+    .expect("an option");
+    Saver {
+        choice: String::from("os.tairix.saver.waves"),
+        id: BundleId::new("os.tairix.saver.waves").ok(),
+        bundle: String::from("/System/Screensavers/Waves.app"),
+        origin: SaverOrigin::System,
+        title: String::from("Waves"),
+        purpose: String::new(),
+        feeds: SaverFeeds::from_bits(feeds).expect("feeds"),
+        parallel: false,
+        large_memory: false,
+        options: alloc::vec![detail],
+        standing: SaverStanding::Offered,
     }
 }
 
-/// Start `kind` on `comp` at `now_ns`, asserting it covered the screen.
-fn start(saver: &mut Screensaver, kind: ScreensaverKind, comp: &mut Compositor, now_ns: u64) {
-    assert!(saver.start(kind, Fixture::new().setup(), comp, now_ns));
+fn context(values: &SaverValues) -> SaverContext<'_> {
+    SaverContext {
+        screen: (1920, 1080),
+        scale: Scale::ONE,
+        refresh: RefreshRate::ASSUMED,
+        look: (
+            Appearance::Dark,
+            None,
+            Contrast::Normal,
+            Density::Normal,
+            false,
+        ),
+        seed: [3; tairix_abi::saver_ipc::SAVER_SEED_LEN],
+        pressure: PressureBand::Normal,
+        machine: (4, 8 << 30),
+        identity: ("ada", "lovelace"),
+        slides: 0,
+        values,
+        names: TaskNames::Own,
+    }
+}
+
+/// Cover the screen black at `now_ns`, asserting it covered it.
+fn start_blank(saver: &mut Saving, comp: &mut Compositor, now_ns: u64) {
+    let setup = SaverSetup::<Launches> {
+        ground: None,
+        launch: None,
+    };
+    assert_eq!(saver.start(setup, comp, now_ns), Ok(true));
+}
+
+/// Host `bundle` over pipes held in memory, answering the pipes.
+fn host<S: Sink + Clone>(
+    saver: &mut Screensaver<Pipes, S>,
+    bundle: &Saver,
+    comp: &mut Compositor,
+    now_ns: u64,
+) -> Pipes {
+    let values = SaverValues::default();
+    let mut launches = Launches::default();
+    let setup = SaverSetup {
+        ground: None,
+        launch: Some(SaverLaunch {
+            saver: bundle,
+            context: context(&values),
+            launcher: &mut launches,
+        }),
+    };
+    assert_eq!(saver.start(setup, comp, now_ns), Ok(true));
+    assert_eq!(launches.entries, ["/System/Screensavers/Waves.app/Run"]);
+    launches.pipes.pop().expect("launched")
 }
 
 fn centre(compositor: &Compositor) -> Point {
@@ -137,12 +181,17 @@ fn centre(compositor: &Compositor) -> Point {
     )
 }
 
+/// Flush what the screensaver queued for the saver.
+fn flush<S: Sink + Clone>(saver: &mut Screensaver<Pipes, S>, comp: &mut Compositor) {
+    assert!(saver.on_writable(0, comp).is_none());
+}
+
 #[test]
 fn a_screensaver_covers_the_screen_until_it_is_dismissed() {
     let mut comp = compositor();
     let behind = comp.add_window(Point::new(0, 0), Surface::new(64, 64).expect("a surface"));
-    let mut saver = Screensaver::new();
-    start(&mut saver, ScreensaverKind::Blank, &mut comp, 0);
+    let mut saver = Saving::new(DiscardSink);
+    start_blank(&mut saver, &mut comp, 0);
     assert!(saver.is_shown());
     let over = comp.window_at(centre(&comp)).expect("something is on top");
     assert_ne!(over, behind);
@@ -158,28 +207,27 @@ fn a_screensaver_covers_the_screen_until_it_is_dismissed() {
 }
 
 #[test]
-fn every_kind_covers_the_screen_and_hides_the_pointer() {
-    for kind in ScreensaverKind::ALL {
-        let mut comp = compositor();
-        crate::tests::shell().refresh_cursor(&mut comp);
-        assert!(comp.cursor_bounds().is_some(), "a pointer to hide");
-        let mut saver = Screensaver::new();
-        start(&mut saver, kind, &mut comp, 0);
-        assert!(saver.window().is_some(), "{kind:?}");
-        assert_eq!(comp.cursor_bounds(), None, "{kind:?}: no pointer over it");
-        assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
-        assert!(
-            comp.cursor_bounds().is_some(),
-            "{kind:?}: the pointer is back"
-        );
-    }
+fn a_screensaver_hides_the_pointer_until_it_goes() {
+    let mut comp = compositor();
+    crate::tests::shell().refresh_cursor(&mut comp);
+    assert!(comp.cursor_bounds().is_some(), "a pointer to hide");
+    let mut saver = Saving::new(DiscardSink);
+    let _pipes = host(&mut saver, &saver_bundle(), &mut comp, 0);
+    assert!(saver.window().is_some());
+    assert_eq!(comp.cursor_bounds(), None, "no pointer over it");
+    assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
+    assert!(comp.cursor_bounds().is_some(), "the pointer is back");
+}
+
+fn saver_bundle() -> Saver {
+    saver(0)
 }
 
 #[test]
 fn a_window_raised_behind_the_screensaver_goes_back_beneath_it() {
     let mut comp = compositor();
-    let mut saver = Screensaver::new();
-    start(&mut saver, ScreensaverKind::Blank, &mut comp, 0);
+    let mut saver = Saving::new(DiscardSink);
+    start_blank(&mut saver, &mut comp, 0);
     let saver_window = comp.window_at(Point::new(1, 1));
     let late = comp.add_window(Point::new(0, 0), Surface::new(64, 64).expect("a surface"));
     comp.raise(late);
@@ -193,13 +241,12 @@ fn a_dimmed_screensaver_is_the_ground_it_was_given() {
     let screen = comp.screen_rect();
     let mut ground = Surface::new(screen.width, screen.height).expect("a ground");
     ground.fill(Color::rgb(200, 200, 200));
-    let mut saver = Screensaver::new();
-    let fixture = Fixture::new();
-    let setup = SaverSetup {
+    let mut saver = Saving::new(DiscardSink);
+    let setup = SaverSetup::<Launches> {
         ground: Some(ground),
-        ..fixture.setup()
+        launch: None,
     };
-    assert!(saver.start(ScreensaverKind::Dim, setup, &mut comp, 0));
+    assert_eq!(saver.start(setup, &mut comp, 0), Ok(true));
     assert!(saver.is_shown());
     assert_eq!(
         saver.park_deadline_ns(0, u64::MAX),
@@ -208,58 +255,144 @@ fn a_dimmed_screensaver_is_the_ground_it_was_given() {
     );
 }
 
+/// A hosted saver is started from its manifest's options, given the values
+/// the user chose or their defaults, and held to its ceilings.
 #[test]
-fn a_slideshow_asks_for_each_picture_in_turn_one_interval_apart() {
-    let mut comp = compositor();
-    let mut saver = Screensaver::new();
-    let fixture = Fixture::with_slides(3);
-    assert!(saver.start(ScreensaverKind::Slideshow, fixture.setup(), &mut comp, 100));
-    assert_eq!(saver.park_deadline_ns(0, u64::MAX), 100);
+fn a_saver_is_started_with_its_options_and_held_to_its_ceilings() {
+    let bundle = saver(0);
+    let mut values = SaverValues::default();
+    let id = bundle.id.expect("an identifier");
+    assert!(values.set(
+        &id,
+        &bundle.options[0],
+        tairix_abi::saver::SaverValue::Choice(ChoiceValue::new("maximum").expect("a word")),
+    ));
+    let start = saver_start(&bundle, &context(&values), 77).expect("a start");
+    assert_eq!(start.now_ns, 77);
     assert_eq!(
-        saver.due_slide(100),
-        Some(0),
-        "the first is asked for at once"
+        start
+            .option("detail")
+            .map(|value| value == bundle.options[0].default_value()),
+        Some(false)
     );
-    assert_eq!(saver.due_slide(100), None);
-    assert_eq!(
-        saver.park_deadline_ns(100, u64::MAX),
-        10 * SEC,
-        "parked until the next is due"
-    );
-    let later = 100 + 10 * SEC;
-    assert_eq!(saver.due_slide(later), Some(1));
-    assert_eq!(saver.due_slide(later + 10 * SEC), Some(2));
-    assert_eq!(saver.due_slide(later + 20 * SEC), Some(0), "and round");
+    assert_eq!(start.account.as_str(), "ada");
+    assert_eq!(start.threads, 1, "not a parallel saver");
+    let (memory, threads) = ceilings(&bundle, start.region.len(), (4, 8 << 30));
+    assert_eq!(start.memory, memory);
+    assert_eq!(threads, 1);
+    let mut parallel = saver(0);
+    parallel.parallel = true;
+    parallel.large_memory = true;
+    let (large, cores) = ceilings(&parallel, start.region.len(), (4, 8 << 30));
+    assert_eq!(cores, 4);
+    assert!(large > memory);
+    let (held, _) = ceilings(&parallel, start.region.len(), (4, 1 << 30));
+    assert_eq!(held, 1 << 29, "never more than half the machine");
 }
 
+/// A saver that cannot be started leaves the screen covered black, and says
+/// why.
 #[test]
-fn a_blank_screensaver_or_an_empty_catalog_asks_for_no_picture() {
+fn a_saver_that_cannot_be_started_leaves_the_screen_black() {
     let mut comp = compositor();
-    let fixture = Fixture::with_slides(3);
-    let mut blank = Screensaver::new();
-    assert!(blank.start(ScreensaverKind::Blank, fixture.setup(), &mut comp, 0));
-    assert_eq!(blank.due_slide(u64::MAX), None);
-    let mut empty = Screensaver::new();
-    start(&mut empty, ScreensaverKind::Slideshow, &mut comp, 0);
-    assert_eq!(empty.due_slide(u64::MAX), None);
-    assert_eq!(empty.park_deadline_ns(0, u64::MAX), u64::MAX);
+    let mut saver = Saving::new(DiscardSink);
+    let bundle = saver_bundle();
+    let values = SaverValues::default();
+    let mut launches = Launches {
+        refuse: Some(Errno::NotFound),
+        ..Launches::default()
+    };
+    let setup = SaverSetup {
+        ground: None,
+        launch: Some(SaverLaunch {
+            saver: &bundle,
+            context: context(&values),
+            launcher: &mut launches,
+        }),
+    };
+    let refused = saver.start(setup, &mut comp, 0).expect_err("refused");
+    assert_eq!(refused.title, "Waves");
+    assert_eq!(refused.ended, Ended::Refused(Errno::NotFound));
+    assert!(saver.is_shown(), "the screen is still covered");
 }
 
-/// The hand that pressed Test is still on the mouse: its motion leaves the
-/// preview up for a moment, while a key, a press or a scroll never does.
+/// A saver that misbehaves is ended, the screen laid black, and the end
+/// said; a saver missing its start deadline likewise.
+#[test]
+fn a_saver_that_misbehaves_or_never_starts_is_ended_and_the_screen_blacked() {
+    let mut comp = compositor();
+    let mut saver = Saving::new(DiscardSink);
+    let pipes = host(&mut saver, &saver_bundle(), &mut comp, 0);
+    flush(&mut saver, &mut comp);
+    pipes.say(&SaverMessage::Presented {
+        serial: 9,
+        damage: None,
+        next: tairix_abi::saver_ipc::NextFrame::Idle,
+    });
+    let mut errands = super::fixtures::Errands::default();
+    let ended = saver
+        .on_readable(1, &mut comp, &mut errands)
+        .expect("ended");
+    assert_eq!(ended.ended, Ended::Faulted(Fault::OutOfTurn));
+    assert_eq!(ended.code, Some(0), "reaped");
+    assert!(saver.is_shown(), "the screen stays covered");
+    assert_eq!(
+        saver.park_deadline_ns(1, u64::MAX),
+        u64::MAX,
+        "nothing hosted"
+    );
+
+    let mut late = Saving::new(DiscardSink);
+    let _pipes = host(&mut late, &saver_bundle(), &mut comp, 0);
+    let wall = WallReading::unset(0);
+    assert!(late.advance(1, &wall, &mut comp).is_none());
+    assert_eq!(
+        late.park_deadline_ns(1, u64::MAX),
+        SAVER_START_DEADLINE_NS - 1,
+        "woken for the start deadline"
+    );
+    let ended = late
+        .advance(SAVER_START_DEADLINE_NS, &wall, &mut comp)
+        .expect("ended");
+    assert_eq!(ended.ended, Ended::Faulted(Fault::NeverReady));
+}
+
+/// Machine reports are wanted only by a ready saver given the machine feed,
+/// on an awake display.
+#[test]
+fn only_a_ready_saver_given_the_machine_feed_wants_reports() {
+    let mut comp = compositor();
+    let mut plain = Saving::new(DiscardSink);
+    let pipes = host(&mut plain, &saver(0), &mut comp, 0);
+    pipes.say(&SaverMessage::Ready);
+    let mut errands = super::fixtures::Errands::default();
+    assert!(plain.on_readable(0, &mut comp, &mut errands).is_none());
+    assert!(!plain.wants_machine_reports());
+
+    let mut fed = Saving::new(DiscardSink);
+    let pipes = host(&mut fed, &saver(APPINFO_FLAG_FEED_MACHINE), &mut comp, 0);
+    assert!(!fed.wants_machine_reports(), "not before it is ready");
+    pipes.say(&SaverMessage::Ready);
+    assert!(fed.on_readable(0, &mut comp, &mut errands).is_none());
+    assert!(fed.wants_machine_reports());
+}
+
 #[test]
 fn a_preview_holds_through_motion_for_its_first_moment_only() {
     let mut comp = compositor();
-    let fixture = Fixture::new();
-    let mut saver = Screensaver::new();
-    assert!(saver.start_preview(ScreensaverKind::Blank, fixture.setup(), &mut comp, 100));
+    let mut saver = Saving::new(DiscardSink);
+    let setup = SaverSetup::<Launches> {
+        ground: None,
+        launch: None,
+    };
+    assert_eq!(saver.start_preview(setup, &mut comp, 100), Ok(true));
     assert!(!saver.woken_by(Waking::Moved, 100));
     assert!(!saver.woken_by(Waking::Moved, 100 + PREVIEW_STEADY_NS - 1));
     assert!(saver.woken_by(Waking::Moved, 100 + PREVIEW_STEADY_NS));
     assert!(saver.woken_by(Waking::Acted, 100), "a deliberate gesture");
     assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
 
-    start(&mut saver, ScreensaverKind::Blank, &mut comp, 100);
+    start_blank(&mut saver, &mut comp, 100);
     assert!(
         saver.woken_by(Waking::Moved, 100),
         "a screensaver the idle deadline started keeps no grace"
@@ -267,118 +400,47 @@ fn a_preview_holds_through_motion_for_its_first_moment_only() {
 }
 
 /// A preview asked for over a screensaver already up changes nothing: not
-/// the scene, and not the rule that takes it down.
+/// the saver, and not the rule that takes it down.
 #[test]
 fn a_preview_over_a_running_screensaver_leaves_it_as_it_is() {
     let mut comp = compositor();
-    let mut saver = Screensaver::new();
-    start(&mut saver, ScreensaverKind::Blank, &mut comp, 0);
+    let mut saver = Saving::new(DiscardSink);
+    assert!(saver.would_start());
+    start_blank(&mut saver, &mut comp, 0);
+    assert!(
+        !saver.would_start(),
+        "so the embedder prepares nothing over the screensaver up"
+    );
     let window = saver.window();
-    assert!(saver.start_preview(ScreensaverKind::Life, Fixture::new().setup(), &mut comp, 0));
+    let setup = SaverSetup::<Launches> {
+        ground: None,
+        launch: None,
+    };
+    assert_eq!(saver.start_preview(setup, &mut comp, 0), Ok(true));
     assert_eq!(saver.window(), window);
     assert!(saver.woken_by(Waking::Moved, 0));
-}
-
-/// An animated screensaver draws a frame and asks for the next one a saver
-/// frame later — never sooner, so it cannot outrun the frames it draws.
-#[test]
-fn an_animated_screensaver_asks_for_its_next_frame() {
-    for kind in [
-        ScreensaverKind::Starfield,
-        ScreensaverKind::Life,
-        ScreensaverKind::Raytrace,
-    ] {
-        let mut comp = compositor();
-        let mut saver = Screensaver::new();
-        start(&mut saver, kind, &mut comp, 0);
-        assert_eq!(
-            saver.park_deadline_ns(0, u64::MAX),
-            0,
-            "{kind:?}: due at once"
-        );
-        saver.advance(0, &mut comp, &mut || None, &mut || 0);
-        assert_eq!(
-            saver.park_deadline_ns(0, u64::MAX),
-            TEST_SCENE_FRAME_NS,
-            "{kind:?}"
-        );
-        saver.advance(TEST_SCENE_FRAME_NS / 2, &mut comp, &mut || None, &mut || 0);
-        assert_eq!(
-            saver.park_deadline_ns(TEST_SCENE_FRAME_NS / 2, u64::MAX),
-            TEST_SCENE_FRAME_NS / 2,
-            "{kind:?}: an early wake draws nothing and moves nothing"
-        );
-    }
-}
-
-/// A ray tracer's thread readying a scene brings a revealing ray tracer back
-/// at once, and no other screensaver forward.
-#[test]
-fn a_tracing_thread_readying_a_scene_brings_the_ray_tracer_back_at_once() {
-    let woken = TEST_SCENE_FRAME_NS / 4;
-    for kind in [ScreensaverKind::Raytrace, ScreensaverKind::Starfield] {
-        let mut comp = compositor();
-        let mut saver = Screensaver::new();
-        start(&mut saver, kind, &mut comp, 0);
-        saver.advance(0, &mut comp, &mut || None, &mut || 0);
-        let before = saver.park_deadline_ns(woken, u64::MAX);
-        assert!(before > 0, "{kind:?}");
-        saver.trace_landed(woken);
-        let after = saver.park_deadline_ns(woken, u64::MAX);
-        match kind {
-            ScreensaverKind::Raytrace => assert_eq!(after, 0, "due at once"),
-            _ => assert_eq!(after, before, "{kind:?}"),
-        }
-    }
-}
-
-/// The retro games are painted whole as they go up, so their first frame is
-/// already drawn and the next is asked for a saver frame later; under reduced
-/// motion they ask for none.
-#[test]
-fn the_retro_games_go_up_drawn_and_fly_on_a_saver_frame_later() {
-    let mut comp = compositor();
-    let mut saver = Screensaver::new();
-    start(&mut saver, ScreensaverKind::RetroGames, &mut comp, 0);
-    comp.composite();
-    let sky = comp.frame()[..4].to_vec();
-    assert_ne!(sky, [0, 0, 0, 255], "the night is painted, not black");
-    assert_eq!(saver.park_deadline_ns(0, u64::MAX), TEST_SCENE_FRAME_NS);
-    saver.advance(TEST_SCENE_FRAME_NS, &mut comp, &mut || None, &mut || 0);
-    assert_eq!(
-        saver.park_deadline_ns(TEST_SCENE_FRAME_NS, u64::MAX),
-        TEST_SCENE_FRAME_NS
-    );
     assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
-
-    let fixture = Fixture {
-        theme: Theme::dark().with_axes(tairix_theme::Accessibility {
-            motion: tairix_theme::Motion::Reduced,
-            ..tairix_theme::Accessibility::default()
-        }),
-        ..Fixture::new()
-    };
-    assert!(saver.start(ScreensaverKind::RetroGames, fixture.setup(), &mut comp, 0));
-    assert_eq!(saver.park_deadline_ns(0, u64::MAX), u64::MAX, "held still");
+    assert!(
+        saver.would_start(),
+        "taken down, the next start covers anew"
+    );
 }
 
 #[test]
 fn a_display_that_can_switch_off_goes_dark_and_wakes_before_the_screensaver_goes() {
     let mut comp = compositor();
     let mut panel = Panel::switchable();
-    let mut saver = Screensaver::new();
-    start(&mut saver, ScreensaverKind::Starfield, &mut comp, 0);
+    let mut saver = Saving::new(DiscardSink);
+    let _pipes = host(&mut saver, &saver_bundle(), &mut comp, 0);
     assert_eq!(
         saver.switch_display_off(&mut comp, Some(&mut panel)),
         Some(SwitchedOff::Off)
     );
     assert!(saver.is_dark());
-    assert!(
-        saver
-            .shown
-            .as_ref()
-            .is_some_and(|shown| matches!(shown.scene, Scene::Still)),
-        "a dark screen lets its scene go"
+    assert_eq!(
+        saver.saver_descriptors(),
+        (None, false, false),
+        "a dark screen lets its saver go"
     );
     assert_eq!(
         saver.park_deadline_ns(0, u64::MAX),
@@ -394,14 +456,13 @@ fn a_display_that_can_switch_off_goes_dark_and_wakes_before_the_screensaver_goes
 }
 
 /// A display with no power control is not left lit and moving: the screen
-/// goes black and still, and no timer is armed for it.
+/// goes black and still, and its saver is ended.
 #[test]
 fn a_display_that_cannot_switch_off_is_kept_black_and_still() {
     let mut comp = compositor();
     let mut panel = Panel::fixed();
-    let mut saver = Screensaver::new();
-    start(&mut saver, ScreensaverKind::Life, &mut comp, 0);
-    saver.advance(0, &mut comp, &mut || None, &mut || 0);
+    let mut saver = Saving::new(DiscardSink);
+    let _pipes = host(&mut saver, &saver_bundle(), &mut comp, 0);
     assert_eq!(
         saver.switch_display_off(&mut comp, Some(&mut panel)),
         Some(SwitchedOff::Blanked)
@@ -410,11 +471,7 @@ fn a_display_that_cannot_switch_off_is_kept_black_and_still() {
     assert!(saver.is_shown());
     assert_eq!(saver.park_deadline_ns(0, u64::MAX), u64::MAX);
     comp.composite();
-    assert_eq!(
-        comp.frame()[..4],
-        [0, 0, 0, 255],
-        "black where the cells were"
-    );
+    assert_eq!(comp.frame()[..4], [0, 0, 0, 255], "black");
     assert_eq!(saver.dismiss(&mut comp, Some(&mut panel)), Ok(true));
     assert!(panel.switches.is_empty(), "nothing to switch back on");
 }
@@ -426,15 +483,14 @@ fn a_refused_switch_is_stated_and_the_screen_kept_black() {
         refuse: Some(DriverError::DeviceFault),
         ..Panel::switchable()
     };
-    let mut saver = Screensaver::new();
-    start(&mut saver, ScreensaverKind::Clock, &mut comp, 0);
+    let mut saver = Saving::new(DiscardSink);
+    start_blank(&mut saver, &mut comp, 0);
     assert_eq!(
         saver.switch_display_off(&mut comp, Some(&mut panel)),
         Some(SwitchedOff::Refused(DriverError::DeviceFault))
     );
     assert!(!saver.is_dark());
 }
-
 /// A display that will not light again keeps the screensaver up and dark:
 /// presenting to a screen nobody can see helps nobody, and the next input
 /// asks again.
@@ -442,8 +498,8 @@ fn a_refused_switch_is_stated_and_the_screen_kept_black() {
 fn a_display_that_will_not_wake_keeps_the_screensaver_up_and_asks_again() {
     let mut comp = compositor();
     let mut panel = Panel::switchable();
-    let mut saver = Screensaver::new();
-    start(&mut saver, ScreensaverKind::Blank, &mut comp, 0);
+    let mut saver = Saving::new(DiscardSink);
+    start_blank(&mut saver, &mut comp, 0);
     assert_eq!(
         saver.switch_display_off(&mut comp, Some(&mut panel)),
         Some(SwitchedOff::Off)
@@ -466,7 +522,7 @@ fn a_display_that_will_not_wake_keeps_the_screensaver_up_and_asks_again() {
 fn a_display_asleep_without_a_surface_is_still_woken() {
     let mut comp = compositor();
     let mut panel = Panel::switchable();
-    let mut saver = Screensaver::new();
+    let mut saver = Saving::new(DiscardSink);
     assert_eq!(
         saver.switch_display_off(&mut comp, Some(&mut panel)),
         Some(SwitchedOff::Off)
@@ -488,7 +544,7 @@ fn a_refused_switch_without_a_surface_leaves_the_desktop_live() {
             ..Panel::switchable()
         },
     ] {
-        let mut saver = Screensaver::new();
+        let mut saver = Saving::new(DiscardSink);
         assert!(saver
             .switch_display_off(&mut comp, Some(&mut panel))
             .is_some());
@@ -497,14 +553,190 @@ fn a_refused_switch_without_a_surface_leaves_the_desktop_live() {
     }
 }
 
+/// The machine's pressure reaches a saver at the depth the session reads it.
 #[test]
-fn nothing_asks_for_a_slide_while_the_display_sleeps() {
+fn every_pressure_band_reaches_a_saver_at_its_own_depth() {
+    for band in [
+        PressureBand::Normal,
+        PressureBand::Mild,
+        PressureBand::Moderate,
+        PressureBand::Severe,
+        PressureBand::Critical,
+    ] {
+        assert_eq!(super::memory_band(band).depth(), band.depth(), "{band:?}");
+    }
+    let values = SaverValues::default();
+    let mut given = context(&values);
+    given.pressure = PressureBand::Severe;
+    let start = saver_start(&saver(0), &given, 0).expect("a start");
+    assert_eq!(start.pressure, MemoryBand::new(3).expect("a band"));
+}
+
+/// An errand's answer reaches only the saver that asked: one landing after
+/// that saver went, when another draws, is dropped.
+#[test]
+fn an_answer_reaches_only_the_saver_that_asked_for_it() {
     let mut comp = compositor();
-    let mut saver = Screensaver::new();
-    let fixture = Fixture::with_slides(2);
-    assert!(saver.start(ScreensaverKind::Slideshow, fixture.setup(), &mut comp, 0));
-    let mut panel = Panel::switchable();
-    let _ = saver.switch_display_off(&mut comp, Some(&mut panel));
-    assert_eq!(saver.due_slide(u64::MAX), None);
-    assert_eq!(saver.park_deadline_ns(0, u64::MAX), u64::MAX);
+    let mut saver = Saving::new(DiscardSink);
+    let _first = host(&mut saver, &saver_bundle(), &mut comp, 0);
+    let asked = saver.hosting().expect("a saver draws");
+    assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
+    let second = host(&mut saver, &saver_bundle(), &mut comp, 0);
+    let drawing = saver.hosting().expect("another draws");
+    assert_ne!(asked, drawing);
+    flush(&mut saver, &mut comp);
+    let heard = second.heard().len();
+    assert!(saver
+        .font_answered(asked, (Ok(&[1, 2, 3]), 1), &mut comp)
+        .is_none());
+    assert!(saver.kept(asked, (true, 1), &mut comp).is_none());
+    flush(&mut saver, &mut comp);
+    assert_eq!(second.heard().len(), heard, "nothing was sent to it");
+}
+
+/// A saver whose pipes cannot be watched is ended, and the screen kept
+/// black, with why.
+#[test]
+fn a_saver_that_cannot_be_watched_is_ended() {
+    let mut comp = compositor();
+    let mut saver = Saving::new(DiscardSink);
+    let _pipes = host(&mut saver, &saver_bundle(), &mut comp, 0);
+    let ended = saver
+        .unwatched(Errno::OutOfMemory, &mut comp)
+        .expect("ended");
+    assert_eq!(ended.ended, Ended::Unwatched(Errno::OutOfMemory));
+    assert_eq!(saver.hosting(), None);
+    assert!(saver.is_shown(), "the screen stays covered");
+}
+
+/// What the session says of a saver it ended names the saver and why, and
+/// that the screen is black.
+#[test]
+fn an_ended_saver_is_said_by_name_and_reason() {
+    let said = |ended, code| {
+        alloc::format!(
+            "{}",
+            SaverEnd {
+                saver: String::from("os.tairix.saver.waves"),
+                title: String::from("Waves"),
+                ended,
+                code,
+            }
+        )
+    };
+    assert_eq!(
+        said(Ended::Faulted(Fault::Late), Some(9)),
+        "the screensaver Waves did not draw a frame in time; the screen is kept black"
+    );
+    assert_eq!(
+        said(Ended::Gone, Some(3)),
+        "the screensaver Waves stopped with exit code 3; the screen is kept black"
+    );
+    assert!(said(Ended::Refused(Errno::NotFound), None).contains("could not be started"));
+}
+
+/// A field list of one `saver` record, as the log holds it.
+fn naming(saver: &str) -> Vec<(String, String)> {
+    alloc::vec![(String::from("saver"), String::from(saver))]
+}
+
+/// Draw one frame of the saver at the far end of `pipes` at `now_ns`: asked
+/// for, presented changing its first pixel, and taken in.
+fn present<S: Sink + Clone>(
+    saver: &mut Screensaver<Pipes, S>,
+    pipes: &Pipes,
+    (serial, now_ns): (u32, u64),
+    comp: &mut Compositor,
+) {
+    let wall = WallReading::unset(now_ns);
+    assert!(saver.advance(now_ns, &wall, comp).is_none());
+    flush(saver, comp);
+    let corner = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    pipes.say(&SaverMessage::Presented {
+        serial,
+        damage: DamageList::new(&[corner]).ok(),
+        next: tairix_abi::saver_ipc::NextFrame::Soon,
+    });
+    let mut errands = super::fixtures::Errands::default();
+    assert!(saver.on_readable(now_ns, comp, &mut errands).is_none());
+}
+
+/// A hosted saver is recorded by its identifier when its first frame reaches
+/// the screen, once however many follow, and again when it is dismissed.
+#[test]
+fn a_saver_is_recorded_when_first_shown_and_when_dismissed() {
+    let mut comp = compositor();
+    let log = Records::default();
+    let mut saver = Screensaver::<Pipes, Records>::new(log.clone());
+    let pipes = host(&mut saver, &saver_bundle(), &mut comp, 0);
+    pipes.say(&SaverMessage::Ready);
+    let mut errands = super::fixtures::Errands::default();
+    assert!(saver.on_readable(0, &mut comp, &mut errands).is_none());
+    assert!(log.of(SAVER_SHOWN).is_empty(), "nothing presented yet");
+    present(&mut saver, &pipes, (1, 1), &mut comp);
+    present(&mut saver, &pipes, (2, 1_000_000_000), &mut comp);
+    let mut shown = naming("os.tairix.saver.waves");
+    shown.push((String::from("preview"), String::from("false")));
+    assert_eq!(log.of(SAVER_SHOWN), [shown]);
+    assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
+    assert_eq!(log.of(SAVER_DISMISSED), [naming("os.tairix.saver.waves")]);
+    assert!(log.of(SAVER_ENDED).is_empty());
+}
+
+/// A saver ended for misbehaving, or one that could not be started, is
+/// recorded with why; neither is recorded as dismissed.
+#[test]
+fn a_saver_ended_or_refused_is_recorded_with_why() {
+    let mut comp = compositor();
+    let log = Records::default();
+    let mut saver = Screensaver::<Pipes, Records>::new(log.clone());
+    let pipes = host(&mut saver, &saver_bundle(), &mut comp, 0);
+    flush(&mut saver, &mut comp);
+    pipes.say(&SaverMessage::Presented {
+        serial: 9,
+        damage: None,
+        next: tairix_abi::saver_ipc::NextFrame::Idle,
+    });
+    let mut errands = super::fixtures::Errands::default();
+    assert!(saver.on_readable(1, &mut comp, &mut errands).is_some());
+    assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
+
+    let bundle = saver_bundle();
+    let values = SaverValues::default();
+    let mut launches = Launches {
+        refuse: Some(Errno::NotFound),
+        ..Launches::default()
+    };
+    let setup = SaverSetup {
+        ground: None,
+        launch: Some(SaverLaunch {
+            saver: &bundle,
+            context: context(&values),
+            launcher: &mut launches,
+        }),
+    };
+    assert!(saver.start(setup, &mut comp, 2).is_err());
+
+    let reason = |why: &str| {
+        let mut fields = naming("os.tairix.saver.waves");
+        fields.push((String::from("reason"), String::from(why)));
+        fields
+    };
+    assert_eq!(
+        log.of(SAVER_ENDED),
+        [
+            reason("broke the screensaver protocol"),
+            reason(&alloc::format!("could not be started: {}", Errno::NotFound)),
+        ]
+    );
+    assert!(
+        log.of(SAVER_DISMISSED).is_empty(),
+        "its end was recorded once"
+    );
+    assert!(log.of(SAVER_SHOWN).is_empty());
 }

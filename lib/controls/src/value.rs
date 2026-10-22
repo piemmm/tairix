@@ -222,6 +222,10 @@ const fn dot_percent(pointer: PointerState) -> u32 {
     }
 }
 
+/// The most stops a slider holds: one for each thousandth of its travel and
+/// both its ends. A list of more values than this cannot all be set on one.
+pub const SLIDER_STOPS_MAX: u16 = FULL + 1;
+
 /// A measured value control: a rail, a value track that fills to the knob, a
 /// draggable knob, an optional bounded-cap marker, and optionally a fixed set
 /// of stops and a label at either end (spec §11.6).
@@ -307,7 +311,11 @@ impl Slider {
     /// nearest stop.
     #[must_use]
     pub fn with_stops(mut self, count: u16) -> Self {
-        self.stops = if count >= 2 { count.min(FULL + 1) } else { 0 };
+        self.stops = if count >= 2 {
+            count.min(SLIDER_STOPS_MAX)
+        } else {
+            0
+        };
         self.value = self.snapped(self.value);
         self
     }

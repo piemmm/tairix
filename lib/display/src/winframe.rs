@@ -188,6 +188,26 @@ impl Shape {
     }
 }
 
+/// The damage rectangle a client-space `rect` names, clipped to `mode`'s
+/// surface, or `None` when nothing of it survives the clip.
+///
+/// An app that presents what it repainted holds that as a [`Rect`] in its own
+/// coordinates — the very rectangles its controls reported — while the protocol
+/// carries a [`DamageRect`] the session refuses outside the surface. Clipping is
+/// therefore the app's own fail-closed step, with one definition here, beneath
+/// every presenter, rather than a copy per app, and `None` says there is nothing to present at all.
+#[must_use]
+pub fn damage_in(mode: &DisplayMode, rect: Rect) -> Option<DamageRect> {
+    let clipped = rect.intersection(&Rect::new(0, 0, mode.width_px, mode.height_px));
+    let (x, y) = clipped.surface_origin()?;
+    Some(DamageRect {
+        x,
+        y,
+        width_px: clipped.width,
+        height_px: clipped.height,
+    })
+}
+
 /// Write `damage`'s pixels of `surface` into `frame` (laid out per `mode`) as
 /// the premultiplied bytes a window frame holds.
 ///
@@ -279,6 +299,7 @@ pub fn decode(
     surface: &mut Surface,
     mode: &DisplayMode,
     damage: DamageRect,
+    alpha: Alpha,
     runner: &dyn JobRunner,
 ) -> Result<Rect, Errno> {
     let shape = Shape::resolve(mode, surface, damage, frame.len())?;
@@ -299,7 +320,7 @@ pub fn decode(
         bands,
         Bounds::default(),
         &|mut band| {
-            decode_band(&shape, frame, &mut band);
+            decode_band(&shape, frame, alpha, &mut band);
             band.changed
         },
         &|mut joined, band| {
@@ -323,6 +344,7 @@ pub fn decode_list(
     surface: &mut Surface,
     mode: &DisplayMode,
     damage: &DamageList,
+    alpha: Alpha,
     runner: &dyn JobRunner,
     mut changed: impl FnMut(Rect),
 ) -> Result<(), Errno> {
@@ -330,9 +352,20 @@ pub fn decode_list(
         Shape::resolve(mode, surface, *rect, frame.len())?;
     }
     for rect in damage.rects() {
-        changed(decode(frame, surface, mode, *rect, runner)?);
+        changed(decode(frame, surface, mode, *rect, alpha, runner)?);
     }
     Ok(())
+}
+
+/// What a decode makes of the alpha a frame carries.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Alpha {
+    /// The frame's own: a window may be translucent.
+    AsSent,
+    /// Full, whatever the frame says, for a picture that may not show what it
+    /// covers. Applied before a pixel is compared, so a transparent pixel over
+    /// a transparent one is still a change.
+    Opaque,
 }
 
 /// One band of a [`decode`]: the surface rows it owns, and the box of pixels it
@@ -343,7 +376,7 @@ struct DecodeBand<'a> {
 }
 
 /// Decode every row of one band, accumulating the pixels it changed.
-fn decode_band(shape: &Shape, frame: &[u8], band: &mut DecodeBand<'_>) {
+fn decode_band(shape: &Shape, frame: &[u8], alpha: Alpha, band: &mut DecodeBand<'_>) {
     let rows = band.rows.rows();
     for y in rows.start.max(shape.top)..rows.end.min(shape.bottom) {
         // Addressed from the frame's own first row: the frame is shared
@@ -362,7 +395,10 @@ fn decode_band(shape: &Shape, frame: &[u8], band: &mut DecodeBand<'_>) {
         // loop runs over every damaged pixel of every application repaint.
         let (groups, _tail) = source.as_chunks::<PIXEL_BYTES>();
         for (index, (bytes, slot)) in groups.iter().zip(target).enumerate() {
-            let pixel = shape.order.decode(*bytes);
+            let mut pixel = shape.order.decode(*bytes);
+            if alpha == Alpha::Opaque {
+                pixel.a = u8::MAX;
+            }
             if *slot == pixel {
                 continue;
             }

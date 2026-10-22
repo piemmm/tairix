@@ -509,6 +509,8 @@ const NUM_FD_REDEEM_LOCATION: u64 = SyscallNumber::FD_REDEEM_LOCATION.as_u16() a
 
 /// `shm_map_from` syscall number (as above).
 const NUM_SHM_MAP_FROM: u64 = SyscallNumber::SHM_MAP_FROM.as_u16() as u64;
+/// `share_map` syscall number (as above).
+const NUM_SHARE_MAP: u64 = SyscallNumber::SHARE_MAP.as_u16() as u64;
 
 /// `thread_create` syscall number (as above).
 const NUM_THREAD_CREATE: u64 = SyscallNumber::THREAD_CREATE.as_u16() as u64;
@@ -4511,6 +4513,22 @@ pub fn shm_map_from(handle: u64, grantor: ProcId, len_out: &mut u64) -> i64 {
             ],
         )
     };
+    ret as i64
+}
+
+/// Map this task's spawn share — the one region a drawing-sandbox spawn handed
+/// it (`SyscallNumber::SHARE_MAP`) — writing its byte length to `len_out`.
+///
+/// Returns the base address, or `-errno`: `NotFound` for a task handed none,
+/// `AlreadyExists` once it is mapped.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 map-result encoding (base ≥ 0, else -errno).
+pub fn share_map(len_out: &mut u64) -> i64 {
+    let len_ptr = core::ptr::from_mut::<u64>(len_out) as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke. `len_out` is a live
+    // exclusive `&mut u64` the kernel validates against the caller's own
+    // address space before writing.
+    let ret = unsafe { raw_syscall(NUM_SHARE_MAP, [len_ptr, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -8960,6 +8978,18 @@ mod tests {
         assert_eq!(args[0], 0xDEAD);
         assert_eq!(args[1], len_ptr);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn share_map_marshals_the_len_out_pointer_alone() {
+        let mut len = 0u64;
+        let len_ptr = core::ptr::addr_of_mut!(len) as usize as u64;
+        let (number, args) = capture(0x9000, || {
+            assert_eq!(share_map(&mut len), 0x9000);
+        });
+        assert_eq!(number, NUM_SHARE_MAP);
+        assert_eq!(args[0], len_ptr);
+        assert_eq!(&args[1..], &[0; 5]);
     }
 
     #[test]

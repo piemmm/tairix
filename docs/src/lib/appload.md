@@ -10,7 +10,7 @@ exec time.
 
 ## What it does
 
-`AppLoader::load(bundle, user_grants)` runs a fail-closed pipeline
+`AppLoader::load(bundle, user_grants, mode)` runs a fail-closed pipeline
 (`AGENTS.md` §5.4) and stops at the first problem:
 
 1. **Layout** — reads the bundle's top-level entries and validates them
@@ -24,8 +24,19 @@ exec time.
 4. **Signature** — verifies the Ed25519 signature over the whole manifest
    except the signature field (the header prefix concatenated with the
    capability/MIME body, so a swapped capability id breaks it) through the
-   `Verifier` seam. A failure is `AppError::Signature`.
-5. **Publisher** — resolves the bundle's stable developer identity
+   `Verifier` seam — or, for a saver in a user's own store
+   (`tairix_abi::is_user_saver_bundle`: `/Users/<name>/Library/Screensavers`,
+   a plain path whose only bundle is the saver), against the key its own
+   manifest names, which proves it whole and grants nothing. A failure is
+   `AppError::Signature`.
+5. **Kind** — the signed kind must run from the store the bundle is in
+   (`AppError::Misplaced`), a screensaver only into a `LoadMode::Drawing`
+   spawn and nothing else into one (`AppError::DrawingOnly`), and a user's own
+   saver may claim only its threads and memory (`APPINFO_FLAGS_SAVER_OWN`):
+   any other saver flag is a feed, `AppError::PrivilegedFeed`. A screensaver's
+   declared options are checked here too, before the bundle is read and
+   hashed.
+6. **Publisher** — resolves the bundle's stable developer identity
    (`PublisherId`). A self-published manifest needs no further signature: its
    publisher key *is* the signing key the trust root just admitted. A
    *delegated* manifest must carry the publisher's Ed25519 signature over
@@ -39,13 +50,13 @@ exec time.
    identity it first saw (`plans/APPDATA.md`). This is why a release may be
    re-signed with a fresh build key without the app losing the settings,
    secrets, and blobs it stored.
-6. **Contents** — compares the bundle's actual content hash (from the
+7. **Contents** — compares the bundle's actual content hash (from the
    `BundleStore` seam) against the hash the signature covers, in constant
    time. A mismatch is `AppError::ContentHashMismatch` (§16.5).
-7. **Authority** — decodes the requested capabilities and grants the
+8. **Authority** — decodes the requested capabilities and grants the
    **intersection** of that request with `user_grants`; ambient authority
    is forbidden (§4, §5.2), so the loader never widens a request.
-8. **Run image** — reads the `Run` binary and validates it through
+9. **Run image** — reads the `Run` binary and validates it through
    `tairix_abi::rxe::LoadImage::parse` with the kernel's syscall hash as the
    expected CFI tag, enforcing the §19.2 hardening invariants (PIE, W^X,
    CFI tag); a malformed image or CFI-tag mismatch is `AppError::RunImage`.
@@ -95,7 +106,10 @@ Every decision is recorded through `lib/log` (§19.4) in the reserved
 `EventId` range `11000..12000`: `APP_LOADED`, `APP_LAYOUT_REJECTED`,
 `APP_MANIFEST_INVALID`, `APP_INTERFACE_MISMATCH`, `APP_SIGNATURE_INVALID`,
 `APP_PUBLISHER_INVALID`, `APP_CONTENT_MISMATCH`, `APP_STORE_ERROR`,
-`LIBRARY_RESOLVED`, `LIBRARY_REFUSED`, and `APP_RUN_IMAGE_INVALID`.
+`LIBRARY_RESOLVED`, `LIBRARY_REFUSED`, `APP_RUN_IMAGE_INVALID`, `APP_MISPLACED`,
+`APP_DRAWING_ONLY` (11013, saying which way the drawing sandbox's rule was
+broken) and `APP_FEED_REFUSED` (11014). A launch-cache hit is held to the
+drawing rule by `admit_cached`, audited the same way.
 
 The `APP_LOADED` record additionally carries a `load` duration (time spent
 reading the bundle off the store — the "getting it from disk" cost), a
@@ -104,7 +118,8 @@ signature / publisher / content-hash / run-image checking), and a
 `read_bytes` count of what that load span actually moved, so a slow first
 launch is diagnosable from the audit log — `load` and `read_bytes` together
 state a store throughput, which a bare duration cannot distinguish from a
-large bundle.
+large bundle. Its `signer` field says whose key admitted the bundle: `system`,
+or `own` for a user's own saver.
 
 The crate is `no_std` (with `alloc`) and depends only on `tairix-abi`,
 `tairix-caps`, `tairix-crypto`, and `tairix-log` (§17.4); it has no `unsafe`

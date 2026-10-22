@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::desktop::{Appearance, DesktopInfo, ScreensaverKind};
+use tairix_abi::desktop::{Appearance, DesktopInfo};
 use tairix_abi::driver::display::{
     DamageList, DamageRect, DisplayFormat, DisplayMode, RefreshRate,
 };
@@ -35,10 +35,11 @@ use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
-    damage_in, pointer_point, present_damage, present_damage_list, presented_damage,
-    retained_damage, DeclaredTip, EventDrain, EventError, EventSource, Owed, Parked, PostedRequest,
-    Refused, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
+    pointer_point, present_damage, present_damage_list, presented_damage, retained_damage,
+    DeclaredTip, EventDrain, EventError, EventSource, Owed, Parked, PostedRequest, Refused,
+    Repaint, Target, WindowClient, WindowEvents, WindowTransport,
 };
+use crate::damage_in;
 use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, Activation, AlertOpen, CallerIdentity, ClientRegion, CursorSetName,
@@ -310,6 +311,8 @@ struct RecordingHost {
     /// it.
     wallpapers: Vec<WallpaperName>,
     renders: Vec<(u64, ClientRegion, PreviewSize)>,
+    /// Who each render was attested as asking, where the engine asked.
+    render_callers: Vec<Option<AppIdentity>>,
     refuse_render: Option<Errno>,
     /// Every clipboard set and get the engine passed on, by window.
     clipboard: Vec<(u64, ClientRegion)>,
@@ -348,6 +351,7 @@ impl Default for RecordingHost {
             picks: Vec::new(),
             wallpapers: Vec::new(),
             renders: Vec::new(),
+            render_callers: Vec::new(),
             refuse_render: None,
             clipboard: Vec::new(),
             cursor_sets: Vec::new(),
@@ -755,6 +759,7 @@ impl WindowHost for RecordingHost {
 
     fn preview_render_requested(
         &mut self,
+        caller: Option<&AppIdentity>,
         window_id: u64,
         region: ClientRegion,
         request: PreviewSize,
@@ -762,6 +767,7 @@ impl WindowHost for RecordingHost {
         if let Some(err) = self.refuse_render {
             return Err(err);
         }
+        self.render_callers.push(caller.copied());
         self.renders.push((window_id, region, request));
         Ok(())
     }
@@ -3449,7 +3455,7 @@ fn a_preview_render_is_owner_bound_and_each_is_concluded_once_by_its_own_event()
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let wallpaper = PreviewSubject::Wallpaper(0);
-    let starfield = PreviewSubject::Screensaver(ScreensaverKind::Starfield);
+    let starfield = PreviewSubject::Screensaver(2);
 
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
@@ -3573,7 +3579,7 @@ fn a_screensaver_preview_reaches_the_host_with_the_caller_it_was_attested_as() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
     assert_eq!(
-        client.preview_screensaver("screensaver.kind = clock\n"),
+        client.preview_screensaver("screensaver.saver = os.tairix.saver.clock\n"),
         Err(Errno::PermissionDenied),
         "a caller running no verified bundle is refused by the host"
     );
@@ -3581,14 +3587,36 @@ fn a_screensaver_preview_reaches_the_host_with_the_caller_it_was_attested_as() {
         .expect("a well-formed identity");
     loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings)];
     assert_eq!(
-        client.preview_screensaver("screensaver.kind = clock\n"),
+        client.preview_screensaver("screensaver.saver = os.tairix.saver.clock\n"),
         Ok(())
     );
     assert_eq!(
         loopback.borrow().host.previews,
-        alloc::vec![String::from("screensaver.kind = clock\n")]
+        alloc::vec![String::from("screensaver.saver = os.tairix.saver.clock\n")]
     );
     assert_eq!(client.preview_screensaver(""), Err(Errno::LengthOutOfRange));
+}
+
+/// A screensaver's picture is asked for with the caller it was attested as,
+/// since it says what the user installed; a shipped wallpaper's needs none.
+#[test]
+fn a_screensaver_picture_names_its_caller_and_a_wallpaper_none() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let settings = AppIdentity::new("os.tairix.settings", PublisherId::from_raw([7; 32]))
+        .expect("a well-formed identity");
+    loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings)];
+    client
+        .render_preview((window, 0x99), PreviewSubject::Wallpaper(0), (144, 81))
+        .expect("render accepted");
+    client
+        .render_preview((window, 0x9A), PreviewSubject::Screensaver(2), (144, 81))
+        .expect("render accepted");
+    assert_eq!(
+        loopback.borrow().host.render_callers,
+        alloc::vec![None, Some(settings)]
+    );
 }
 
 #[test]

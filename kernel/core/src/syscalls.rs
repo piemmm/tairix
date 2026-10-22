@@ -2698,6 +2698,57 @@ where
         Ok(Some(buf))
     }
 
+    /// Where a spawned child will live, settled before any of its state exists
+    /// and once: an ending session admits nobody, and a join must stay inside
+    /// the caller's own session. Admission re-checks only that the destination
+    /// has not begun ending since.
+    fn spawn_placement(
+        &self,
+        caller: &CallerContext<'_>,
+        attach: &SpawnAttach,
+    ) -> Result<Placement, Errno> {
+        let placement = self.caps.read().resolve_placement(
+            caller.process(),
+            attach.session,
+            attach.target_uid != SPAWN_UID_INHERIT,
+        );
+        placement.map_err(|refusal| {
+            self.audit_spawn_denied("session_placement");
+            placement_errno(attach.session, refusal)
+        })
+    }
+
+    /// The precise spawn authority, once the attach block's mode is known and
+    /// still before any descriptor is resolved or any page table touched.
+    ///
+    /// A canonical parser sandbox is admitted by the narrow
+    /// `CAP_SANDBOX_SPAWN` or by `CAP_PROC_SPAWN`; anything else needs
+    /// `CAP_PROC_SPAWN`, so a principal granted only the sandbox authority
+    /// cannot start a general process. A drawing sandbox is handed only a
+    /// region its spawner holds, live and not retired with a removed device;
+    /// admission delegates it again under the registry's lock, and this
+    /// answers the spawner before any child state exists.
+    fn check_spawn_mode(
+        &self,
+        caller: &CallerContext<'_>,
+        attach: &SpawnAttach,
+    ) -> Result<(), Errno> {
+        if !SpawnMode::of_attach(attach.is_sandbox()).admits(caller.caps) {
+            self.audit_spawn_denied("proc_spawn_required");
+            return Err(Errno::PermissionDenied);
+        }
+        if attach.is_drawing() {
+            let wanted = HwResource::shared(attach.share);
+            if !self.aspaces.read().grant_covers(caller.process(), &wanted)
+                || crate::sharedreg::is_retired(attach.share)
+            {
+                self.audit_spawn_denied("spawn_share_not_held");
+                return Err(Errno::PermissionDenied);
+            }
+        }
+        Ok(())
+    }
+
     /// Validate and stage `spawn`'s optional attach block from the
     /// caller's address space (`plans/SPAWN.md` SP10).
     ///
@@ -6986,40 +7037,14 @@ where
         // blocks *before* touching any further state (fail closed on a
         // malformed shape — a refused block wires nothing).
         let attach = self.stage_spawn_attach(caller, attach, attach_len)?;
-
-        // Now the block's mode is known, take the precise decision — still
-        // before any descriptor is resolved or any page table touched. A
-        // canonical parser sandbox is admitted by the narrow
-        // `CAP_SANDBOX_SPAWN` or by `CAP_PROC_SPAWN`; anything else needs
-        // `CAP_PROC_SPAWN`, so a principal granted only the sandbox
-        // authority cannot start a general process.
-        let mode = SpawnMode::of_attach(attach.is_sandbox());
-        if !mode.admits(caller.caps) {
-            self.audit_spawn_denied("proc_spawn_required");
-            return Err(Errno::PermissionDenied);
-        }
+        self.check_spawn_mode(caller, &attach)?;
         let foreground = if attach.hands_over_foreground() {
             Some(self.terminal_to_hand_over(caller)?)
         } else {
             None
         };
 
-        // Where the child will live is settled before any of its state exists,
-        // and once: an ending session admits nobody, and a join must stay
-        // inside the caller's own session. Admission re-checks only that the
-        // destination has not begun ending since.
-        let placement = self.caps.read().resolve_placement(
-            caller.process(),
-            attach.session,
-            attach.target_uid != SPAWN_UID_INHERIT,
-        );
-        let placement = match placement {
-            Ok(placement) => placement,
-            Err(refusal) => {
-                self.audit_spawn_denied("session_placement");
-                return Err(placement_errno(attach.session, refusal));
-            }
-        };
+        let placement = self.spawn_placement(caller, &attach)?;
 
         // The kernel has now committed to running an executable, and from
         // here the launch is latency-critical: most of what follows waits on
@@ -7085,6 +7110,12 @@ where
         let bundle = crate::appspawn::bundle_run_path(&path_buf);
         if program.is_none() && bundle.is_none() {
             return Err(Errno::NotFound);
+        }
+        // Only the load gate a store bundle meets can tell a screensaver, and
+        // the drawing sandbox runs nothing else.
+        if attach.is_drawing() && program.is_some() {
+            self.audit_spawn_denied("drawing_needs_bundle");
+            return Err(Errno::PermissionDenied);
         }
         // The bundle read + signature/hash verification is **not** done here:
         // it moves onto the child's own first slice (`plans/FIX-DESKTOP.md`
@@ -7201,6 +7232,11 @@ where
             Some(terminal) => ctx.with_foreground(terminal),
             None => ctx,
         };
+        let ctx = if attach.is_drawing() {
+            ctx.with_share(attach.share, caller.caps.proc_id())
+        } else {
+            ctx
+        };
         // The child's load source (`plans/FIX-DESKTOP.md` §2.6.5): a
         // boot-floor program is a **prebuilt** plan carrying its already-
         // verified `'static` image and manifest request, so the child only
@@ -7217,6 +7253,11 @@ where
             LoadPlan::Bundle {
                 bundle: String::from(parsed.bundle),
                 command: String::from(parsed.command),
+                mode: if attach.is_drawing() {
+                    tairix_appload::LoadMode::Drawing
+                } else {
+                    tairix_appload::LoadMode::Ordinary
+                },
             }
         } else {
             // Unreachable by construction; keep the arm fail-closed.
@@ -10773,6 +10814,14 @@ where
         self.map_granted_region(caller, handle, None, len_out)
     }
 
+    fn share_map(&self, caller: &CallerContext<'_>, len_out: u64) -> SyscallResult {
+        // No capability: the spawn grant is the authority. The first call
+        // spends the claim whatever it answers, so an unwind that could not take
+        // its mapping back never lets a second call map the region again.
+        let (handle, grantor) = self.aspaces.write().claim_spawn_share(caller.process())?;
+        self.map_granted_region(caller, handle, Some(grantor), len_out)
+    }
+
     fn shm_map_from(
         &self,
         caller: &CallerContext<'_>,
@@ -13753,6 +13802,9 @@ where
     /// to the spawner to take back, and no gate admits the dead instance
     /// meanwhile.
     foreground: Option<Terminal>,
+    /// The shared region a drawing sandbox is handed, and the spawner's own
+    /// instance it is delegated from; `None` for every other spawn.
+    share: Option<(u64, ProcId)>,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -13818,6 +13870,7 @@ where
             translation: None,
             lowered: tairix_abi::SpawnLimits::INHERIT,
             foreground: None,
+            share: None,
         }
     }
 
@@ -13849,6 +13902,14 @@ where
     #[must_use]
     pub(crate) fn with_foreground(mut self, terminal: Terminal) -> Self {
         self.foreground = Some(terminal);
+        self
+    }
+
+    /// Hand the child the shared region `region`, delegated from `grantor` —
+    /// the spawner's own instance — as its spawn share.
+    #[must_use]
+    pub(crate) fn with_share(mut self, region: u64, grantor: ProcId) -> Self {
+        self.share = Some((region, grantor));
         self
     }
 
@@ -14019,6 +14080,8 @@ pub enum LoadPlan {
         /// synchronous resolver; the child re-derives its manifest request
         /// from the verified `AppInfo`.
         command: String,
+        /// How the child is spawned, which a screensaver's admission turns on.
+        mode: tairix_appload::LoadMode,
     },
 }
 
@@ -14179,6 +14242,7 @@ fn body_load_bundle(
     uid: u32,
     effective: &dyn tairix_abi::CapabilityQuery,
     bundle: &str,
+    mode: tairix_appload::LoadMode,
 ) -> Result<alloc::sync::Arc<tairix_appload::LoadedApp>, Errno> {
     let Some(store) = services.app_store() else {
         return Err(Errno::NotFound);
@@ -14194,6 +14258,8 @@ fn body_load_bundle(
             services
                 .filesystem()
                 .read_program(uid, effective, app.run_path(), 0, &mut [])?;
+            tairix_appload::admit_cached(&app, mode, services.audit())
+                .map_err(crate::appspawn::app_error_errno)?;
             return Ok(app);
         }
     }
@@ -14216,7 +14282,7 @@ fn body_load_bundle(
     // (in `ChildRecordSeed::record`) stays the one authority bound.
     let full_grants = CapabilitySet::from_words([u64::MAX; 4]);
     let app = loader
-        .load(bundle, &full_grants)
+        .load(bundle, &full_grants, mode)
         .map(alloc::sync::Arc::new)
         .map_err(crate::appspawn::app_error_errno)?;
     if cacheable {
@@ -14329,7 +14395,7 @@ fn build_child_image(
             args,
             env,
         ),
-        LoadPlan::Bundle { bundle, .. } => {
+        LoadPlan::Bundle { bundle, mode, .. } => {
             // Park until the store latch resolves, then read + verify under
             // the child's own credential. The effective set for the read is
             // the account ceiling (a system principal with no ceiling reads
@@ -14337,7 +14403,7 @@ fn build_child_image(
             // predecessor did); it is never wider than the account allows.
             body_wait_app_store(services, task)?;
             let (uid, effective) = seed.credential.read_authority();
-            let app = body_load_bundle(services, uid, &effective, bundle)?;
+            let app = body_load_bundle(services, uid, &effective, bundle, *mode)?;
             // The build copies the image bytes before `app` is dropped at the
             // end of this arm, so the borrow of the retained image is sound.
             let program = VerifiedProgram {
@@ -14470,7 +14536,9 @@ fn audit_port_refused(audit: &(dyn Sink + Sync), task: ProcessId, port: u16, wid
 
 /// Audit a child refused at admission for `cause`, before it could run: the
 /// session it was bound for began ending while it was built (`session_ending`),
-/// or the terminal it was to be handed changed hands (`terminal_changed_hands`).
+/// the terminal it was to be handed changed hands (`terminal_changed_hands`),
+/// or its spawner no longer holds the region it was to be handed
+/// (`spawn_share_not_held`).
 fn audit_admission_refused(
     audit: &(dyn Sink + Sync),
     cause: &'static str,
@@ -14848,28 +14916,12 @@ where
         let parent_cwd = self.aspaces.read().cwd(self.parent);
         self.aspaces.write().set_cwd(sec_id, parent_cwd);
 
-        // Mint the child's device-resource grants:
-        // one unforgeable, owner-checked handle per [`HwResource`] the
-        // matched hardware-tree node requested, keyed to the child's own
-        // kernel-trusted id, so the child reaches exactly those windows
-        // through `mmio_map` / `dma_alloc` and enumerates its handles
-        // through `resource_grants` — and another task presenting the same
-        // numeric handle resolves nothing (the registry owner-check).
-        // The resources are kernel-sourced (the privileged driver-spawn path
-        // threads the matched node's requests, never an untrusted caller),
-        // so minting can never widen authority beyond what that node exposed
-        // (no ambient authority); the ordinary `spawn` syscall carries
-        // an empty slice and mints nothing. Minted only after the child is
-        // fully admitted, under one write lock, so a `resource_grants` from
-        // the child observes the complete set.
-        if !self.grants.is_empty() {
-            let mut aspaces = self.aspaces.write();
-            for resource in self.grants {
-                match self.node {
-                    Some(node) => aspaces.mint_node_grant(sec_id, *resource, node.id),
-                    None => aspaces.mint_grant(sec_id, *resource),
-                };
+        if let Err(err) = self.install_child_grants(sec_id) {
+            if err == AdmitError::ShareNotHeld {
+                audit_admission_refused(self.audit, "spawn_share_not_held", sec_id, &seed);
             }
+            self.abandon_admission(task_id, sec_id, services.peer_watch(), None);
+            return Err(err);
         }
 
         // The node may have left the tree since the device manager matched
@@ -14908,6 +14960,39 @@ where
 
         self.release_admitted(task_id, sec_id, &seed, services.peer_watch())?;
         Ok(task_id)
+    }
+
+    /// Mint `child` an owner-checked handle for each resource its matched node
+    /// requested, and hand a drawing sandbox its region.
+    ///
+    /// The node's requests are kernel-sourced, so a grant is never wider than
+    /// the node exposed, and the ordinary `spawn` mints none. The region is
+    /// delegated from what the spawner holds now, so the child can never be
+    /// handed more than it has.
+    ///
+    /// # Errors
+    ///
+    /// [`AdmitError::ShareNotHeld`] when the spawner no longer holds the
+    /// region.
+    fn install_child_grants(&self, child: ProcessId) -> Result<(), AdmitError> {
+        if !self.grants.is_empty() {
+            let mut aspaces = self.aspaces.write();
+            for resource in self.grants {
+                match self.node {
+                    Some(node) => aspaces.mint_node_grant(child, *resource, node.id),
+                    None => aspaces.mint_grant(child, *resource),
+                };
+            }
+        }
+        match self.share {
+            Some((region, grantor)) => self
+                .aspaces
+                .write()
+                .hand_spawn_share(self.parent, grantor, child, region)
+                .map(drop)
+                .ok_or(AdmitError::ShareNotHeld),
+            None => Ok(()),
+        }
     }
 
     /// Make a child whose every other piece of state is installed reachable
@@ -17114,7 +17199,7 @@ mod tests {
     }
 
     /// User address of the `i`-th attach block a
-    /// [`send_aspace_with_attach`] space stages (page 2, 48-byte strides).
+    /// [`send_aspace_with_attach`] space stages (page 2, one block apart).
     fn attach_addr(i: usize) -> u64 {
         0x2000 + (i * tairix_abi::SPAWN_ATTACH_LEN) as u64
     }
@@ -20675,6 +20760,7 @@ mod tests {
         LoadPlan::Bundle {
             bundle: String::from(BUNDLE_ROOT),
             command: String::from(BUNDLE_COMMAND),
+            mode: tairix_appload::LoadMode::Ordinary,
         }
     }
 
@@ -21719,14 +21805,26 @@ mod tests {
         let services = leak_body_services(frames, audit, fs, Some(store), aspaces, caps, builder);
         let grants = full_grants();
 
-        let first =
-            body_load_bundle(services, 0, &grants, BUNDLE_ROOT).expect("first load verifies");
+        let first = body_load_bundle(
+            services,
+            0,
+            &grants,
+            BUNDLE_ROOT,
+            tairix_appload::LoadMode::Ordinary,
+        )
+        .expect("first load verifies");
         assert_eq!(first.run_image(), run.as_slice());
         let reads_after_first = fs.read_bytes();
         assert!(reads_after_first > 0, "the first load reads the bundle");
 
-        let second =
-            body_load_bundle(services, 0, &grants, BUNDLE_ROOT).expect("second load serves cache");
+        let second = body_load_bundle(
+            services,
+            0,
+            &grants,
+            BUNDLE_ROOT,
+            tairix_appload::LoadMode::Ordinary,
+        )
+        .expect("second load serves cache");
         assert_eq!(second.run_image(), run.as_slice());
         assert_eq!(
             fs.read_bytes(),
@@ -21757,14 +21855,26 @@ mod tests {
         let services = leak_body_services(frames, audit, fs, Some(store), aspaces, caps, builder);
         let grants = full_grants();
 
-        body_load_bundle(services, 0, &grants, BUNDLE_ROOT)
-            .expect("first load verifies and caches");
+        body_load_bundle(
+            services,
+            0,
+            &grants,
+            BUNDLE_ROOT,
+            tairix_appload::LoadMode::Ordinary,
+        )
+        .expect("first load verifies and caches");
         fs.revoke();
         // The second load hits the cache, but the secured VFS refuses the
         // re-authorising read of the entry point: it fails closed.
         assert!(
             matches!(
-                body_load_bundle(services, 0, &grants, BUNDLE_ROOT),
+                body_load_bundle(
+                    services,
+                    0,
+                    &grants,
+                    BUNDLE_ROOT,
+                    tairix_appload::LoadMode::Ordinary
+                ),
                 Err(Errno::PermissionDenied)
             ),
             "a cache hit must re-authorise the read and fail closed"
@@ -21793,11 +21903,24 @@ mod tests {
         let services = leak_body_services(frames, audit, fs, Some(store), aspaces, caps, builder);
         let grants = full_grants();
 
-        body_load_bundle(services, 0, &grants, BUNDLE_ROOT)
-            .expect("first load verifies and caches");
+        body_load_bundle(
+            services,
+            0,
+            &grants,
+            BUNDLE_ROOT,
+            tairix_appload::LoadMode::Ordinary,
+        )
+        .expect("first load verifies and caches");
         fs.stop_running_programs();
         assert_eq!(
-            body_load_bundle(services, 0, &grants, BUNDLE_ROOT).err(),
+            body_load_bundle(
+                services,
+                0,
+                &grants,
+                BUNDLE_ROOT,
+                tairix_appload::LoadMode::Ordinary
+            )
+            .err(),
             Some(Errno::PermissionDenied)
         );
     }
@@ -22562,6 +22685,44 @@ mod tests {
             Err(AdmitError::GrantsWithoutNode)
         );
         assert_eq!(table.read().len(), records);
+    }
+
+    /// A share the spawner no longer holds by the time its child is admitted
+    /// refuses the admission whole, and the refusal names its cause.
+    #[test]
+    fn a_share_given_up_before_admission_refuses_it_and_says_why() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let ctx = KernelSpawnCtx::new(
+            sink,
+            &sched,
+            &table,
+            &aspaces,
+            arch.as_ref(),
+            ProcessId(1),
+            &NULL_PROCESS_WAIT,
+            DescriptorTable::standard(),
+            Vec::new(),
+            &[],
+            None,
+            tairix_abi::ProcId::from_raw([0x17; 16]),
+            ProcName::from_bytes_truncating(b"saver"),
+            SPAWN_PATH.to_vec(),
+            SpawnCredential::system(),
+            true,
+        )
+        .with_share(DRAWN_REGION, ProcId::from_raw([0x22; PROC_ID_LEN]));
+        let records = table.read().len();
+        assert_eq!(
+            admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM),
+            Err(AdmitError::ShareNotHeld)
+        );
+        assert!(denied_for(sink, "spawn_share_not_held"));
+        assert_eq!(table.read().len(), records, "no record survives");
     }
 
     /// An admission refused after the node was claimed undoes itself in the
@@ -25659,6 +25820,201 @@ mod tests {
             limits.get(LimitKind::Threads),
             ResourceLimit::new(1, 1).expect("well-formed")
         );
+    }
+
+    /// A drawing spawn handed `share`, wired closed, on three threads.
+    fn drawing_attach(share: u64) -> SpawnAttach {
+        SpawnAttach::drawing(
+            [FdWire::Closed; tairix_abi::STD_STREAM_COUNT],
+            SANDBOX_CEILING,
+            3,
+            share,
+        )
+    }
+
+    /// The region every drawing-spawn test hands its child.
+    const DRAWN_REGION: u64 = 0x7E57;
+
+    /// An available store holding one saver bundle, at `bundle`.
+    fn available_saver_store(
+        bundle: &str,
+    ) -> (
+        &'static crate::test_bundle::MemFs,
+        &'static crate::appspawn::AppStore,
+    ) {
+        let (memfs, anchor) = crate::test_bundle::composed_saver(
+            bundle,
+            &[0x6B; 32],
+            tairix_abi::saver::SaverFeeds::NONE,
+        );
+        let store = crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        store.note_available();
+        (crate::forever(Box::new(memfs)), store)
+    }
+
+    /// A drawing spawn hands its child the region the spawner holds,
+    /// delegated from the spawner's own instance, and is refused outright for
+    /// a region the spawner does not hold.
+    #[test]
+    fn a_drawing_spawn_hands_its_child_only_a_region_the_spawner_holds() {
+        const SAVER: &str = "/System/Screensavers/Waves.app";
+        const SAVER_RUN: &[u8] = b"/System/Screensavers/Waves.app/Run";
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace_with_attach(
+            SAVER_RUN,
+            &[
+                drawing_attach(DRAWN_REGION),
+                drawing_attach(DRAWN_REGION + 1),
+            ],
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        aspaces
+            .write()
+            .mint_grant(ProcessId(2), tairix_abi::HwResource::shared(DRAWN_REGION));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let spawner = ProcId::from_raw([0x22; PROC_ID_LEN]);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink).with_proc_id(spawner);
+        table.write().insert(caps.clone());
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (memfs, store) = available_saver_store(SAVER);
+        let wait_producer: &'static RecordingProcessWait =
+            crate::forever(Box::new(RecordingProcessWait::new(Err(Errno::NotFound))));
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+        )
+        .with_filesystem(memfs)
+        .with_app_store(store)
+        .with_process_wait(wait_producer);
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SAVER_RUN.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("a drawing spawn of a held region succeeds");
+        let (handle, grantor) = aspaces
+            .write()
+            .claim_spawn_share(ProcessId(pid))
+            .expect("the child holds its share");
+        assert_eq!(grantor, spawner);
+        assert_eq!(
+            aspaces
+                .read()
+                .grant_from(ProcessId(pid), handle, Some(spawner)),
+            Some(tairix_abi::HwResource::shared(DRAWN_REGION))
+        );
+        assert_eq!(
+            aspaces
+                .read()
+                .limits(ProcessId(pid))
+                .get(LimitKind::Threads),
+            ResourceLimit::new(3, 3).expect("well-formed")
+        );
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                SAVER_RUN.len(),
+                attach_addr(1),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            ),
+            Err(Errno::PermissionDenied),
+            "a region the spawner holds no grant for"
+        );
+        assert!(denied_for(sink, "spawn_share_not_held"));
+    }
+
+    /// A drawing spawn naming a boot-floor program is refused before anything
+    /// is admitted: that program never meets the gate that admits only a
+    /// screensaver into the drawing sandbox.
+    #[test]
+    fn a_drawing_spawn_of_a_boot_floor_program_is_refused() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[drawing_attach(DRAWN_REGION)]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        aspaces
+            .write()
+            .mint_grant(ProcessId(2), tairix_abi::HwResource::shared(DRAWN_REGION));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
+        table.write().insert(caps.clone());
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+        let before = sched.live_task_count();
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(denied_for(sink, "drawing_needs_bundle"));
+        assert_eq!(sched.live_task_count(), before, "nothing is admitted");
+        assert_eq!(table.read().len(), 1, "no child record exists");
     }
 
     /// The narrow `CAP_SANDBOX_SPAWN` admits a canonical parser sandbox —
@@ -43828,6 +44184,143 @@ mod tests {
         );
         let _ = crate::sharedreg::unmap(facility, ProcessId(mapper), va);
         let _ = crate::sharedreg::unmap(facility, ProcessId(region_owner), owner_va);
+    }
+
+    /// A drawing sandbox maps the one region its spawner handed it, once and
+    /// with no capability; a task handed none maps nothing.
+    #[test]
+    fn share_map_maps_the_spawn_share_once_and_nothing_else() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let saver = crate::test_boot::claim_task();
+        let host = crate::test_boot::claim_peer_task();
+        aspaces
+            .write()
+            .register(ProcessId(saver), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(saver, &[], sink).as_sandboxed();
+        let ctx = CallerContext {
+            task_id: SecTaskId(saver),
+            caps: &caps,
+        };
+        let facility: &'static RecordingSharedFacility =
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_7000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_shared_mem_facility(facility);
+        assert_eq!(h.share_map(&ctx, 0x2000), Err(Errno::NotFound), "no share");
+
+        let host_id = ProcId::from_raw([0x5E; PROC_ID_LEN]);
+        let (host_va, id) =
+            crate::sharedreg::create(facility, ProcessId(host), 2).expect("region created");
+        aspaces
+            .write()
+            .mint_grant(ProcessId(host), tairix_abi::HwResource::shared(id));
+        assert_eq!(
+            aspaces
+                .write()
+                .hand_spawn_share(ProcessId(host), host_id, ProcessId(saver), id + 1),
+            None,
+            "a region the spawner does not hold is never handed"
+        );
+        aspaces
+            .write()
+            .hand_spawn_share(ProcessId(host), host_id, ProcessId(saver), id)
+            .expect("the spawner's own region is handed");
+
+        let va = h.share_map(&ctx, 0x2000).expect("the handed share maps");
+        assert_eq!(va, 0x2_0000_7000);
+        let len_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(ProcessId(saver))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(len_bytes.try_into().expect("8 bytes")),
+            2 * PAGE_SIZE as u64
+        );
+        assert_eq!(h.share_map(&ctx, 0x2000), Err(Errno::AlreadyExists));
+        let _ = crate::sharedreg::unmap(facility, ProcessId(saver), va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(host), host_va);
+    }
+
+    /// A `share_map` that fails spends the share: it leaves nothing mapped, and
+    /// no later call maps the region behind an unwind it cannot see.
+    #[test]
+    fn a_failed_share_map_spends_the_share() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let saver = crate::test_boot::claim_task();
+        let host = crate::test_boot::claim_peer_task();
+        aspaces
+            .write()
+            .register(ProcessId(saver), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(saver, &[], sink).as_sandboxed();
+        let ctx = CallerContext {
+            task_id: SecTaskId(saver),
+            caps: &caps,
+        };
+        let facility: &'static RecordingSharedFacility =
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_9000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_shared_mem_facility(facility);
+        let (host_va, id) =
+            crate::sharedreg::create(facility, ProcessId(host), 1).expect("region created");
+        aspaces
+            .write()
+            .mint_grant(ProcessId(host), tairix_abi::HwResource::shared(id));
+        aspaces
+            .write()
+            .hand_spawn_share(
+                ProcessId(host),
+                ProcId::from_raw([0x5F; PROC_ID_LEN]),
+                ProcessId(saver),
+                id,
+            )
+            .expect("the spawner's own region is handed");
+
+        assert_eq!(
+            h.share_map(&ctx, 0x9_0000_0000),
+            Err(Errno::BadAddress),
+            "a faulting length pointer"
+        );
+        assert_eq!(
+            crate::sharedreg::mapping_of(ProcessId(saver), id),
+            None,
+            "the unwind took the mapping back"
+        );
+        assert_eq!(
+            h.share_map(&ctx, 0x2000),
+            Err(Errno::AlreadyExists),
+            "the failed call spent the share"
+        );
+        assert_eq!(crate::sharedreg::mapping_of(ProcessId(saver), id), None);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(host), host_va);
     }
 
     /// `shm_grant` delegates a mapping right only for a region the caller

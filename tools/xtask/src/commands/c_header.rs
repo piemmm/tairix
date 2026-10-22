@@ -1416,7 +1416,7 @@ const APPINFO_HEADER_FIELDS: &[(&str, usize)] = &[
     ("uint16_t mime_count", 2),
     ("uint16_t browse_count", 2),
     ("uint8_t kind", 1),
-    ("uint8_t reserved", 1),
+    ("uint8_t option_count", 1),
     ("uint8_t id_len", 1),
     ("uint8_t name_len", 1),
     ("uint8_t version_len", 1),
@@ -3772,6 +3772,12 @@ fn emit_spawn_attach_contract(out: &mut String) {
          * bounds. */\n",
     );
     out.push_str(
+        "/* Spawn share: a SANDBOX spawn naming a non-zero share is a drawing\n\
+         * sandbox, handed the shared region of that id the caller holds a live\n\
+         * grant for, which the child maps once with tairix_sys_share_map. A share\n\
+         * on any other spawn is refused. */\n",
+    );
+    out.push_str(
         "typedef struct tairix_fd_wire {\n\
          \x20   uint32_t kind;\n\
          \x20   uint32_t value;\n\
@@ -3793,7 +3799,7 @@ fn emit_spawn_attach_contract(out: &mut String) {
         "    tairix_resource_limit_t limits[{}];",
         tairix_abi::LimitKind::COUNT
     );
-    out.push_str("} tairix_spawn_attach_t;\n\n");
+    out.push_str("    uint64_t share;\n} tairix_spawn_attach_t;\n\n");
 }
 
 /// `tairix_abi.h` — the umbrella header that includes every module header.
@@ -6044,16 +6050,17 @@ mod tests {
                     "    uint32_t limits_mask;\n",
                     "    uint32_t limits_reserved;\n",
                     "    tairix_resource_limit_t limits[{}];\n",
+                    "    uint64_t share;\n",
                     "}} tairix_spawn_attach_t;",
                 ),
                 tairix_abi::LimitKind::COUNT
             )),
-            "spawn attach session selector and lowered limits: {h}"
+            "spawn attach session selector, lowered limits and spawn share: {h}"
         );
         assert!(h.contains("#include \"tairix_rlimit.h\""), "{h}");
         // The struct is the block: its members sum to the encoded length.
         assert_eq!(
-            4 + 4 + 8 + 8 + 4 * 8 + 4 + 4 + 16 + 4 + 4 + tairix_abi::LimitKind::COUNT * 16,
+            4 + 4 + 8 + 8 + 4 * 8 + 4 + 4 + 16 + 4 + 4 + tairix_abi::LimitKind::COUNT * 16 + 8,
             tairix_abi::SPAWN_ATTACH_LEN
         );
     }

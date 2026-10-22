@@ -170,10 +170,10 @@ pub enum AssetFamilyKind {
     /// `tairix_cursor::catalog_sets` and its assets resolved by
     /// `tairix_cursor::cursor_asset_kind_for_file`.
     Cursor,
-    /// The screensaver previews: one `<kind>.png` per screensaver, flat, the
-    /// picture a chooser shows for it. Named by
-    /// `tairix_wallpaper::preview_file` and resolved by
-    /// `tairix_wallpaper::preview_kind`.
+    /// The previews of the desktop's own two screensavers, Blank and Dim:
+    /// flat, the picture a chooser shows for each, resolved by
+    /// `tairix_wallpaper::ScreensaverChoice::of_preview`. A saver bundle ships
+    /// its own in its `Resources/`.
     ScreensaverPreview,
     /// The sound themes: one `<asset>.flac` per sound asset, filed one
     /// directory level deep in a theme (`TAIRiX`, …), resolved by
@@ -665,32 +665,33 @@ mod tests {
         }
     }
 
-    /// The screensaver previews' contract: flat, each named for the kind it
-    /// shows and within the preview byte bound, one per kind, and every kind
-    /// covered — a chooser offering a screensaver with no preview would show
-    /// its glyph where every other shows a picture.
+    /// The desktop screensaver previews' contract: flat, each named for the
+    /// one of Blank and Dim it shows and within the preview byte bound, one
+    /// each, and both covered — a chooser offering either with no preview
+    /// would show its glyph where every other shows a picture.
     fn check_screensaver_preview_family(assets: &[&super::AssetFile]) {
-        let mut kinds: BTreeSet<tairix_wallpaper::ScreensaverKind> = BTreeSet::new();
+        let mut shown = alloc::vec::Vec::new();
         for asset in assets {
             assert!(
                 asset.category.is_none(),
                 "the screensaver previews are flat, so `{}` carries no category",
                 asset.file
             );
-            let kind = tairix_wallpaper::preview_kind(asset.file)
-                .unwrap_or_else(|| panic!("`{}` previews a screensaver", asset.file));
+            let choice = tairix_wallpaper::ScreensaverChoice::of_preview(asset.file)
+                .unwrap_or_else(|| panic!("`{}` previews a desktop screensaver", asset.file));
             assert!(
                 asset.bytes.len() <= tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES,
                 "`{}` is within the preview byte bound",
                 asset.file
             );
             assert!(
-                kinds.insert(kind),
-                "{kind:?} is previewed by more than one file"
+                !shown.contains(&choice),
+                "{choice:?} is previewed by more than one file"
             );
+            shown.push(choice);
         }
-        for kind in tairix_wallpaper::ScreensaverKind::ALL {
-            assert!(kinds.contains(&kind), "{kind:?} ships no preview");
+        for choice in tairix_wallpaper::ScreensaverChoice::DESKTOP {
+            assert!(shown.contains(&choice), "{choice:?} ships no preview");
         }
     }
 
@@ -1116,17 +1117,17 @@ mod tests {
             tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY,
             tairix_wallpaper::DEFAULT_WALLPAPER
         );
-        // And every screensaver's preview directly in its own directory.
-        for kind in tairix_wallpaper::ScreensaverKind::ALL {
-            let file = tairix_wallpaper::preview_file(kind);
+        // And each desktop screensaver's preview where the desktop reads it.
+        for choice in tairix_wallpaper::ScreensaverChoice::DESKTOP {
+            let path = choice.preview_path().expect("a desktop preview");
+            let planted: alloc::vec::Vec<alloc::vec::Vec<u8>> = path
+                .trim_start_matches("/System/")
+                .split('/')
+                .map(|part| part.as_bytes().to_vec())
+                .collect();
             assert!(
-                visited.iter().any(|c| c
-                    == &[
-                        b"Graphics".to_vec(),
-                        b"Screensavers".to_vec(),
-                        file.as_bytes().to_vec()
-                    ]),
-                "the {kind:?} preview is planted at Graphics/Screensavers/{file}"
+                visited.iter().any(|c| c == &planted),
+                "the {choice:?} preview is planted at {path}"
             );
         }
         // And each shipped sound inside the default theme.

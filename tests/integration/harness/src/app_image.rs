@@ -38,22 +38,35 @@
 //! of its own, because it already reaches it another way), `instances`
 //! (`"multiple"` for a program one user may run more than once), and
 //! `document-access` (`"read-write"` for a program handed the documents it
-//! opens writable where the user may write them). Each key appears
-//! at most once. Anything else — an unknown key, a duplicate, a multi-line
-//! value, an unknown capability or folder name — is a packaging defect
-//! that fails the build, never a guessed default.
+//! opens writable where the user may write them). A `screensaver` also
+//! declares `feeds` (the privileged feeds it needs: `"machine"`, `"keep"`,
+//! `"slides"`), `threads = "cores"` and `memory = "large"` for its resource
+//! needs, and one `option.<key>` inline table per option: a `label` and an
+//! optional `note`, then `switch = <default>`, or `choice = ["value:Label", …]`
+//! with a `default` value, or `range = [min, max, step]` with a `default` and
+//! an optional `unit`. Each key appears at most once. Anything else — an unknown key, a
+//! duplicate, a multi-line value, an unknown capability or folder name, a
+//! saver key on another kind — is a packaging defect that fails the build,
+//! never a guessed default.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use tairix_abi::bounded_text::BoundedText;
 use tairix_abi::discovery_ipc::ServiceTypeField;
+use tairix_abi::saver::{
+    Choice, ChoiceValue, Choices, OptionKey, Range, SaverFeeds, SaverOption, SaverOptionKind,
+    SAVER_MAX_OPTIONS, SAVER_OPTION_ENTRY_LEN,
+};
 use tairix_abi::{
     browse_entry, digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId,
     LibraryCategory, ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_DOCUMENT_WRITE,
-    APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX,
-    LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    APPINFO_FLAG_FEED_KEEP, APPINFO_FLAG_FEED_MACHINE, APPINFO_FLAG_FEED_SLIDES,
+    APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_FLAG_SAVER_LARGE_MEMORY,
+    APPINFO_FLAG_SAVER_PARALLEL, APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES,
+    APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+    BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
+    MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 use tairix_crypto::Ed25519SecretKey;
@@ -147,6 +160,71 @@ pub struct AppManifestSource {
     /// the user may write them. Absent means `"read-only"`
     /// (`plans/TEXTEDIT.md`).
     pub writes_documents: bool,
+    /// What a screensaver declares beyond every bundle's fields; nothing for
+    /// another kind.
+    pub saver: SaverDeclaration,
+}
+
+/// What a screensaver's manifest declares beyond every bundle's fields
+/// (`plans/SCREENSAVERS.md` SV2).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SaverDeclaration {
+    /// Its options, in manifest order.
+    pub options: Vec<SaverOption>,
+    /// The privileged feeds it needs.
+    pub feeds: SaverFeeds,
+    /// Whether it runs up to one thread per online core.
+    pub parallel: bool,
+    /// Whether it is granted the large memory ceiling.
+    pub large_memory: bool,
+}
+
+/// The screensaver keys of one manifest as they are read, each once.
+#[derive(Default)]
+struct SaverKeys {
+    options: Vec<SaverOption>,
+    feeds: Option<SaverFeeds>,
+    threads: Option<()>,
+    memory: Option<()>,
+}
+
+impl SaverKeys {
+    /// Read `key = value`, at `at`, as a screensaver key.
+    fn take(&mut self, at: &str, key: &str, value: &str) -> Result<(), AppImageError> {
+        match key {
+            "feeds" => set(at, key, &mut self.feeds, parse_feeds(at, value)?),
+            "threads" => set(at, key, &mut self.threads, parse_word(at, value, "cores")?),
+            "memory" => set(at, key, &mut self.memory, parse_word(at, value, "large")?),
+            other => {
+                let Some(option) = other.strip_prefix("option.") else {
+                    return Err(AppImageError::new(at, format!("unknown key `{other}`")));
+                };
+                let option = parse_option(at, option, value)?;
+                if self.options.iter().any(|known| known.key() == option.key()) {
+                    return Err(AppImageError::new(at, format!("duplicate key `{other}`")));
+                }
+                self.options.push(option);
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether any was read.
+    fn any(&self) -> bool {
+        !self.options.is_empty()
+            || self.feeds.is_some()
+            || self.threads.is_some()
+            || self.memory.is_some()
+    }
+
+    fn declaration(self) -> SaverDeclaration {
+        SaverDeclaration {
+            options: self.options,
+            feeds: self.feeds.unwrap_or(SaverFeeds::NONE),
+            parallel: self.threads.is_some(),
+            large_memory: self.memory.is_some(),
+        }
+    }
 }
 
 impl AppManifestSource {
@@ -164,7 +242,8 @@ impl AppManifestSource {
     /// an unknown library folder, an over-long `library-icon`, `title`,
     /// `purpose`, or `author`,
     /// an `icon-bar` that is not a bare `true`/`false`, an `instances` that is
-    /// neither `"single"` nor `"multiple"`, or a `library` on a `service`.
+    /// neither `"single"` nor `"multiple"`, a `library` on a `service`, a
+    /// malformed option, or a screensaver key on another kind.
     pub fn parse(text: &str) -> Result<Self, AppImageError> {
         let ctx = APP_MANIFEST_SOURCE;
         let mut id = None;
@@ -182,6 +261,7 @@ impl AppManifestSource {
         let mut icon_bar = None;
         let mut instances = None;
         let mut document_access = None;
+        let mut saver_keys = SaverKeys::default();
         for (number, entry) in tairix_syshelp::bundles::manifest_entries(text) {
             let at = format!("{ctx} line {number}");
             let (key, value) =
@@ -215,11 +295,11 @@ impl AppManifestSource {
                         parse_document_access(&at, value)?,
                     )?;
                 }
-                other => {
-                    return Err(AppImageError::new(&at, format!("unknown key `{other}`")));
-                }
+                other => saver_keys.take(&at, other, value)?,
             }
         }
+        let declares_saver = saver_keys.any();
+        let desktop_keys = icon_bar.is_some() || instances.is_some() || document_access.is_some();
         let manifest = Self {
             id: require(id, "id")?,
             name: require(name, "name")?,
@@ -248,7 +328,21 @@ impl AppManifestSource {
             // Absent means read-only: a program is handed nothing it could
             // change unless it says it edits.
             writes_documents: document_access.unwrap_or(false),
+            saver: saver_keys.declaration(),
         };
+        let saver = manifest.kind == ProgramKind::Screensaver;
+        if declares_saver && !saver {
+            return Err(AppImageError::new(
+                ctx,
+                "only a `screensaver` declares options, feeds, threads or memory",
+            ));
+        }
+        if desktop_keys && saver {
+            return Err(AppImageError::new(
+                ctx,
+                "a `screensaver` has no icon-bar slot, instances or documents",
+            ));
+        }
         manifest.validate()?;
         Ok(manifest)
     }
@@ -316,6 +410,20 @@ impl AppManifestSource {
                 ctx,
                 format!("a `{}` cannot declare `library`", self.kind.as_str()),
             ));
+        }
+        let requests = !self.capabilities.is_empty()
+            || !self.associations.is_empty()
+            || !self.browses.is_empty();
+        if self.kind == ProgramKind::Screensaver && requests {
+            // A saver runs capability-empty in the drawing sandbox: there is
+            // nothing a request could be granted.
+            return Err(AppImageError::new(
+                ctx,
+                "a `screensaver` requests no capability, file type or browsed service",
+            ));
+        }
+        if self.saver.options.len() > usize::from(SAVER_MAX_OPTIONS) {
+            return Err(AppImageError::new(ctx, "too many options"));
         }
         Ok(())
     }
@@ -513,6 +621,194 @@ fn parse_browses(at: &str, value: &str) -> Result<Vec<ServiceType>, AppImageErro
     Ok(types)
 }
 
+/// Parse a quoted string that must be exactly `word`: the one value a key
+/// with a single non-default setting takes.
+fn parse_word(at: &str, value: &str, word: &str) -> Result<(), AppImageError> {
+    if parse_string(at, value)? != word {
+        return Err(AppImageError::new(at, format!("expected `\"{word}\"`")));
+    }
+    Ok(())
+}
+
+/// Parse a single-line array of the privileged feeds a screensaver needs.
+fn parse_feeds(at: &str, value: &str) -> Result<SaverFeeds, AppImageError> {
+    let mut bits = 0;
+    for item in array_items(at, value)? {
+        let feed = match parse_string(at, item)?.as_str() {
+            "machine" => APPINFO_FLAG_FEED_MACHINE,
+            "keep" => APPINFO_FLAG_FEED_KEEP,
+            "slides" => APPINFO_FLAG_FEED_SLIDES,
+            other => return Err(AppImageError::new(at, format!("unknown feed `{other}`"))),
+        };
+        if bits & feed != 0 {
+            return Err(AppImageError::new(at, "duplicate feed"));
+        }
+        bits |= feed;
+    }
+    SaverFeeds::from_bits(bits).map_err(|e| AppImageError::new(at, format!("feeds: {e:?}")))
+}
+
+/// The items of a single-line `[...]` array, split at its top-level commas.
+fn array_items<'a>(at: &str, value: &'a str) -> Result<Vec<&'a str>, AppImageError> {
+    let inner = value
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| AppImageError::new(at, "expected a single-line `[...]` array"))?
+        .trim();
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    split_top_level(at, inner)
+}
+
+/// Split `text` at the commas outside every quoted string and bracket.
+fn split_top_level<'a>(at: &str, text: &'a str) -> Result<Vec<&'a str>, AppImageError> {
+    let mut items = Vec::new();
+    let (mut depth, mut quoted, mut from) = (0u32, false, 0usize);
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'"' => quoted = !quoted,
+            b'[' | b'{' if !quoted => depth += 1,
+            b']' | b'}' if !quoted => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| AppImageError::new(at, "unbalanced bracket"))?;
+            }
+            b',' if !quoted && depth == 0 => {
+                items.push(text[from..index].trim());
+                from = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if quoted || depth != 0 {
+        return Err(AppImageError::new(at, "unbalanced quote or bracket"));
+    }
+    items.push(text[from..].trim());
+    Ok(items)
+}
+
+/// The `"value:Label"` words of a choice option's `choice` array.
+fn parse_choices(
+    at: &str,
+    choice: &str,
+    refuse: &dyn Fn(&str) -> AppImageError,
+) -> Result<Choices, AppImageError> {
+    let mut choices = Vec::new();
+    for item in array_items(at, choice)? {
+        let spelled = parse_string(at, item)?;
+        let (value, label) = spelled
+            .split_once(':')
+            .ok_or_else(|| refuse("a choice is spelled `\"value:Label\"`"))?;
+        choices.push(Choice {
+            value: ChoiceValue::new(value)
+                .map_err(|_| refuse(&format!("`{value}` is not a lower-case word")))?,
+            label: BoundedText::new(label)
+                .map_err(|_| refuse(&format!("choice label `{label}` is out of bounds")))?,
+        });
+    }
+    Choices::new(&choices).map_err(|_| {
+        refuse(&format!(
+            "a choice offers two to {} distinct, labelled values",
+            tairix_abi::saver::SAVER_MAX_CHOICES
+        ))
+    })
+}
+
+/// Parse one `option.<key> = { … }` inline table into the option it declares.
+fn parse_option(at: &str, key: &str, value: &str) -> Result<SaverOption, AppImageError> {
+    let refuse = |why: &str| AppImageError::new(at, format!("option `{key}`: {why}"));
+    let inner = value
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .ok_or_else(|| refuse("expected a single-line `{ … }` table"))?
+        .trim();
+    let mut fields: Vec<(&str, &str)> = Vec::new();
+    for item in split_top_level(at, inner)? {
+        let (name, field) = item
+            .split_once('=')
+            .map(|(name, field)| (name.trim(), field.trim()))
+            .ok_or_else(|| refuse("expected `name = value`"))?;
+        if fields.iter().any(|(known, _)| *known == name) {
+            return Err(refuse(&format!("duplicate `{name}`")));
+        }
+        fields.push((name, field));
+    }
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, v)| *v)
+    };
+    let text = |name: &str| -> Result<Option<String>, AppImageError> {
+        field(name).map(|value| parse_string(at, value)).transpose()
+    };
+    let number = |value: &str| -> Result<i32, AppImageError> {
+        value
+            .parse()
+            .map_err(|_| refuse(&format!("`{value}` is not a whole number")))
+    };
+    let label = text("label")?.ok_or_else(|| refuse("missing `label`"))?;
+    let note = text("note")?.unwrap_or_default();
+    let kinds = ["switch", "choice", "range"]
+        .into_iter()
+        .filter(|kind| field(kind).is_some())
+        .count();
+    if kinds != 1 {
+        return Err(refuse("needs exactly one of `switch`, `choice` or `range`"));
+    }
+    let (kind, known): (SaverOptionKind, &[&str]) = if let Some(default) = field("switch") {
+        (
+            SaverOptionKind::Switch {
+                default: parse_bool(at, default)?,
+            },
+            &["label", "note", "switch"],
+        )
+    } else if let Some(choice) = field("choice") {
+        let choices = parse_choices(at, choice, &refuse)?;
+        let default = text("default")?.ok_or_else(|| refuse("missing `default`"))?;
+        let default = choices
+            .position(&default)
+            .and_then(|at| u8::try_from(at).ok())
+            .ok_or_else(|| refuse(&format!("default `{default}` is not one of its values")))?;
+        (
+            SaverOptionKind::Choice { choices, default },
+            &["label", "note", "choice", "default"],
+        )
+    } else {
+        let bounds = array_items(at, field("range").unwrap_or_default())?;
+        let [min, max, step] = bounds.as_slice() else {
+            return Err(refuse("a range is `[min, max, step]`"));
+        };
+        let step = u32::try_from(number(step)?).map_err(|_| refuse("a negative step"))?;
+        let range = Range::new(number(min)?, number(max)?, step).map_err(|_| {
+            refuse(&format!(
+                "a range needs min < max, a step dividing the span, and at most {} values",
+                tairix_abi::saver::SAVER_RANGE_VALUES_MAX
+            ))
+        })?;
+        let default = number(field("default").ok_or_else(|| refuse("missing `default`"))?)?;
+        let unit = BoundedText::new(text("unit")?.as_deref().unwrap_or(""))
+            .map_err(|_| refuse("`unit` is out of bounds"))?;
+        (
+            SaverOptionKind::Range {
+                range,
+                default,
+                unit,
+            },
+            &["label", "note", "range", "default", "unit"],
+        )
+    };
+    if let Some((stray, _)) = fields.iter().find(|(name, _)| !known.contains(name)) {
+        return Err(refuse(&format!("unknown field `{stray}`")));
+    }
+    let key = OptionKey::new(key).map_err(|_| refuse("a key is a lower-case word"))?;
+    let label = BoundedText::new(&label).map_err(|_| refuse("`label` is out of bounds"))?;
+    let note = BoundedText::new(&note).map_err(|_| refuse("`note` is out of bounds"))?;
+    SaverOption::new(key, (label, note), kind)
+        .map_err(|_| refuse("the default is not one of its values"))
+}
+
 /// One program crate the discovery walk found: its cargo package name (the
 /// `-p` argument a cross-compile passes), its crate directory, and its
 /// parsed manifest source.
@@ -667,7 +963,13 @@ pub struct ComposedAppInfo {
 /// that says nothing lands on every default (a slot on the icon bar, one
 /// instance per user, documents handed read-only).
 fn header_flags(manifest: &AppManifestSource) -> u32 {
-    let mut flags = 0;
+    let mut flags = manifest.saver.feeds.bits();
+    if manifest.saver.parallel {
+        flags |= APPINFO_FLAG_SAVER_PARALLEL;
+    }
+    if manifest.saver.large_memory {
+        flags |= APPINFO_FLAG_SAVER_LARGE_MEMORY;
+    }
     if !manifest.icon_bar {
         flags |= APPINFO_FLAG_NO_ICON_BAR;
     }
@@ -735,6 +1037,8 @@ pub fn compose_signed_appinfo(
         .map_err(|_| AppImageError::new(ctx, "too many associations"))?;
     let browse_count = u16::try_from(manifest.browses.len())
         .map_err(|_| AppImageError::new(ctx, "too many browsed service types"))?;
+    let option_count = u8::try_from(manifest.saver.options.len())
+        .map_err(|_| AppImageError::new(ctx, "too many options"))?;
     let header = AppInfoHeader {
         magic: APPINFO_MAGIC,
         abi_version: ABI_VERSION_CURRENT,
@@ -743,7 +1047,7 @@ pub fn compose_signed_appinfo(
         mime_count,
         browse_count,
         kind: manifest.kind.to_wire(),
-        reserved: 0,
+        option_count,
         id_len: inline_len(ctx, "id", &manifest.id, BUNDLE_ID_MAX)?,
         name_len: inline_len(ctx, "name", &manifest.name, BUNDLE_NAME_MAX)?,
         version_len: inline_len(ctx, "version", &manifest.version, BUNDLE_VERSION_MAX)?,
@@ -796,7 +1100,8 @@ pub fn compose_signed_appinfo(
         AppInfoHeader::WIRE_LEN
             + manifest.capabilities.len() * 2
             + manifest.associations.len() * MIME_ENTRY_LEN
-            + manifest.browses.len() * BROWSE_ENTRY_LEN,
+            + manifest.browses.len() * BROWSE_ENTRY_LEN
+            + manifest.saver.options.len() * SAVER_OPTION_ENTRY_LEN,
     );
     bytes.extend_from_slice(&header.to_le_bytes());
     // The whole body is covered by the signature below, so a tampered entry
@@ -818,8 +1123,8 @@ pub fn compose_signed_appinfo(
 
 /// Append the body the header counts: the capability ids, then the MIME
 /// table `mime_type_at` reads (a length byte and the type in a
-/// `MIME_TYPE_MAX` buffer per association), then the browse table
-/// `browse_type_at` reads.
+/// `MIME_TYPE_MAX` buffer per association), the browse table
+/// `browse_type_at` reads, then a screensaver's options.
 fn append_body(
     ctx: &str,
     manifest: &AppManifestSource,
@@ -844,6 +1149,9 @@ fn append_body(
         .map_err(|e| AppImageError::new(ctx, format!("browsed type: {e:?}")))?;
         bytes.extend_from_slice(&entry);
     }
+    for option in &manifest.saver.options {
+        bytes.extend_from_slice(&option.to_entry());
+    }
     Ok(())
 }
 
@@ -863,6 +1171,7 @@ fn inline_buf<const N: usize>(value: &str) -> [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     use tairix_abi::{decode_capability_ids, mime_type_at, PublisherBinding};
     use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
 
@@ -1108,6 +1417,12 @@ mod tests {
             assert_eq!(manifest.kind, kind);
             assert_eq!(manifest.kind.store_dir(), store);
         }
+        // A screensaver requests no capability, so it is its own manifest.
+        let saver = AppManifestSource::parse(SAVER).expect("valid");
+        assert_eq!(
+            (saver.kind, saver.kind.store_dir()),
+            (ProgramKind::Screensaver, "Screensavers")
+        );
     }
 
     #[test]
@@ -1183,7 +1498,15 @@ mod tests {
     /// tree, by manifest name, pinned so dropping or mis-spelling a manifest is
     /// a loud test diff.
     const EXPECTED_PROGRAM_BUNDLES: &[&str] = &[
+        "Clock",
+        "Life",
         "Paint",
+        "Raytrace",
+        "RetroGames",
+        "Ribbon",
+        "Slideshow",
+        "Starfield",
+        "SystemMonitor",
         "TextEdit",
         "applib",
         "audioctl",
@@ -1550,6 +1873,132 @@ mod tests {
             .collect();
         let text = format!("{GOOD}browses = [{}]\n", many.join(", "));
         assert!(AppManifestSource::parse(&text).is_err(), "past the bound");
+    }
+
+    const SAVER: &str = "id = \"os.tairix.waves\"\n\
+        name = \"waves\"\n\
+        version = \"1.0\"\n\
+        kind = \"screensaver\"\n\
+        capabilities = []\n";
+
+    #[test]
+    fn a_screensaver_declares_its_options_feeds_and_needs() {
+        let text = format!(
+            "{SAVER}feeds = [\"keep\", \"machine\"]\nthreads = \"cores\"\nmemory = \"large\"\n\
+             option.detail = {{ label = \"Detail, from coarse to fine\", choice = [\"simple:Simple\", \"maximum:Maximum\"], default = \"maximum\" }}\n\
+             option.keep = {{ label = \"Keep pictures\", note = \"Each as a PNG, in your Pictures.\", switch = true }}\n\
+             option.interval_s = {{ label = \"Change every\", range = [5, 3600, 5], default = 30, unit = \"seconds\" }}\n"
+        );
+        let manifest = AppManifestSource::parse(&text).expect("valid");
+        assert!(
+            manifest.saver.feeds.keep()
+                && manifest.saver.feeds.machine()
+                && !manifest.saver.feeds.slides()
+        );
+        assert!(manifest.saver.parallel && manifest.saver.large_memory);
+        let keys: Vec<&str> = manifest
+            .saver
+            .options
+            .iter()
+            .map(|o| o.key().as_str())
+            .collect();
+        assert_eq!(keys, ["detail", "keep", "interval_s"]);
+        assert_eq!(
+            manifest.saver.options[0].label(),
+            "Detail, from coarse to fine"
+        );
+        let composed = compose_signed_appinfo(
+            &[9u8; 32],
+            PublisherSource::SelfPublished,
+            &manifest,
+            [0x11; 32],
+            &[BundleFileDigest {
+                path: "Run",
+                bytes: b"program",
+            }],
+        )
+        .expect("composes");
+        let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
+        assert_eq!(header.program_kind(), Some(ProgramKind::Screensaver));
+        assert_eq!(header.option_count, 3);
+        assert!(
+            header.saver_feeds().keep() && header.runs_parallel() && header.needs_large_memory()
+        );
+        let body = &composed.bytes[AppInfoHeader::WIRE_LEN..];
+        assert_eq!(body.len(), header.body_len().expect("fits"));
+        assert_eq!(tairix_abi::validate_saver_options(body, &header), Ok(()));
+        for (index, option) in manifest.saver.options.iter().enumerate() {
+            assert_eq!(
+                tairix_abi::saver_option_at(body, &header, index).as_ref(),
+                Ok(option)
+            );
+        }
+    }
+
+    #[test]
+    fn saver_keys_belong_to_a_screensaver_alone() {
+        for line in [
+            "feeds = [\"keep\"]\n",
+            "threads = \"cores\"\n",
+            "memory = \"large\"\n",
+            "option.keep = { label = \"Keep\", switch = true }\n",
+        ] {
+            let refused = AppManifestSource::parse(&format!("{GOOD}{line}"));
+            assert!(refused.is_err(), "{line}");
+        }
+        for line in [
+            "icon-bar = false\n",
+            "instances = \"multiple\"\n",
+            "document-access = \"read-write\"\n",
+        ] {
+            assert!(
+                AppManifestSource::parse(&format!("{SAVER}{line}")).is_err(),
+                "{line}"
+            );
+        }
+        let requesting = SAVER.replace("capabilities = []", "capabilities = [\"CAP_FS_ACCESS\"]");
+        assert!(AppManifestSource::parse(&requesting).is_err());
+        let typed = format!("{SAVER}associations = [\"text/plain\"]\n");
+        assert!(AppManifestSource::parse(&typed).is_err());
+    }
+
+    #[test]
+    fn a_malformed_option_is_refused() {
+        for option in [
+            "option.Detail = { label = \"Detail\", switch = true }",
+            "option.keep = { switch = true }",
+            "option.keep = { label = \"Keep\" }",
+            "option.keep = { label = \"Keep\", switch = yes }",
+            "option.keep = { label = \"Keep\", switch = true, range = [0, 2, 1] }",
+            "option.keep = { label = \"Keep\", switch = true, default = true }",
+            "option.keep = { label = \"Keep\", label = \"Again\", switch = true }",
+            "option.pick = { label = \"Pick\", choice = [\"one:One\"], default = \"one\" }",
+            "option.pick = { label = \"Pick\", choice = [\"a:A\", \"b:B\"], default = \"c\" }",
+            "option.pick = { label = \"Pick\", choice = [\"a\", \"b:B\"], default = \"a\" }",
+            "option.pick = { label = \"Pick\", choice = [\"A:A\", \"b:B\"], default = \"b\" }",
+            "option.n = { label = \"N\", range = [0, 10, 3], default = 0 }",
+            "option.n = { label = \"N\", range = [0, 10], default = 0 }",
+            "option.n = { label = \"N\", range = [0, 10, 2], default = 3 }",
+            "option.n = { label = \"N\", range = [0, 10, -2], default = 0 }",
+            "option.n = { label = \"N\", range = [0, 10, 2] }",
+            "option.n = { label = \"N, unbalanced\", range = [0, 10, 2, default = 0 }",
+            "option.n = label",
+        ] {
+            assert!(
+                AppManifestSource::parse(&format!("{SAVER}{option}\n")).is_err(),
+                "{option}"
+            );
+        }
+        let twice = format!(
+            "{SAVER}option.keep = {{ label = \"Keep\", switch = true }}\noption.keep = {{ label = \"Keep\", switch = false }}\n"
+        );
+        assert!(AppManifestSource::parse(&twice).is_err());
+        let mut many = String::new();
+        for n in 0..=SAVER_MAX_OPTIONS {
+            writeln!(many, "option.o{n} = {{ label = \"O\", switch = true }}")
+                .expect("a string takes it");
+        }
+        assert!(AppManifestSource::parse(&format!("{SAVER}{many}")).is_err());
     }
 
     #[test]

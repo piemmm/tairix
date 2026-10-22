@@ -24,9 +24,10 @@ use tairix_abi::desktop::{DesktopInfo, DesktopText, Motion};
 use tairix_abi::driver::display::{DamageList, DisplayMode};
 use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DragItems,
-    DropOperation, HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, PickPurpose,
-    PointerAction, SystemTask, TerrainPlate, ToolOver, WindowEvent, WindowRegion,
+    encode_screensaver_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape,
+    DialogModality, DragItems, DropOperation, HandOverDocument, HandOverOutcome, LayerDepth,
+    MenuRefusal, PickPurpose, PointerAction, PreviewSubject, SystemTask, TerrainPlate, ToolOver,
+    WindowEvent, WindowRegion, WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::zone::ZoneName;
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
@@ -66,6 +67,7 @@ use crate::lock::ScreenLock;
 use crate::menu::{ChainGeometry, ChainOwner, MenuChain, ModelRefused};
 use crate::picker::{PickerSlot, SessionPicker};
 use crate::resolution::ResolutionPrompt;
+use crate::saver::SaverCatalog;
 use crate::session::DesktopSession;
 use crate::shell::DesktopShell;
 use crate::wallpaper::WallpaperService;
@@ -1144,16 +1146,18 @@ pub(crate) fn bundle_artwork(
     }
 }
 
-/// What a screensaver preview needs from the session that serves it: the
-/// desktop's settings as they stand, which the preview is read over, and
-/// whether this session has the screen, rather than standing behind another
-/// user's.
+/// What the screensaver's requests need from the session that serves them:
+/// the desktop's settings as they stand, which a preview is read over,
+/// whether this session has the screen rather than standing behind another
+/// user's, and the savers it offers.
 #[derive(Copy, Clone)]
 pub struct ScreensaverServe<'a> {
     /// The desktop's settings.
     pub settings: &'a DesktopSettings,
     /// Whether the screen is this session's to cover.
     pub owns_screen: bool,
+    /// The screensavers the desktop offers.
+    pub savers: &'a SaverCatalog,
 }
 
 /// The [`WindowHost`] bridge one serve pass borrows: the desktop shell,
@@ -1836,9 +1840,15 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             surface.width_px,
             surface.height_px,
             |content, changed| {
-                winframe::decode_list(frame, content, surface, damage, runner, |rect| {
-                    changed.add(rect);
-                })
+                winframe::decode_list(
+                    frame,
+                    content,
+                    surface,
+                    damage,
+                    winframe::Alpha::AsSent,
+                    runner,
+                    |rect| changed.add(rect),
+                )
             },
         ) else {
             return Err(Errno::NotFound);
@@ -2530,14 +2540,66 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 
     fn preview_render_requested(
         &mut self,
+        caller: Option<&AttestedApp>,
         window_id: u64,
         region: ClientRegion,
         request: PreviewSize,
     ) -> Result<(), Errno> {
+        // Which savers a user installed is theirs, and their pictures say so.
+        if matches!(request.subject, PreviewSubject::Screensaver(_))
+            && !self.shell.settings_only(caller, "screensaver-preview")
+        {
+            return Err(Errno::PermissionDenied);
+        }
         // The engine has checked the window and refused a duplicate; bounding
         // the renders, resolving the subject, mapping the region and getting
         // the decode off this loop are the session's.
-        self.wallpapers.render(window_id, region, request)
+        self.wallpapers.render(window_id, region, request)?;
+        if matches!(request.subject, PreviewSubject::Screensaver(_))
+            && self.shell.take_savers_unshown()
+        {
+            let listed = self.screensaver.map_or(0, |serve| serve.savers.total());
+            tairix_log::log(
+                self.shell.audit(),
+                &tairix_log::Event {
+                    level: tairix_log::Level::Info,
+                    id: crate::saver::SAVER_CATALOGUE_SHOWN,
+                    message: crate::saver::SAVER_CATALOGUE_SHOWN_MESSAGE,
+                    fields: &[Field {
+                        key: "savers",
+                        value: FieldValue::UnsignedInt(u64::from(listed)),
+                    }],
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn screensaver_entry(
+        &mut self,
+        caller: Option<&AttestedApp>,
+        index: u16,
+        out: &mut [u8; WINDOW_SCREENSAVER_REPLY_MAX],
+    ) -> usize {
+        let Some(serve) = self.screensaver else {
+            return encode_screensaver_reply(out, Err(Errno::NotSupported));
+        };
+        // Which savers a user installed is theirs, so only the pane that
+        // chooses among them may read the list.
+        if !self.shell.settings_only(caller, "screensaver-catalogue") {
+            return encode_screensaver_reply(out, Err(Errno::PermissionDenied));
+        }
+        // Read again once a listing reaches the end, so the stores move
+        // under the next listing rather than this one.
+        if index.saturating_add(1) >= serve.savers.total() {
+            self.shell.note_savers_listed();
+        }
+        match serve.savers.entry(index) {
+            Some((entry, options)) => {
+                encode_screensaver_reply(out, Ok((serve.savers.total(), &entry, options)))
+            }
+            None => encode_screensaver_reply(out, Err(Errno::NotFound)),
+        }
     }
 
     fn screensaver_preview_requested(
@@ -2603,7 +2665,7 @@ pub fn desktop_info(
 mod tests {
     use super::*;
     use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::window_ipc::{DocumentName, PreviewSubject};
+    use tairix_abi::window_ipc::DocumentName;
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_taskbar::TaskbarConfig;
     use tairix_window::WindowHost;
@@ -2917,6 +2979,96 @@ mod tests {
             authorise: prompt.map(|(prompt, elevator)| AuthoriseDesk { prompt, elevator }),
         };
         host.authorise_requested(caller, 12, task)
+    }
+
+    /// The screensaver catalogue is read by the desktop's own Settings alone,
+    /// one entry at a time with the options each declares, the total with
+    /// every entry, and nothing past the last.
+    #[test]
+    fn the_screensaver_catalogue_is_read_by_settings_alone() {
+        use tairix_abi::window_ipc::{decode_screensaver_reply, SaverOrigin, SaverStanding};
+
+        let mut bench = HandOverBench::new();
+        let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+        let own = AttestedApp::new("os.tairix.desktop", publisher).expect("identity");
+        bench.shell.set_own_app(Some(own));
+        let settings =
+            AttestedApp::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher).expect("identity");
+        let files = AttestedApp::new("os.tairix.files", publisher).expect("identity");
+        let savers = SaverCatalog::of(alloc::vec![crate::saver::Saver {
+            choice: String::from("os.tairix.saver.waves"),
+            id: BundleId::new("os.tairix.saver.waves").ok(),
+            bundle: String::from("/System/Screensavers/Waves.app"),
+            origin: SaverOrigin::System,
+            title: String::from("Waves"),
+            purpose: String::from("The sea at night"),
+            feeds: tairix_abi::saver::SaverFeeds::NONE,
+            parallel: false,
+            large_memory: false,
+            options: Vec::new(),
+            standing: SaverStanding::Offered,
+        }]);
+        let desktop = DesktopSettings::default();
+        let ask = |bench: &mut HandOverBench, caller: Option<&AttestedApp>, index: u16| {
+            let mut host = ShellWindowHost {
+                shell: &mut bench.shell,
+                compositor: &mut bench.compositor,
+                windows: &mut bench.windows,
+                picker: &mut bench.picker,
+                apps: &mut bench.bar,
+                menu: &mut bench.menu,
+                seat_held: false,
+                screensaver: Some(ScreensaverServe {
+                    settings: &desktop,
+                    owns_screen: true,
+                    savers: &savers,
+                }),
+                relay: &mut bench.relay,
+                wallpapers: &mut bench.gallery,
+                cursor_sets: &[],
+                clipboard: &mut bench.clipboard,
+                authorise: None,
+            };
+            let mut out = [0u8; WINDOW_SCREENSAVER_REPLY_MAX];
+            let len = host.screensaver_entry(caller, index, &mut out);
+            out[..len].to_vec()
+        };
+        let refusal = |bytes: &[u8]| decode_screensaver_reply(bytes).err();
+        assert_eq!(
+            refusal(&ask(&mut bench, Some(&files), 0)),
+            Some(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            refusal(&ask(&mut bench, None, 0)),
+            Some(Errno::PermissionDenied)
+        );
+        assert!(
+            !bench.shell.take_savers_listed(),
+            "a refused listing reads nothing"
+        );
+        let blank = ask(&mut bench, Some(&settings), 0);
+        let (total, entry) = decode_screensaver_reply(&blank).expect("an entry");
+        assert_eq!((total, entry.choice), (3, "blank"));
+        assert!(!bench.shell.take_savers_listed(), "not before the end");
+        let waves = ask(&mut bench, Some(&settings), 2);
+        let (_, entry) = decode_screensaver_reply(&waves).expect("an entry");
+        assert_eq!(
+            (entry.choice, entry.title, entry.purpose, entry.origin),
+            (
+                "os.tairix.saver.waves",
+                "Waves",
+                "The sea at night",
+                SaverOrigin::System
+            )
+        );
+        assert!(
+            bench.shell.take_savers_listed(),
+            "a listing read to its end reads the stores again"
+        );
+        assert_eq!(
+            refusal(&ask(&mut bench, Some(&settings), 3)),
+            Some(Errno::NotFound)
+        );
     }
 
     /// Only the desktop's own Settings may ask for a system task, only with
@@ -3872,6 +4024,81 @@ mod tests {
         assert_eq!(refused(), 3);
         assert!(bench.desk.handed.is_empty());
         assert_eq!(bench.relay.located.len(), 3, "every location was consumed");
+    }
+
+    /// A window's first screensaver picture after the list was read to its
+    /// end says the catalogue reached a chooser, once per listing: a
+    /// wallpaper's picture and a second screensaver's say nothing.
+    #[test]
+    fn a_listed_catalogue_is_recorded_once_when_a_chooser_first_asks_for_a_picture() {
+        static AUDIT: CatalogueAudit = CatalogueAudit(core::sync::atomic::AtomicUsize::new(0));
+        let shown = || AUDIT.0.load(core::sync::atomic::Ordering::Relaxed);
+        let mut bench = HandOverBench::new();
+        bench.shell = crate::tests::shell_audited(TaskbarConfig::bottom_bar(640, 480), &AUDIT);
+        let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+        let own = AttestedApp::new("os.tairix.desktop", publisher).expect("identity");
+        bench.shell.set_own_app(Some(own));
+        let settings =
+            AttestedApp::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher).expect("identity");
+        let savers = SaverCatalog::default();
+        let desktop = DesktopSettings::default();
+        let mut host = ShellWindowHost {
+            shell: &mut bench.shell,
+            compositor: &mut bench.compositor,
+            windows: &mut bench.windows,
+            picker: &mut bench.picker,
+            apps: &mut bench.bar,
+            menu: &mut bench.menu,
+            seat_held: false,
+            screensaver: Some(ScreensaverServe {
+                settings: &desktop,
+                owns_screen: true,
+                savers: &savers,
+            }),
+            relay: &mut bench.relay,
+            wallpapers: &mut bench.gallery,
+            cursor_sets: &[],
+            clipboard: &mut bench.clipboard,
+            authorise: None,
+        };
+        let picture = |subject| PreviewSize {
+            subject,
+            width: 32,
+            height: 18,
+        };
+        let region = ClientRegion::of(window_owner(7), 3);
+        let mut out = [0u8; WINDOW_SCREENSAVER_REPLY_MAX];
+        assert_eq!(
+            host.preview_render_requested(None, 1, region, picture(PreviewSubject::Screensaver(0))),
+            Err(Errno::PermissionDenied),
+            "a saver's picture is the Settings pane's alone"
+        );
+        let ask = |host: &mut ShellWindowHost<'_>, subject| {
+            host.preview_render_requested(Some(&settings), 1, region, picture(subject))
+                .expect("accepted");
+        };
+        ask(&mut host, PreviewSubject::Screensaver(0));
+        assert_eq!(shown(), 0, "nothing was listed");
+        host.screensaver_entry(Some(&settings), 1, &mut out);
+        ask(&mut host, PreviewSubject::Wallpaper(0));
+        assert_eq!(shown(), 0, "a wallpaper's picture says nothing of savers");
+        ask(&mut host, PreviewSubject::Screensaver(1));
+        ask(&mut host, PreviewSubject::Screensaver(0));
+        assert_eq!(shown(), 1, "once for the listing");
+        host.screensaver_entry(Some(&settings), 1, &mut out);
+        ask(&mut host, PreviewSubject::Screensaver(1));
+        assert_eq!(shown(), 2, "and again for the next");
+    }
+
+    /// Counts the catalogue's showings it records.
+    struct CatalogueAudit(core::sync::atomic::AtomicUsize);
+
+    impl tairix_log::Sink for CatalogueAudit {
+        fn write_event(&self, event: &tairix_log::Event<'_>) {
+            if event.id == crate::saver::SAVER_CATALOGUE_SHOWN {
+                self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 
     /// Counts the reveal refusals it records.
@@ -6839,7 +7066,7 @@ mod tests {
             width: 64,
             height: 36,
         };
-        host.preview_render_requested(7, ClientRegion::of(window_owner(7), 0x99), request)
+        host.preview_render_requested(None, 7, ClientRegion::of(window_owner(7), 0x99), request)
             .expect("the gallery accepts");
         assert_eq!(gallery.rendered, alloc::vec![(7, request)]);
     }
@@ -6874,7 +7101,12 @@ mod tests {
             height: 36,
         };
         assert_eq!(
-            host.preview_render_requested(7, ClientRegion::of(window_owner(7), 0x99), request),
+            host.preview_render_requested(
+                None,
+                7,
+                ClientRegion::of(window_owner(7), 0x99),
+                request
+            ),
             Err(Errno::NotFound)
         );
     }

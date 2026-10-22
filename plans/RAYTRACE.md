@@ -6,6 +6,7 @@ nature it sets out, the sampling and reconstruction a pixel is traced with,
 and the screensaver's reveal, progress readout and saved pictures.
 
 Read first: `docs/src/lib/raytrace.md` (the tracer as built),
+`plans/SCREENSAVERS.md` (the saver bundle and how the desktop hosts it),
 `plans/NEW-DESKTOP-SETTINGS.md` DS21 and DS24 (the screensaver and its pane),
 `plans/WINTERSUN.md` WS25–WS31 and WS35 (the world generator that is to share
 the land generator and the countryside layout), `plans/FIX-DESKTOP.md` (no I/O
@@ -18,7 +19,7 @@ D505, D514–D518 and D1140 (the tracer's open defects).
 |---|---|---|
 | RT1 | Smooth reveal: a cubic B-spline over the reveal's grids, a blur coming into focus with no point a peak or a cross; each paint repaints and marks only what its steps change, the paints half a second apart while the picture forms and slowing with the share shown to at most 3 s, each change crossfaded in over the wait until the next, only the tiles it touches, until a twentieth of the picture is shown; the finished picture is every pixel's own trace | done |
 | RT2 | Progress readout: *Generating scene... N%* while a scene is prepared, then *Rendering... N%*, small and mid-grey in the lower right, gone once the picture is whole | done |
-| RT3 | Saving finished pictures: `screensaver.raytrace.save` keeps each whole picture as a PNG in the user's `Home/Pictures/Raytracing/`, with no limit on how many | done |
+| RT3 | Saving finished pictures: the Ray Tracer's `save` option has the desktop keep each whole picture as a PNG in the user's `Home/Pictures/Ray Tracer/`, with no limit on how many | done |
 | RT4 | Highest quality, always: no sample governor; a reconstruction filter and sampling rounds that leave no jagged or noisy edge | done |
 | RT5 | A preparation guideline of 160 s, which a heaped sky's cloud light passes; every unit of preparation bounded and parallel (closes D464); the time spent where it measurably buys realism: radiosity records, and woods reaching twice as far | done |
 | RT6 | Wind on water without repetition: a spectrum of many wave components under gusting patches; the open sea's grid no longer tiles in view; detail finer than a pixel becomes roughness | done |
@@ -54,7 +55,7 @@ D505, D514–D518 and D1140 (the tracer's open defects).
 | RT36 | Caves: stalactites, stalagmites, pools, iridescent water, crystal outcrops that glow | planned |
 | RT37 | Woods to the horizon: at *Maximum* a wood of trees reaches as far as its trees still span a pixel, stood one by one near the eye and hashed from cells past them, as thickly far off as near | done |
 | RT38 | Stones in patches: boulder fields, scree below crags and pebbles in drifts, strewn by noise and slope from eight rocks a scene, and leaf litter as thick as the canopy sheds | done |
-| RT39 | Scene detail: one generator at two profiles, *Simple* (low memory, every setting, the screensaver's default) and *Maximum* (up to 2 GB, all the realism the budget buys), chosen by `screensaver.raytrace.detail` | done |
+| RT39 | Scene detail: one generator at two profiles, *Simple* (low memory, every setting, the screensaver's default) and *Maximum* (up to 2 GB, all the realism the budget buys), chosen by the Ray Tracer's `detail` option | done |
 | RT40 | One land generator, the tracer's and WinterSun's: the land's stages renderer-neutral, keyed by place and seam-free, in crates WinterSun builds its realm's land with at *Maximum*; staged as RT40.1–RT40.5 | done |
 | RT40.1 | Droplets keyed by place: `lib/terrain`'s run on a lattice fixed to the land, its tiles keyed by their place over two staggered passes of tiles run apart and summed in order, so a piece held with the run's halo wears as the land worn whole | done |
 | RT40.2 | Woods by the keyed priority rule: a canopy and a subcanopy each sown on a lattice fixed to the land and thinned tallest first in four rounds of `lib/scatter`'s rule, the far wood the canopy's own kept places | done |
@@ -125,7 +126,7 @@ These bind every item, done or planned.
 spacing halves pass by pass that no coarser pass reached, each point once. A
 `Step` names its pixel and its pass's spacing.
 
-The picture shown (`saver::raytrace::preview`) is a uniform cubic B-spline
+The picture shown (`tairix_saver_raytrace`'s `preview`) is a uniform cubic B-spline
 over the grid the current pass traces, its controls drawn from every pixel
 traced so far, which the painter keeps. The basis is smooth through its
 second derivative, so a coarse grid reads as a soft blur, with no point a
@@ -144,27 +145,28 @@ refining too.
 
 A step changes the picture only within three of its pass's spacings of its
 point. A paint repaints the cells the reaches of every step since the last
-cover, each once, across the compositor's pool, and marks a cover of 16-pixel
+cover, each once — across the saver's pool where its frames trace under
+performance themselves, else on the frames' own thread — and marks a cover of 16-pixel
 tiles, their side doubled until they make at most 128 rectangles: a compositor
 merges each rectangle against the rest, so a scattered paint's own rectangles
-would cost more than whole tiles, and the box it spans is the screen. A buffer
-the compositor lets go is painted afresh from what the painter keeps, and
-nothing is traced again.
+would cost more than whole tiles, and the box it spans is the screen. Where
+the screensaver's window lets its picture go, the desktop lays the whole frame
+afresh from the region the saver presents through, and nothing is traced
+again.
 
 Paints come further apart as the picture fills in
-(`saver::raytrace::paint_wait`). The wait after a paint is in proportion to
+(`paint_wait`). The wait after a paint is in proportion to
 the steps shown, so each pass, four times as long as the one before, is shown
 in about as many paints: half a second while the coarse passes form the
 picture, 1.5 s as the 2 px pass begins (every point of the 4 px grid shown),
 and never more than 3 s; until the first steps come, the loop looks again a
 scene frame later. Fine detail changes too little between paints for a
 quicker cadence to show, and every paint costs a wake, a compositor pass and a
-present whatever it carries. A buffer to lay afresh and a picture's last steps
-are painted at once. Steps collected between paints wait for the next, and
+present whatever it carries. A picture's last steps are painted at once. Steps collected between paints wait for the next, and
 those of a refused scene go with it.
 
 Each paint's change is crossfaded in over the wait until the next
-(`saver::raytrace::crossfade`), so the picture moves on continuously rather
+(`crossfade`), so the picture moves on continuously rather
 than in steps, until a twentieth of the picture is shown: past it a change is
 dots too small for a fade to show, and each paint is laid straight on. The
 painter paints into a picture of the crossfade's own; a fade keeps what the
@@ -172,10 +174,9 @@ screen showed over the 16-pixel tiles its change touches and blends only
 those, a scene frame at a time (`lib/raster`'s `mix_span`, one pass, about
 half the cost of a copy and a composite), marking their cover. Its two
 screen-sized pictures are taken only where the heap and the memory band let a
-disposable cache of the machine's share hold them, and let go once the
-twentieth is passed or the band wants the memory back, the change under way
-first laid on whole; once the compositor lets the window's buffer go, which is
-then painted afresh whole; and with a refused scene, whose rest is black.
+disposable cache of the memory the desktop granted hold them, and let go once
+the twentieth is passed or the band wants the memory back, the change under
+way first laid on whole, and with a refused scene, whose rest is black.
 Under reduced motion every change is laid straight on. Measured, a
 fade frame blends about 2 ns a pixel on one core, 4.5 ms for a whole 1080p
 screen before the pool shares it out.
@@ -192,36 +193,35 @@ setting whose land is most of its work (the desert) runs behind the clock in
 its first half and catches up. Tracing reports steps traced of the reveal's
 count. The engine reports both in the trace desk's status.
 
-The readout is its own small window over the screensaver's, a transient of
-it so it rises with it: *Generating scene... N%* while the scene is prepared,
+The readout is laid over the picture in the saver's own surface, what it
+covers kept aside and laid back before the picture changes, so the picture
+never holds a letter: *Generating scene... N%* while the scene is prepared,
 *Rendering... N%* while it is traced, in mid-grey at the theme's caption size,
 a margin in from the lower-right corner. It is brought up to date each time
-the loop collects — at each paint and each frame of a fade — and four times a
-second while a scene is prepared on its own thread,
-which wakes the serve loop through the session's worker wake the moment the
-scene is ready, so its first passes are shown as they come. It is repainted
-only when the whole percentage changes and taken down once the picture is
-whole, the scene is refused, or the screensaver goes.
+the frames collect — at each paint and each frame of a fade — and four times a
+second while a scene is prepared on its own thread, so a readied scene is
+collected within a quarter second and its first passes are shown as they
+come. It is repainted only when the whole percentage changes and taken down
+once the picture is whole, the scene is refused, or the screensaver goes.
 
 ## RT3 — Saving finished pictures
 
-`screensaver.raytrace.save` (`true`/`false`, off by default) is a *Save
-pictures* row on the screensaver pane. The option travels to the tracing host
-at launch; an engine told to keep pictures copies each traced pixel into a
-picture of its own as it traces, on the thread that will write it.
+The Ray Tracer's `save` option (a switch, off by default) is its *Save
+pictures* row on the screensaver pane. A saver opens no file, so it keeps
+nothing itself: once a picture is whole it hands it to the desktop through the
+keeping feed, once per scene and named for its setting
+(`plans/SCREENSAVERS.md` SV7).
 
-Once the picture is whole and laid down for the loop, the tracing thread —
-never the serve loop — encodes it with `lib/image`'s PNG encoder (the smallest
-exact colour type, 8-bit RGB for an opaque picture) and writes it into
-`<home>/Home/Pictures/Raytracing/` through the `Keeper` and
-`PictureFiles` seams, making each folder of the way as needed. A file is
-created exclusively and never through a link, named for the setting and the
-UTC moment it was finished (its scene's seed when the clock is not set), with
-a numbered suffix if that name is taken, so nothing is overwritten and no
-count is enforced; a write cut short is removed. A refusal — no home, no
-space, a picture the heap would not copy — is stated on `stderr` and never
-stops the screensaver. With no tracing thread granted there is nowhere off the
-loop to write from, so nothing is kept and the launch says so.
+The desktop reads the feed area out opaque and, on its saver file worker —
+never the serve loop — encodes it with `lib/image`'s PNG encoder and writes it
+into `<home>/Home/Pictures/Ray Tracer/`, the saver's title, making each folder
+of the way as needed. The file is written whole to a hidden scratch name and
+renamed without replacing onto the first free name — the setting and the
+moment it was kept in the user's own zone, or the setting alone while the
+clock is not set, with a numbered suffix where that is taken — so nothing is
+overwritten, no count is enforced, and a write cut short stands under no
+picture's name. A refusal is stated on `stderr` and never stops the
+screensaver.
 
 ## RT4 — Highest quality, always
 

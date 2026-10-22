@@ -135,10 +135,9 @@ mod program {
     use tairix_desktop_session::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
     use tairix_desktop_session::output::{Follow, Refusal};
     use tairix_desktop_session::pinboard::{self, PinboardCommand};
-    use tairix_desktop_session::saver::raytrace::{
-        keep as keep_picture, run_tracing_thread, DeskLink, DeskLock, Engine as TraceEngine,
-        Keeper, Memory as TraceMemory, Picture, PictureFiles, TraceDesk, TraceHost, TraceLink,
-        Unkept,
+    use tairix_desktop_session::saver::{
+        keep as keep_picture, kept_at, load_savers, Picture, PictureFiles, SaverCatalog,
+        SaverErrands, SaverMemory, Unkept,
     };
     use tairix_desktop_session::sound::{SoundAnswer, SoundJob, SoundSession};
     use tairix_desktop_session::switchuser::{
@@ -169,16 +168,16 @@ mod program {
         OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied, PinboardCall, PinboardRefusal,
         Prepared, PresentedOwners, PreviewBudget, PreviewDone, PreviewJob, PreviewRequest,
         PreviewRun, PreviewTarget, PromptOutcome, Requester, ResizedRecord, ResolutionAsk,
-        ResolutionPrompt, Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver,
-        Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake,
-        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SlotAnswer,
-        SoundCall, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Trial, TrialEnd,
-        TrialOutcome, UnlockAnswer, UnlockAsk, WallpaperDesk, WallpaperJob, WallpaperService,
-        WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
-        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
-        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, LAYER_FEEDS,
-        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        ResolutionPrompt, Routed, SaverContext, SaverEnd, SaverLaunch, SaverLauncher, SaverSetup,
+        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
+        SeatRouter, SeatWake, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
+        SizedRecord, SlideWant, SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, Trial, TrialEnd, TrialOutcome, UnlockAnswer, UnlockAsk, WallpaperDesk,
+        WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED,
+        APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED,
+        CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
+        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
         LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
@@ -189,8 +188,8 @@ mod program {
     };
     use tairix_desktop_session::{machine_zone_place, moves_machine_zone, read_machine_zone};
     use tairix_desktop_session::{
-        preview_source, resolution_ask, CivilAdoption, HeldZones, ScreensaverPreview,
-        ScreensaverServe,
+        preview_source, resolution_ask, slide_positions, slide_source, CivilAdoption, HeldZones,
+        ScreensaverPreview, ScreensaverServe,
     };
     use tairix_display::{
         DisplayClient, DisplayTransport, FramesRefused, Presenter, RtDisplay, RtShmMapper,
@@ -204,10 +203,9 @@ mod program {
         log, Event as LogEvent, EventId, Field as LogField, FieldValue as LogFieldValue,
         Level as LogLevel,
     };
-    use tairix_parallel::{JobRunner, Pool};
+    use tairix_parallel::Pool;
     use tairix_procinfo::IpcTransport;
     use tairix_proglib::Edit;
-    use tairix_raytrace::Detail;
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_rt::work::Worker;
     use tairix_rt::ServedCall;
@@ -215,7 +213,9 @@ mod program {
         plan_wallpaper, rasterise_icon, upload_document, ImageRenderService, UploadFailure,
         WallpaperRenderFailure, WALLPAPER_PREPARATION_BYTES,
     };
-    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::rt::{
+        serve_stdio, worker_role, RtLauncher, RtSessionChannel, SessionMembers,
+    };
     use tairix_sandbox::ParserSandbox;
     use tairix_soundtheme::{SoundSettings, UserChoices};
     use tairix_taskbar::{
@@ -224,8 +224,8 @@ mod program {
     use tairix_theme::Accessibility;
     use tairix_tz::{Decided, ZoneInfo};
     use tairix_wallpaper::{
-        merge_applied, CpuUse, DesktopSettings, RaytraceOptions, Resolution, ScreensaverKind,
-        MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
+        merge_applied, DesktopSettings, Resolution, ScreensaverChoice, MAX_WALLPAPER_BYTES,
+        WALLPAPER_STORE,
     };
     use tairix_window::{
         app, Activation, CallerIdentity, ClientRegion, DragConclusion, DragReport, EventSink,
@@ -433,6 +433,39 @@ mod program {
     /// The wait-set token of the font worker's wake: text the desktop drew
     /// provisionally has been fetched.
     const FONT_TOKEN: u64 = 24;
+
+    /// The wait-set token of a hosted saver's pipe: it said something.
+    const SAVER_READ_TOKEN: u64 = 26;
+
+    /// The wait-set token of room in a hosted saver's pipe for what the
+    /// session queued for it.
+    const SAVER_WRITE_TOKEN: u64 = 27;
+
+    /// The wait-set token of the saver font relay's wake: the font service
+    /// answered a call a saver made.
+    const SAVER_FONT_TOKEN: u64 = 28;
+
+    /// The wait-set token of the saver file worker's wake: a picture a saver
+    /// handed over was kept, or the screensaver stores were read.
+    const SAVER_FILE_TOKEN: u64 = 29;
+
+    /// The wait-set token of the watch on the user's own screensaver store: a
+    /// saver was put there, taken away or renamed.
+    const SAVER_STORE_TOKEN: u64 = 30;
+
+    /// The wait-set token of every saver taken down while it still ran: ready
+    /// once one has exited, to be reaped.
+    const SAVER_EXIT_TOKEN: u64 = 31;
+
+    /// How often the user's screensaver store's watch may report: a bundle
+    /// copied in costs one read of the stores, and is most often whole by
+    /// the time it is read.
+    const SAVER_STORE_WATCH_LATENCY_NS: u64 = 1_000_000_000;
+
+    /// The most change batches one read of the stores drains from the user
+    /// store's watch before it reads them, so a store changing without pause
+    /// cannot hold the worker.
+    const SAVER_STORE_DRAIN_BATCHES: usize = 16;
 
     /// How often the configuration directory's watch may report. A changed
     /// zone shows within this, and a burst of writes costs one read.
@@ -1071,70 +1104,129 @@ mod program {
         }
     }
 
-    /// Cover the screen with the screensaver `asked` names, drawn as its
-    /// options say over the desktop's `backdrop`, as a preview when `preview`:
-    /// the one start the idle deadline and a Test request both go through.
+    /// What starting a saver bundle draws on that only the session's loop
+    /// holds: the savers the desktop offers, who is signed in and where, the
+    /// machine's cores and memory, and the shipped pictures, of which the
+    /// positions the slides feed offers are recorded in `slides`.
+    struct SaverHosting<'a> {
+        savers: &'a SaverCatalog,
+        reaper: &'a alloc::sync::Arc<SaverReaper>,
+        identity: (&'a str, &'a str),
+        machine: (u16, u64),
+        catalog: &'a [WallpaperName],
+        slides: &'a mut alloc::vec::Vec<usize>,
+    }
+
+    /// Cover the screen with the screensaver `asked` names over the desktop's
+    /// `backdrop`, as a preview when `preview`: the one start the idle
+    /// deadline and a Test request both go through.
     fn start_screensaver(
-        saver: &mut Screensaver,
+        saver: &mut DesktopSaver,
         asked: &ScreensaverPreview,
         backdrop: tairix_wallpaper::Backdrop,
         (shell, compositor): (&DesktopShell, &mut Compositor),
-        (catalog, identity, tracers): (&[WallpaperName], &SaverIdentity, &RtTraceHost),
+        hosting: &mut SaverHosting<'_>,
         (now_ns, preview): (u64, bool),
     ) {
-        let kind = asked.kind;
+        if !saver.would_start() {
+            return;
+        }
+        let screen = compositor.screen_rect();
         // Only the dimmed screensaver builds the backdrop's ground, so no
-        // other kind pays for a full-screen surface it discards.
-        let ground = (kind == ScreensaverKind::Dim).then(|| {
-            let screen = compositor.screen_rect();
-            shell.backdrop_ground(backdrop, screen.width, screen.height)
-        });
-        let wall = if tairix_desktop_session::saver::tells_time(kind) {
-            tairix_rt::wall_time().ok()
-        } else {
-            None
+        // other pays for a full-screen surface it discards.
+        let ground = match asked.choice {
+            ScreensaverChoice::Dim => shell.backdrop_ground(backdrop, screen.width, screen.height),
+            ScreensaverChoice::Blank | ScreensaverChoice::Saver(_) => None,
+        };
+        let mut seed = [0u8; tairix_abi::saver_ipc::SAVER_SEED_LEN];
+        let bundle = match &asked.choice {
+            ScreensaverChoice::Saver(id) => match hosting.savers.offered(&asked.choice) {
+                None => {
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "the screensaver {} is not one the desktop offers; the screen is \
+                             kept black",
+                            id.as_str()
+                        ),
+                    );
+                    None
+                }
+                Some(bundle) => match tairix_rt::random_fill(&mut seed) {
+                    Ok(()) => Some(bundle),
+                    Err(errno) => {
+                        app::report(
+                            APP_NAME,
+                            format_args!(
+                                "no randomness for the screensaver {} ({errno}); the screen is \
+                                 kept black",
+                                bundle.title
+                            ),
+                        );
+                        None
+                    }
+                },
+            },
+            ScreensaverChoice::Blank | ScreensaverChoice::Dim => None,
+        };
+        hosting.slides.clear();
+        if bundle.is_some_and(|bundle| bundle.feeds.slides())
+            && slide_positions(hosting.catalog, &asked.slides, hosting.slides).is_err()
+        {
+            app::report(
+                APP_NAME,
+                format_args!("no memory to offer the screensaver its slides"),
+            );
+        }
+        let theme = compositor.theme();
+        let fonts = theme.fonts();
+        let look = (
+            theme.appearance(),
+            tairix_abi::desktop::DesktopText::new(fonts.ui_family(), fonts.base_size_px()).ok(),
+            theme.contrast(),
+            theme.density(),
+            theme.motion().reduced_motion(),
+        );
+        let mut launcher = RtSaverLauncher {
+            reaper: hosting.reaper,
         };
         let setup = SaverSetup {
-            ground: ground.flatten(),
-            catalog,
-            wall,
-            civil: shell.clock().civil(),
-            identity,
-            theme: shell.session().active_theme(),
-            options: &asked.options,
-            tracers: Some(tracers),
-            memory: tracers.memory,
-            tell_detail,
+            ground,
+            launch: bundle.map(|bundle| SaverLaunch {
+                saver: bundle,
+                context: SaverContext {
+                    screen: (screen.width, screen.height),
+                    scale: compositor.scale(),
+                    refresh: compositor.refresh_rate(),
+                    look,
+                    seed,
+                    pressure: tairix_rt::pressure::gauge().band(),
+                    machine: hosting.machine,
+                    identity: hosting.identity,
+                    slides: u16::try_from(hosting.slides.len()).unwrap_or(u16::MAX),
+                    values: &asked.values,
+                    names: asked.names,
+                },
+                launcher: &mut launcher,
+            }),
         };
-        let covered = if preview {
-            saver.start_preview(kind, setup, compositor, now_ns)
+        let started = if preview {
+            saver.start_preview(setup, compositor, now_ns)
         } else {
-            saver.start(kind, setup, compositor, now_ns)
+            saver.start(setup, compositor, now_ns)
         };
-        if !covered {
-            io::write_stderr_line(
+        match started {
+            Ok(true) => {}
+            Ok(false) => io::write_stderr_line(
                 "desktop: no memory for the screensaver; the screen stays as it is",
-            );
+            ),
+            Err(end) => report_saver_end(&end),
         }
     }
 
-    /// The slideshow picture at catalog position `index`, placed to fill a
-    /// `screen`-sized display.
-    fn slide_source(
-        catalog: &[WallpaperName],
-        index: usize,
-        screen: Rect,
-    ) -> Option<WallpaperSource> {
-        let name = catalog.get(index)?;
-        let path = tairix_wallpaper::wallpaper_path(&name.category, &name.file);
-        Some(WallpaperSource {
-            choice: tairix_wallpaper::WallpaperChoice::Image(
-                tairix_wallpaper::WallpaperPath::new(&path).ok()?,
-            ),
-            fit: tairix_wallpaper::WallpaperFit::Fill,
-            width: screen.width,
-            height: screen.height,
-        })
+    /// Say why the saver drawing the screensaver was ended.
+    fn report_saver_end(end: &SaverEnd) {
+        app::report(APP_NAME, format_args!("{end}"));
     }
 
     /// Drive the seat's pointer by `policy`: the button order and speed, what
@@ -1175,7 +1267,7 @@ mod program {
     fn animate<S: DirectorySource>(
         fade: &mut ScreenFade,
         (lock, elevate): (&mut ScreenLock, &mut AuthorisePrompt),
-        saver: &mut Screensaver,
+        saver: &mut DesktopSaver,
         shell: &mut DesktopShell,
         desktop: &Desktop<S>,
         (compositor, pacer): (&mut Compositor, &FramePacer),
@@ -1196,13 +1288,12 @@ mod program {
             // must type into it waits on a real surface.
             log_info(ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, &[]);
         }
-        saver.advance(
-            now_ns,
-            compositor,
-            &mut || tairix_rt::wall_time().ok(),
-            &mut tairix_rt::clock_get,
-        );
+        // The clock first, so a saver drawing the minute that has just turned
+        // is told it.
         tick_clock(shell, compositor, now_ns);
+        if let Some(end) = saver.advance(now_ns, &shell.clock().saver_reading(), compositor) {
+            report_saver_end(&end);
+        }
         // A backdrop dissolving into another is a repaint of the desktop
         // layer rather than a compositor state change, so each frame of it is
         // the layer drawn again. Only a frame that changed the ground costs
@@ -1941,7 +2032,7 @@ mod program {
             &'a mut AuthorisePrompt,
             &'a mut ResolutionPrompt,
         ),
-        saver: &'a mut Screensaver,
+        saver: &'a mut DesktopSaver,
         lock: &'a mut ScreenLock,
         idle: &'a mut IdleClock,
         /// The machine's memory, which the frosted backdrops' share is of.
@@ -2713,14 +2804,6 @@ mod program {
             alloc::sync::Arc::new(Publisher::new(alloc::sync::Arc::clone(&worker_wake)));
         let catalogs = alloc::sync::Arc::new(Catalogs::new(alloc::sync::Arc::clone(&worker_wake)));
         let files = alloc::sync::Arc::new(Files::new(alloc::sync::Arc::clone(&worker_wake)));
-        let tracers = RtTraceHost {
-            online,
-            memory: TraceMemory {
-                total: memory_total,
-                gauge: tairix_rt::pressure::gauge(),
-            },
-            wake: alloc::sync::Arc::clone(&worker_wake),
-        };
         // One worker per kind of work, spawned only where there is a wake to
         // deliver through. Each handle is held for the session's life; the
         // worker's own `Arc` keeps its desk alive either way.
@@ -2865,6 +2948,53 @@ mod program {
             ),
         }
         let _font_guard = tairix_rt::work::WorkerGuard::new(&font_worker);
+        // A saver's font calls wait on the font service off the loop, on a
+        // thread of their own so none waits behind a picture being written.
+        let saver_fonts: alloc::sync::Arc<SaverFontWorker> = alloc::sync::Arc::new(Worker::new(
+            relay_saver_font,
+            alloc::vec::Vec::new(),
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        if let Err(reason) = Worker::start(&saver_fonts) {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "no saver font thread ({reason:?}); a screensaver's text is fetched on the serve loop"
+                ),
+            );
+        }
+        let _saver_fonts_guard = tairix_rt::work::WorkerGuard::new(&saver_fonts);
+        // The pictures savers keep are written, and the screensaver stores
+        // read, off the loop.
+        let saver_home = home_dir();
+        let saver_files: alloc::sync::Arc<SaverFileWorker> = match Worker::queued(
+            file_for_saver,
+            SaverFiles {
+                store: watch_saver_store(set, saver_home.as_deref()),
+                home: saver_home,
+            },
+            tairix_rt::sync::WorkerWake::create(),
+            SAVER_FILE_JOBS,
+        ) {
+            Ok(worker) => alloc::sync::Arc::new(worker),
+            Err(_) => {
+                return app::fail(
+                    APP_NAME,
+                    EXIT_WAIT_FAILED,
+                    "no memory for the screensaver file worker",
+                );
+            }
+        };
+        if let Err(reason) = Worker::start(&saver_files) {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "no screensaver file thread ({reason:?}); the screensaver stores are read and \
+                     its pictures kept on the serve loop"
+                ),
+            );
+        }
+        let _saver_files_guard = tairix_rt::work::WorkerGuard::new(&saver_files);
         // This session took the seat before it got here.
         effects.seat(true);
         let sound_themes = list_sound_themes();
@@ -3376,6 +3506,31 @@ mod program {
                 return app::fail(APP_NAME, EXIT_WAIT_FAILED, "font wake wait refused");
             }
         }
+        for (read, token, what) in [
+            (
+                saver_fonts.wake().read_end(),
+                SAVER_FONT_TOKEN,
+                "saver font wake wait refused",
+            ),
+            (
+                saver_files.wake().read_end(),
+                SAVER_FILE_TOKEN,
+                "saver file wake wait refused",
+            ),
+        ] {
+            if let Some(read) = read {
+                if tairix_rt::waitset_ctl(
+                    set,
+                    WaitSetOp::Add,
+                    WaitSourceKind::Stream,
+                    u64::from(read),
+                    token,
+                ) != 0
+                {
+                    return app::fail(APP_NAME, EXIT_WAIT_FAILED, what);
+                }
+            }
+        }
         // A member reports a generation that moves after it joins, so each
         // is read once after joining and nothing published in between is
         // missed.
@@ -3527,7 +3682,24 @@ mod program {
         // screensaver it puts up.
         let mut idle = IdleClock::new(tairix_rt::clock_get());
         let mut idle_policy = IdlePolicy::default();
-        let mut saver = Screensaver::new();
+        let mut saver: DesktopSaver = Screensaver::new(tairix_rt::LogSink);
+        // The pipes of the saver drawing, watched in the directions it wants.
+        let mut saver_members = SessionMembers::new(set, SAVER_READ_TOKEN, SAVER_WRITE_TOKEN);
+        let saver_reaper = alloc::sync::Arc::new(SaverReaper::new(set));
+        // The savers the desktop offers: its own two until the stores are read,
+        // which is asked for at once, and again whenever Settings lists them
+        // from the start.
+        let mut savers = SaverCatalog::default();
+        let mut scan_owed = false;
+        if scan_savers(&saver_files, &mut scan_owed) {
+            collect_saver_files(&saver_files, &mut saver, &mut savers, &mut compositor);
+        }
+        // The places of the shipped pictures the drawing saver's slides feed
+        // offers it.
+        let mut saver_slides: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+        // The cores a saver may run a thread on, and the memory a saver's
+        // ceiling is a share of.
+        let saver_machine = (u16::try_from(online).unwrap_or(u16::MAX), memory_total);
         let account = tairix_rt::env_var(b"USER")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .unwrap_or_default();
@@ -3547,21 +3719,18 @@ mod program {
         // same mark the login screen drew for it.
         shell.set_account(&mut compositor, shown_name);
         // What the machine is, read here because it cannot be read on the
-        // loop: the clock screensaver names the machine, and *About This
+        // loop: a screensaver is told the machine's name, and *About This
         // System* states its version.
         let machine = tairix_procinfo::system_identity(&IpcTransport).ok();
-        let saver_identity = SaverIdentity {
-            user: alloc::string::String::from(account),
-            host: machine.as_ref().map_or_else(
-                || {
-                    io::write_stderr_line(
-                        "desktop: the machine's name could not be read; the clock screensaver names only the account",
-                    );
-                    alloc::string::String::new()
-                },
-                |machine| tairix_procinfo::field_lossy(machine.hostname_bytes()),
-            ),
-        };
+        let host_name = machine.as_ref().map_or_else(
+            || {
+                io::write_stderr_line(
+                    "desktop: the machine's name could not be read; a screensaver is told only the account",
+                );
+                alloc::string::String::new()
+            },
+            |machine| tairix_procinfo::field_lossy(machine.hostname_bytes()),
+        );
         let system = SystemFacts {
             version: machine
                 .as_ref()
@@ -3713,7 +3882,11 @@ mod program {
                     &mut compositor,
                 );
                 if switchboard_pid.is_none() {
-                    saver.machine_unmonitored(&mut compositor);
+                    if let Some(end) =
+                        saver.machine_unmonitored(tairix_rt::clock_get(), &mut compositor)
+                    {
+                        report_saver_end(&end);
+                    }
                 }
             }
             // A trial's countdown moves on whatever wake finds it due, and one
@@ -3827,6 +4000,7 @@ mod program {
             resolution.paint_owed(&shell, &mut compositor);
             picker.paint_owed(&shell, &mut compositor);
             post_push(&mut effects, &mut cue_posts, set);
+            watch_saver(&mut saver_members, &mut saver, &mut compositor);
             let timeout_ns = {
                 let now_ns = tairix_rt::clock_get();
                 let refresh = compositor.refresh_rate();
@@ -3937,13 +4111,17 @@ mod program {
                             let settings = desktop.settings();
                             start_screensaver(
                                 &mut saver,
-                                &ScreensaverPreview {
-                                    kind: settings.screensaver,
-                                    options: settings.screensaver_options.clone(),
-                                },
+                                &ScreensaverPreview::of(settings),
                                 settings.backdrop,
                                 (&shell, &mut compositor),
-                                (&wallpaper_catalog, &saver_identity, &tracers),
+                                &mut SaverHosting {
+                                    savers: &savers,
+                                    reaper: &saver_reaper,
+                                    identity: (account, &host_name),
+                                    machine: saver_machine,
+                                    catalog: &wallpaper_catalog,
+                                    slides: &mut saver_slides,
+                                },
                                 (now_ns, false),
                             );
                         }
@@ -3978,11 +4156,6 @@ mod program {
                 saver.keep_topmost(&mut compositor);
                 lock.keep_topmost(&shell, &mut compositor, saver.window());
                 elevate.keep_topmost(&mut compositor, saver.window());
-                if let Some(source) = saver.due_slide(now_ns).and_then(|index| {
-                    slide_source(&wallpaper_catalog, index, compositor.screen_rect())
-                }) {
-                    wallpapers.want_slide(source);
-                }
                 serve_rest(&mut shell, &mut compositor, &mut menu, &windows, now_ns);
                 shell.advance_window_thumbnails(&mut compositor);
                 animate(
@@ -4087,10 +4260,12 @@ mod program {
                             screensaver: Some(ScreensaverServe {
                                 settings: desktop.settings(),
                                 owns_screen: !switch.is_background(),
+                                savers: &savers,
                             }),
                             relay: &mut RtDocumentRelay,
                             wallpapers: &mut Gallery {
                                 catalog: &wallpaper_catalog,
+                                savers: &savers,
                                 desk: &wallpapers,
                             },
                             cursor_sets: &cursor_set_names,
@@ -4126,6 +4301,11 @@ mod program {
                     if shell.drag_active() {
                         light_drop_icon(&mut shell, &mut compositor, &mut desktop);
                     }
+                    // Settings reading the screensavers to the end of the list
+                    // reads the stores again, for its next listing.
+                    if shell.take_savers_listed() && scan_savers(&saver_files, &mut scan_owed) {
+                        collect_saver_files(&saver_files, &mut saver, &mut savers, &mut compositor);
+                    }
                     // The desktop's Settings application asked to see a
                     // screensaver; it is shown once the request that asked is
                     // answered.
@@ -4135,7 +4315,14 @@ mod program {
                             &asked,
                             desktop.settings().backdrop,
                             (&shell, &mut compositor),
-                            (&wallpaper_catalog, &saver_identity, &tracers),
+                            &mut SaverHosting {
+                                savers: &savers,
+                                reaper: &saver_reaper,
+                                identity: (account, &host_name),
+                                machine: saver_machine,
+                                catalog: &wallpaper_catalog,
+                                slides: &mut saver_slides,
+                            },
                             (tairix_rt::clock_get(), true),
                         );
                         saver.keep_topmost(&mut compositor);
@@ -4271,8 +4458,16 @@ mod program {
                                     );
                                 },
                             self_proc_id: self_origin.proc_id(),
-                            saver: &mut saver,
-                            now_ns: tairix_rt::clock_get(),
+                            machine: &mut |report, compositor| {
+                                let drawn = saver.wants_machine_reports();
+                                let now_ns = tairix_rt::clock_get();
+                                if let Some(end) =
+                                    saver.adopt_machine_report(report, now_ns, compositor)
+                                {
+                                    report_saver_end(&end);
+                                }
+                                drawn
+                            },
                         },
                         ticket,
                         &request[..len],
@@ -4425,6 +4620,7 @@ mod program {
                             relay: &mut RtDocumentRelay,
                             wallpapers: &mut Gallery {
                                 catalog: &wallpaper_catalog,
+                                savers: &savers,
                                 desk: &wallpapers,
                             },
                             cursor_sets: &cursor_set_names,
@@ -4448,7 +4644,6 @@ mod program {
                 if token == WORKER_TOKEN {
                     worker_wake.drain();
                 }
-                saver.trace_landed(tairix_rt::clock_get());
                 let settings_landed = collect_publish(
                     &publisher,
                     &mut pinboard,
@@ -4458,8 +4653,17 @@ mod program {
                     &mut compositor,
                     tairix_rt::clock_get(),
                 );
-                if let Some(Ok(frame)) = wallpapers.take_slide() {
-                    saver.show_slide(frame, &mut compositor);
+                if let Some((want, landed)) = wallpapers.take_slide() {
+                    if let Err(why) = &landed {
+                        app::report(APP_NAME, format_args!("a slide could not be shown: {why}"));
+                    }
+                    let slide = (want.index, landed.as_ref().ok());
+                    let now_ns = tairix_rt::clock_get();
+                    if let Some(end) =
+                        saver.slide_landed(want.saver, slide, now_ns, &mut compositor)
+                    {
+                        report_saver_end(&end);
+                    }
                 }
                 if let Some(loaded) = catalogs.collect() {
                     adopt_programs(loaded, &mut shell, &mut compositor, &mut programs);
@@ -4654,6 +4858,11 @@ mod program {
                     );
                     let _ = shell.trim_caches(&mut compositor);
                     tairix_font::trim_glyph_cache();
+                    let band = tairix_rt::pressure::gauge().band();
+                    if let Some(end) = saver.pressure(band, tairix_rt::clock_get(), &mut compositor)
+                    {
+                        report_saver_end(&end);
+                    }
                     deliver_released_notices(
                         &mut server,
                         &mut sink,
@@ -4810,6 +5019,7 @@ mod program {
                                 relay: &mut RtDocumentRelay,
                                 wallpapers: &mut Gallery {
                                     catalog: &wallpaper_catalog,
+                                    savers: &savers,
                                     desk: &wallpapers,
                                 },
                                 cursor_sets: &cursor_set_names,
@@ -4837,7 +5047,11 @@ mod program {
                             switchboard_pid = None;
                             shell.set_tray_summary(&mut compositor, None);
                             shell.set_network_report(&mut compositor, None);
-                            saver.machine_unmonitored(&mut compositor);
+                            if let Some(end) =
+                                saver.machine_unmonitored(tairix_rt::clock_get(), &mut compositor)
+                            {
+                                report_saver_end(&end);
+                            }
                         }
                         machine_watch.forget(pid);
                     },
@@ -5009,6 +5223,51 @@ mod program {
                 // every surface is brought up to date before the frame.
                 font_worker.wake().drain();
                 let _ = font_worker.collect();
+            } else if token == SAVER_READ_TOKEN {
+                if let Some(instance) = saver.hosting() {
+                    let mut errands = RtSaverErrands {
+                        saver: instance,
+                        fonts: &saver_fonts,
+                        files: &saver_files,
+                        wallpapers: &wallpapers,
+                        slides: (&wallpaper_catalog, &saver_slides, compositor.screen_rect()),
+                        civil: shell.clock().civil(),
+                        owed: OwedErrands::default(),
+                    };
+                    let heard =
+                        saver.on_readable(tairix_rt::clock_get(), &mut compositor, &mut errands);
+                    let owed = errands.owed;
+                    if let Some(end) = heard {
+                        report_saver_end(&end);
+                    }
+                    settle_errands(
+                        &owed,
+                        instance,
+                        &mut saver,
+                        (&saver_fonts, &saver_files),
+                        &mut savers,
+                        &mut compositor,
+                    );
+                }
+            } else if token == SAVER_WRITE_TOKEN {
+                if let Some(end) = saver.on_writable(tairix_rt::clock_get(), &mut compositor) {
+                    report_saver_end(&end);
+                }
+            } else if token == SAVER_FONT_TOKEN {
+                saver_fonts.wake().drain();
+                collect_saver_fonts(&saver_fonts, &mut saver, &mut compositor);
+            } else if token == SAVER_FILE_TOKEN {
+                saver_files.wake().drain();
+                collect_saver_files(&saver_files, &mut saver, &mut savers, &mut compositor);
+                if scan_owed && scan_savers(&saver_files, &mut scan_owed) {
+                    collect_saver_files(&saver_files, &mut saver, &mut savers, &mut compositor);
+                }
+            } else if token == SAVER_EXIT_TOKEN {
+                saver_reaper.collect();
+            } else if token == SAVER_STORE_TOKEN {
+                if scan_savers(&saver_files, &mut scan_owed) {
+                    collect_saver_files(&saver_files, &mut saver, &mut savers, &mut compositor);
+                }
             } else if token == MACHINE_ZONE_WATCH_TOKEN || token == MACHINE_ZONE_TOKEN {
                 // A change is drained and the file read on the worker; with no
                 // worker it ran here and its answer is already landed.
@@ -5266,7 +5525,7 @@ mod program {
                     &mut compositor,
                     &desktop,
                     (&mut menu, &windows),
-                    (&mut lock, &mut saver),
+                    &mut lock,
                 );
             }
             // A prompt keeps the pixels it was painted in, so one standing
@@ -5673,17 +5932,19 @@ mod program {
             self.desk.lock().admits(request)
         }
 
-        /// Ask for a slideshow picture. A desk with no worker takes none, so a
-        /// slideshow there stays black rather than decoding on the serve loop.
-        fn want_slide(&self, source: WallpaperSource) {
+        /// Ask for a slide a saver wants, answering whether it was taken. A
+        /// desk with no preparer takes none, rather than decoding on the serve
+        /// loop, and the saver is told the slide is unavailable.
+        fn want_slide(&self, want: SlideWant, source: WallpaperSource) -> bool {
             let mut desk = self.desk.lock();
-            desk.want_slide(source);
+            let taken = desk.want_slide(want, source);
             if desk.has_work() {
                 self.work.notify_one();
             }
+            taken
         }
 
-        fn take_slide(&self) -> Option<Result<Surface, alloc::string::String>> {
+        fn take_slide(&self) -> Option<(SlideWant, Result<Surface, alloc::string::String>)> {
             self.desk.lock().take_slide()
         }
 
@@ -5794,6 +6055,8 @@ mod program {
     /// then carries the mapping to the preparer that draws into it.
     struct Gallery<'a> {
         catalog: &'a [WallpaperName],
+        /// The screensavers whose previews a chooser may ask for.
+        savers: &'a SaverCatalog,
         desk: &'a Wallpapers,
     }
 
@@ -5818,7 +6081,7 @@ mod program {
             size: tairix_window::PreviewSize,
         ) -> Result<(), Errno> {
             let (path, bound) =
-                preview_source(size.subject, self.catalog).ok_or(Errno::NotFound)?;
+                preview_source(size.subject, self.catalog, self.savers).ok_or(Errno::NotFound)?;
             let request = PreviewRequest {
                 window_id,
                 client: region.grantor,
@@ -7209,114 +7472,450 @@ mod program {
         )))
     }
 
-    /// The ray-traced screensaver's threads: a tracing thread for each reveal,
-    /// and under the performance setting a worker for every other one of the
-    /// `online` cores; what the machine's memory can spare its scenes; and the
-    /// session's worker wake, which each tracing thread nudges the loop by.
-    struct RtTraceHost {
-        online: usize,
-        memory: TraceMemory,
-        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
+    /// The session's screensaver, hosting savers spawned into the drawing
+    /// sandbox.
+    type DesktopSaver = Screensaver<RtSessionChannel, tairix_rt::LogSink>;
+
+    /// Spawns a saver bundle into the drawing sandbox, handed a region of its
+    /// own the session maps too, and reaped by `reaper` once taken down.
+    struct RtSaverLauncher<'a> {
+        reaper: &'a alloc::sync::Arc<SaverReaper>,
     }
 
-    /// Say the detail the ray tracer's scenes are now set out at.
-    fn tell_detail(detail: Detail) {
-        match detail {
-            Detail::Simple => app::report(
-                APP_NAME,
-                format_args!(
-                    "the ray tracer sets its scenes out simply: the memory band leaves no room \
-                     for maximum detail"
-                ),
-            ),
-            Detail::Maximum => app::report(
-                APP_NAME,
-                format_args!("the ray tracer sets its scenes out at maximum detail again"),
-            ),
+    impl SaverLauncher for RtSaverLauncher<'_> {
+        type Transport = RtSessionChannel;
+
+        fn launch(
+            &mut self,
+            entry: &str,
+            len: usize,
+            (memory, threads): (u64, u64),
+        ) -> Result<(RtSessionChannel, alloc::boxed::Box<dyn SaverMemory>), Errno> {
+            let region = tairix_rt::shm::SharedRegion::create(len).ok_or(Errno::OutOfMemory)?;
+            let channel =
+                RtSessionChannel::launch_drawing(entry.as_bytes(), memory, threads, region.id())?
+                    .reaped_by(alloc::sync::Arc::<SaverReaper>::clone(self.reaper));
+            Ok((channel, alloc::boxed::Box::new(SaverShare(region))))
         }
     }
 
-    impl TraceHost for RtTraceHost {
-        fn launch(
-            &self,
-            mut engine: TraceEngine,
-            options: RaytraceOptions,
-        ) -> Result<alloc::boxed::Box<dyn TraceLink>, TraceEngine> {
-            let desk = alloc::sync::Arc::new(RtTraceDesk {
-                desk: tairix_rt::sync::Mutex::new(TraceDesk::new()),
-                turn: tairix_rt::sync::Condvar::new(),
-                wake: alloc::sync::Arc::clone(&self.wake),
+    /// The savers taken down while they still ran, each a child member of the
+    /// wait set until the kernel reports it exited and it is reaped: a saver
+    /// given half the machine gives its memory back in its own time, never on
+    /// the key that dismissed it.
+    struct SaverReaper {
+        set: u64,
+        exiting: tairix_rt::sync::Mutex<alloc::vec::Vec<i64>>,
+    }
+
+    impl SaverReaper {
+        const fn new(set: u64) -> Self {
+            Self {
+                set,
+                exiting: tairix_rt::sync::Mutex::new(alloc::vec::Vec::new()),
+            }
+        }
+
+        /// Reap every saver that has exited, and stop watching it.
+        fn collect(&self) {
+            self.exiting.lock().retain(|&pid| {
+                if tairix_rt::try_reap(pid) == tairix_abi::Reap::Running {
+                    return true;
+                }
+                #[allow(clippy::cast_sign_loss)] // a spawned child's pid is positive.
+                let _ = tairix_rt::waitset_ctl(
+                    self.set,
+                    WaitSetOp::Del,
+                    WaitSourceKind::Child,
+                    pid as u64,
+                    SAVER_EXIT_TOKEN,
+                );
+                false
             });
-            let served = alloc::sync::Arc::clone(&desk);
-            let online = self.online;
-            // Read here, where the environment is, for the thread to write in.
-            let mut keeper = options.save.then(|| RtKeeper { home: home_dir() });
-            let keeping = keeper.is_some();
-            let spawned = tairix_rt::thread::Thread::spawn(move || {
-                // Made and joined on this thread, so the serve loop waits on
-                // neither the workers' creation nor their teardown.
-                let pool = match options.cpu {
-                    CpuUse::Idle => None,
-                    CpuUse::Performance => Some(app::pool_across(APP_NAME, online, "ray tracing")),
-                };
-                let runner: &dyn JobRunner = match &pool {
-                    Some(pool) => pool,
-                    None => &tairix_parallel::SERIAL,
-                };
-                let keeper = keeper.as_mut().map(|keeper| keeper as &mut dyn Keeper);
-                run_tracing_thread(&*served, runner, &tairix_rt::clock_get, keeper);
-            });
-            match spawned {
-                Ok(thread) => {
-                    // Detached: it leaves at its next turn once the link is
-                    // dropped, and the serve loop never waits for it.
-                    thread.detach();
-                    if keeping {
-                        engine.keep_pictures();
+        }
+    }
+
+    impl tairix_sandbox::Reaper for SaverReaper {
+        fn reap(&self, pid: i64) {
+            #[allow(clippy::cast_sign_loss)] // a spawned child's pid is positive.
+            let watched = tairix_rt::waitset_ctl(
+                self.set,
+                WaitSetOp::Add,
+                WaitSourceKind::Child,
+                pid as u64,
+                SAVER_EXIT_TOKEN,
+            ) == 0;
+            let mut exiting = self.exiting.lock();
+            if watched && exiting.try_reserve(1).is_ok() {
+                exiting.push(pid);
+                return;
+            }
+            // Unwatched, it would never be reaped: wait, as the saver is
+            // already told to end.
+            let mut code = 0;
+            let _ = tairix_rt::wait_exit(pid, &mut code);
+        }
+    }
+
+    /// A saver's region, as the session maps it.
+    struct SaverShare(tairix_rt::shm::SharedRegion);
+
+    impl SaverMemory for SaverShare {
+        fn bytes(&self) -> &[u8] {
+            self.0.bytes()
+        }
+
+        fn bytes_mut(&mut self) -> &mut [u8] {
+            self.0.bytes_mut()
+        }
+    }
+
+    /// A font call saver `saver` made, in the font service's own wire form.
+    struct FontRelay {
+        saver: u64,
+        request: [u8; tairix_abi::font_ipc::FontRequest::WIRE_LEN],
+    }
+
+    /// The font service's answer to a relayed call, and the saver that made it.
+    type FontRelayed = (u64, Result<alloc::vec::Vec<u8>, Errno>);
+
+    /// The thread that waits on the font service for a saver, and the buffer
+    /// it reads every reply into.
+    type SaverFontWorker = Worker<alloc::vec::Vec<u8>, FontRelay, FontRelayed>;
+
+    /// The saver font worker's job: one round trip to the font service, read
+    /// into the worker's own buffer, which is sized and zeroed once, and
+    /// answered as the bytes it filled.
+    fn relay_saver_font(reply: &mut alloc::vec::Vec<u8>, relay: &mut FontRelay) -> FontRelayed {
+        const MAX: usize = tairix_abi::saver_ipc::SAVER_FONT_REPLY_MAX;
+        if reply.len() < MAX {
+            if reply.try_reserve_exact(MAX - reply.len()).is_err() {
+                return (relay.saver, Err(Errno::OutOfMemory));
+            }
+            reply.resize(MAX, 0);
+        }
+        let answered =
+            tairix_rt::ipc_call(tairix_abi::font_ipc::FONT_ENDPOINT, &relay.request, reply)
+                .map_err(Errno::from_syscall)
+                .and_then(|len| {
+                    let filled = reply.get(..len).ok_or(Errno::MessageTooLarge)?;
+                    let mut answer = alloc::vec::Vec::new();
+                    answer
+                        .try_reserve_exact(filled.len())
+                        .map_err(|_| Errno::OutOfMemory)?;
+                    answer.extend_from_slice(filled);
+                    Ok(answer)
+                });
+        (relay.saver, answered)
+    }
+
+    /// What the saver file worker is asked.
+    enum SaverFiling {
+        /// Keep the picture saver `saver` handed over, named for the moment
+        /// in the user's zone.
+        Keep {
+            saver: u64,
+            picture: Picture,
+            civil: tairix_tz::CivilClock<'static>,
+        },
+        /// Read the screensaver stores.
+        Scan,
+    }
+
+    /// What the saver file worker answers.
+    enum SaverFiled {
+        /// Saver `saver`'s picture, kept where the path says, or why not.
+        Kept {
+            saver: u64,
+            kept: Result<alloc::string::String, Unkept>,
+        },
+        /// The savers the stores hold, and why one could not be read where
+        /// one could not.
+        Scanned((SaverCatalog, Option<tairix_appstore::WalkError>)),
+    }
+
+    /// The most saver file jobs waiting at once: a keep for the saver drawing
+    /// and one for the saver before it, and a scan.
+    const SAVER_FILE_JOBS: usize = 3;
+
+    /// What the saver file worker holds: the account's home, and the watch on
+    /// its own screensaver store where there is one.
+    struct SaverFiles {
+        home: Option<alloc::string::String>,
+        store: Option<tairix_rt::Dir>,
+    }
+
+    /// The thread that writes savers' pictures and reads the screensaver
+    /// stores.
+    type SaverFileWorker = Worker<
+        SaverFiles,
+        SaverFiling,
+        SaverFiled,
+        tairix_util::defer::JobQueue<SaverFiling, SaverFiled>,
+    >;
+
+    /// The saver file worker's job.
+    fn file_for_saver(files: &mut SaverFiles, job: &mut SaverFiling) -> SaverFiled {
+        match job {
+            SaverFiling::Keep {
+                saver,
+                picture,
+                civil,
+            } => {
+                let when = kept_at(tairix_rt::wall_time().ok(), civil);
+                SaverFiled::Kept {
+                    saver: *saver,
+                    kept: keep_picture(&mut RtPictureFiles, files.home.as_deref(), picture, when),
+                }
+            }
+            SaverFiling::Scan => {
+                // What the watch reported is spent before the stores are read,
+                // so a change made during the read reports again.
+                if let Some(store) = files.store.as_ref() {
+                    let mut scratch = [0u8; 2 * tairix_abi::fs::DirChangeBatch::MIN_BUFFER];
+                    for _ in 0..SAVER_STORE_DRAIN_BATCHES {
+                        let more = store.read_changes(&mut scratch).is_ok_and(|len| {
+                            tairix_abi::fs::DirChangeBatch::decode(
+                                scratch.get(..len).unwrap_or_default(),
+                            )
+                            .is_ok_and(|batch| batch.more)
+                        });
+                        if !more {
+                            break;
+                        }
                     }
-                    Ok(alloc::boxed::Box::new(DeskLink::hand_over(desk, engine)))
                 }
-                Err(err) => {
-                    let unkept = if keeping {
-                        ", and keeps no pictures: nothing off the loop could write them"
-                    } else {
-                        ""
-                    };
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "no ray tracing thread ({err:?}); the screensaver traces on \
-                         the serve loop{unkept}"
-                        ),
-                    );
-                    Err(engine)
-                }
+                SaverFiled::Scanned(load_savers(&VfsFileReader, files.home.as_deref()))
             }
         }
     }
 
-    /// Where the ray-traced screensaver keeps its whole pictures: in the
-    /// account's home, written on the tracing thread.
-    struct RtKeeper {
-        home: Option<alloc::string::String>,
-    }
-
-    impl Keeper for RtKeeper {
-        fn keep(&mut self, picture: Result<Picture, Unkept>) {
-            // Named for when it was finished only on a clock that has been set.
-            let when = tairix_rt::wall_time()
-                .ok()
-                .filter(|reading| reading.state().is_set())
-                .map(|reading| tairix_abi::time::CivilTime::from_time64(reading.time()));
-            let kept = picture.and_then(|picture| {
-                keep_picture(&mut RtPictureFiles, self.home.as_deref(), &picture, when)
+    /// The user's own screensaver store in `home`, watched and joined to
+    /// `set`, so a saver put there while the desktop runs is listed without
+    /// waiting for Settings to ask; `None`, stated, where it cannot be.
+    fn watch_saver_store(set: u64, home: Option<&str>) -> Option<tairix_rt::Dir> {
+        let roots = tairix_appstore::saver_roots(home);
+        let store = roots.get(1)?;
+        let watched = tairix_rt::open_dir(store.as_bytes())
+            .and_then(|dir| dir.watch(SAVER_STORE_WATCH_LATENCY_NS).map(|()| dir))
+            .map_err(Errno::from_syscall)
+            .and_then(|dir| {
+                let joined = tairix_rt::waitset_ctl(
+                    set,
+                    WaitSetOp::Add,
+                    WaitSourceKind::DirWatch,
+                    u64::from(dir.fd()),
+                    SAVER_STORE_TOKEN,
+                );
+                if joined == 0 {
+                    Ok(dir)
+                } else {
+                    Err(Errno::from_syscall(joined))
+                }
             });
-            if let Err(why) = kept {
+        watched
+            .map_err(|err| {
                 app::report(
                     APP_NAME,
-                    format_args!("the ray-traced picture was not kept: {why}"),
+                    format_args!(
+                        "a screensaver put in {store} is listed only when Settings next lists \
+                         them ({err})"
+                    ),
                 );
+            })
+            .ok()
+    }
+
+    /// Ask for the screensaver stores to be read again, in place of a read
+    /// already waiting. A queue full of pictures to keep leaves the read
+    /// `owed`, to be asked again once one of them is done; answers whether it
+    /// ran here.
+    fn scan_savers(files: &SaverFileWorker, owed: &mut bool) -> bool {
+        files.retain_waiting(|job| !matches!(job, SaverFiling::Scan));
+        let submitted = files.submit(SaverFiling::Scan);
+        *owed = submitted.is_err();
+        submitted.unwrap_or(false)
+    }
+
+    /// Where a hosted saver's errands go: its font calls to the relay, the
+    /// pictures it keeps to the file worker, and the slides it wants to the
+    /// wallpaper preparers.
+    struct RtSaverErrands<'a> {
+        /// The saver asking.
+        saver: u64,
+        fonts: &'a SaverFontWorker,
+        files: &'a SaverFileWorker,
+        wallpapers: &'a Wallpapers,
+        /// The shipped pictures, the places of those the saver is offered,
+        /// and the screen a slide fills.
+        slides: (&'a [WallpaperName], &'a [usize], Rect),
+        /// The zone a kept picture's moment is named in.
+        civil: tairix_tz::CivilClock<'static>,
+        owed: OwedErrands,
+    }
+
+    /// Answers a saver's errands already have before the saver may be told
+    /// them: what a worker carried out on the loop's own thread, or what
+    /// nothing could take.
+    #[derive(Default)]
+    struct OwedErrands {
+        fonts: bool,
+        files: bool,
+        unkept: bool,
+        unavailable: Option<u16>,
+    }
+
+    impl SaverErrands for RtSaverErrands<'_> {
+        fn relay_font(&mut self, request: [u8; tairix_abi::font_ipc::FontRequest::WIRE_LEN]) {
+            self.owed.fonts |= self.fonts.submit(FontRelay {
+                saver: self.saver,
+                request,
+            });
+        }
+
+        fn keep(&mut self, picture: Picture) {
+            match self.files.submit(SaverFiling::Keep {
+                saver: self.saver,
+                picture,
+                civil: self.civil,
+            }) {
+                Ok(ran_here) => self.owed.files |= ran_here,
+                Err(_) => self.owed.unkept = true,
             }
+        }
+
+        fn want_slide(&mut self, index: u16) {
+            let (catalog, places, screen) = self.slides;
+            let source = places
+                .get(usize::from(index))
+                .and_then(|&place| slide_source(catalog, place, screen));
+            let taken = source.is_some_and(|source| {
+                self.wallpapers.want_slide(
+                    SlideWant {
+                        saver: self.saver,
+                        index,
+                    },
+                    source,
+                )
+            });
+            if !taken {
+                self.owed.unavailable = Some(index);
+            }
+        }
+    }
+
+    /// Answer saver `instance` what its errands already have.
+    fn settle_errands(
+        owed: &OwedErrands,
+        instance: u64,
+        saver: &mut DesktopSaver,
+        (fonts, files): (&SaverFontWorker, &SaverFileWorker),
+        savers: &mut SaverCatalog,
+        compositor: &mut Compositor,
+    ) {
+        let now_ns = tairix_rt::clock_get();
+        if owed.fonts {
+            collect_saver_fonts(fonts, saver, compositor);
+        }
+        if owed.files {
+            collect_saver_files(files, saver, savers, compositor);
+        }
+        if owed.unkept {
+            app::report(
+                APP_NAME,
+                format_args!("a screensaver's picture was not kept: the queue for it is full"),
+            );
+            if let Some(end) = saver.kept(instance, (false, now_ns), compositor) {
+                report_saver_end(&end);
+            }
+        }
+        if let Some(index) = owed.unavailable {
+            if let Some(end) = saver.slide_landed(instance, (index, None), now_ns, compositor) {
+                report_saver_end(&end);
+            }
+        }
+    }
+
+    /// Hand every relayed font answer that has landed to the saver that
+    /// asked.
+    fn collect_saver_fonts(
+        fonts: &SaverFontWorker,
+        saver: &mut DesktopSaver,
+        compositor: &mut Compositor,
+    ) {
+        while let Some((asked, reply)) = fonts.collect() {
+            let reply = reply.as_deref().map_err(|errno| *errno);
+            if let Some(end) =
+                saver.font_answered(asked, (reply, tairix_rt::clock_get()), compositor)
+            {
+                report_saver_end(&end);
+            }
+        }
+    }
+
+    /// Adopt everything the saver file worker has answered: a kept picture is
+    /// said to the saver that kept it, and a reading of the stores becomes the
+    /// catalogue, its refusals said where it changed.
+    fn collect_saver_files(
+        files: &SaverFileWorker,
+        saver: &mut DesktopSaver,
+        savers: &mut SaverCatalog,
+        compositor: &mut Compositor,
+    ) {
+        files.collect_landed(|filed| match filed {
+            SaverFiled::Kept { saver: asked, kept } => {
+                if let Err(why) = &kept {
+                    app::report(
+                        APP_NAME,
+                        format_args!("a screensaver's picture was not kept: {why}"),
+                    );
+                }
+                let answered = (kept.is_ok(), tairix_rt::clock_get());
+                if let Some(end) = saver.kept(asked, answered, compositor) {
+                    report_saver_end(&end);
+                }
+            }
+            SaverFiled::Scanned((catalog, refused)) => {
+                if let Some(error) = refused {
+                    app::report(
+                        APP_NAME,
+                        format_args!("the screensaver stores could not be read: {error}"),
+                    );
+                }
+                if catalog != *savers {
+                    for saver in catalog.newly_refused(savers) {
+                        app::report(
+                            APP_NAME,
+                            format_args!(
+                                "screensaver {} cannot be chosen: {}",
+                                saver.bundle,
+                                tairix_wallpaper::standing_reason(saver.standing)
+                            ),
+                        );
+                        saver.log_refused(&LOG_SINK);
+                    }
+                    *savers = catalog;
+                }
+            }
+        });
+    }
+
+    /// Bring the wait-set in line with the saver drawing: its pipes watched in
+    /// the directions it wants. A saver whose pipes cannot be watched could
+    /// never be heard, so it is ended.
+    fn watch_saver(
+        members: &mut SessionMembers,
+        saver: &mut DesktopSaver,
+        compositor: &mut Compositor,
+    ) {
+        let (descriptors, read, write) = saver.saver_descriptors();
+        if let Err(errno) = members.sync(descriptors, read, write) {
+            if let Some(end) = saver.unwatched(errno, compositor) {
+                report_saver_end(&end);
+            }
+            // The saver has gone, and whatever of its pipes is still watched
+            // goes with it.
+            let _ = members.sync(None, false, false);
         }
     }
 
@@ -7335,47 +7934,35 @@ mod program {
             }
         }
 
-        fn create(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
-            // A name already taken is the kernel's own refusal, so nothing is
-            // ever replaced, nor written through a link planted there.
+        fn write_scratch(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+            // What an earlier keep left goes first; creating afresh rather than
+            // opening it is what refuses to write through a link planted there.
+            self.discard(path);
             let file = tairix_rt::create_new(path.as_bytes()).map_err(Errno::from_syscall)?;
             let written = tairix_rt::fs_write_all(file.fd(), 0, bytes)
                 .and_then(|()| file.sync().map_err(Errno::from_syscall));
             if written.is_err() {
-                // A picture cut short is no picture: what was begun goes.
                 drop(file);
-                let _ = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::empty());
+                self.discard(path);
             }
             written
         }
-    }
 
-    /// A reveal's [`TraceDesk`] behind the runtime's futex mutex, with the
-    /// condition variable its tracing thread parks on when there is nothing
-    /// to trace (never a spin), and the session's worker wake.
-    struct RtTraceDesk {
-        desk: tairix_rt::sync::Mutex<TraceDesk>,
-        turn: tairix_rt::sync::Condvar,
-        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
-    }
-
-    impl DeskLock for RtTraceDesk {
-        type Guard<'a> = tairix_rt::sync::MutexGuard<'a, TraceDesk>;
-
-        fn lock(&self) -> Self::Guard<'_> {
-            self.desk.lock()
+        fn place(&mut self, scratch: &str, path: &str) -> Result<(), Errno> {
+            // A name already taken is the kernel's own refusal, so nothing is
+            // ever replaced.
+            match tairix_rt::fs_rename(
+                scratch.as_bytes(),
+                path.as_bytes(),
+                tairix_abi::RenameFlags::NO_REPLACE,
+            ) {
+                0.. => Ok(()),
+                refused => Err(Errno::from_syscall(refused)),
+            }
         }
 
-        fn park<'a>(&'a self, held: Self::Guard<'a>) -> Self::Guard<'a> {
-            self.turn.wait(held)
-        }
-
-        fn signal(&self) {
-            self.turn.notify_one();
-        }
-
-        fn nudge(&self) {
-            self.wake.nudge();
+        fn discard(&mut self, path: &str) {
+            let _ = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::empty());
         }
     }
 
@@ -10059,7 +10646,7 @@ mod program {
         compositor: &mut Compositor,
         desktop: &Desktop<S>,
         (menu, windows): (&mut MenuChain, &SessionWindows),
-        (lock, saver): (&mut ScreenLock, &mut Screensaver),
+        lock: &mut ScreenLock,
     ) {
         shell.session_mut().taskbar_mut().redraw_text();
         compositor.refresh_titles();
@@ -10071,8 +10658,6 @@ mod program {
         }
         shell.present_tooltip(compositor);
         lock.repaint(shell, compositor);
-        let scale = compositor.scale();
-        saver.refit_text(shell.session().active_theme(), scale, compositor);
     }
 
     /// The broker's answer to one question at the authorisation prompt, any

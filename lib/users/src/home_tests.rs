@@ -47,6 +47,14 @@ fn a_fresh_home_gets_every_folder_owner_only_with_the_user_files_inside() {
         assert!(node.directory);
         assert_eq!(node.security, Some(private()), "{child}");
     }
+    let savers = tree
+        .at(&[
+            tairix_abi::home::HOME_LIBRARY_DIR,
+            tairix_abi::HOME_SCREENSAVER_STORE_DIR,
+        ])
+        .expect("the user's screensaver store");
+    assert!(savers.directory);
+    assert_eq!(savers.security, Some(private()), "the account's own");
 }
 
 /// Re-provisioning fills in only what is missing: a folder the account

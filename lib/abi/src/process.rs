@@ -657,7 +657,7 @@ pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
 /// block. A block bearing any other value is refused with
 /// [`Errno::BadMagic`], so a stale or foreign encoding can never be
 /// misread as wiring.
-pub const SPAWN_ATTACH_VERSION: u32 = 4;
+pub const SPAWN_ATTACH_VERSION: u32 = 5;
 
 /// Byte offset of the session selector in an encoded [`SpawnAttach`] block:
 /// after the version and target-uid words, the console selector, the flags
@@ -669,12 +669,16 @@ const SPAWN_ATTACH_SESSION_AT: usize = 4 + 4 + 8 + 8 + STD_STREAM_COUNT * 8;
 /// join names.
 const SPAWN_ATTACH_LIMITS_AT: usize = SPAWN_ATTACH_SESSION_AT + 4 + 4 + PROC_ID_LEN;
 
-/// Exact byte length of an encoded [`SpawnAttach`] block: everything before
-/// the lowered limits, then a mask naming the lowered kinds, a reserved word,
-/// and one limit per [`LimitKind`]. The block is fixed-length by design — the
-/// kernel bounds the copy before staging and refuses any other length.
-pub const SPAWN_ATTACH_LEN: usize =
+/// Byte offset of the spawn share in an encoded [`SpawnAttach`] block: after
+/// the lowered limits' mask, reserved word and one limit per [`LimitKind`].
+const SPAWN_ATTACH_SHARE_AT: usize =
     SPAWN_ATTACH_LIMITS_AT + 4 + 4 + LimitKind::COUNT * ResourceLimit::WIRE_LEN;
+
+/// Exact byte length of an encoded [`SpawnAttach`] block: everything before
+/// the spawn share, then the share's region id. The block is fixed-length by
+/// design — the kernel bounds the copy before staging and refuses any other
+/// length.
+pub const SPAWN_ATTACH_LEN: usize = SPAWN_ATTACH_SHARE_AT + 8;
 
 /// The threads a sandbox worker may hold: its leader alone. A parser needs no
 /// other, and every thread costs kernel memory its ceiling does not bound.
@@ -974,6 +978,10 @@ pub struct SpawnAttach {
     pub session: SpawnSession,
     /// The limits the child is lowered to below the ones it inherits.
     pub limits: SpawnLimits,
+    /// The id of a shared region the spawner holds a grant for, handed to a
+    /// sandboxed child as its one spawn share ([`crate::SyscallNumber::SHARE_MAP`]);
+    /// zero for none. Refused on any spawn but a sandbox one.
+    pub share: u64,
 }
 
 /// The resource limits a spawn lowers its child to, each kind at most once.
@@ -1059,6 +1067,7 @@ impl SpawnAttach {
         wires: [FdWire::Inherit; STD_STREAM_COUNT],
         session: SpawnSession::Inherit,
         limits: SpawnLimits::INHERIT,
+        share: 0,
     };
 
     /// Build a canonical [`SPAWN_FLAG_SANDBOX`] block over `wires`, its worker
@@ -1087,7 +1096,42 @@ impl SpawnAttach {
             limits: SpawnLimits::INHERIT
                 .lowering(LimitKind::AddressSpaceBytes, ceiling)
                 .lowering(LimitKind::Threads, SANDBOX_THREADS),
+            share: 0,
         }
+    }
+
+    /// Build a canonical drawing-sandbox block: [`Self::sandbox`] over
+    /// `wires` and `address_space_bytes`, allowed `threads` threads and handed
+    /// the shared region `share` the spawner holds a grant for.
+    ///
+    /// A screensaver runs in one: the region is the frame it presents
+    /// through, and the thread bound is what its host grants it.
+    #[must_use]
+    pub const fn drawing(
+        wires: [FdWire; STD_STREAM_COUNT],
+        address_space_bytes: u64,
+        threads: u64,
+        share: u64,
+    ) -> Self {
+        let sandbox = Self::sandbox(wires, address_space_bytes);
+        Self {
+            limits: sandbox.limits.lowering(
+                LimitKind::Threads,
+                ResourceLimit {
+                    soft: threads,
+                    hard: threads,
+                },
+            ),
+            share,
+            ..sandbox
+        }
+    }
+
+    /// Whether this block hands a sandboxed child a spawn share — the
+    /// drawing sandbox.
+    #[must_use]
+    pub const fn is_drawing(&self) -> bool {
+        self.is_sandbox() && self.share != 0
     }
 
     /// Whether this block requests the parser-sandbox spawn mode.
@@ -1121,7 +1165,9 @@ impl SpawnAttach {
         let at = SPAWN_ATTACH_SESSION_AT;
         out[at..at + 4].copy_from_slice(&kind.to_le_bytes());
         out[at + 8..SPAWN_ATTACH_LIMITS_AT].copy_from_slice(&instance.to_le_bytes());
-        self.limits.write(&mut out[SPAWN_ATTACH_LIMITS_AT..]);
+        self.limits
+            .write(&mut out[SPAWN_ATTACH_LIMITS_AT..SPAWN_ATTACH_SHARE_AT]);
+        out[SPAWN_ATTACH_SHARE_AT..].copy_from_slice(&self.share.to_le_bytes());
         out
     }
 
@@ -1139,8 +1185,9 @@ impl SpawnAttach {
     /// console index, a session other than the one anchored at the parent, no
     /// finite memory ceiling and thread bound, or a terminal hand-over —
     /// nothing ambient may flow into a sandbox, nothing may let it outlive its
-    /// owner, and nothing it decodes may take the machine's memory). A refused
-    /// block wires nothing.
+    /// owner, and nothing it decodes may take the machine's memory), or a
+    /// spawn share on a block that is not a sandbox one. A refused block wires
+    /// nothing.
     pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != SPAWN_ATTACH_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -1165,7 +1212,7 @@ impl SpawnAttach {
             read_u32(bytes, at + 4),
             ProcId::from_bytes(&bytes[at + 8..SPAWN_ATTACH_LIMITS_AT])?,
         )?;
-        let limits = SpawnLimits::read(&bytes[SPAWN_ATTACH_LIMITS_AT..])?;
+        let limits = SpawnLimits::read(&bytes[SPAWN_ATTACH_LIMITS_AT..SPAWN_ATTACH_SHARE_AT])?;
         let block = Self {
             target_uid,
             console,
@@ -1173,7 +1220,11 @@ impl SpawnAttach {
             wires,
             session,
             limits,
+            share: read_u64(bytes, SPAWN_ATTACH_SHARE_AT),
         };
+        if block.share != 0 && !block.is_sandbox() {
+            return Err(Errno::OutOfRange);
+        }
         if block.is_sandbox() {
             let explicit = block
                 .wires
@@ -1895,10 +1946,10 @@ mod tests {
         LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
         PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
         PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN, SPAWN_ATTACH_LIMITS_AT,
-        SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_FOREGROUND,
-        SPAWN_FLAG_SANDBOX, SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT, SPAWN_SESSION_JOIN,
-        STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED,
-        WAIT_STATUS_KIND_STOPPED,
+        SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_SHARE_AT, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL,
+        SPAWN_FLAG_FOREGROUND, SPAWN_FLAG_SANDBOX, SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT,
+        SPAWN_SESSION_JOIN, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
+        WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
     };
     use crate::{Errno, LimitKind, ProcId, ResourceLimit, ABI_VERSION_CURRENT, RLIMIT_INFINITY};
     use alloc::vec::Vec;
@@ -1929,6 +1980,7 @@ mod tests {
             ],
             session: SpawnSession::Inherit,
             limits: SpawnLimits::INHERIT,
+            share: 0,
         };
         let bytes = attach.to_le_bytes();
         assert_eq!(bytes.len(), SPAWN_ATTACH_LEN);
@@ -2135,7 +2187,8 @@ mod tests {
         };
         assert_eq!(SpawnAttach::parse(&all.to_le_bytes()), Ok(all));
         assert_eq!(SPAWN_ATTACH_LIMITS_AT, 80);
-        assert_eq!(SPAWN_ATTACH_LEN, 80 + 8 + LimitKind::COUNT * 16);
+        assert_eq!(SPAWN_ATTACH_SHARE_AT, 80 + 8 + LimitKind::COUNT * 16);
+        assert_eq!(SPAWN_ATTACH_LEN, SPAWN_ATTACH_SHARE_AT + 8);
     }
 
     #[test]
@@ -2210,6 +2263,46 @@ mod tests {
             Err(Errno::OutOfRange),
             "unbounded threads"
         );
+    }
+
+    #[test]
+    fn a_drawing_block_is_a_sandbox_handed_its_share_and_threads() {
+        let explicit = [
+            FdWire::Handle(4),
+            FdWire::Handle(5),
+            FdWire::Closed,
+            FdWire::Closed,
+        ];
+        let drawing = SpawnAttach::drawing(explicit, CEILING, 6, 77);
+        assert!(drawing.is_sandbox() && drawing.is_drawing());
+        assert_eq!(drawing.share, 77);
+        assert_eq!(
+            drawing.limits.get(LimitKind::Threads),
+            Some(ResourceLimit { soft: 6, hard: 6 })
+        );
+        assert_eq!(
+            drawing.limits.get(LimitKind::AddressSpaceBytes),
+            SpawnAttach::sandbox(explicit, CEILING)
+                .limits
+                .get(LimitKind::AddressSpaceBytes)
+        );
+        assert_eq!(SpawnAttach::parse(&drawing.to_le_bytes()), Ok(drawing));
+        assert!(!SpawnAttach::sandbox(explicit, CEILING).is_drawing());
+    }
+
+    #[test]
+    fn only_a_sandbox_block_carries_a_spawn_share() {
+        let shared = SpawnAttach {
+            share: 9,
+            ..SpawnAttach::INHERIT
+        };
+        assert_eq!(
+            SpawnAttach::parse(&shared.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+        let mut bytes = SpawnAttach::INHERIT.to_le_bytes();
+        bytes[SPAWN_ATTACH_LEN - 1] = 1;
+        assert_eq!(SpawnAttach::parse(&bytes), Err(Errno::OutOfRange));
     }
 
     #[test]

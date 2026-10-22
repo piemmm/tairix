@@ -3,7 +3,7 @@
 The one bounded walk of TAIRiX's installed program stores (`lib/appstore`,
 `AGENTS.md` §16.2/§16.5/§16.8).
 
-Three consumers need the same answer to "which bundles are installed, and
+Four consumers need the same answer to "which bundles are installed, and
 what does each one's own signed manifest say?":
 
 - the program-library `rescan` (`userland/apps/applib`), which registers every
@@ -11,7 +11,9 @@ what does each one's own signed manifest say?":
 - the file manager's "Open With…" table (`userland/apps/files`), which reads
   the file types each bundle claims,
 - the desktop session's icon-bar identity index (`userland/gui/session`), which
-  resolves the bundle a kernel-attested `AppIdentity` names.
+  resolves the bundle a kernel-attested `AppIdentity` names,
+- the desktop session's screensaver catalogue, which lists the saver bundles
+  of the system's store and the user's own (`saver_roots`).
 
 Each carried its own copy of the walk, its own depth and entry bounds, and its
 own manifest decode. This crate is that walk, defined once.

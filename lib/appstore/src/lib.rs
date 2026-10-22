@@ -1,11 +1,10 @@
 //! The one bounded walk of the installed program stores.
 //!
-//! Three consumers need the same answer to "which bundles are installed, and
+//! Four consumers need the same answer to "which bundles are installed, and
 //! what does each one's own signed manifest say?": the program-library
-//! `rescan`, the file manager's open-with table, and the desktop session's
-//! icon-bar identity index. Each had its own copy of the walk, its own depth
-//! and entry bounds, and its own manifest decode; this crate is that walk,
-//! defined once.
+//! `rescan`, the file manager's open-with table, the desktop session's
+//! icon-bar identity index, and its screensaver catalogue. This crate is that
+//! walk, defined once: its depth and entry bounds and its manifest decode.
 //!
 //! Reading is injected through [`StoreReader`], so the crate performs no I/O
 //! and holds no authority — the consumer's own capability-checked filesystem
@@ -44,10 +43,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::home::HOME_LIBRARY_DIR;
 use tairix_abi::{
     AppInfoHeader, BundleEntry, Errno, ProgramKind, APPINFO_WIRE_MAX, BUNDLE_SUFFIX,
-    HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, SYSTEM_APPLICATION_STORE,
-    SYSTEM_COMMAND_STORE,
+    HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, HOME_SCREENSAVER_STORE_DIR,
+    SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE, SYSTEM_SCREENSAVER_STORE,
 };
 
 #[cfg(test)]
@@ -77,12 +77,12 @@ pub const MACHINE_ROOTS: [&str; 2] = [SYSTEM_COMMAND_STORE, SYSTEM_APPLICATION_S
 /// The machine-wide store roots a running process's attested identity may
 /// name a bundle in: every kind's system store, [`MACHINE_ROOTS`] first.
 ///
-/// No program word resolves against a service or a component, but each runs
-/// as a process like any other — the Switchboard and the file manager own
-/// desktop windows. These stores rank with the other read-only, system-signed
-/// stores, ahead of every writable one, so no bundle planted in a writable
-/// store can claim a shipped program's identity. Derived from the closed kind
-/// set, so a new kind's store cannot be left out.
+/// No program word resolves against a service, a component or a screensaver,
+/// but each runs as a process like any other — the Switchboard and the file
+/// manager own desktop windows. These stores rank with the other read-only,
+/// system-signed stores, ahead of every writable one, so no bundle planted in
+/// a writable store can claim a shipped program's identity. Derived from the
+/// closed kind set, so a new kind's store cannot be left out.
 pub const IDENTITY_MACHINE_ROOTS: [&str; ProgramKind::ALL.len()] = {
     let mut roots = [""; ProgramKind::ALL.len()];
     let mut at = 0;
@@ -175,6 +175,15 @@ pub enum WalkError {
     TreeTooLarge,
 }
 
+impl core::fmt::Display for WalkError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Listing(errno) => write!(f, "a store could not be listed: {errno}"),
+            Self::TreeTooLarge => write!(f, "the stores hold more than {MAX_WALK_ENTRIES} entries"),
+        }
+    }
+}
+
 /// What one completed scan examined.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Scan {
@@ -228,6 +237,21 @@ pub fn user_roots(home: Option<&str>) -> Vec<String> {
         format!("{home}/{HOME_COMMAND_STORE_DIR}"),
         format!("{home}/{HOME_APPLICATION_STORE_DIR}"),
     ]
+}
+
+/// The screensaver stores, in the precedence a saver's identifier is claimed
+/// in: the system's read-only, system-signed store, then the account's own
+/// under `home`'s `Library`, which a home that could name somewhere other
+/// than itself contributes nothing to.
+#[must_use]
+pub fn saver_roots(home: Option<&str>) -> Vec<String> {
+    let mut roots = alloc::vec![String::from(SYSTEM_SCREENSAVER_STORE)];
+    if let Some(home) = home.and_then(tairix_abi::user_saver_home) {
+        roots.push(format!(
+            "{home}/{HOME_LIBRARY_DIR}/{HOME_SCREENSAVER_STORE_DIR}"
+        ));
+    }
+    roots
 }
 
 fn is_plain_absolute(path: &str) -> bool {

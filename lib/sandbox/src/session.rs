@@ -19,10 +19,12 @@
 //!
 //! # Why this cannot deadlock
 //!
-//! The worker is a pure reactor, and the kernel forces it to be: the
-//! sandbox syscall allow-list (`docs/src/security/sandbox.md`) has no
-//! wait-set call, no clock, and no RNG, so the pipe is the only thing that
-//! can ever wake it. It may therefore use the ordinary **blocking**
+//! The worker is a pure reactor toward its parent, and the kernel forces it
+//! to be: the sandbox syscall allow-list (`docs/src/security/sandbox.md`)
+//! has no wait-set call and no channel but its pipes, so the pipe is the only
+//! thing outside the worker that can ever wake it — a timed futex wait or a
+//! read of the clock reaches nothing beyond the worker. It may therefore use
+//! the ordinary **blocking**
 //! [`crate::proto::Channel`], and the invariant that makes that safe is
 //! that the parent never blocks:
 //!
@@ -122,6 +124,34 @@ pub trait SessionTransport: Sized {
     /// Close the transport and reap the worker, reporting its exit code
     /// when one is known.
     fn dispose(self) -> Option<i32>;
+}
+
+/// Where a worker still running when its session ends is reaped, so its owner
+/// never waits on the worker's teardown: a desktop takes a screensaver down at
+/// a key, and the saver may have half the machine's memory to give back.
+pub trait Reaper {
+    /// Reap `pid`, already told to end, away from the caller's thread.
+    fn reap(&self, pid: i64);
+}
+
+/// Let go of worker `pid`, already told to end, of which a non-blocking reap
+/// said `now`: answered at once when it has gone, else handed to `reaper` when
+/// there is one, else waited for with `wait`.
+pub fn let_go(
+    pid: i64,
+    now: tairix_abi::Reap,
+    reaper: Option<&dyn Reaper>,
+    wait: impl FnOnce(i64) -> Option<i32>,
+) -> Option<i32> {
+    match (now, reaper) {
+        (tairix_abi::Reap::Exited(code), _) => Some(code),
+        (tairix_abi::Reap::Gone, _) => None,
+        (tairix_abi::Reap::Running, Some(elsewhere)) => {
+            elsewhere.reap(pid);
+            None
+        }
+        (tairix_abi::Reap::Running, None) => wait(pid),
+    }
 }
 
 /// Typed failure a session operation can report.

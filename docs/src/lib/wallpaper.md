@@ -102,23 +102,11 @@ that key's own closed vocabulary:
 | `key.repeat_delay_ms` | whole milliseconds, `100..=2000`           | `500`                                         |
 | `key.repeat_rate` | `off`, or repeats a second, `1..=60`           | `30`                                          |
 | `screensaver.after_min` | `never`, or whole minutes, `1..=1440`    | `10`                                          |
-| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `ribbon` \| `starfield` \| `life` \| `raytrace` \| `retro_games` \| `system_monitor` | `ribbon` |
+| `screensaver.saver` | `blank` \| `dim` \| a saver bundle's identifier | `os.tairix.saver.ribbon` |
 | `screensaver.display_off_min` | `never`, or whole minutes of screensaver, `0..=1440` | `30`                    |
-| `screensaver.slideshow.interval_s` | whole seconds, `5..=3600`     | `30`                                          |
-| `screensaver.slideshow.order` | `sequential` \| `shuffled`          | `sequential`                                  |
-| `screensaver.slideshow.category` | empty for every category, or a category's name | empty                          |
-| `screensaver.clock.date` | `true` \| `false`                         | `true`                                        |
-| `screensaver.clock.identity` | `true` \| `false`                     | `true`                                        |
-| `screensaver.ribbon.date` | `true` \| `false`                        | `true`                                        |
-| `screensaver.starfield.stars` | `sparse` \| `normal` \| `dense`      | `normal`                                      |
-| `screensaver.starfield.warp` | `true` \| `false`                     | `true`                                        |
-| `screensaver.life.cells` | `small` \| `medium` \| `large`            | `medium`                                      |
-| `screensaver.life.speed` | `slow` \| `normal` \| `fast`              | `normal`                                      |
-| `screensaver.raytrace.cpu` | `idle` \| `performance`                 | `idle`                                        |
-| `screensaver.raytrace.save` | `true` \| `false`                      | `false`                                       |
-| `screensaver.raytrace.detail` | `simple` \| `maximum`               | `simple`                                      |
-| `screensaver.retro_games.speed` | `slow` \| `normal` \| `fast`       | `normal`                                      |
-| `screensaver.system_monitor.tasks` | `true` \| `false`               | `true`                                        |
+| `screensaver.slides.source` | empty for every category, or a category's name | empty                               |
+| `screensaver.machine.tasks` | `none` \| `own` \| `all`                | `own`                                         |
+| `saver.<bundle-id>.<key>` | a word or a whole number, read against the saver's own declaration | its declared default |
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
 | `region` | empty, or an ISO 3166-1 alpha-2 code (two capitals); a region the zone store no longer holds is kept and reads as its default | empty: the zone store's own |
 | `time.zone` | empty, or an IANA zone name in the shape `tairix_abi::zone` checks; a zone the store no longer holds is kept and passed over | empty: the machine's own, else the zone store's |
@@ -150,17 +138,33 @@ a key outside it is refused whole (`DocumentRefusal::OutsideGroup`), which is
 how the session reads a screensaver preview it is asked for — as the
 screensaver keys and nothing else.
 
-Every screensaver's options (`saver::ScreensaverOptions`) are kept whichever
-screensaver is chosen, so choosing another and coming back restores what was
-set. The slideshow's pictures are a `SlideSource` — every category, or one
-named by a `WallpaperCategory` — and a category is a name, not a promise: one
-an update has taken out of the store is still what the document says, and its
-consumer decides what that means (the slideshow shows every picture rather
-than none). Every screensaver also ships a 16:9 preview picture at
-`SCREENSAVER_PREVIEW_STORE/<kind>.png` (`preview_path`), the picture a chooser
-shows for it, read under `MAX_SCREENSAVER_PREVIEW_BYTES`; the image build
-discovers them from `lib/wallpaper/screensavers/` and refuses a kind without
-one.
+The screensaver is a `ScreensaverChoice`: the desktop's own `blank` or
+`dim`, or a saver bundle by its identifier ([Screensavers](../desktop/screensavers.md)).
+A saver declares its options in its signed manifest, and `SaverValues` holds
+only the values the user changed, under `saver.<bundle-id>.<key>` — the one
+open family of keys the registry admits, anchored to `screensaver.saver` so a
+document naming the screensaver carries every saver's values, and a merge of
+one replaces the family whole (`Registry::clear_open`): a value it leaves out,
+one set back to its default among them, is held no more. A value is
+held as spelled and read against the declaration of the saver it belongs to
+(`SaverValues::value`), so one a saver no longer accepts reads as its default
+and an update to a saver never resets the desktop; one at the default is not
+held, and at most `SAVER_VALUES_MAX` are, a bound on what a hostile store
+can make a reader keep. Every saver's values are kept whichever is chosen.
+
+Two settings belong to the desktop rather than to any saver: the pictures
+the slides feed offers, a `SlideSource` — every category, or one named by a
+`WallpaperCategory`, a name rather than a promise (one an update took out of
+the store offers every picture) — and whose task names the machine feed
+carries, a `TaskNames` (`none`; `own`, the default, naming only the user's
+own tasks; or `all`), since a saver draws over the locked screen.
+`standing_reason` is the one wording of why a saver cannot be chosen. The
+desktop's own two ship 16:9 previews at
+`SCREENSAVER_PREVIEW_STORE/{blank,dim}.png` (`ScreensaverChoice::preview_path`,
+`of_preview`) and a saver bundle its own at `SAVER_PREVIEW_PATH`, each read
+under `MAX_SCREENSAVER_PREVIEW_BYTES`; the image build discovers the first
+from `lib/wallpaper/screensavers/` and refuses a saver bundle without the
+second.
 
 A notification source is the kernel-attested bundle identity of the program
 that posted, never a name it gave itself; a source with no entry shows
@@ -354,21 +358,12 @@ every source pixel at 1:1 and so needs the native size.
   surface posts, and the strict reading confined to one group;
   `DocumentRefusal` — the strict reading's reasons, the engine's
   `tairix_appconf::Refusal` over `SettingsKey`.
-- `saver::{ScreensaverOptions, SlideshowOptions, SlideSource, SlideOrder,
-  ClockOptions, RibbonOptions, StarfieldOptions, StarDensity, LifeOptions,
-  CellSize, RaytraceOptions, CpuUse, SceneDetail, RetroGamesOptions,
-  SystemMonitorOptions, Pace, WallpaperCategory}`
-  — every screensaver's options; `Pace` is the one speed ladder a moving
-  scene is set at, each scene holding what its own pace means (`percent`),
-  and `CpuUse` how much of the machine the ray tracer traces on — one core
-  (`Idle`, the default) or every core (`Performance`) — beside whether it
-  keeps each finished picture (`RaytraceOptions::save`, off by default) and
-  how much each of its scenes sets out (`SceneDetail`: `Simple`, the
-  default, or `Maximum`);
-  `SystemMonitorOptions::tasks` whether the System Monitor names the busiest
-  tasks, which anyone who can see the screen can read, the lock included;
-  `SCREENSAVER_PREVIEW_STORE`, `preview_file`, `preview_path`,
-  `preview_kind`, `MAX_SCREENSAVER_PREVIEW_BYTES` — the shipped previews.
+- `saver::{ScreensaverChoice, SaverValues, SlideSource, TaskNames,
+  WallpaperCategory, document_key, keeps_values_of, read_value, spell_value,
+  standing_reason, DEFAULT_SAVER, SAVER_VALUES_MAX, SAVER_VALUE_PREFIX}` — the
+  screensaver chosen, every saver's values and their spelling, and the two
+  feeds' settings; `SCREENSAVER_PREVIEW_STORE`, `SAVER_PREVIEW_PATH`,
+  `MAX_SCREENSAVER_PREVIEW_BYTES` — the previews.
 - `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER,
   category_path, wallpaper_path, default_wallpaper_path,
   is_wallpaper_category_name, is_wallpaper_file_name, catalog_categories,

@@ -10,7 +10,7 @@ It has two embedders, and neither may depend on the other:
 
 | Embedder | Keeps the ribbon clear of |
 |---|---|
-| the desktop session's minimal-clock screensaver (`userland/gui/session`) | the time and the date |
+| the minimal-clock screensaver, `Ribbon.app` (`userland/gui/screensavers/ribbon`) | the time and the date |
 | the graphical login screen (`userland/session/greeter`) | its login column |
 
 ## What it provides

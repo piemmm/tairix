@@ -1,0 +1,13 @@
+# Signed-AppInfo manifest source for Clock, a desktop screensaver. It runs in
+# the drawing sandbox, so it asks for no capability and no feed: the time it
+# tells is the host's reading, and its text is drawn through the host's font
+# relay.
+id = "os.tairix.saver.clock"
+name = "Clock"
+version = "0.1.0"
+kind = "screensaver"
+purpose = "The time, the date, the account and the machine, moved about so no pixel stays lit for long"
+author = "The TAIRiX Project"
+capabilities = []
+option.date = { label = "Show the date", note = "Whether the date is shown beneath the time.", switch = true }
+option.identity = { label = "Show who is signed in", note = "Whether the account signed in and this machine's name are shown beneath it.", switch = true }

@@ -122,7 +122,7 @@ pub(crate) fn test_manifest(
         mime_count: 0,
         browse_count: 0,
         kind: kind.to_wire(),
-        reserved: 0,
+        option_count: 0,
         id_len,
         name_len,
         version_len,

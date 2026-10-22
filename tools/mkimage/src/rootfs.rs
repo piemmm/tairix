@@ -39,9 +39,10 @@ use crate::MkimageError;
 /// (`build_system_partition`): the charter's `/System` layout. `Security`
 /// additionally carries its fixed `Keys` and `Policy` subdirectories; the
 /// `Users`/`Groups` databases inside it are installer-authored data, not
-/// image content. `Commands`, `Applications`, `Services` and `Components` are
-/// the program stores the image pipeline plants each OS-provided bundle into.
-pub const SYSTEM_SUBDIRS: [&str; 17] = [
+/// image content. `Commands`, `Applications`, `Services`, `Components` and
+/// `Screensavers` are the program stores the image pipeline plants each
+/// OS-provided bundle into.
+pub const SYSTEM_SUBDIRS: [&str; 18] = [
     "Kernel",
     "Commands",
     "Applications",
@@ -59,6 +60,7 @@ pub const SYSTEM_SUBDIRS: [&str; 17] = [
     "Defaults",
     "Services",
     "Components",
+    "Screensavers",
 ];
 
 /// The writable exceptions the root volume mounts over the read-only

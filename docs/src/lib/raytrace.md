@@ -1,7 +1,8 @@
 # tairix-raytrace
 
-`lib/raytrace` is the ray tracer behind the desktop's ray-traced screensaver
-(`docs/src/desktop/session.md`): scenes composed at random from a seed, and a
+`lib/raytrace` is the ray tracer behind the Ray Tracer screensaver
+([`docs/src/desktop/screensavers.md`](../desktop/screensavers.md)): scenes
+composed at random from a seed, and a
 tracer that answers what one pixel of one shows. It is `no_std` + `alloc` and
 forbids `unsafe`.
 

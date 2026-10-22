@@ -84,6 +84,7 @@
 #define TAIRIX_PROGRAM_KIND_APPLICATION ((uint8_t)2u)
 #define TAIRIX_PROGRAM_KIND_SERVICE ((uint8_t)3u)
 #define TAIRIX_PROGRAM_KIND_COMPONENT ((uint8_t)4u)
+#define TAIRIX_PROGRAM_KIND_SCREENSAVER ((uint8_t)5u)
 
 /* Signed AppInfo manifest prefix; encoded little-endian on the wire. */
 typedef struct tairix_appinfo_header {
@@ -94,7 +95,7 @@ typedef struct tairix_appinfo_header {
     uint16_t mime_count;
     uint16_t browse_count;
     uint8_t kind;
-    uint8_t reserved;
+    uint8_t option_count;
     uint8_t id_len;
     uint8_t name_len;
     uint8_t version_len;

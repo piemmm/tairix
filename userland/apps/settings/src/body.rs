@@ -25,6 +25,7 @@ use crate::facts::{Facts, MachineFacts};
 use crate::form::{Documents, Form, FormPlace, TextChoices};
 use crate::network::{IfaceSetting, NetworkFacts};
 use crate::registry::{PaneContent, PaneRow};
+use crate::saver::SaverEntry;
 use crate::sound::SoundReading;
 use crate::statement;
 use crate::volumes::{Readings, VolumeReading};
@@ -42,6 +43,8 @@ pub(crate) struct Answered<'a> {
     pub(crate) cursor_sets: &'a [CursorSetId],
     /// The shipped pictures the desktop answered with.
     pub(crate) catalog: &'a [CatalogItem],
+    /// The screensavers the desktop answered with; empty until it has.
+    pub(crate) savers: &'a [SaverEntry],
     /// The font store's families and the theme's own text, once listed.
     pub(crate) text: Option<&'a TextChoices>,
     /// The output the desktop is drawn on, once the desktop has said.
@@ -81,17 +84,18 @@ pub(crate) struct Answered<'a> {
     pub(crate) preview_refusal: Option<Errno>,
 }
 
-impl<'a> Answered<'a> {
+impl Answered<'_> {
     /// The stores a form's rows are built from.
-    fn documents(&self) -> Documents<'a> {
+    fn documents(&self) -> Documents<'_> {
         Documents {
             settings: self.settings,
             cursor_sets: self.cursor_sets,
             catalog: self.catalog,
+            savers: self.savers,
             text: self.text,
             output: self.output,
             civil: self.civil,
-            machine_zone: self.machine_zone,
+            machine_zone: self.machine_zone.as_ref(),
             config: self.config,
             addressing: &self.network.addressing,
             staged: self.staged,

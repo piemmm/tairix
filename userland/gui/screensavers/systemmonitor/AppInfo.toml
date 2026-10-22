@@ -1,0 +1,13 @@
+# Signed-AppInfo manifest source for System Monitor, a desktop screensaver. It
+# runs in the drawing sandbox and asks for no capability; it needs the machine
+# feed, the Switchboard's readings its host relays, which only a screensaver
+# the system ships may be given.
+id = "os.tairix.saver.system-monitor"
+name = "SystemMonitor"
+title = "System Monitor"
+version = "0.1.0"
+kind = "screensaver"
+purpose = "The machine's own readings at a glance, set out to be read from across a room"
+author = "The TAIRiX Project"
+capabilities = []
+feeds = ["machine"]

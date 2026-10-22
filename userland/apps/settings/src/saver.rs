@@ -1,350 +1,409 @@
-//! The screensavers' own settables: what each one has to set, as the rows its
-//! group on the Screensaver pane draws.
+//! The screensavers the desktop offers, as Settings lists them, and the rows
+//! the chosen one's own group draws: every option its signed manifest
+//! declares, then the desktop's settings for the feeds it is given.
 //!
-//! A screensaver's options are kept whichever screensaver is chosen, so each
-//! row reads and writes its own part of the options and nothing else.
+//! Settings reads no store: which savers exist, and what each declares, is
+//! what the desktop's catalogue answers. A saver's values are held under keys
+//! its own identifier names, so its rows write nothing of another's.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::time::Duration64;
+use tairix_abi::saver::{SaverFeeds, SaverOption, SaverOptionKind, SaverValue};
+use tairix_abi::window_ipc::{SaverOrigin, SaverStanding, ScreensaverEntry};
+use tairix_abi::BundleId;
+use tairix_controls::{ComboBox, FieldControl, FieldRow, Slider};
 use tairix_wallpaper::{
-    CatalogItem, CellSize, CpuUse, Pace, SceneDetail, ScreensaverKind, ScreensaverOptions,
-    SettingsKey, SlideOrder, SlideSource, StarDensity, WallpaperCategory, SLIDE_INTERVAL_MAX,
-    SLIDE_INTERVAL_MIN,
+    standing_reason, CatalogItem, DesktopSettings, ScreensaverChoice, SlideSource, TaskNames,
+    WallpaperCategory,
 };
 
-use crate::form::{labelled, pick, set, switch_label, wait_label, with_current, SWITCH};
+use crate::form::{pick, switch_label, SWITCH};
 
-/// How long the slideshow row offers to show each picture: from the shortest
-/// the slideshow shows one to the longest.
-const SLIDE_LADDER: [Duration64; 11] = [
-    SLIDE_INTERVAL_MIN,
-    Duration64::from_secs(10),
-    Duration64::from_secs(15),
-    Duration64::from_secs(30),
-    Duration64::from_secs(60),
-    Duration64::from_secs(120),
-    Duration64::from_secs(300),
-    Duration64::from_secs(600),
-    Duration64::from_secs(900),
-    Duration64::from_secs(1_800),
-    SLIDE_INTERVAL_MAX,
-];
+// Every value a range holds has a stop on its slider, so each can be set.
+const _: () =
+    assert!(tairix_abi::saver::SAVER_RANGE_VALUES_MAX <= tairix_controls::SLIDER_STOPS_MAX);
 
-/// One screensaver's settable.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum SaverOption {
-    /// How long the slideshow shows each picture.
-    SlideInterval,
-    /// The order the slideshow shows its pictures in.
-    SlideOrder,
-    /// Which of the shipped pictures the slideshow shows.
-    SlideSource,
-    /// Whether the clock shows the date.
-    ClockDate,
-    /// Whether the clock names who is signed in, and where.
-    ClockIdentity,
-    /// Whether the minimal clock shows the date.
-    RibbonDate,
-    /// How many stars the starfield flies through.
-    StarDensity,
-    /// Whether the starfield surges into warp.
-    StarWarp,
-    /// How large the Game of Life's cells are.
-    LifeCells,
-    /// How fast the Game of Life's generations pass.
-    LifeSpeed,
-    /// How many of the machine's cores the ray tracer traces on.
-    RaytraceCpu,
-    /// Whether the ray tracer keeps each finished picture.
-    RaytraceSave,
-    /// How much each of the ray tracer's scenes sets out.
-    RaytraceDetail,
-    /// How fast the retro games' flight crosses the grid.
-    RetroGamesSpeed,
-    /// Whether the System Monitor names the busiest tasks.
-    MonitorTasks,
+/// One screensaver the desktop's catalogue lists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SaverEntry {
+    /// Its place in the catalogue, which its preview is asked for by.
+    pub index: u16,
+    /// What a settings document names it by.
+    pub choice: ScreensaverChoice,
+    /// What the chooser shows.
+    pub title: String,
+    /// Its one-line purpose; empty when it states none.
+    pub purpose: String,
+    /// Where it comes from.
+    pub origin: SaverOrigin,
+    /// Whether it can be chosen.
+    pub standing: SaverStanding,
+    /// The privileged feeds it declares.
+    pub feeds: SaverFeeds,
+    /// The options it declares, in its manifest's order.
+    pub options: Vec<SaverOption>,
 }
 
-impl SaverOption {
-    /// What `kind` has to set, in the order its group lists them.
+impl SaverEntry {
+    /// Catalogue entry `index` as the desktop answered it, or `None` for one
+    /// this build cannot name: no document could hold its choice.
     #[must_use]
-    pub const fn of(kind: ScreensaverKind) -> &'static [Self] {
-        match kind {
-            ScreensaverKind::Blank | ScreensaverKind::Dim => &[],
-            ScreensaverKind::Slideshow => {
-                &[Self::SlideInterval, Self::SlideOrder, Self::SlideSource]
-            }
-            ScreensaverKind::Clock => &[Self::ClockDate, Self::ClockIdentity],
-            ScreensaverKind::Ribbon => &[Self::RibbonDate],
-            ScreensaverKind::Starfield => &[Self::StarDensity, Self::StarWarp],
-            ScreensaverKind::Life => &[Self::LifeCells, Self::LifeSpeed],
-            ScreensaverKind::Raytrace => {
-                &[Self::RaytraceCpu, Self::RaytraceSave, Self::RaytraceDetail]
-            }
-            ScreensaverKind::RetroGames => &[Self::RetroGamesSpeed],
-            ScreensaverKind::SystemMonitor => &[Self::MonitorTasks],
+    pub fn of(index: u16, entry: &ScreensaverEntry<'_>) -> Option<Self> {
+        Some(Self {
+            index,
+            choice: ScreensaverChoice::from_value(entry.choice)?,
+            title: String::from(entry.title),
+            purpose: String::from(entry.purpose),
+            origin: entry.origin,
+            standing: entry.standing,
+            feeds: entry.feeds,
+            options: entry.options().collect(),
+        })
+    }
+
+    /// Add catalogue entry `index`, as the desktop answered it, to `savers`,
+    /// unless no document could hold it. A second claim to a saver's
+    /// identifier is kept: the desktop marks it a duplicate, which the pane
+    /// says, and the chooser offers only what can be chosen.
+    pub fn list(savers: &mut Vec<Self>, index: u16, entry: &ScreensaverEntry<'_>) {
+        if let Some(saver) = Self::of(index, entry) {
+            savers.push(saver);
         }
     }
 
-    /// The registry key this option writes.
+    /// Whether it can be chosen.
     #[must_use]
-    pub const fn key(self) -> SettingsKey {
-        match self {
-            Self::SlideInterval => SettingsKey::SlideInterval,
-            Self::SlideOrder => SettingsKey::SlideOrder,
-            Self::SlideSource => SettingsKey::SlideCategory,
-            Self::ClockDate => SettingsKey::ClockDate,
-            Self::ClockIdentity => SettingsKey::ClockIdentity,
-            Self::RibbonDate => SettingsKey::RibbonDate,
-            Self::StarDensity => SettingsKey::StarDensity,
-            Self::StarWarp => SettingsKey::StarWarp,
-            Self::LifeCells => SettingsKey::LifeCells,
-            Self::LifeSpeed => SettingsKey::LifeSpeed,
-            Self::RaytraceCpu => SettingsKey::RaytraceCpu,
-            Self::RaytraceSave => SettingsKey::RaytraceSave,
-            Self::RaytraceDetail => SettingsKey::RaytraceDetail,
-            Self::RetroGamesSpeed => SettingsKey::RetroGamesSpeed,
-            Self::MonitorTasks => SettingsKey::MonitorTasks,
-        }
+    pub fn offered(&self) -> bool {
+        self.standing == SaverStanding::Offered
     }
 
-    /// The row's leading label, which is also its search term.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::SlideInterval => "Change every",
-            Self::SlideOrder => "Order",
-            Self::SlideSource => "Pictures",
-            Self::ClockDate | Self::RibbonDate => "Show the date",
-            Self::ClockIdentity => "Show who is signed in",
-            Self::StarDensity => "Stars",
-            Self::StarWarp => "Warp",
-            Self::LifeCells => "Cell size",
-            Self::LifeSpeed | Self::RetroGamesSpeed => "Speed",
-            Self::RaytraceCpu => "Processor use",
-            Self::RaytraceSave => "Save pictures",
-            Self::RaytraceDetail => "Detail",
-            Self::MonitorTasks => "Name the busiest tasks",
+    /// The bundle it is, for one that is.
+    const fn bundle(&self) -> Option<&BundleId> {
+        match &self.choice {
+            ScreensaverChoice::Saver(id) => Some(id),
+            ScreensaverChoice::Blank | ScreensaverChoice::Dim => None,
         }
     }
+}
 
-    /// The sentence beneath the label: what choosing this actually does.
+/// What a reader searches for to reach a saver's own rows, which the pane
+/// shows only for the saver chosen.
+pub const SAVER_FACTS: [&str; 1] = ["Screensaver options"];
+
+/// The label of the row choosing which pictures the slides feed offers.
+pub const SLIDES_LABEL: &str = "Pictures shown";
+
+/// The label of the row choosing whose task names the machine feed carries.
+pub const TASKS_LABEL: &str = "Task names";
+
+/// One row of the chosen saver's own group.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SaverRow {
+    /// The option at this place among those the saver declares.
+    Option(usize),
+    /// Which of the shipped pictures the slides feed offers.
+    Slides,
+    /// Whose task names the machine feed carries.
+    Tasks,
+}
+
+impl SaverRow {
+    /// The rows `saver` draws: its options, then one for each feed it is
+    /// given whose setting the desktop holds.
     #[must_use]
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::SlideInterval => "How long each picture is shown before the next.",
-            Self::SlideOrder => {
-                "In order goes through the pictures as they are listed. Shuffled shows every one \
-                 once before any is shown again."
-            }
-            Self::SlideSource => "Which of the shipped pictures are shown.",
-            Self::ClockDate | Self::RibbonDate => "Whether the date is shown beneath the time.",
-            Self::ClockIdentity => {
-                "Whether the account signed in and this machine's name are shown beneath it."
-            }
-            Self::StarDensity => "How many stars the flight passes.",
-            Self::StarWarp => {
-                "Whether the flight surges into warp now and then, rather than only cruising."
-            }
-            Self::LifeCells => "How large each cell is drawn. Smaller cells make a larger board.",
-            Self::LifeSpeed => "How fast one generation follows the last.",
-            Self::RaytraceCpu => {
-                "Idle time traces on one core and leaves the rest of the machine free. \
-                 Performance traces on every core, so each picture is finished sooner."
-            }
-            Self::RaytraceSave => {
-                "Whether each finished picture is kept as a PNG in your Home folder, under \
-                 Pictures and then Raytracing."
-            }
-            Self::RaytraceDetail => {
-                "Simple sets each scene out plainly, in a fraction of the memory. Maximum \
-                 realism stands its woods further out and gathers its light more finely, in \
-                 many times the memory; while that is not free, scenes are set out simply."
-            }
-            Self::RetroGamesSpeed => "How fast the flight crosses the grid towards the sun.",
-            Self::MonitorTasks => {
-                "Whether the programs using the most processor time are named. Anyone who can \
-                 see the screen can read them, even while it is locked."
-            }
+    pub fn of(saver: &SaverEntry) -> Vec<Self> {
+        let mut rows: Vec<Self> = (0..saver.options.len()).map(Self::Option).collect();
+        if saver.feeds.slides() {
+            rows.push(Self::Slides);
         }
+        if saver.feeds.machine() {
+            rows.push(Self::Tasks);
+        }
+        rows
     }
 
-    /// The choices this option offers, in the order they are listed, and
-    /// which of them `options` holds; `catalog` is the shipped pictures, whose
-    /// categories the slideshow may be narrowed to.
-    pub(crate) fn choices(
+    /// The row as drawn for `saver` over `settings`, the shipped pictures
+    /// being `catalog`; `None` for an option the saver does not declare.
+    #[must_use]
+    pub(crate) fn row(
         self,
-        options: &ScreensaverOptions,
+        saver: &SaverEntry,
+        settings: &DesktopSettings,
         catalog: &[CatalogItem],
-    ) -> (Vec<String>, usize) {
+    ) -> Option<FieldRow> {
         match self {
-            Self::SlideInterval => labelled(
-                &slide_ladder(options.slideshow.interval),
-                options.slideshow.interval,
-                span_label,
-            ),
-            Self::SlideOrder => pick(&SlideOrder::ALL, options.slideshow.order, slide_order_label),
-            Self::SlideSource => {
-                let current = &options.slideshow.source;
-                let ladder = source_ladder(current, catalog);
-                let at = ladder.iter().position(|held| held == current).unwrap_or(0);
-                (ladder.iter().map(source_label).collect(), at)
+            Self::Option(at) => {
+                let option = saver.options.get(at)?;
+                let held = saver.bundle().map_or_else(
+                    || option.default_value(),
+                    |id| settings.saver_values.value(id, option),
+                );
+                Some(option_row(option, held))
             }
-            Self::ClockDate => pick(&SWITCH, options.clock.date, switch_label),
-            Self::ClockIdentity => pick(&SWITCH, options.clock.identity, switch_label),
-            Self::RibbonDate => pick(&SWITCH, options.ribbon.date, switch_label),
-            Self::StarDensity => pick(
-                &StarDensity::ALL,
-                options.starfield.stars,
-                star_density_label,
+            Self::Slides => {
+                let sources = slide_sources(catalog, &settings.slides);
+                let labels = sources.iter().map(slides_label).collect();
+                let at = sources
+                    .iter()
+                    .position(|source| *source == settings.slides)
+                    .unwrap_or(0);
+                Some(
+                    FieldRow::new(SLIDES_LABEL, combo((labels, at)))
+                        .with_description("Which of the shipped pictures the screensaver shows."),
+                )
+            }
+            Self::Tasks => Some(
+                FieldRow::new(
+                    TASKS_LABEL,
+                    combo(pick(&TaskNames::ALL, settings.task_names, tasks_label)),
+                )
+                .with_description(
+                    "Whose busiest tasks the screensaver names. A task is named by its owner, \
+                     and the screensaver draws over the locked screen, so another account's \
+                     tasks are shown by what they cost unless every account's are chosen.",
+                ),
             ),
-            Self::StarWarp => pick(&SWITCH, options.starfield.warp, switch_label),
-            Self::LifeCells => pick(&CellSize::ALL, options.life.cells, cell_size_label),
-            Self::LifeSpeed => pick(&Pace::ALL, options.life.speed, pace_label),
-            Self::RaytraceCpu => pick(&CpuUse::ALL, options.raytrace.cpu, cpu_use_label),
-            Self::RaytraceSave => pick(&SWITCH, options.raytrace.save, switch_label),
-            Self::RaytraceDetail => pick(&SceneDetail::ALL, options.raytrace.detail, detail_label),
-            Self::RetroGamesSpeed => pick(&Pace::ALL, options.retro_games.speed, pace_label),
-            Self::MonitorTasks => pick(&SWITCH, options.system_monitor.tasks, switch_label),
         }
     }
 
-    /// Write the choice at `index` onto `options`, answering whether it named
-    /// one this option offers.
+    /// Write the choice at `index` onto `settings` for `saver`, one of the
+    /// `listed` savers, the shipped pictures being `catalog`, answering whether
+    /// it named one the row offers.
     ///
-    /// Fails closed: an index outside the list this very surface built
-    /// changes nothing.
+    /// Fails closed: an index outside the list the row was drawn with changes
+    /// nothing, so a routing defect cannot post a value the reader did not
+    /// choose. A document with no room for another saver value makes it by
+    /// forgetting the values of savers no longer listed.
     pub(crate) fn adopt(
         self,
+        (saver, listed): (&SaverEntry, &[SaverEntry]),
         index: usize,
-        options: &mut ScreensaverOptions,
+        settings: &mut DesktopSettings,
         catalog: &[CatalogItem],
     ) -> bool {
         match self {
-            Self::SlideInterval => set(
-                &slide_ladder(options.slideshow.interval),
-                index,
-                &mut options.slideshow.interval,
-            ),
-            Self::SlideOrder => set(&SlideOrder::ALL, index, &mut options.slideshow.order),
-            Self::SlideSource => {
-                let chosen = source_ladder(&options.slideshow.source, catalog)
-                    .into_iter()
-                    .nth(index);
-                match chosen {
-                    Some(source) => {
-                        options.slideshow.source = source;
-                        true
-                    }
-                    None => false,
+            Self::Option(at) => {
+                let (Some(option), Some(id)) = (saver.options.get(at), saver.bundle()) else {
+                    return false;
+                };
+                let Some(value) = option_value(option, index) else {
+                    return false;
+                };
+                let values = &mut settings.saver_values;
+                if values.set(id, option, value) {
+                    return true;
                 }
+                values
+                    .retain_savers(|held| listed.iter().any(|saver| saver.bundle() == Some(held)));
+                values.set(id, option, value)
             }
-            Self::ClockDate => set(&SWITCH, index, &mut options.clock.date),
-            Self::ClockIdentity => set(&SWITCH, index, &mut options.clock.identity),
-            Self::RibbonDate => set(&SWITCH, index, &mut options.ribbon.date),
-            Self::StarDensity => set(&StarDensity::ALL, index, &mut options.starfield.stars),
-            Self::StarWarp => set(&SWITCH, index, &mut options.starfield.warp),
-            Self::LifeCells => set(&CellSize::ALL, index, &mut options.life.cells),
-            Self::LifeSpeed => set(&Pace::ALL, index, &mut options.life.speed),
-            Self::RaytraceCpu => set(&CpuUse::ALL, index, &mut options.raytrace.cpu),
-            Self::RaytraceSave => set(&SWITCH, index, &mut options.raytrace.save),
-            Self::RaytraceDetail => set(&SceneDetail::ALL, index, &mut options.raytrace.detail),
-            Self::RetroGamesSpeed => set(&Pace::ALL, index, &mut options.retro_games.speed),
-            Self::MonitorTasks => set(&SWITCH, index, &mut options.system_monitor.tasks),
+            Self::Slides => match slide_sources(catalog, &settings.slides)
+                .into_iter()
+                .nth(index)
+            {
+                Some(source) => {
+                    settings.slides = source;
+                    true
+                }
+                None => false,
+            },
+            Self::Tasks => crate::form::set(&TaskNames::ALL, index, &mut settings.task_names),
         }
     }
 }
 
-/// The intervals the slideshow row offers a desktop currently at `current`.
-fn slide_ladder(current: Duration64) -> Vec<Duration64> {
-    with_current(SLIDE_LADDER.to_vec(), current, |span| *span)
-}
-
-/// A span of whole seconds as a reader says it: in seconds below a minute, in
-/// minutes and hours as [`wait_label`] says them above.
-fn span_label(span: Duration64) -> String {
-    let seconds = span.saturating_total_nanos() / 1_000_000_000;
-    let minutes = |count: u64| wait_label(u16::try_from(count).unwrap_or(u16::MAX));
-    match (seconds / 60, seconds % 60) {
-        (0, 1) => String::from("1 second"),
-        (0, seconds) => alloc::format!("{seconds} seconds"),
-        (whole, 0) => minutes(whole),
-        (whole, rest) => alloc::format!("{} {rest} seconds", minutes(whole)),
+/// The row `option` draws holding `held`; a value of another kind, which no
+/// reading of the option gives, draws as its default.
+fn option_row(option: &SaverOption, held: SaverValue) -> FieldRow {
+    let (control, described) = match option.kind() {
+        SaverOptionKind::Switch { default } => {
+            let on = match held {
+                SaverValue::Switch(on) => on,
+                SaverValue::Choice(_) | SaverValue::Range(_) => *default,
+            };
+            (
+                combo(pick(&SWITCH, on, switch_label)),
+                String::from(option.note()),
+            )
+        }
+        SaverOptionKind::Choice { choices, default } => {
+            let at = match held {
+                SaverValue::Choice(value) => choices.position(value.as_str()),
+                SaverValue::Switch(_) | SaverValue::Range(_) => None,
+            };
+            let labels = choices
+                .as_slice()
+                .iter()
+                .map(|choice| choice.label.as_str().to_string())
+                .collect();
+            (
+                combo((labels, at.unwrap_or(usize::from(*default)))),
+                String::from(option.note()),
+            )
+        }
+        SaverOptionKind::Range {
+            range,
+            default,
+            unit,
+        } => {
+            let value = match held {
+                SaverValue::Range(value) if range.holds(value) => value,
+                SaverValue::Switch(_) | SaverValue::Choice(_) | SaverValue::Range(_) => *default,
+            };
+            let spelled = |value: i32| spell_amount(value, unit.as_str());
+            let mut slider = Slider::new(0)
+                .with_stops(range.values())
+                .with_ends(spelled(range.min()), spelled(range.max()));
+            slider.set_value(
+                slider
+                    .stop_value(range.index_of(value).unwrap_or(0))
+                    .unwrap_or(0),
+            );
+            let now = spelled(value);
+            let described = if option.note().is_empty() {
+                format!("Now {now}.")
+            } else {
+                format!("{} Now {now}.", option.note())
+            };
+            (FieldControl::Slider(slider), described)
+        }
+    };
+    let row = FieldRow::new(option.label(), control);
+    if described.is_empty() {
+        row
+    } else {
+        row.with_description(described)
     }
 }
 
-const fn slide_order_label(order: SlideOrder) -> &'static str {
-    match order {
-        SlideOrder::Sequential => "In order",
-        SlideOrder::Shuffled => "Shuffled",
+/// The value the choice at `index` of `option`'s row names.
+fn option_value(option: &SaverOption, index: usize) -> Option<SaverValue> {
+    match option.kind() {
+        SaverOptionKind::Switch { .. } => SWITCH.get(index).copied().map(SaverValue::Switch),
+        SaverOptionKind::Choice { choices, .. } => choices
+            .as_slice()
+            .get(index)
+            .map(|choice| SaverValue::Choice(choice.value)),
+        SaverOptionKind::Range { range, .. } => u16::try_from(index)
+            .ok()
+            .and_then(|stop| range.value_at(stop))
+            .map(SaverValue::Range),
     }
 }
 
-/// The pictures the slideshow row offers a desktop currently showing
-/// `current`: every category's first, then each category the catalog files a
-/// picture under, in its order, and `current` itself when an update has taken
-/// its category out of the catalog — still what the document says, so still
-/// offered.
-fn source_ladder(current: &SlideSource, catalog: &[CatalogItem]) -> Vec<SlideSource> {
-    let mut ladder = Vec::new();
-    ladder.push(SlideSource::Every);
+/// `value` in `unit`, or bare where it counts in none.
+fn spell_amount(value: i32, unit: &str) -> String {
+    if unit.is_empty() {
+        value.to_string()
+    } else {
+        format!("{value} {unit}")
+    }
+}
+
+/// A list of `labels` with the one at `at` held.
+fn combo((labels, at): (Vec<String>, usize)) -> FieldControl {
+    let mut combo = ComboBox::new(labels);
+    combo.set_selected(at);
+    FieldControl::Combo(combo)
+}
+
+/// What the slides row offers: every picture, then each category of the
+/// shipped ones in the catalog's order, the one `held` among them even where
+/// the catalog no longer has it.
+fn slide_sources(catalog: &[CatalogItem], held: &SlideSource) -> Vec<SlideSource> {
+    let mut sources = alloc::vec![SlideSource::Every];
     for item in catalog {
-        let listed = ladder
-            .iter()
-            .any(|held| held.as_str() == item.category.as_str());
-        if let Some(category) = WallpaperCategory::new(&item.category).filter(|_| !listed) {
-            ladder.push(SlideSource::Category(category));
+        let Some(category) = WallpaperCategory::new(&item.category) else {
+            continue;
+        };
+        let source = SlideSource::Category(category);
+        if !sources.contains(&source) {
+            sources.push(source);
         }
     }
-    if !ladder.contains(current) {
-        ladder.push(current.clone());
+    if !sources.contains(held) {
+        sources.push(held.clone());
     }
-    ladder
+    sources
 }
 
-fn source_label(source: &SlideSource) -> String {
-    match source {
-        SlideSource::Every => String::from("Every category"),
-        SlideSource::Category(name) => name.as_str().to_string(),
-    }
-}
-
-const fn star_density_label(density: StarDensity) -> &'static str {
-    match density {
-        StarDensity::Sparse => "Sparse",
-        StarDensity::Normal => "Normal",
-        StarDensity::Dense => "Dense",
+fn slides_label(source: &SlideSource) -> String {
+    match source.category() {
+        None => String::from("Every picture"),
+        Some(category) => String::from(category.as_str()),
     }
 }
 
-const fn cell_size_label(size: CellSize) -> &'static str {
-    match size {
-        CellSize::Small => "Small",
-        CellSize::Medium => "Medium",
-        CellSize::Large => "Large",
+const fn tasks_label(names: TaskNames) -> &'static str {
+    match names {
+        TaskNames::None => "None",
+        TaskNames::Own => "Your own",
+        TaskNames::All => "Every account's",
     }
 }
 
-const fn pace_label(pace: Pace) -> &'static str {
-    match pace {
-        Pace::Slow => "Slow",
-        Pace::Normal => "Normal",
-        Pace::Fast => "Fast",
-    }
+/// The caption of the group the chosen saver's own rows sit in: its title,
+/// or what says no saver of that name is listed.
+#[must_use]
+pub fn options_caption(chosen: Option<&SaverEntry>) -> String {
+    chosen.map_or_else(
+        || String::from("SCREENSAVER OPTIONS"),
+        |saver| saver.title.to_uppercase(),
+    )
 }
 
-const fn cpu_use_label(cpu: CpuUse) -> &'static str {
-    match cpu {
-        CpuUse::Idle => "Idle time",
-        CpuUse::Performance => "Performance",
-    }
+/// What the pane says beneath the chosen saver's rows when the desktop lists
+/// no saver of that name: once the catalogue has been answered, so a list
+/// still to arrive is never mistaken for a saver gone.
+#[must_use]
+pub fn missing_statement(choice: &ScreensaverChoice, savers: &[SaverEntry]) -> Option<String> {
+    let listed = savers.iter().any(|saver| saver.choice == *choice);
+    (!savers.is_empty() && !listed).then(|| {
+        format!(
+            "The screensaver chosen, {}, is not installed: the screen is kept black until \
+             another is chosen.",
+            choice.as_str()
+        )
+    })
 }
 
-const fn detail_label(detail: SceneDetail) -> &'static str {
-    match detail {
-        SceneDetail::Simple => "Simple",
-        SceneDetail::Maximum => "Maximum realism",
-    }
+/// The entry `choice` names among `savers`: the one that can be chosen where a
+/// second claim to its identifier is listed beside it.
+#[must_use]
+pub(crate) fn chosen<'a>(
+    savers: &'a [SaverEntry],
+    choice: &ScreensaverChoice,
+) -> Option<&'a SaverEntry> {
+    let mut named = savers.iter().filter(|saver| saver.choice == *choice);
+    let first = named.clone().next();
+    named.find(|saver| saver.offered()).or(first)
 }
+
+/// Why each saver the desktop lists cannot be chosen, one sentence apiece,
+/// or `None` when every one can.
+#[must_use]
+pub fn unavailable_statement(savers: &[SaverEntry]) -> Option<String> {
+    let lines: Vec<String> = savers
+        .iter()
+        .filter(|saver| !saver.offered())
+        .map(|saver| {
+            let whose = if saver.origin == SaverOrigin::User {
+                " (yours)"
+            } else {
+                ""
+            };
+            format!(
+                "{}{whose} cannot be chosen: {}.",
+                saver.title,
+                standing_reason(saver.standing)
+            )
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join(" "))
+}
+
+#[cfg(test)]
+#[path = "saver_tests.rs"]
+mod tests;

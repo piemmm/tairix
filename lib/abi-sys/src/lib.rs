@@ -178,6 +178,7 @@ const NUM_CONSOLE_RELINQUISH: u64 = SyscallNumber::CONSOLE_RELINQUISH.as_u16() a
 const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
+const NUM_SHARE_MAP: u64 = SyscallNumber::SHARE_MAP.as_u16() as u64;
 const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
 const NUM_SHM_GRANT: u64 = SyscallNumber::SHM_GRANT.as_u16() as u64;
 const NUM_CALL_GRANT: u64 = SyscallNumber::CALL_GRANT.as_u16() as u64;
@@ -2526,6 +2527,20 @@ pub extern "C" fn sys_shm_map(handle: u64, len_out: *mut c_void) -> u64 {
     unsafe { raw_syscall(NUM_SHM_MAP, [handle, ptr_arg(len_out), 0, 0, 0, 0]) }
 }
 
+/// `share_map`: map the calling task's spawn share — the one region its spawner
+/// handed it in a drawing-sandbox spawn — read-write, writing the region's
+/// byte length to `len_out` (`SyscallNumber::SHARE_MAP`). Needs no capability:
+/// the spawn grant is the authority, and a task handed none, or one whose share
+/// is already mapped, is refused. Returns the mapped base address or a negated
+/// `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_share_map"]
+pub extern "C" fn sys_share_map(len_out: *mut c_void) -> u64 {
+    // SAFETY: see `sys_shm_map`; the kernel validates the `len_out` pointer
+    // against the caller's address space before writing to it.
+    unsafe { raw_syscall(NUM_SHARE_MAP, [ptr_arg(len_out), 0, 0, 0, 0, 0]) }
+}
+
 /// `shm_map_from`: [`sys_shm_map`] for a region another process delegated the
 /// calling task, only if the process instance at `(grantor, grantor_len)` — an
 /// attested `tairix_proc_id_t` — delegated it (`SyscallNumber::SHM_MAP_FROM`).
@@ -3904,6 +3919,7 @@ mod tests {
         (NUM_FD_REDEEM_LOCATION, "fd_redeem_location", 5),
         (NUM_CONSOLE_DAMAGE, "console_damage", 2),
         (NUM_CONSOLE_RELINQUISH, "console_relinquish", 0),
+        (NUM_SHARE_MAP, "share_map", 1),
         (NUM_SHM_MAP_FROM, "shm_map_from", 4),
         (NUM_TOUCH_INJECT, "touch_inject", 3),
         (NUM_TOUCH_READ, "touch_read", 3),
@@ -4527,6 +4543,18 @@ mod tests {
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], len as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn share_map_marshals_its_length_pointer() {
+        let mut len = 0u64;
+        let ptr = core::ptr::addr_of_mut!(len).cast::<c_void>();
+        let (number, args) = capture(0x2_0000, || {
+            assert_eq!(sys_share_map(ptr), 0x2_0000);
+        });
+        assert_eq!(number, NUM_SHARE_MAP);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(&args[1..], &[0; 5]);
     }
 
     #[test]

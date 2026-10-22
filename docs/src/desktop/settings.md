@@ -226,9 +226,10 @@ what the store then holds as well, and the rows adopt that *durable* value
 when the answer lands, so a refusal states its reason and puts the row back
 rather than leaving a value on screen the next login would not restore. So
 does every other request only the session answers — *Lock Now*, the
-screensaver's *Test*, and which programs have notified — on a desk of their
-own that holds one of each, so the window keeps drawing however long the
-session's own loop takes to reach them. A second *Test* of other settings
+screensaver's *Preview*, which programs have notified, and which screensavers
+it offers — on a desk of their own that holds one of each, so the window keeps
+drawing however long the session's own loop takes to reach them. A second
+*Preview* of other settings
 pressed while the first is asked is held and asked once it is answered, and
 a refusal is stated on its pane whenever that pane is shown, even after the
 reader has moved elsewhere.
@@ -621,28 +622,30 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   keyboard behaves alike. It states what it cannot offer: this system has one
   built-in layout and no list of the desktop's shortcuts.
 - **Screensaver** sets how long the desktop sits idle before the screensaver
-  covers it, and chooses which by its picture — black, the desktop's own
-  backdrop dimmed, the shipped pictures one after another, a clock naming the
-  account and the machine, a minimal clock over a ribbon of light, a
-  starfield, the Game of Life, a ray-traced scene, retro games, or the
-  machine's own readings as a system monitor — each
-  shown by the preview the OS ships for it (`/System/Graphics/Screensavers/`).
-  Beneath it, a group named for the chosen screensaver holds what that one has
-  to set
-  (`tairix_settings::SaverOption`): the slideshow's interval, order and
-  pictures — every category, or one; the clock's date and who is signed in;
-  the minimal clock's date; the starfield's stars and warp; the Game of
-  Life's cell size and speed; the ray tracer's processor use — *Idle time*,
-  one core, or *Performance*, every core — whether it saves each finished
-  picture into *Home/Pictures/Raytracing* (*Save pictures*, off until
-  asked), and how much its scenes set out (*Detail*: *Simple*, until asked,
-  or *Maximum realism*, which the session lowers to Simple while the memory
-  band leaves no room for it); the retro games' speed; whether the system monitor names the busiest
-  tasks, which its row warns anyone who can see the screen can read, even
-  while it is locked.
-  Choosing another screensaver brings its own group in place of the last
-  one's, and every screensaver's options are kept whichever is chosen. The
-  group ends with **Test**, which asks the session to show the screensaver now
+  covers it, and chooses which by its picture from the screensavers the
+  session lists (`QueryScreensaver`, [Screensavers](./screensavers.md)):
+  black, the desktop's own backdrop dimmed, then every saver bundle that can
+  be chosen, the user's own under a title of their own, each shown by its
+  preview. The list is asked for each time the pane comes on show and
+  whenever the window is focused while it shows — asked again once a listing
+  already on its way lands, which may predate the change — so a saver put in
+  the user's store is listed; a listing the catalogue moved under starts over,
+  and one still moving is refused rather than kept half old. The pane says
+  beneath the chooser why any saver it found cannot be chosen, a second claim
+  to a saver's identifier among them. Beneath it, a group named for the chosen saver
+  (`tairix_settings::SaverRow`) holds a row for each option its manifest
+  declares — a switch or a choice as a list, a range as a slider whose row
+  says the value it holds — then, for a saver given the slides feed, which
+  shipped pictures it is shown, and, for one given the machine feed, whose
+  task names it may show, warning that anyone who can see the screen can read
+  them, even while it is locked. A range offers no more values than its
+  slider has stops (`SAVER_RANGE_VALUES_MAX`), so each can be set. A value
+  is written under the saver's own key, so every saver's values are kept
+  whichever is chosen; one set back to its default is held no more, and a
+  document with no room for another value makes it by forgetting the values
+  of savers no longer installed. A chosen saver
+  no longer installed is said in its group. The group ends with **Preview**,
+  which asks the session to show the screensaver now
   as the pane sets it (`PreviewScreensaver`, answered for this application
   alone), without keeping anything; a refusal is stated on the row that
   asked. Its **Energy Saving** group sets how long after the screensaver
