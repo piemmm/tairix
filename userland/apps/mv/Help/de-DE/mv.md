@@ -19,6 +19,8 @@ das die Identität des Knotens bewahrt. Liegen Quelle und Ziel auf
 verschiedenen Volumes, kann es nicht atomar sein: es fällt auf das
 Kopieren der Quelle zum Ziel und das anschließende Entfernen der
 Quelle zurück (Verzeichnisse werden rekursiv nachgebildet).
+Eine Datei, deren Kopie fehlschlägt, wird wieder entfernt, und die
+Quelle bleibt erhalten.
 
 Ein bestehendes Ziel wird standardmäßig überschrieben, mit `-n`
 übersprungen und mit `-i` über die Standardfehlerausgabe erfragt
@@ -26,6 +28,13 @@ Ein bestehendes Ziel wird standardmäßig überschrieben, mit `-n`
 eine unlesbare Antwort gilt nie als Zustimmung). Der erste Fehlschlag
 beendet den Lauf vor jedem späteren Operanden. `--` beendet die
 Optionsauswertung: jedes spätere Argument ist ein Pfad.
+
+Die Kopie überträgt die Lücken und erweiterten Attribute jeder Datei — einen
+RISC-OS-Dateityp, Typ und Ersteller eines Mac — überall dort, wo das Ziel sie
+speichern kann, und verschiebt einen symbolischen Link als Link mit demselben
+Ziel, nie das, worauf er zeigt. Attribute, die das Ziel nicht speichern kann,
+werden am Ende des Laufs in einer einzigen Warnung gemeldet und in einem
+`omission`-Datensatz auf dem Standard-Informationsstrom.
 
 ## OPTIONS
 

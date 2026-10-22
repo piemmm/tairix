@@ -54,8 +54,8 @@ no-deferral rule), ahead of everything below it.
 | M5 | The maintenance runner | `ARXFS-MAINTENANCE.md` | 18 | M4, WB1 | planned |
 | M6 | Escalation, reporting, the `arxfs` command app | `ARXFS-MAINTENANCE.md` | 18 | M5 | planned |
 | M7 | Maintenance acceptance + docs | `ARXFS-MAINTENANCE.md` | 18 | M6 | planned |
-| S1 | Hole-aware seek and punch-hole/zero-range | §4 here + `SPARSE.md` §19 | 13 (completion) | A0 | planned |
-| P1 | `cp`/`mv`/file-manager metadata + sparseness preservation | `ARXFS-METADATA.md` §10 | 16 | S1 | planned |
+| S1 | Hole-aware seek and punch-hole/zero-range | §4 here + `SPARSE.md` §19 | 13 (completion) | A0 | **done** |
+| P1 | `cp`/`mv`/file-manager metadata + sparseness preservation | `ARXFS-METADATA.md` §10 | 16 | S1 | **done** |
 | P2 | The attribute CLI | `ARXFS-METADATA.md` §10 | 16 | — | planned |
 | P3 | Named streams (forks above `VALUE_MAX`) | `ARXFS-METADATA.md` §4.4 | 16 | — | planned |
 | B1 | The §5 format targets: fs block size, record size, inline small files | §5 here | 19 | WB2, A0 | planned |
@@ -73,8 +73,9 @@ nothing: no later item depends on the figure.
 their reason recorded there, not here:
 
 - **Per-family foreign-driver wiring** (`amiga.*`, `atari.*`, `mac.*` presets).
-  ADFS answers `acorn.*` already; the AmigaDOS, Atari GEMDOS, and classic-Mac
-  drivers do not exist in the tree, so those registry entries have no producer.
+  ADFS answers `acorn.*`; the ISO 9660 driver answers `acorn.*`, `mac.*` and
+  `amiga.*` from a disc's records and UDF answers `mac.*`. The native AmigaDOS,
+  Atari GEMDOS and HFS drivers do not exist, so `atari.*` has no producer yet.
   Each lands with its driver, not here.
 - **Archive round-trip of preset attributes.** There is no archive tool in the
   tree, so there is nothing to teach. It lands with the archive tool.
@@ -225,43 +226,17 @@ twice — the same as one with 200 (`tests/bounded_iteration.rs`). The
 allocation-map rebuild over sixteen times the records stays inside a
 geometry-fixed budget rather than scaling with them.
 
-## 4. S1 — hole-aware seek and punch-hole/zero-range
+## 4. S1 — hole-aware seek and punch-hole/zero-range — done
 
-**Owned jointly:** `plans/SPARSE.md` §19 states the ARXFS behaviour; the ABI
-addition is stated here because that plan correctly declined to invent it.
-
-`SPARSE.md` §19 records both items as blocked on "an interface that does not
-exist yet". That is accurate but not a reason to stop: the interface is
-TAIRiX's own, `abi-v1` is unfrozen, and there is a real consumer — a copy that
-preserves sparseness (§15 of that plan requires it, and P1 is the change that
-does it). So the interface is added here, in place, with its first consumer.
-
-**Deliverable.**
-
-- Two filesystem operations on the existing versioned filesystem driver traits
-  and their syscalls, extended in place with no `v2`: a hole-aware seek
-  (`SEEK_DATA` / `SEEK_HOLE`-equivalent) and a punch-hole / zero-range. Both
-  capability-checked as the ordinary write/read authority on the node — no new
-  capability: punching a hole is writing zeroes, and asking where the holes are
-  is reading metadata the caller may already read.
-- ARXFS answers the seek from the extent tree it already walks (an unmapped
-  range *is* a hole), through the A0 cursor rather than by collecting the map.
-  It implements the punch by dropping the covering mappings and releasing the
-  replaced data extents through the copy-on-write refcount/free path — the same
-  code an all-zero write already runs, so it is a bound and a range walk, not a
-  new pipeline.
-- Every other filesystem driver answers honestly: a driver with no hole concept
-  reports the whole file as data and refuses the punch as unsupported, never
-  fabricating either.
-
-**Acceptance.** The mandatory behaviours `SPARSE.md` §15 makes conditional
-become unconditional and tested: a seek over a mixed file reports every hole and
-every data run exactly, at the boundaries, including a hole at offset zero and a
-file that is entirely a hole; a punch over a data range makes it read as zero,
-frees the replaced extents only when the copy-on-write rules allow, leaves a
-snapshot's view unchanged, and normalises adjacent holes; a punch that spans
-end-of-file, a zero-length punch, and a punch on a read-only mount each fail or
-no-op correctly. `SPARSE.md` §19 is replaced by its done-state summary.
+`fs_seek_region` (`SEEK_DATA` / `SEEK_HOLE`) and `fs_punch` are syscalls 151
+and 152 over the versioned filesystem traits, extended in place: gated as the
+ordinary read and write authority on the descriptor, no new capability.
+ARXFS answers the seek from its extent tree through the A0 cursor (an unmapped
+range is a hole) and punches by dropping the covering mappings and releasing
+the replaced extents through the copy-on-write free path; ext4 and UDF answer
+the seek from their extents, UDF and the kernel's memory filesystem punch too,
+and every other driver reports a file as one data run and refuses the punch as
+`NotSupported`. `SPARSE.md` §19 holds the done-state.
 
 ## 5. B1 — the §5 format targets
 

@@ -83,8 +83,8 @@ those fields and is rejected with `DriverError::BadMagic`, so the
 distinction is exact for the volumes this driver accepts.
 
 The device logical-block size and the FAT bytes-per-sector are
-decoupled: every access is staged one logical block at a time, so the
-two sizes need not match.
+decoupled: the driver addresses the volume in bytes through
+[`tairix-bytedev`](../lib/bytedev.md), so the two sizes need not match.
 
 ## Writing
 

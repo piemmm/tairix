@@ -35,20 +35,31 @@ pub mod uas;
 
 use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey};
 
+/// The bind-table class word of a mass-storage interface speaking
+/// `sub_class` over `protocol`.
+const fn interface_class(sub_class: u8, protocol: u8) -> u32 {
+    (desc::CLASS_MASS_STORAGE as u32) << 16 | (sub_class as u32) << 8 | protocol as u32
+}
+
 /// SCSI-transparent Bulk-Only Transport (class `0x08`, sub-class `0x06`,
-/// protocol `0x50`) — the ubiquitous USB disk/stick.
-pub const MSD_BOT_SCSI_CLASS: u32 = 0x08_06_50;
+/// protocol `0x50`) — the ubiquitous USB disk/stick, and most optical
+/// drives.
+pub const MSD_BOT_SCSI_CLASS: u32 = interface_class(desc::SUBCLASS_SCSI, desc::PROTOCOL_BOT);
+
+/// ATAPI over Bulk-Only Transport (sub-class `0x02`, protocol `0x50`) — an
+/// optical drive behind an ATAPI bridge.
+pub const MSD_BOT_ATAPI_CLASS: u32 = interface_class(desc::SUBCLASS_ATAPI, desc::PROTOCOL_BOT);
 
 /// UFI over Bulk-Only Transport (sub-class `0x04`, protocol `0x50`) — a
 /// USB floppy drive speaking BOT framing.
-pub const MSD_BOT_UFI_CLASS: u32 = 0x08_04_50;
+pub const MSD_BOT_UFI_CLASS: u32 = interface_class(desc::SUBCLASS_UFI, desc::PROTOCOL_BOT);
 
 /// UFI over Control/Bulk/Interrupt (sub-class `0x04`, protocol `0x00`) —
 /// the classic USB floppy drive.
-pub const MSD_CBI_UFI_CLASS: u32 = 0x08_04_00;
+pub const MSD_CBI_UFI_CLASS: u32 = interface_class(desc::SUBCLASS_UFI, desc::PROTOCOL_CBI);
 
 /// USB Attached SCSI (sub-class `0x06`, protocol `0x62`).
-pub const MSD_UAS_CLASS: u32 = 0x08_06_62;
+pub const MSD_UAS_CLASS: u32 = interface_class(desc::SUBCLASS_SCSI, desc::PROTOCOL_UAS);
 
 /// The bind priority [`BIND_KEYS`] carries.
 ///
@@ -68,6 +79,7 @@ const BIND_PRIORITY: u16 = 5;
 /// resolves a discovered mass-storage interface node against.
 pub const BIND_KEYS: &[DriverBindKey] = &[
     DriverBindKey::new(BIND_PRIORITY, HwMatchKey::usb(0, 0, MSD_BOT_SCSI_CLASS)),
+    DriverBindKey::new(BIND_PRIORITY, HwMatchKey::usb(0, 0, MSD_BOT_ATAPI_CLASS)),
     DriverBindKey::new(BIND_PRIORITY, HwMatchKey::usb(0, 0, MSD_BOT_UFI_CLASS)),
     DriverBindKey::new(BIND_PRIORITY, HwMatchKey::usb(0, 0, MSD_CBI_UFI_CLASS)),
     DriverBindKey::new(BIND_PRIORITY, HwMatchKey::usb(0, 0, MSD_UAS_CLASS)),

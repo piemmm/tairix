@@ -1457,9 +1457,7 @@ fn carried(old: &[Entry], fresh: &mut [Entry]) -> Option<Vec<Option<usize>>> {
     by_name.try_reserve_exact(old.len()).ok()?;
     by_name.extend(old.iter().enumerate().map(|(at, entry)| (entry.name(), at)));
     by_name.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    let mut placed = Vec::new();
-    placed.try_reserve_exact(old.len()).ok()?;
-    placed.resize(old.len(), None);
+    let mut placed = tairix_util::fallible::filled(old.len(), None)?;
     for (at, entry) in fresh.iter_mut().enumerate() {
         let Ok(found) = by_name.binary_search_by(|probe| probe.0.cmp(entry.name())) else {
             continue;

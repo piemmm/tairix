@@ -44,7 +44,7 @@ use tairix_log::{log, Event, EventId, Level, Sink};
 
 use crate::header::{BlockType, ReservedOwner, HEADER_LEN};
 use crate::scrub::{ScrubBudget, ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};
-use crate::{rd_u64, wr_u64, ARXFS, MAX_BLOCK_SIZE};
+use crate::{rd_u64, wr_u64, ARXFS, MAX_BLOCK_LEN};
 
 /// A health pass classified the volume healthy.
 pub const HEALTH_OK: EventId = EventId(12_040);
@@ -640,7 +640,7 @@ impl<B: Block> ARXFS<B> {
         if self.health_baseline_root == 0 {
             return None;
         }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         self.read_meta(
             self.health_baseline_root,
             BlockType::HealthBaseline,
@@ -673,7 +673,7 @@ impl<B: Block> ARXFS<B> {
     /// (and updating [`Self::health_baseline_root`]) so a crash mid-update
     /// still leaves a mountable volume.
     fn store_health_baseline(&mut self, baseline: &Baseline) -> Result<(), DriverError> {
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let bs = self.block_size;
         for byte in &mut buf[HEADER_LEN..bs] {
             *byte = 0;

@@ -3006,6 +3006,31 @@ impl SyscallNumber {
     /// Audited, as every grant of a window onto another process's memory is.
     pub const SHARE_MAP: Self = Self(150);
 
+    /// Find where the next data or hole of an open file begins: the
+    /// `SEEK_DATA` / `SEEK_HOLE` pair.
+    ///
+    /// Arguments: `fd: u32` (an open file handle), `offset: u64`, and
+    /// `region: u32` (a [`crate::SeekRegion`] discriminant). Returns the
+    /// offset of the first byte at or after `offset` in a region of that
+    /// kind, or `-errno`: [`Errno::NoData`] when there is none (the offset is
+    /// at or past the end, or only holes follow it), [`Errno::OutOfRange`]
+    /// for an unknown region, [`Errno::IsADirectory`] for a directory handle.
+    /// A file's end always begins a hole. Ungated beyond the handle, and not
+    /// audited.
+    pub const FS_SEEK_REGION: Self = Self(151);
+
+    /// Punch a hole in an open file: make `[offset, offset + len)` read as
+    /// zeros and release the storage it occupied, keeping the file's length.
+    ///
+    /// Arguments: `fd: u32` (an open handle with write access), `offset:
+    /// u64`, and `len: u64`. The range is clipped to the file's length, and
+    /// an empty one changes nothing. Returns `0`, or `-errno`:
+    /// [`Errno::NotSupported`] where the volume's format keeps no holes,
+    /// [`Errno::ReadOnly`] on a read-only mount, [`Errno::PermissionDenied`]
+    /// for a handle without write access, [`Errno::OutOfRange`] for a range
+    /// whose end overflows. Audited.
+    pub const FS_PUNCH: Self = Self(152);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3303,6 +3328,8 @@ mod tests {
         assert_eq!(SyscallNumber::CONSOLE_DAMAGE.as_u16(), 148);
         assert_eq!(SyscallNumber::CONSOLE_RELINQUISH.as_u16(), 149);
         assert_eq!(SyscallNumber::SHARE_MAP.as_u16(), 150);
+        assert_eq!(SyscallNumber::FS_SEEK_REGION.as_u16(), 151);
+        assert_eq!(SyscallNumber::FS_PUNCH.as_u16(), 152);
     }
 
     #[test]

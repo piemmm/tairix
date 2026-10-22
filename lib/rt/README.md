@@ -257,12 +257,19 @@ directory-listing respectively).
 `replace_file` is the one way a program replaces a whole document, so a crash
 or power loss at any point leaves the old contents or the new, never an empty
 or torn file: the bytes go to a sibling temporary named for that replace alone,
-which takes the original's owner, group and mode, is synced, and is renamed
-over the original, and a second sync puts the rename on the medium.
+which takes the original's extended attributes (through the copy engine, every
+one or the replace is refused), owner, group and mode, is synced, and is
+renamed over the original, and a second sync puts the rename on the medium.
 `ParentDir::CreatedIfMissing` creates the document's directory only when the
 replace finds it missing. A file's ACL and capability gate are not visible to
 a program, so neither survives a replace: it is not for a file carrying
 either.
+
+The `copy` module is the shared copy engine's seams (`lib/fscopy`) over this
+runtime: `RtFile` reads and writes an open `File` with its holes,
+`RtAttributes` reads and sets a path's extended attributes, and `OpenFiles`
+keeps one source and one destination open by path between a copying tool's
+chunks.
 
 `File::open` is the one **open-by-name** path, and it applies the shared
 `lib/resref` spelling rule (`names_resource_reference`) before any lookup: a

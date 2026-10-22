@@ -51,7 +51,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use tairix_abi::driver::block::Block;
+use tairix_abi::driver::block::{Block, MAX_BLOCK_LEN};
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
     FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind,
@@ -60,6 +60,7 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::fs::FS_NAME_MAX;
 use tairix_abi::time::{CivilTime, Time64};
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use tairix_bytedev::ByteDevice;
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x4641_5433_3200_0001; // "FAT32" + index
@@ -80,11 +81,6 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     }
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
 }
-
-/// Largest device logical-block size the driver stages through its
-/// on-stack scratch buffer. FAT volumes never use a sector larger than
-/// 4096 bytes, and no Tier-1 block device exceeds it either.
-const MAX_BLOCK_SIZE: u32 = 4096;
 
 /// The most 32-byte entries a FAT directory may hold (the specification's
 /// 65,536-entry limit). A walk that would read past it is on a corrupt or
@@ -347,7 +343,7 @@ struct DirCursor {
     /// The device block the last slot came from, so a walk reads each block
     /// once rather than once per slot it holds.
     held: Option<u64>,
-    block: [u8; MAX_BLOCK_SIZE as usize],
+    block: [u8; MAX_BLOCK_LEN],
 }
 
 impl DirCursor {
@@ -356,16 +352,14 @@ impl DirCursor {
         Self {
             pos: SlotPos::at(cluster),
             held: None,
-            block: [0; MAX_BLOCK_SIZE as usize],
+            block: [0; MAX_BLOCK_LEN],
         }
     }
 }
 
 /// A FAT32 volume backed by a [`Block`] device.
 pub struct Fat32<B: Block> {
-    block: B,
-    block_size: u32,
-    block_count: u64,
+    dev: ByteDevice<B>,
     layout: Layout,
     /// Forward search hint for the cluster allocator: the cluster to try
     /// first on the next [`Fat32::alloc_cluster`]. It only moves forward
@@ -408,23 +402,18 @@ use tairix_fsprobe::{
 /// the allocator and the chain-free path maintain the count from there,
 /// so space accounting never re-scans the FAT.
 fn count_free_clusters<B: Block>(
-    block: &mut B,
-    block_size: u32,
-    block_count: u64,
+    dev: &mut ByteDevice<B>,
     fat_start_byte: u64,
     max_cluster: u32,
 ) -> Result<u64, DriverError> {
     let mut free_clusters = 0u64;
-    let mut chunk = [0u8; MAX_BLOCK_SIZE as usize];
+    let mut chunk = [0u8; MAX_BLOCK_LEN];
     let mut cluster = 2u32;
     while cluster <= max_cluster {
         let remaining = (u64::from(max_cluster) - u64::from(cluster) + 1) * 4;
         let take = remaining.min(chunk.len() as u64);
         let take_usize = usize::try_from(take).map_err(|_| DriverError::DeviceFault)?;
-        device_read(
-            block,
-            block_size,
-            block_count,
+        dev.read(
             fat_start_byte + u64::from(cluster) * 4,
             &mut chunk[..take_usize],
         )?;
@@ -434,7 +423,7 @@ fn count_free_clusters<B: Block>(
             }
         }
         // `take` is a whole number of 4-byte entries by construction
-        // (`MAX_BLOCK_SIZE` and `remaining` are both multiples of 4).
+        // (`MAX_BLOCK_LEN` and `remaining` are both multiples of 4).
         cluster += u32::try_from(take / 4).map_err(|_| DriverError::DeviceFault)?;
     }
     Ok(free_clusters)
@@ -507,9 +496,7 @@ const BACKUP_BOOT_SECTOR: u16 = 6;
 /// documented "unknown" value — deterministic, so images stay
 /// bit-reproducible — and are left untouched at runtime.
 fn write_reserved_structures<B: Block>(
-    block: &mut B,
-    block_size: u32,
-    block_count: u64,
+    dev: &mut ByteDevice<B>,
     boot: &[u8; 512],
 ) -> Result<(), DriverError> {
     let mut fsinfo = [0u8; 512];
@@ -518,37 +505,15 @@ fn write_reserved_structures<B: Block>(
     put_le32(&mut fsinfo, 488, 0xFFFF_FFFF); // FSI_Free_Count: unknown
     put_le32(&mut fsinfo, 492, 0xFFFF_FFFF); // FSI_Nxt_Free: unknown
     put_le32(&mut fsinfo, 508, 0xAA55_0000); // FSI_TrailSig
-    let bps64 = u64::from(block_size);
+    let bps64 = u64::from(dev.block_size());
     for (sector, image) in [
         (u64::from(FSINFO_SECTOR), &fsinfo),
         (u64::from(BACKUP_BOOT_SECTOR), boot),
         (u64::from(BACKUP_BOOT_SECTOR) + 1, &fsinfo),
     ] {
-        device_write(block, block_size, block_count, sector * bps64, image)?;
+        dev.write(sector * bps64, image)?;
     }
-    device_write(block, block_size, block_count, 0, boot)
-}
-
-/// Write `len` zero bytes to `block` starting at device byte `offset`,
-/// staged through a stack scratch buffer one chunk at a time.
-fn write_zeros<B: Block>(
-    block: &mut B,
-    block_size: u32,
-    block_count: u64,
-    offset: u64,
-    len: u64,
-) -> Result<(), DriverError> {
-    let zeros = [0u8; MAX_BLOCK_SIZE as usize];
-    let mut at = offset;
-    let mut remaining = len;
-    while remaining > 0 {
-        let chunk = remaining.min(zeros.len() as u64);
-        let chunk_usize = usize::try_from(chunk).map_err(|_| DriverError::DeviceFault)?;
-        device_write(block, block_size, block_count, at, &zeros[..chunk_usize])?;
-        at += chunk;
-        remaining -= chunk;
-    }
-    Ok(())
+    dev.write(0, boot)
 }
 
 /// Number of leading bytes of `field` that are not the ASCII padding
@@ -1012,28 +977,26 @@ impl<B: Block> Fat32<B> {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::DeviceFault`] if the device geometry is
-    ///   degenerate or a block read fails.
+    /// * [`DriverError::Unsupported`] if the device's block size is not one
+    ///   [`ByteDevice`] can stage.
     /// * [`DriverError::BadMagic`] if the boot sector is not a valid
     ///   FAT32 BPB (bad signature, non-power-of-two sector/cluster
     ///   size, missing FAT, or non-FAT32 markers).
+    /// * Whatever the device reports for a read.
     ///
     /// # Capabilities
     ///
     /// Caller must already hold the driver's [`DriverHandle`].
-    pub fn open(mut block: B) -> Result<Self, DriverError> {
-        let geometry = block.geometry()?;
-        let block_size = geometry.block_size;
-        if block_size == 0 || block_size > MAX_BLOCK_SIZE || !block_size.is_power_of_two() {
-            return Err(DriverError::DeviceFault);
-        }
-        let block_count = geometry.block_count;
-        let total_bytes = u64::from(block_size)
-            .checked_mul(block_count)
-            .ok_or(DriverError::DeviceFault)?;
+    pub fn open(block: B) -> Result<Self, DriverError> {
+        Self::mount(ByteDevice::new(block)?)
+    }
 
+    /// Read the volume on `dev`: the one reading of the on-disk layout, which
+    /// [`Fat32::format`] ends in too.
+    fn mount(mut dev: ByteDevice<B>) -> Result<Self, DriverError> {
+        let total_bytes = dev.capacity();
         let mut boot = [0u8; 512];
-        device_read(&mut block, block_size, block_count, 0, &mut boot)?;
+        dev.read(0, &mut boot)?;
         let bpb = Fat32Bpb::parse(&boot).ok_or(DriverError::BadMagic)?;
 
         let fat_start_byte = bpb.fat_start_byte();
@@ -1058,18 +1021,10 @@ impl<B: Block> Fat32<B> {
         }
 
         let identity = identity_from_boot(&boot);
-        let free_clusters = count_free_clusters(
-            &mut block,
-            block_size,
-            block_count,
-            fat_start_byte,
-            max_cluster,
-        )?;
+        let free_clusters = count_free_clusters(&mut dev, fat_start_byte, max_cluster)?;
 
         Ok(Self {
-            block,
-            block_size,
-            block_count,
+            dev,
             layout: Layout {
                 bytes_per_cluster,
                 fat_start_byte,
@@ -1118,26 +1073,26 @@ impl<B: Block> Fat32<B> {
     /// is chosen (mirroring `mkfs.fat` thresholds) to keep the cluster count inside
     /// the FAT32 range, the two mirrored FATs are sized so every data
     /// cluster is addressable, and the root directory (cluster 2) is
-    /// created empty. The boot sector this function writes is then handed
-    /// straight to [`Fat32::open`], which is the single source of truth for
-    /// the on-disk layout — so a volume `format`
-    /// produces is, by construction, one the driver mounts.
+    /// created empty. The volume is then read back through the mount
+    /// [`Fat32::open`] uses, the single reading of the on-disk layout — so a
+    /// volume `format` produces is, by construction, one the driver mounts.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::BadMagic`] if the device logical-block size is not
-    ///   a power of two in `512..=4096` (a valid FAT32 sector size), or if
-    ///   the bytes written somehow fail [`Fat32::open`]'s validation.
+    /// * [`DriverError::Unsupported`] if the device's block size is not one
+    ///   [`ByteDevice`] can stage; every size it can is a valid FAT32 sector.
+    /// * [`DriverError::BadMagic`] if the bytes written somehow fail the
+    ///   mount's validation.
     /// * [`DriverError::OutOfRange`] if `serial` is zero, if the device is
     ///   too small to host a valid FAT32 volume (fewer than the FAT32
     ///   minimum of 65525 data clusters), or if it has more sectors than
     ///   the 32-bit BPB count addresses.
-    /// * [`DriverError::DeviceFault`] if a block read or write fails.
+    /// * Whatever the device reports for a transfer.
     ///
     /// # Capabilities
     ///
     /// Reached only through the driver's [`DriverHandle`].
-    pub fn format(mut block: B, serial: u32) -> Result<Self, DriverError> {
+    pub fn format(block: B, serial: u32) -> Result<Self, DriverError> {
         const RESERVED_SECTORS: u16 = 32;
         const NUM_FATS: u8 = 2;
         const _: () = assert!(BACKUP_BOOT_SECTOR + 1 < RESERVED_SECTORS);
@@ -1145,17 +1100,12 @@ impl<B: Block> Fat32<B> {
         if serial == 0 {
             return Err(DriverError::OutOfRange);
         }
-        let geometry = block.geometry()?;
-        let bps = geometry.block_size;
-        if !(512..=MAX_BLOCK_SIZE).contains(&bps) || !bps.is_power_of_two() {
-            return Err(DriverError::BadMagic);
-        }
-        let block_count = geometry.block_count;
+        let mut dev = ByteDevice::new(block)?;
+        let bps = dev.block_size();
+        let block_count = dev.block_count();
         let total_sectors = u32::try_from(block_count).map_err(|_| DriverError::OutOfRange)?;
         let bps64 = u64::from(bps);
-        let total_bytes = bps64
-            .checked_mul(block_count)
-            .ok_or(DriverError::OutOfRange)?;
+        let total_bytes = dev.capacity();
 
         let cluster_bytes = pick_cluster_bytes(total_bytes, bps64);
         let bytes_per_cluster = cluster_bytes;
@@ -1228,40 +1178,29 @@ impl<B: Block> Fat32<B> {
         boot[82..90].copy_from_slice(b"FAT32   ");
         boot[510] = 0x55;
         boot[511] = 0xAA;
-        write_reserved_structures(&mut block, bps, block_count, &boot)?;
+        write_reserved_structures(&mut dev, &boot)?;
 
         // Mirrored FATs: zero every entry, then plant the two reserved
         // entries and the root directory's end-of-chain marker.
         for fat in 0..num_fats {
             let base = fat_start_byte + fat * fat_size_bytes;
-            write_zeros(&mut block, bps, block_count, base, fat_size_bytes)?;
+            dev.zero(base, fat_size_bytes)?;
             let mut head = [0u8; 12];
             head[0..4].copy_from_slice(&0x0FFF_FFF8u32.to_le_bytes()); // media | reserved
             head[4..8].copy_from_slice(&FAT32_EOC_WRITE.to_le_bytes()); // entry 1
             head[8..12].copy_from_slice(&FAT32_EOC_WRITE.to_le_bytes()); // root EOC
-            device_write(&mut block, bps, block_count, base, &head)?;
+            dev.write(base, &head)?;
         }
 
         // Empty root directory: a zeroed cluster reads as end-of-directory.
-        write_zeros(&mut block, bps, block_count, root_byte, bytes_per_cluster)?;
+        dev.zero(root_byte, bytes_per_cluster)?;
 
-        Self::open(block)
+        Self::mount(dev)
     }
 
     /// Consume the driver, returning the underlying block device.
     pub fn into_block(self) -> B {
-        self.block
-    }
-
-    /// Read an arbitrary byte range from the backing device.
-    fn read_bytes(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        device_read(
-            &mut self.block,
-            self.block_size,
-            self.block_count,
-            offset,
-            buf,
-        )
+        self.dev.into_inner()
     }
 
     /// Byte offset of cluster `cluster`'s data on the device.
@@ -1273,7 +1212,7 @@ impl<B: Block> Fat32<B> {
     fn next_cluster(&mut self, cluster: u32) -> Result<ChainStep, DriverError> {
         let offset = self.layout.fat_start_byte + u64::from(cluster) * 4;
         let mut raw = [0u8; 4];
-        self.read_bytes(offset, &mut raw)?;
+        self.dev.read(offset, &mut raw)?;
         Ok(match classify_chain(u32::from_le_bytes(raw)) {
             // A link past the last data cluster points outside the volume.
             ChainStep::Next(next) if next > self.layout.max_cluster => ChainStep::Bad,
@@ -1281,22 +1220,11 @@ impl<B: Block> Fat32<B> {
         })
     }
 
-    /// Write an arbitrary byte range to the backing device.
-    fn write_bytes(&mut self, offset: u64, buf: &[u8]) -> Result<(), DriverError> {
-        device_write(
-            &mut self.block,
-            self.block_size,
-            self.block_count,
-            offset,
-            buf,
-        )
-    }
-
     /// Read the masked 28-bit FAT entry for `cluster` from the first FAT.
     fn fat_entry(&mut self, cluster: u32) -> Result<u32, DriverError> {
         let offset = self.layout.fat_start_byte + u64::from(cluster) * 4;
         let mut raw = [0u8; 4];
-        self.read_bytes(offset, &mut raw)?;
+        self.dev.read(offset, &mut raw)?;
         Ok(u32::from_le_bytes(raw) & FAT32_CLUSTER_MASK)
     }
 
@@ -1309,26 +1237,17 @@ impl<B: Block> Fat32<B> {
                 + fat * self.layout.fat_size_bytes
                 + u64::from(cluster) * 4;
             let mut raw = [0u8; 4];
-            self.read_bytes(offset, &mut raw)?;
+            self.dev.read(offset, &mut raw)?;
             let reserved = u32::from_le_bytes(raw) & !FAT32_CLUSTER_MASK;
-            self.write_bytes(offset, &(reserved | value).to_le_bytes())?;
+            self.dev.write(offset, &(reserved | value).to_le_bytes())?;
         }
         Ok(())
     }
 
     /// Zero the entire data region of `cluster`.
     fn zero_cluster(&mut self, cluster: u32) -> Result<(), DriverError> {
-        let zeros = [0u8; MAX_BLOCK_SIZE as usize];
-        let mut at = self.cluster_byte(cluster);
-        let mut remaining = self.layout.bytes_per_cluster;
-        while remaining > 0 {
-            let chunk = remaining.min(zeros.len() as u64);
-            let chunk_usize = usize::try_from(chunk).map_err(|_| DriverError::DeviceFault)?;
-            self.write_bytes(at, &zeros[..chunk_usize])?;
-            at += chunk;
-            remaining -= chunk;
-        }
-        Ok(())
+        self.dev
+            .zero(self.cluster_byte(cluster), self.layout.bytes_per_cluster)
     }
 
     /// Allocate one free data cluster, mark it end-of-chain, optionally
@@ -1491,7 +1410,7 @@ impl<B: Block> Fat32<B> {
             pos.cluster = fresh;
             pos.intra = 0;
         }
-        self.write_bytes(self.slot_byte(*pos), raw)?;
+        self.dev.write(self.slot_byte(*pos), raw)?;
         pos.intra += DIR_ENTRY_LEN as u64;
         pos.slot += 1;
         Ok(())
@@ -1505,18 +1424,14 @@ impl<B: Block> Fat32<B> {
         cursor: &mut DirCursor,
         byte: u64,
     ) -> Result<[u8; DIR_ENTRY_LEN], DriverError> {
-        let bs = u64::from(self.block_size);
-        let lba = byte / bs;
+        let bs = self.dev.block_size() as usize;
+        let lba = byte / bs as u64;
         if cursor.held != Some(lba) {
-            if lba >= self.block_count {
-                return Err(DriverError::DeviceFault);
-            }
             cursor.held = None;
-            self.block
-                .read_blocks(lba, &mut cursor.block[..self.block_size as usize])?;
+            self.dev.read(lba * bs as u64, &mut cursor.block[..bs])?;
             cursor.held = Some(lba);
         }
-        let within = usize::try_from(byte % bs).map_err(|_| DriverError::DeviceFault)?;
+        let within = usize::try_from(byte % bs as u64).map_err(|_| DriverError::DeviceFault)?;
         let mut raw = [0u8; DIR_ENTRY_LEN];
         raw.copy_from_slice(
             cursor
@@ -1617,71 +1532,6 @@ impl<B: Block> Fat32<B> {
     }
 }
 
-/// Read `buf.len()` bytes starting at device byte `offset`, staging
-/// through one logical block at a time.
-fn device_read<B: Block>(
-    block: &mut B,
-    block_size: u32,
-    block_count: u64,
-    offset: u64,
-    buf: &mut [u8],
-) -> Result<(), DriverError> {
-    let bs = u64::from(block_size);
-    let bs_usize = block_size as usize;
-    let mut scratch = [0u8; MAX_BLOCK_SIZE as usize];
-    let mut done: usize = 0;
-    while done < buf.len() {
-        let cursor = offset + done as u64;
-        let lba = cursor / bs;
-        let within = usize::try_from(cursor % bs).map_err(|_| DriverError::DeviceFault)?;
-        if lba >= block_count {
-            return Err(DriverError::DeviceFault);
-        }
-        block.read_blocks(lba, &mut scratch[..bs_usize])?;
-        let take = core::cmp::min(bs_usize - within, buf.len() - done);
-        buf[done..done + take].copy_from_slice(&scratch[within..within + take]);
-        done += take;
-    }
-    Ok(())
-}
-
-/// Write `buf.len()` bytes starting at device byte `offset`, staging
-/// through one logical block at a time.
-///
-/// A block touched only partially is read-modified-written so the
-/// untouched bytes of that block are preserved; a fully covered block is
-/// written directly.
-fn device_write<B: Block>(
-    block: &mut B,
-    block_size: u32,
-    block_count: u64,
-    offset: u64,
-    buf: &[u8],
-) -> Result<(), DriverError> {
-    let bs = u64::from(block_size);
-    let bs_usize = block_size as usize;
-    let mut scratch = [0u8; MAX_BLOCK_SIZE as usize];
-    let mut done: usize = 0;
-    while done < buf.len() {
-        let cursor = offset + done as u64;
-        let lba = cursor / bs;
-        let within = usize::try_from(cursor % bs).map_err(|_| DriverError::DeviceFault)?;
-        if lba >= block_count {
-            return Err(DriverError::DeviceFault);
-        }
-        let take = core::cmp::min(bs_usize - within, buf.len() - done);
-        if within == 0 && take == bs_usize {
-            scratch[..bs_usize].copy_from_slice(&buf[done..done + bs_usize]);
-        } else {
-            block.read_blocks(lba, &mut scratch[..bs_usize])?;
-            scratch[within..within + take].copy_from_slice(&buf[done..done + take]);
-        }
-        block.write_blocks(lba, &scratch[..bs_usize])?;
-        done += take;
-    }
-    Ok(())
-}
-
 /// One created directory entry pending write (a long-name fragment or
 /// the 8.3 short entry).
 type RawEntry = [u8; DIR_ENTRY_LEN];
@@ -1723,14 +1573,14 @@ impl<B: Block> Fat32<B> {
         tail[..2].copy_from_slice(&cb[0..2]);
         tail[2..].copy_from_slice(&size.to_le_bytes());
         let Some(written) = written else {
-            self.write_bytes(short_offset + 20, &cb[2..4])?;
-            return self.write_bytes(short_offset + 26, &tail);
+            self.dev.write(short_offset + 20, &cb[2..4])?;
+            return self.dev.write(short_offset + 26, &tail);
         };
         let mut span = [0u8; 12];
         span[..2].copy_from_slice(&cb[2..4]);
         span[2..6].copy_from_slice(&written);
         span[6..].copy_from_slice(&tail);
-        self.write_bytes(short_offset + 20, &span)
+        self.dev.write(short_offset + 20, &span)
     }
 
     /// The instant an operation stamps, or `None` while the host has no time
@@ -1869,8 +1719,8 @@ impl<B: Block> Fat32<B> {
             Self::build_short_entry(&f, ATTR_DIRECTORY, pc, 0, stamps)
         };
         let base = self.cluster_byte(child_cluster);
-        self.write_bytes(base, &dot)?;
-        self.write_bytes(base + DIR_ENTRY_LEN as u64, &dotdot)
+        self.dev.write(base, &dot)?;
+        self.dev.write(base + DIR_ENTRY_LEN as u64, &dotdot)
     }
 
     /// Length (in clusters) and last cluster of the chain at `first`.
@@ -1940,7 +1790,7 @@ impl<B: Block> Fat32<B> {
             let room = usize::try_from(bpc - intra).map_err(|_| DriverError::LengthOutOfRange)?;
             let take = core::cmp::min(room, buf.len() - done);
             let at = self.cluster_byte(cluster) + intra;
-            self.write_bytes(at, &buf[done..done + take])?;
+            self.dev.write(at, &buf[done..done + take])?;
             done += take;
             intra = 0;
             if done < buf.len() {
@@ -1955,7 +1805,7 @@ impl<B: Block> Fat32<B> {
 
     /// Zero `len` bytes of the data chain `first` starting at `start`.
     fn zero_range(&mut self, first: u32, start: u64, len: u64) -> Result<(), DriverError> {
-        let zeros = [0u8; MAX_BLOCK_SIZE as usize];
+        let zeros = [0u8; MAX_BLOCK_LEN];
         let mut remaining = len;
         let mut at = start;
         while remaining > 0 {
@@ -2055,7 +1905,8 @@ impl<B: Block> Fat32<B> {
                 after.slot += 1;
             }
             if in_chain && after.slot < u64::from(MAX_DIR_SLOTS) && self.settle(&mut after)? {
-                self.write_bytes(self.slot_byte(after), &[0u8; DIR_ENTRY_LEN])?;
+                self.dev
+                    .write(self.slot_byte(after), &[0u8; DIR_ENTRY_LEN])?;
             }
         }
 
@@ -2211,7 +2062,7 @@ impl<B: Block> Fat32<B> {
             if !self.settle(&mut pos)? {
                 return Err(DriverError::DeviceFault);
             }
-            self.write_bytes(self.slot_byte(pos), &[DELETED_ENTRY])?;
+            self.dev.write(self.slot_byte(pos), &[DELETED_ENTRY])?;
             pos.intra += DIR_ENTRY_LEN as u64;
             pos.slot += 1;
         }
@@ -2222,7 +2073,7 @@ impl<B: Block> Fat32<B> {
     /// (which stores `0` for the root).
     fn dir_parent_cluster(&mut self, dir_cluster: u32) -> Result<u32, DriverError> {
         let mut raw = [0u8; DIR_ENTRY_LEN];
-        self.read_bytes(
+        self.dev.read(
             self.cluster_byte(dir_cluster) + DIR_ENTRY_LEN as u64,
             &mut raw,
         )?;
@@ -2306,7 +2157,7 @@ impl<B: Block> Fat32<B> {
         // Preserve the source's attribute byte (read-only/hidden/system/
         // archive/directory) verbatim across the move.
         let mut attr_buf = [0u8; 1];
-        self.read_bytes(src_entry.short_offset + 11, &mut attr_buf)?;
+        self.dev.read(src_entry.short_offset + 11, &mut attr_buf)?;
         let attr = attr_buf[0];
 
         // A destination resolving to the source's own entry is that entry
@@ -2466,7 +2317,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
             }
             let take = core::cmp::min(cluster_len - intra, want - produced);
             let start = self.cluster_byte(cluster) + intra as u64;
-            self.read_bytes(start, &mut buf[produced..produced + take])?;
+            self.dev.read(start, &mut buf[produced..produced + take])?;
             produced += take;
             intra = 0;
             if produced < want {
@@ -2596,21 +2447,13 @@ impl<B: Block> FilesystemWrite for Fat32<B> {
 impl<B: Block> FilesystemSecurity for Fat32<B> {
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
         // FAT32 stores no owner, mode, ACL, or capability gate, so every
-        // node reports one uniform, restrictive default record: owned by
-        // the system principal, group-writable by nobody. The volume
-        // manager's mount policy is what grants ordinary users access to
-        // a foreign volume; the driver itself never fabricates per-file
-        // ownership the format cannot hold.
-        let info = self.node_info(node)?;
-        let mode = match info.kind {
-            NodeKind::Directory => 0o755,
-            NodeKind::RegularFile => 0o644,
-            // FAT32 stores no symbolic links, so `node_info` never reports
-            // one; refuse rather than invent a mode for a node this format
-            // cannot hold.
-            NodeKind::Symlink => return Err(DriverError::Unsupported),
-        };
-        Ok(NodeSecurity::new(mode, 0, 0))
+        // node reports the one record an ownerless format stands in with;
+        // the mount policy is what grants a foreign volume's users access.
+        Ok(NodeSecurity::unrecorded(self.node_info(node)?.kind))
+    }
+
+    fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
+        self.node_info(node).map(|_| false)
     }
 
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {

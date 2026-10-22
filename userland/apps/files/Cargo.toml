@@ -40,6 +40,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # `render`, the `VfsDirectorySource` composition, and the canonical
 # browser-view geometry.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The one file copy: a file's bytes with its holes, its extended attributes,
+# and the tally of what a destination could not keep, which an operation's
+# answer carries back to its folder window.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
 # The one installed-bundle walk: the open-with table discovers bundles through
 # the shared store walk — its roots in resolution precedence, its containment
 # bounds, and its bounded manifest decode — rather than a private copy of it.

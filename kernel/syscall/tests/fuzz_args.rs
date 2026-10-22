@@ -29,9 +29,9 @@ use core::cell::RefCell;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
-    MapFlags, OpenFlags, PortWidth, PowerAction, RandomFlags, RealpathMode, SyscallNumber,
-    SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
-    FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
+    MapFlags, OpenFlags, PortWidth, PowerAction, RandomFlags, RealpathMode, SeekRegion,
+    SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX,
+    FS_ATTR_VALUE_MAX, FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
 use tairix_fuzzseed::Prng;
@@ -864,6 +864,20 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fs_seek_region(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _region: SeekRegion,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_punch(&self, _c: &CallerContext<'_>, _fd: u32, _offset: u64, _len: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn fs_sync(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -1364,6 +1378,7 @@ fn operand_semantics_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
         SyscallNumber::FS_RENAME => Some((4, |b| tairix_abi::RenameFlags::from_bits(b).is_ok())),
         SyscallNumber::FS_LINK => Some((4, |b| LinkFlags::from_bits(b).is_ok())),
         SyscallNumber::FS_REALPATH => Some((4, |b| RealpathMode::from_raw(b).is_ok())),
+        SyscallNumber::FS_SEEK_REGION => Some((2, |b| SeekRegion::from_raw(b).is_ok())),
         _ => None,
     };
     if let Some((slot, accepts)) = flags_arg {

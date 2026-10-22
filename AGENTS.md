@@ -582,6 +582,8 @@ tairix/
 │   │   ├── adfs/        # Acorn ADFS / RISC OS FileCore, read/write.
 │   │   ├── ext4/
 │   │   ├── fat32/
+│   │   ├── iso9660/     # CD/DVD volumes, read-only: Joliet, Rock Ridge, RISC OS.
+│   │   ├── udf/         # OSTA UDF 1.02–2.60, read/write.
 │   │   └── arxfs/      # Native, POSIX-compliant, capability-aware FS.
 │   ├── input/
 │   ├── irq/             # Second-level interrupt controllers: brcmstb_l2.
@@ -609,6 +611,7 @@ tairix/
 │   ├── bootload/        # Firmware-neutral boot-chain loader core.
 │   ├── browse/          # Shared directory-browser engine.
 │   ├── buildcfg/        # Build-script target classification: the freestanding cfg.
+│   ├── bytedev/         # Byte-addressed I/O over a block device.
 │   ├── caps/            # Capability primitives.
 │   ├── clock/           # Clock-controller side (clock-v1 server).
 │   ├── cmdres/          # Shared command-word resolution policy.
@@ -646,6 +649,7 @@ tairix/
 │   ├── font/            # Shared text rasterisation (monospace font + blitter).
 │   ├── fontface/        # Shared glyph-coverage engine: TrueType outlines,
 │   │                    #   grid fitting, and pixel-exact line art.
+│   ├── fscopy/          # The one file copy: holes, attributes, what was not kept.
 │   ├── fsmeta/          # Shared extended-file-metadata model.
 │   ├── fsprobe/         # Shared filesystem signature/label/identity probe.
 │   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb helper.
@@ -1641,6 +1645,7 @@ You are not exempt from any rule above. In addition:
     | Civil time zones: the vendored IANA rules and CLDR-derived regions, the zone store compiled with `zic`'s semantics and held to its output, the `lib/tz` engine, which zone and region a reader is in, how a process that may open no file is delegated the store, and the one renderer of a local reading | `plans/TIMEZONES.md` |
     | Setting the clock: the NTP client service, the sync-decision policy (unset/implausible/stale-boot/refresh cadence), NTP-server politeness, RTC drivers and the wall clock's provenance ladder, and the enable/disable surfaces | `plans/TIMESYNC.md` |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
+| Foreign media and the copy that keeps their metadata: ISO 9660, UDF, USB optical drives and the disc layout, and `lib/fscopy`'s holes, attributes and omission report | `plans/FOREIGN-MEDIA.md`; `plans/ARXFS-METADATA.md` |
     | Boot namespace assembly: which volume backs which root, the signed namespace policy on `/System`, volume attachment vs view projection, mount-flag narrowing, and the user-space root-volume unlock | `plans/NEW-NAMESPACE.md` |
     | Advisory file locking: byte-range locks owned by the open file description, the conflict/fairness/deadlock rules, the `file-locks` bound, `fs_lock`/`fs_lock_query`, and the `flock` command | `plans/FILELOCK.md` |
     | Links, symbolic and hard, and path canonicalisation: the `FileKind`/`NodeKind` kind, `NO_FOLLOW`, `fs_symlink`/`fs_readlink`/`fs_link`/`fs_realpath`, VFS per-component resolution with its hop bound and mount-projection floor, `RealpathMode`, the per-format on-disk spellings, the link-count lifecycle, `ln`/`ls`/`readlink`, desktop shortcuts | `plans/SYMLINKS.md` |

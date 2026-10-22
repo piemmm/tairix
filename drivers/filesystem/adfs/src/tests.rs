@@ -481,7 +481,7 @@ fn big_directories_grow_and_survive_remount() {
         assert_eq!(list(&mut fs, root).len(), count as usize, "{variant:?}");
         // The grown root (its size now lives in the disc record)
         // survives a remount, and every entry still resolves.
-        let mut fs = Adfs::open(fs.volume.into_device()).expect("remount");
+        let mut fs = Adfs::open(fs.volume.into_inner()).expect("remount");
         let root = FilesystemRead::root(&fs);
         for i in 0..count {
             let mut name = *b"AVeryLongObjectName-000";
@@ -509,7 +509,7 @@ fn image_of(variant: AdfsVariant, bytes: usize) -> Vec<u8> {
     let root = FilesystemRead::root(&fs);
     make(&mut fs, root, b"File", b"survivor");
     fs.create(root, b"Dir", NodeKind::Directory).expect("dir");
-    fs.volume.into_device().data
+    fs.volume.into_inner().data
 }
 
 /// Reopen an image, asserting the driver rejects it as corrupt.
@@ -616,7 +616,7 @@ fn corrupt_boot_blocks_fall_back_and_fail_closed() {
     let mut block = [0u8; 512];
     block.copy_from_slice(&data[0xC00..0xE00]);
     block[511] = 0;
-    let sum = disc::boot_block_checksum(&block);
+    let sum = tairix_fsprobe::adfs::boot_block_checksum(&block);
     data[0xC00 + 0x1FF] = sum;
     assert_rejected(AdfsVariant::F, data, "hostile disc record");
 }
@@ -966,7 +966,7 @@ fn format_open_roundtrip_every_variant() {
         // sees the identical volume.
         let listed = list(&mut fs, root);
         assert_eq!(listed, vec![(b"Data".to_vec(), false, body.len() as u64)]);
-        let device = fs.volume.into_device();
+        let device = fs.volume.into_inner();
         let mut reopened = Adfs::open(device).expect("reopen");
         let node = reopened
             .lookup(FilesystemRead::root(&reopened), b"Data")
@@ -1050,7 +1050,7 @@ fn a_stat_reads_its_parent_alone() {
             .expect("dir");
     }
     let target = make(&mut fs, deep, b"Target", b"payload");
-    let device = fs.volume.into_device();
+    let device = fs.volume.into_inner();
     let mut fs = Adfs::open(device).expect("reopen");
     reads.store(0, core::sync::atomic::Ordering::Relaxed);
     let _ = list(&mut fs, deep);
@@ -1138,7 +1138,7 @@ fn a_directory_out_of_order_is_rejected() {
     let root = FilesystemRead::root(&fs);
     make(&mut fs, root, b"QQQQ1", b"1");
     make(&mut fs, root, b"QQQQ2", b"2");
-    let image = fs.volume.into_device().data;
+    let image = fs.volume.into_inner().data;
     let first = image
         .windows(5)
         .position(|w| w == b"QQQQ1")
@@ -1197,4 +1197,50 @@ fn a_shared_fragment_is_freed_with_its_last_sharer() {
     );
     fs.remove(root, b"Holder").expect("remove the last sharer");
     assert!(fs.stats().expect("stats").free_blocks > free_before);
+}
+
+/// On a new-format directory the attribute byte is `FileCore`'s: public
+/// read and write are bits 4 and 5 there, not the canonical encoding's 5 and
+/// 6. A file a RISC OS machine made publicly readable must read back as `r`,
+/// and one set publicly writable here must be so on the disc RISC OS reads.
+#[test]
+fn public_access_bits_land_where_filecore_keeps_them() {
+    for (variant, bytes) in [
+        (AdfsVariant::E, 800 * 1024),
+        (AdfsVariant::F, 1600 * 1024),
+        (AdfsVariant::HardDisc, 4 * 1024 * 1024),
+    ] {
+        let mut fs = fresh(variant, bytes);
+        let root = FilesystemRead::root(&fs);
+        let node = make(&mut fs, root, b"Shared", b"body");
+        fs.set_attr(node, b"acorn.attr", b"RW/rw").expect("attr");
+        let mut image = fs.volume.into_inner().data;
+        let entry = image
+            .windows(7)
+            .position(|w| w == b"Shared\r")
+            .unwrap_or_else(|| panic!("{variant:?}: the entry is on the disc"));
+        assert_eq!(image[entry + 25], 0b0011_0011, "{variant:?}: R W r w");
+
+        // A byte a RISC OS machine wrote: owner read, locked, public read.
+        // The entry is the root's first, so the directory opens five bytes
+        // before it; a zero check byte is one the format does not check.
+        image[entry + 25] = 0b0001_0101;
+        image[entry - 5 + dir::NEW_DIR_SIZE - 1] = 0;
+        let mut disk = MemDisk::new(0, 512);
+        disk.data = image;
+        let mut fs = Adfs::open(disk).expect("reopen");
+        let root = FilesystemRead::root(&fs);
+        let node = fs.lookup(root, b"Shared").expect("lookup");
+        assert_eq!(
+            attr(&mut fs, node, b"acorn.attr").as_deref(),
+            Some(&b"RL/r"[..]),
+            "{variant:?}"
+        );
+        // The execute-only bit has no place in this format.
+        assert_eq!(
+            fs.set_attr(node, b"acorn.attr", b"RE/"),
+            Err(DriverError::OutOfRange),
+            "{variant:?}"
+        );
+    }
 }

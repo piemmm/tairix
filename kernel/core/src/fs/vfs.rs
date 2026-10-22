@@ -16,7 +16,7 @@ use tairix_abi::driver::filesystem::{
     AllocationClass, DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity,
     FilesystemWrite, MountFlags, NodeId, NodeKind as DriverNodeKind,
 };
-use tairix_abi::fs::{RealpathMode, RenameFlags, FS_PATH_MAX};
+use tairix_abi::fs::{RealpathMode, RenameFlags, SeekRegion, FS_PATH_MAX};
 use tairix_abi::{CapabilityId, ROOT_VIEW, STORAGE_CATALOG};
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -906,6 +906,43 @@ impl Vfs {
     ) -> Result<(), VfsError> {
         let mount = self.delegate_context(cred, covered, MountUse::Write)?;
         DelegatedFs::new_secured(fs, mount).truncate(cred, covered.remainder(), size)
+    }
+
+    /// Where the next region of `region`'s kind begins at or after `offset`
+    /// of the regular file at `covered`, under a driver-backed mount.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_via_secured`].
+    pub fn seek_region_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        covered: &CoveredPath,
+        fs: &mut F,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, VfsError> {
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new_secured(fs, mount).seek_region(cred, covered.remainder(), offset, region)
+    }
+
+    /// Punch a hole of `len` bytes at `offset` in the regular file at
+    /// `covered`, under a driver-backed mount.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::truncate_via_secured`], and [`VfsError::NotSupported`]
+    /// where the format keeps no holes.
+    pub fn punch_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        covered: &CoveredPath,
+        fs: &mut F,
+        offset: u64,
+        len: u64,
+    ) -> Result<(), VfsError> {
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new_secured(fs, mount).punch(cred, covered.remainder(), offset, len)
     }
 
     /// Per-inode counterpart of [`Vfs::remove_via`].

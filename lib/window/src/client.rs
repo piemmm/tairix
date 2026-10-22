@@ -394,14 +394,18 @@ pub(crate) fn presented_damage(
     }
 }
 
-/// The error alert stating that what `headline` names was not done because of
-/// `reason`, a clause written to follow a colon on `stderr`.
+/// The alert of `severity` stating what `headline` names and, as its detail,
+/// `reason`: a clause written to follow a colon on `stderr`.
 ///
 /// # Errors
 ///
 /// [`AlertSpec::acknowledged`]'s.
-pub(crate) fn refusal_alert(headline: &str, reason: &str) -> Result<AlertSpec, Errno> {
-    AlertSpec::acknowledged(AlertSeverity::Error, headline, &alert_sentence(reason))
+pub(crate) fn notice_alert(
+    severity: AlertSeverity,
+    headline: &str,
+    reason: &str,
+) -> Result<AlertSpec, Errno> {
+    AlertSpec::acknowledged(severity, headline, &alert_sentence(reason))
 }
 
 /// `reason` as the sentence an alert states it in: its first letter a capital

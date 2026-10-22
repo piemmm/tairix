@@ -1,11 +1,16 @@
-//! The copy engine: resolve each source's destination, stream regular files,
-//! and reproduce each directory `-r` must copy — creating the destination
+//! The copy engine: resolve each source's destination, copy regular files
+//! through the shared engine with their holes and extended attributes, and
+//! reproduce each directory `-r` must copy — creating the destination
 //! directory before its contents.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::Errno;
+use tairix_fscopy::{
+    copy_attributes, AttrError, DataCopy, DataError, Omissions, PathFile, CHUNK_LEN,
+};
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::{join, leaf_name};
 
@@ -13,15 +18,11 @@ use crate::command::{Clobber, Command, Contents, Options, TargetMode};
 use crate::error::CpError;
 use crate::io::{Entry, EntryKind, FileSystem, Follow, Output, Probe, Prompt};
 
-/// The fixed-size chunk used to stream a regular file from source to
-/// destination. Matches `cat`'s `READ_CHUNK` so the userland tools share one
-/// streaming granularity.
-const READ_CHUNK: usize = 4096;
-
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `cp`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
-usage: cp [-dfilnPrRsvT] [-t dir] [--] source... dest
+usage: cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
+          [-t dir] [--] source... dest
 
   -r, -R, --recursive        copy directories and their contents
   -f, --force                remove an unwritable destination and retry
@@ -34,6 +35,11 @@ usage: cp [-dfilnPrRsvT] [-t dir] [--] source... dest
                              rather than copying what it names
   --preserve=links           two sources naming one node get two names at
                              the destination, not two copies
+  --preserve=xattr           fail a copy whose destination cannot keep an
+                             extended attribute
+  --no-preserve=xattr        copy no extended attributes
+  --sparse=WHEN              auto (keep holes), always (also leave stored
+                             zeros unwritten), never (write every byte)
   -d                         -P and --preserve=links together
   -v, --verbose              report each copy
   -t dir, --target-directory=dir
@@ -45,6 +51,10 @@ With one source and a non-directory dest, the source is copied to dest. When
 dest is an existing directory (always, with more than one source) each source
 is copied into it under its base name. `--` ends option parsing: every later
 argument is a path.
+
+Extended attributes (a RISC OS filetype, a Mac type and creator) are copied
+wherever the destination keeps them; the ones it cannot keep are reported in
+one warning at the end.
 
 -a/--archive and the other --preserve members are refused: --preserve=all
 includes timestamps, which no call can set yet, so they are not honoured in
@@ -80,13 +90,19 @@ const OWN_WORD: &str = "cp";
 ///   exists as a non-directory, or the `-t` operand is not an existing
 ///   directory.
 /// * [`CpError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](tairix_abi::Errno).
+///   underlying [`Errno`].
 /// * [`CpError::Read`] — a source file or directory could not be read.
 /// * [`CpError::Create`] — a destination file or directory could not be made.
 /// * [`CpError::Write`] — writing a destination file's bytes failed.
 /// * [`CpError::Prompt`] — a confirmation could not be read (never treated
 ///   as consent).
 /// * [`CpError::Output`] — writing the usage banner or a `-v` report failed.
+/// * [`CpError::Attribute`] — the destination refused an extended attribute
+///   the copy had to carry.
+///
+/// Attributes a destination could not keep are reported once, after the
+/// last copy and before any failure that ended the run: a warning on
+/// `diagnostics` and an advisory record on `out`'s information stream.
 pub fn run(
     command: Command,
     locale: Option<&str>,
@@ -94,6 +110,7 @@ pub fn run(
     prompt: &dyn Prompt,
     help: &dyn HelpSource,
     out: &dyn Output,
+    diagnostics: &dyn Output,
 ) -> Result<(), CpError> {
     match command {
         Command::Help => short_help(locale, help, out),
@@ -101,14 +118,25 @@ pub fn run(
             options,
             sources,
             dest,
-        } => Copier {
-            options,
-            linked: Linked::default(),
-            fs,
-            prompt,
-            out,
+        } => {
+            let mut copier = Copier {
+                options,
+                linked: Linked::default(),
+                omissions: Omissions::default(),
+                buf: Vec::new(),
+                fs,
+                prompt,
+                out,
+            };
+            let outcome = copier.copy_all(&sources, &dest);
+            if let Some(report) = copier.omissions.report(OWN_WORD) {
+                out.info(&report.record);
+                // The warning is advisory: a stream refusing it changes nothing.
+                let _ = diagnostics
+                    .write_all(format!("{OWN_WORD}: warning: {}\n", report.summary).as_bytes());
+            }
+            outcome
         }
-        .copy_all(&sources, &dest),
     }
 }
 
@@ -138,6 +166,10 @@ struct Copier<'a> {
     /// The destinations already written for each multiply-named source node
     /// (`--preserve=links`).
     linked: Linked,
+    /// What the copies' destinations could not keep, reported once.
+    omissions: Omissions,
+    /// The one buffer every file's bytes pass through, sized on first use.
+    buf: Vec<u8>,
     fs: &'a dyn FileSystem,
     prompt: &'a dyn Prompt,
     out: &'a dyn Output,
@@ -204,7 +236,7 @@ impl Copier<'_> {
             TargetMode::Directory => match self.stat(dest, Follow::Target)?.map(|p| p.kind) {
                 Some(EntryKind::Directory) => true,
                 Some(EntryKind::File | EntryKind::Symlink) => return Err(CpError::NotADirectory),
-                None => return Err(CpError::Stat(tairix_abi::Errno::NotFound)),
+                None => return Err(CpError::Stat(Errno::NotFound)),
             },
             // `-T`: the destination is a normal file for exactly one source.
             TargetMode::NoDirectory => {
@@ -267,6 +299,7 @@ impl Copier<'_> {
             Some(EntryKind::File | EntryKind::Symlink) => return Err(CpError::NotADirectory),
             None => {
                 self.fs.mkdir(target).map_err(CpError::Create)?;
+                self.carry_attributes(source, target)?;
                 self.report(source, target)?;
             }
         }
@@ -304,7 +337,7 @@ impl Copier<'_> {
             return self.report(source, target);
         }
         match self.options.contents {
-            Contents::Bytes => self.copy_file(source, target)?,
+            Contents::Bytes => self.copy_file(source, probe, target)?,
             Contents::HardLink => {
                 if !self.replaceable(target)? {
                     return Ok(());
@@ -362,34 +395,60 @@ impl Copier<'_> {
         }
     }
 
-    /// Stream a regular file from `source` to `target`, honouring the
-    /// existing-destination policy and `-f` (remove a destination that
+    /// Copy the regular file `source`, the node `node` describes, to `target`
+    /// — its bytes with its holes, then its extended attributes — honouring
+    /// the existing-destination policy and `-f` (remove a destination that
     /// cannot be created and retry the create once).
-    fn copy_file(&self, source: &str, target: &str) -> Result<(), CpError> {
-        if self.stat(target, Follow::Keep)?.is_some() && !self.consented(target)? {
+    fn copy_file(&mut self, source: &str, node: &Probe, target: &str) -> Result<(), CpError> {
+        let occupant = self.stat(target, Follow::Keep)?;
+        // The create follows a final link, so the node it would empty is the
+        // one the link names.
+        let emptied = match occupant {
+            Some(link) if link.kind == EntryKind::Symlink => self.stat(target, Follow::Target)?,
+            other => other,
+        };
+        if emptied.is_some_and(|emptied| !node.id.is_none() && emptied.id == node.id) {
+            return Err(CpError::SameFile {
+                source: String::from(source),
+                target: String::from(target),
+            });
+        }
+        if occupant.is_some() && !self.consented(target)? {
             return Ok(());
         }
+        let len = self.fs.size(source).map_err(CpError::Read)?;
         self.create_destination(target)?;
-        let mut offset: u64 = 0;
-        let mut buf = [0_u8; READ_CHUNK];
-        loop {
-            let read = self
-                .fs
-                .read(source, offset, &mut buf)
-                .map_err(CpError::Read)?;
-            if read == 0 {
-                return self.report(source, target);
-            }
-            // A seam reporting more than the buffer holds would index out of
-            // bounds; refuse it rather than trust the count.
-            if read > buf.len() {
-                return Err(CpError::Read(tairix_abi::Errno::LengthOutOfRange));
-            }
-            self.fs
-                .write(target, offset, &buf[..read])
-                .map_err(CpError::Write)?;
-            offset = offset.saturating_add(read as u64);
+        if self.buf.is_empty() && !tairix_util::fallible::grow_to(&mut self.buf, CHUNK_LEN, 0) {
+            return Err(CpError::Write(Errno::OutOfMemory));
         }
+        let mut from = PathFile::new(self.fs, source);
+        let mut to = PathFile::new(self.fs, target);
+        DataCopy::new(len, self.options.sparse)
+            .run(&mut from, &mut to, &mut self.buf)
+            .map_err(|failure| match failure {
+                DataError::Read(errno) => CpError::Read(errno),
+                DataError::Write(errno) => CpError::Write(errno),
+            })?;
+        self.carry_attributes(source, target)?;
+        self.report(source, target)
+    }
+
+    /// Carry `source`'s extended attributes to `target`, noting what its
+    /// volume could not keep.
+    fn carry_attributes(&mut self, source: &str, target: &str) -> Result<(), CpError> {
+        let left =
+            copy_attributes(self.fs, source, target, self.options.attributes).map_err(|err| {
+                match err {
+                    AttrError::Read(errno) => CpError::Read(errno),
+                    AttrError::Write { key, error } => CpError::Attribute {
+                        key,
+                        target: String::from(target),
+                        error,
+                    },
+                }
+            })?;
+        self.omissions.note(&left);
+        Ok(())
     }
 
     /// Create `target`, or — with `-f` — remove it and retry the create once.
@@ -425,7 +484,7 @@ impl Copier<'_> {
     fn stat(&self, path: &str, follow: Follow) -> Result<Option<Probe>, CpError> {
         match self.fs.probe(path, follow) {
             Ok(probe) => Ok(Some(probe)),
-            Err(tairix_abi::Errno::NotFound) => Ok(None),
+            Err(Errno::NotFound) => Ok(None),
             Err(errno) => Err(CpError::Stat(errno)),
         }
     }
@@ -455,10 +514,13 @@ mod tests {
     use super::{run as engine_run, USAGE};
     use crate::command::{Clobber, Command, Contents, Options, TargetMode};
     use crate::error::CpError;
-    use crate::io::{Entry, EntryKind, FileSystem, Follow, Output, Probe, Prompt};
+    use crate::io::{
+        AttributeStore, Entry, EntryKind, FileSystem, Follow, Output, PathFiles, Probe, Prompt,
+    };
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use tairix_abi::fs::SeekRegion;
     use tairix_abi::{Errno, FileId};
     use tairix_help::{HelpSource, SourceError};
 
@@ -543,7 +605,7 @@ mod tests {
     /// The engine under a prompt that must never be reached — the shape
     /// every pre-existing non-interactive test uses.
     fn run(command: Command, fs: &dyn FileSystem, out: &Recorder) -> Result<(), CpError> {
-        engine_run(command, None, fs, &NeverAsked, &NoHelp, out)
+        engine_run(command, None, fs, &NeverAsked, &NoHelp, out, out)
     }
 
     /// An in-memory tree. Regular files carry their bytes; directories are
@@ -570,6 +632,15 @@ mod tests {
         /// Second names: `(path, the path whose node it also names)`, so a
         /// hard-linked pair shares one identity and one set of contents.
         hard: Vec<(String, String)>,
+        /// The stored runs `(start, end)` of a sparse file; a file not listed
+        /// is stored throughout.
+        runs: Vec<(String, Vec<(u64, u64)>)>,
+        /// Every write's `(path, offset, length)`, in order.
+        writes: Vec<(String, u64, usize)>,
+        /// Extended attributes: `(path, key, value)`.
+        attrs: Vec<(String, String, Vec<u8>)>,
+        /// Setting this key anywhere is refused with the errno.
+        attr_refusal: Option<(String, Errno)>,
     }
 
     impl MemFs {
@@ -584,8 +655,64 @@ mod tests {
                     removed: Vec::new(),
                     symlinks: Vec::new(),
                     hard: Vec::new(),
+                    runs: Vec::new(),
+                    writes: Vec::new(),
+                    attrs: Vec::new(),
+                    attr_refusal: None,
                 }),
             }
+        }
+
+        /// A sparse file at `path`, `len` bytes long, storing `runs` of
+        /// `(offset, bytes)`; its holes read as zeros.
+        fn sparse(self, path: &str, len: usize, runs: &[(u64, &[u8])]) -> Self {
+            let mut contents = alloc::vec![0u8; len];
+            let mut stored = Vec::new();
+            for (at, bytes) in runs {
+                let at_usize = usize::try_from(*at).expect("fixture offset");
+                contents[at_usize..at_usize + bytes.len()].copy_from_slice(bytes);
+                stored.push((*at, *at + bytes.len() as u64));
+            }
+            self.state
+                .borrow_mut()
+                .runs
+                .push((path.to_string(), stored));
+            self.file(path, &contents)
+        }
+
+        /// An extended attribute on `path`.
+        fn attr(self, path: &str, key: &str, value: &[u8]) -> Self {
+            self.state
+                .borrow_mut()
+                .attrs
+                .push((path.to_string(), key.to_string(), value.to_vec()));
+            self
+        }
+
+        /// Setting `key` anywhere is refused with `errno`.
+        fn refuses_attr(self, key: &str, errno: Errno) -> Self {
+            self.state.borrow_mut().attr_refusal = Some((key.to_string(), errno));
+            self
+        }
+
+        fn attr_of(&self, path: &str, key: &str) -> Option<Vec<u8>> {
+            self.state
+                .borrow()
+                .attrs
+                .iter()
+                .find(|(p, k, _)| p == path && k == key)
+                .map(|(_, _, value)| value.clone())
+        }
+
+        /// The bytes written to `path`, in total.
+        fn written_to(&self, path: &str) -> usize {
+            self.state
+                .borrow()
+                .writes
+                .iter()
+                .filter(|(p, _, _)| p == path)
+                .map(|(_, _, len)| len)
+                .sum()
         }
 
         fn file(self, path: &str, contents: &[u8]) -> Self {
@@ -750,6 +877,109 @@ mod tests {
         }
     }
 
+    impl PathFiles for MemFs {
+        fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+            let named = canon(path);
+            let object = self.followed_object_of(named).ok_or(Errno::NotFound)?;
+            let path = object.as_str();
+            let state = self.state.borrow();
+            if let Some((p, errno)) = &state.read_fail {
+                if p == named {
+                    return Err(*errno);
+                }
+            }
+            let (_, bytes) = state
+                .files
+                .iter()
+                .find(|(p, _)| p == path)
+                .ok_or(Errno::NotFound)?;
+            let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
+            if start >= bytes.len() {
+                return Ok(0);
+            }
+            let take = (bytes.len() - start).min(buf.len());
+            buf[..take].copy_from_slice(&bytes[start..start + take]);
+            Ok(take)
+        }
+        fn size(&self, path: &str) -> Result<u64, Errno> {
+            let object = self
+                .followed_object_of(canon(path))
+                .ok_or(Errno::NotFound)?;
+            let state = self.state.borrow();
+            let (_, bytes) = state
+                .files
+                .iter()
+                .find(|(p, _)| *p == object)
+                .ok_or(Errno::NotFound)?;
+            Ok(bytes.len() as u64)
+        }
+        fn next_region(
+            &self,
+            path: &str,
+            offset: u64,
+            region: SeekRegion,
+        ) -> Result<Option<u64>, Errno> {
+            let object = self
+                .followed_object_of(canon(path))
+                .ok_or(Errno::NotFound)?;
+            let len = self.size(&object)?;
+            let state = self.state.borrow();
+            let Some((_, runs)) = state.runs.iter().find(|(p, _)| *p == object) else {
+                return Ok(region.in_solid_file(offset, len));
+            };
+            if offset >= len {
+                return Ok(None);
+            }
+            let inside = runs
+                .iter()
+                .find(|(start, end)| (*start..*end).contains(&offset));
+            Ok(match (region, inside) {
+                (SeekRegion::Data, Some(_)) | (SeekRegion::Hole, None) => Some(offset),
+                (SeekRegion::Hole, Some((_, end))) => Some(*end),
+                (SeekRegion::Data, None) => runs
+                    .iter()
+                    .map(|(start, _)| *start)
+                    .find(|&start| start > offset),
+            })
+        }
+        fn set_len(&self, path: &str, len: u64) -> Result<(), Errno> {
+            let path = canon(path);
+            let mut state = self.state.borrow_mut();
+            let (_, file) = state
+                .files
+                .iter_mut()
+                .find(|(p, _)| p == path)
+                .ok_or(Errno::NotFound)?;
+            file.resize(
+                usize::try_from(len).map_err(|_| Errno::LengthOutOfRange)?,
+                0,
+            );
+            Ok(())
+        }
+        fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+            let path = canon(path);
+            let mut state = self.state.borrow_mut();
+            if let Some((p, errno)) = &state.write_fail {
+                if p == path {
+                    return Err(*errno);
+                }
+            }
+            let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
+            let (_, file) = state
+                .files
+                .iter_mut()
+                .find(|(p, _)| p == path)
+                .ok_or(Errno::NotFound)?;
+            let end = start + bytes.len();
+            if file.len() < end {
+                file.resize(end, 0);
+            }
+            file[start..end].copy_from_slice(bytes);
+            state.writes.push((path.to_string(), offset, bytes.len()));
+            Ok(())
+        }
+    }
+
     impl FileSystem for MemFs {
         fn probe(&self, path: &str, follow: Follow) -> Result<Probe, Errno> {
             let path = canon(path);
@@ -812,30 +1042,6 @@ mod tests {
             }
             state.hard.push((new, object));
             Ok(())
-        }
-
-        fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-            let named = canon(path);
-            let object = self.followed_object_of(named).ok_or(Errno::NotFound)?;
-            let path = object.as_str();
-            let state = self.state.borrow();
-            if let Some((p, errno)) = &state.read_fail {
-                if p == named {
-                    return Err(*errno);
-                }
-            }
-            let (_, bytes) = state
-                .files
-                .iter()
-                .find(|(p, _)| p == path)
-                .ok_or(Errno::NotFound)?;
-            let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
-            if start >= bytes.len() {
-                return Ok(0);
-            }
-            let take = (bytes.len() - start).min(buf.len());
-            buf[..take].copy_from_slice(&bytes[start..start + take]);
-            Ok(take)
         }
 
         fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno> {
@@ -909,28 +1115,6 @@ mod tests {
             Ok(())
         }
 
-        fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-            let path = canon(path);
-            let mut state = self.state.borrow_mut();
-            if let Some((p, errno)) = &state.write_fail {
-                if p == path {
-                    return Err(*errno);
-                }
-            }
-            let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
-            let (_, file) = state
-                .files
-                .iter_mut()
-                .find(|(p, _)| p == path)
-                .ok_or(Errno::NotFound)?;
-            let end = start + bytes.len();
-            if file.len() < end {
-                file.resize(end, 0);
-            }
-            file[start..end].copy_from_slice(bytes);
-            Ok(())
-        }
-
         fn remove_file(&self, path: &str) -> Result<(), Errno> {
             let path = canon(path);
             let mut state = self.state.borrow_mut();
@@ -944,9 +1128,41 @@ mod tests {
         }
     }
 
-    /// Captures every byte written; optionally fails on the first write.
+    impl AttributeStore for MemFs {
+        fn attr_keys(&self, path: &str) -> Result<Vec<String>, Errno> {
+            Ok(self
+                .state
+                .borrow()
+                .attrs
+                .iter()
+                .filter(|(p, _, _)| p == canon(path))
+                .map(|(_, key, _)| key.clone())
+                .collect())
+        }
+
+        fn attr_value(&self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+            self.attr_of(canon(path), key).ok_or(Errno::NoData)
+        }
+
+        fn attr_set(&self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+            let mut state = self.state.borrow_mut();
+            if let Some((refused, errno)) = &state.attr_refusal {
+                if refused == key {
+                    return Err(*errno);
+                }
+            }
+            state
+                .attrs
+                .push((canon(path).to_string(), key.to_string(), value.to_vec()));
+            Ok(())
+        }
+    }
+
+    /// Captures every byte written and every advisory record; optionally
+    /// fails on the first write.
     struct Recorder {
         bytes: RefCell<Vec<u8>>,
+        records: RefCell<Vec<u8>>,
         fail: bool,
     }
 
@@ -954,15 +1170,20 @@ mod tests {
         fn new() -> Self {
             Self {
                 bytes: RefCell::new(Vec::new()),
+                records: RefCell::new(Vec::new()),
                 fail: false,
             }
         }
 
         fn failing() -> Self {
             Self {
-                bytes: RefCell::new(Vec::new()),
                 fail: true,
+                ..Self::new()
             }
+        }
+
+        fn records(&self) -> String {
+            String::from_utf8(self.records.borrow().clone()).expect("utf8 records")
         }
 
         fn text(&self) -> String {
@@ -978,6 +1199,171 @@ mod tests {
             self.bytes.borrow_mut().extend_from_slice(bytes);
             Ok(())
         }
+
+        fn info(&self, record: &[u8]) {
+            self.records.borrow_mut().extend_from_slice(record);
+        }
+    }
+
+    /// Run `command` with its diagnostics apart from its output.
+    fn run_apart(
+        command: Command,
+        fs: &dyn FileSystem,
+    ) -> (Result<(), CpError>, Recorder, Recorder) {
+        let (out, diagnostics) = (Recorder::new(), Recorder::new());
+        let result = engine_run(command, None, fs, &NeverAsked, &NoHelp, &out, &diagnostics);
+        (result, out, diagnostics)
+    }
+
+    #[test]
+    fn a_sparse_file_is_copied_with_its_holes() {
+        let fs = MemFs::new().sparse("/disk.img", 1 << 20, &[(0, b"boot"), (512 * 1024, b"data")]);
+        let (result, _, _) = run_apart(copy(false, false, &["/disk.img"], "/copy.img"), &fs);
+        assert_eq!(result, Ok(()));
+        assert_eq!(fs.contents("/copy.img"), fs.contents("/disk.img"));
+        assert_eq!(
+            fs.written_to("/copy.img"),
+            8,
+            "only the stored bytes are written"
+        );
+        let dense = Command::Copy {
+            options: Options {
+                sparse: tairix_fscopy::Sparse::Never,
+                ..Options::DEFAULT
+            },
+            sources: alloc::vec![String::from("/disk.img")],
+            dest: String::from("/dense.img"),
+        };
+        let (result, _, _) = run_apart(dense, &fs);
+        assert_eq!(result, Ok(()));
+        assert_eq!(fs.contents("/dense.img"), fs.contents("/disk.img"));
+        assert_eq!(
+            fs.written_to("/dense.img"),
+            1 << 20,
+            "--sparse=never writes every byte"
+        );
+    }
+
+    #[test]
+    fn extended_attributes_travel_with_files_and_directories() {
+        let fs = MemFs::new()
+            .dir("/app")
+            .attr("/app", "acorn.attr", b"RWD/r")
+            .file("/app/run", b"*Run")
+            .attr("/app/run", "acorn.filetype", b"feb");
+        let (result, _, diagnostics) = run_apart(copy(true, false, &["/app"], "/copied"), &fs);
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            fs.attr_of("/copied", "acorn.attr").as_deref(),
+            Some(&b"RWD/r"[..])
+        );
+        assert_eq!(
+            fs.attr_of("/copied/run", "acorn.filetype").as_deref(),
+            Some(&b"feb"[..])
+        );
+        assert_eq!(diagnostics.text(), "", "nothing was left behind");
+    }
+
+    #[test]
+    fn attributes_the_destination_cannot_keep_are_reported_once() {
+        let fs = MemFs::new()
+            .file("/a", b"one")
+            .attr("/a", "acorn.filetype", b"fff")
+            .file("/b", b"two")
+            .attr("/b", "acorn.filetype", b"ffd")
+            .dir("/fat")
+            .refuses_attr("acorn.filetype", Errno::NotSupported);
+        let (result, out, diagnostics) = run_apart(copy(false, false, &["/a", "/b"], "/fat"), &fs);
+        assert_eq!(result, Ok(()), "a carrying copy still copies");
+        assert_eq!(fs.contents("/fat/b").as_deref(), Some(&b"two"[..]));
+        assert_eq!(
+            diagnostics.text(),
+            "cp: warning: extended attributes not kept on 2 files (the destination cannot store \
+             them): acorn.filetype\n"
+        );
+        assert_eq!(out.text(), "", "the warning is no output");
+        assert!(
+            out.records()
+                .contains("\"code\":\"fs.attributes_not_kept\""),
+            "{}",
+            out.records()
+        );
+
+        let required = Command::Copy {
+            options: Options {
+                attributes: tairix_fscopy::Attributes::Require,
+                ..Options::DEFAULT
+            },
+            sources: alloc::vec![String::from("/a")],
+            dest: String::from("/fat/a2"),
+        };
+        let (result, _, _) = run_apart(required, &fs);
+        assert_eq!(
+            result,
+            Err(CpError::Attribute {
+                key: String::from("acorn.filetype"),
+                target: String::from("/fat/a2"),
+                error: Errno::NotSupported,
+            })
+        );
+
+        let skipped = Command::Copy {
+            options: Options {
+                attributes: tairix_fscopy::Attributes::Skip,
+                ..Options::DEFAULT
+            },
+            sources: alloc::vec![String::from("/a")],
+            dest: String::from("/plain"),
+        };
+        let (result, _, diagnostics) = run_apart(skipped, &fs);
+        assert_eq!(result, Ok(()));
+        assert_eq!(fs.attr_of("/plain", "acorn.filetype"), None);
+        assert_eq!(diagnostics.text(), "");
+    }
+
+    #[test]
+    fn a_destination_that_is_the_source_itself_is_refused_and_left_whole() {
+        let fs = MemFs::new()
+            .file("/a", b"keep me")
+            .symlink_at("/alias", "/a");
+        fs.link("/a", "/second").expect("a second name");
+        for dest in ["/a", "/second", "/alias"] {
+            let (result, _, _) = run_apart(copy(false, true, &["/a"], dest), &fs);
+            assert_eq!(
+                result,
+                Err(CpError::SameFile {
+                    source: String::from("/a"),
+                    target: String::from(dest),
+                }),
+                "{dest}"
+            );
+            assert_eq!(
+                fs.contents("/a").as_deref(),
+                Some(&b"keep me"[..]),
+                "{dest}"
+            );
+        }
+        let refused = CpError::SameFile {
+            source: String::from("a"),
+            target: String::from("a"),
+        };
+        assert_eq!(refused.to_string(), "'a' and 'a' are the same file");
+    }
+
+    #[test]
+    fn an_attribute_key_holding_control_bytes_is_reported_escaped() {
+        let refused = CpError::Attribute {
+            key: String::from("user.\u{1b}[2J"),
+            target: String::from("/fat/a"),
+            error: Errno::NotSupported,
+        };
+        assert_eq!(
+            refused.to_string(),
+            alloc::format!(
+                "setting attribute 'user.\\x1b[2J' for '/fat/a': {}",
+                Errno::NotSupported
+            )
+        );
     }
 
     fn copy_with(options: Options, sources: &[&str], dest: &str) -> Command {
@@ -1320,7 +1706,7 @@ mod tests {
         let fs = MemFs::new();
         let out = Recorder::new();
         assert_eq!(
-            engine_run(Command::Help, None, &fs, &NeverAsked, &OneDoc, &out),
+            engine_run(Command::Help, None, &fs, &NeverAsked, &OneDoc, &out, &out),
             Ok(())
         );
         let text = out.text();
@@ -1344,8 +1730,8 @@ mod tests {
 
     #[test]
     fn copies_a_file_across_the_chunk_boundary() {
-        // A payload larger than READ_CHUNK exercises the streaming loop.
-        let payload: Vec<u8> = (0..(super::READ_CHUNK * 2 + 7))
+        // A payload larger than one chunk exercises the streaming loop.
+        let payload: Vec<u8> = (0..(tairix_fscopy::CHUNK_LEN * 2 + 7))
             .map(|i| u8::try_from(i % 251).unwrap_or_default())
             .collect();
         let fs = MemFs::new().file("/big", &payload);
@@ -1641,6 +2027,7 @@ mod tests {
                 &prompt,
                 &NoHelp,
                 &out,
+                &out,
             ),
             Ok(())
         );
@@ -1673,6 +2060,7 @@ mod tests {
                 &fs,
                 &prompt,
                 &NoHelp,
+                &out,
                 &out,
             ),
             Err(CpError::Prompt(Errno::NotFound))

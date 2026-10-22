@@ -101,6 +101,9 @@ fallo a mitad de copia elimina el destino a medio escribir y muestra
 el error del núcleo; nada se hace pasar jamás por una copia completa.
 Cada operación la autoriza el núcleo — un rechazo aparece tal cual en
 la línea de mensajes sin que nada cambie.
+Una copia conserva los huecos de un archivo y sus atributos
+extendidos; cualquier atributo que el destino no pueda conservar se
+indica en la línea de mensajes al terminar la operación.
 
 La línea de estado muestra la ruta listada, el número de entradas
 visibles, el orden de clasificación, los bytes libres/totales del volumen

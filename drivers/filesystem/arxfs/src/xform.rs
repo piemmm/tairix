@@ -51,7 +51,7 @@ use zeroize::Zeroize;
 // it to usize cannot truncate on any supported target.
 #[allow(clippy::cast_possible_truncation)]
 pub const MAX_CLUSTER_PLAINTEXT: usize =
-    (crate::COMPRESS_CLUSTER_BLOCKS as usize) * crate::MAX_BLOCK_SIZE;
+    (crate::COMPRESS_CLUSTER_BLOCKS as usize) * crate::MAX_BLOCK_LEN;
 
 /// Host-provided retention of verified, decrypted, decompressed
 /// cluster plaintext. See the module docs for the coherence contract.

@@ -81,7 +81,11 @@ impl HwTreeSource for Tree {
         Err(Errno::NotImplemented)
     }
 
-    fn node_endpoints(&self, _parent_id: u32, _node_id: u32) -> Result<Vec<u64>, Errno> {
+    fn node_endpoints(
+        &self,
+        _parent_id: u32,
+        _node_id: u32,
+    ) -> Result<crate::hwtree::NodeEndpoints, Errno> {
         Err(Errno::NotImplemented)
     }
 

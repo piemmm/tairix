@@ -13,17 +13,20 @@
 //!   is installed (or when the registry has no such group) the identity
 //!   map is simply absent and a foreign volume stays system-owned — fail
 //!   closed, never an invented gid.
-//! * [`GroupMappedFs`] — the security-overriding adapter the runtime
-//!   volume attach wraps an ownerless filesystem driver in: every node
-//!   appears owned by the system user and the storage group, directories
-//!   `rwxrwxr-x` and files `rw-rw-r--`, so any logged-in member of the
-//!   group reads and writes the medium while non-members read only.
-//!   `set_security` stays refused (the format cannot store a TAIRiX
-//!   security record; a silently-lossy store is forbidden), and the
-//!   structural read/write/stats surfaces pass through untouched.
+//! * [`GroupMappedFs`] — the adapter the runtime volume attach wraps a
+//!   foreign-format driver in. A node whose ownership the format does not
+//!   record ([`FilesystemSecurity::records_ownership`]) appears owned by the
+//!   system user and the storage group, directories `rwxrwxr-x` and files
+//!   `rw-rw-r--`, so any logged-in member of the group reads and writes it
+//!   while non-members read only; storing a record for it stays refused (the
+//!   format cannot hold one, and a silently lossy store is forbidden). A node
+//!   whose ownership *is* recorded — a Rock Ridge entry, a UDF file entry
+//!   with a real owner — keeps its own rules, and every structural surface
+//!   passes through untouched.
 //!
-//! Volumes with a real owner model (`ARXFS`, ext4) are never wrapped:
-//! their on-disk owners, modes, and ACLs keep governing access.
+//! Volumes whose format records ownership for every node (`ARXFS`, ext4)
+//! are never wrapped: their on-disk owners, modes, and ACLs keep governing
+//! access.
 
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
@@ -32,6 +35,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
+use tairix_abi::SeekRegion;
 use tairix_kernel_sec::GroupId;
 use tairix_sync::OnceCell;
 
@@ -92,18 +96,19 @@ impl Default for LateStorageGid {
 /// runtime volume attach reads it.
 pub static LATE_STORAGE_GID: LateStorageGid = LateStorageGid::new();
 
-/// The storage-group identity map over an ownerless filesystem driver.
+/// The storage-group identity map over a foreign-format filesystem driver.
 ///
 /// See the module docs. Structural I/O and space accounting pass through
-/// to the wrapped driver; only the security surface is replaced.
+/// to the wrapped driver; only the security of nodes the format records no
+/// ownership for is replaced.
 pub struct GroupMappedFs<F> {
     inner: F,
     gid: GroupId,
 }
 
 impl<F> GroupMappedFs<F> {
-    /// Wrap `inner` so every node reports system ownership under `gid`
-    /// with group read/write.
+    /// Wrap `inner` so every node whose ownership it does not record reports
+    /// system ownership under `gid` with group read/write.
     #[must_use]
     pub fn new(inner: F, gid: GroupId) -> Self {
         Self { inner, gid }
@@ -113,6 +118,15 @@ impl<F> GroupMappedFs<F> {
 impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
     fn read_link(&mut self, node: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
         self.inner.read_link(node, out)
+    }
+
+    fn seek_region(
+        &mut self,
+        file: NodeId,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        self.inner.seek_region(file, offset, region)
     }
 
     fn root(&self) -> NodeId {
@@ -182,6 +196,16 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for GroupMappedFs<F> {
         self.inner.truncate(dir, name, size)
     }
 
+    fn punch(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        len: u64,
+    ) -> Result<(), DriverError> {
+        self.inner.punch(dir, name, offset, len)
+    }
+
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         self.inner.remove(dir, name)
     }
@@ -209,11 +233,13 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for GroupMappedFs<F> {
     }
 }
 
-impl<F: FilesystemRead> FilesystemSecurity for GroupMappedFs<F> {
+impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for GroupMappedFs<F> {
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
-        // The mapped record replaces the wrapped driver's uniform
-        // restrictive default wholesale; only the node's structural kind
-        // is consulted, so a missing node still refuses honestly.
+        if self.inner.records_ownership(node)? {
+            return self.inner.security(node);
+        }
+        // The mapped record replaces the stand-in an ownerless node reports;
+        // only its structural kind is consulted.
         let info = self.inner.node_info(node)?;
         let mode = match info.kind {
             NodeKind::Directory => MAPPED_DIR_MODE,
@@ -227,17 +253,24 @@ impl<F: FilesystemRead> FilesystemSecurity for GroupMappedFs<F> {
         Ok(NodeSecurity::new(mode, 0, self.gid.0))
     }
 
-    fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
+    fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+        if self.inner.records_ownership(node)? {
+            return self.inner.set_security(node, security);
+        }
         // The mapped ownership is mount policy, not stored state, and the
-        // underlying format cannot hold a TAIRiX security record; storing
-        // a silently-lossy one is forbidden, so the write is refused
-        // whole (fail closed).
+        // format cannot hold a record for this node; storing a silently
+        // lossy one is forbidden, so the write is refused whole.
         Err(DriverError::Unsupported)
     }
 
-    fn stamp_owner(&mut self, node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
-        // Ownership here is the mapping's, so a new node has it already.
-        self.inner.node_info(node).map(|_| ())
+    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
+        // Whether a new node keeps its creator is the format's to say: one
+        // that records owners stores it, an ownerless one keeps nothing.
+        self.inner.stamp_owner(node, uid, gid)
+    }
+
+    fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
+        self.inner.records_ownership(node)
     }
 }
 
@@ -295,8 +328,9 @@ impl<F: FilesystemRead + FilesystemAttrsProvider> FilesystemAttrs for GroupMappe
     }
 }
 
-impl<F: FilesystemRead + FilesystemWrite + FilesystemAttrsProvider> FilesystemAttrsProvider
-    for GroupMappedFs<F>
+impl<F> FilesystemAttrsProvider for GroupMappedFs<F>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemAttrsProvider,
 {
     fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
         // Support is the wrapped driver's fact; the returned view is the

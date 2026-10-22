@@ -15,6 +15,7 @@ struct MemDevice {
     block_count: u64,
     flags: u32,
     medium: Option<BlkMedium>,
+    disc_layout: Option<DiscLayout>,
     calls: Vec<BlkRequest>,
     /// The per-request deadline each exchange was given, so a test can
     /// prove the wait bound follows the device's own class rather than a
@@ -66,6 +67,7 @@ impl BlkCall for MemDevice {
                 block_count: self.block_count,
                 flags: self.flags,
                 medium: self.medium,
+                disc_layout: self.disc_layout,
                 name: BlkDeviceName::new(DEVICE_NAME),
                 binding: DEVICE_BINDING,
             }
@@ -106,10 +108,29 @@ fn device(block_size: u32, block_count: u64, flags: u32) -> MemDevice {
         block_count,
         flags,
         medium: Some(DEVICE_MEDIUM),
+        disc_layout: None,
         calls: Vec::new(),
         deadlines: Vec::new(),
         written: Vec::new(),
     }
+}
+
+#[test]
+fn connect_adopts_the_disc_layout_the_device_reported() {
+    let layout = DiscLayout {
+        last_session_start: 16,
+        last_recorded: Some(40),
+    };
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let served = MemDevice {
+        disc_layout: Some(layout),
+        ..device(2048, 64, BLK_FLAG_READ_ONLY)
+    };
+    let client = RemoteBlock::connect_read_only(served, &mut window).expect("connects");
+    assert_eq!(client.disc_layout(), Some(layout));
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let plain = RemoteBlock::connect_read_only(device(512, 64, 0), &mut window).expect("connects");
+    assert_eq!(plain.disc_layout(), None);
 }
 
 #[test]
@@ -308,6 +329,7 @@ fn an_error_completion_surfaces_as_a_typed_fault() {
                     block_count: 8,
                     flags: 0,
                     medium: Some(DEVICE_MEDIUM),
+                    disc_layout: None,
                     name: BlkDeviceName::new(DEVICE_NAME),
                     binding: 0,
                 }
@@ -346,6 +368,7 @@ fn a_truncated_or_corrupt_reply_fails_closed() {
                     block_count: 8,
                     flags: 0,
                     medium: Some(DEVICE_MEDIUM),
+                    disc_layout: None,
                     name: BlkDeviceName::new(DEVICE_NAME),
                     binding: 0,
                 }
@@ -386,6 +409,7 @@ fn a_truncated_or_corrupt_completion_on_a_write_fails_closed() {
                     block_count: 8,
                     flags: 0,
                     medium: Some(DEVICE_MEDIUM),
+                    disc_layout: None,
                     name: BlkDeviceName::new(DEVICE_NAME),
                     binding: 0,
                 }
@@ -426,6 +450,7 @@ impl BlkCall for FaultingDevice {
                 block_count: 64,
                 flags: 0,
                 medium: Some(DEVICE_MEDIUM),
+                disc_layout: None,
                 name: BlkDeviceName::new(DEVICE_NAME),
                 binding: 0,
             }
@@ -458,6 +483,7 @@ impl BlkCall for PromisingDevice {
                 block_count: 64,
                 flags: 0,
                 medium: Some(DEVICE_MEDIUM),
+                disc_layout: None,
                 name: BlkDeviceName::new(DEVICE_NAME),
                 binding: 0,
             }

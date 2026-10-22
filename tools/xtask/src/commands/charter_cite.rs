@@ -206,6 +206,11 @@ const SOURCES: &[&str] = &[
     "GICv",
     "HID",
     "VL805",
+    // Disc formats: the ISO 9660 and UDF volume structures and the High
+    // Sierra layout ISO 9660 grew from.
+    "ECMA",
+    "High Sierra",
+    "UDF",
     // Display-link standards: the EDID, InfoFrame and audio formats a display
     // and its source exchange.
     "CTA-861",

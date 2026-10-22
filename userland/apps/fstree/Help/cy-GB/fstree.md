@@ -109,6 +109,9 @@ gopïo yn tynnu'r gyrchfan hanner-ysgrifenedig ac yn dangos gwall y
 cnewyllyn; nid oes dim byth yn esgus bod yn gopï cyflawn. Caiff pob
 gweithred ei hawdurdodi gan y cnewyllyn — ymddengys gwrthodiad air am
 air ar y llinell negeseuon heb i ddim newid.
+Mae copi'n cadw tyllau ffeil a'i phriodoleddau estynedig; caiff
+unrhyw briodoledd na all y gyrchfan ei chadw ei henwi ar y llinell
+negeseuon pan ddaw'r weithred i ben.
 
 Mae'r llinell statws yn dangos y llwybr a restrwyd, nifer y cofnodion
 gweladwy, y drefn didoli, beitiau rhydd/cyfanswm y gyfrol sylfaenol (pan

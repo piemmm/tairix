@@ -79,6 +79,9 @@ mantendo `Shift` premido, move-os em vez disso. O ponteiro mostra um sinal
 de mais enquanto largar copiaria e uma seta enquanto moveria, e a pasta onde
 o largar iria parar fica realçada. Um único ficheiro arrastado para o lugar
 de uma aplicação na barra de ícones é aberto lá.
+Copiar ou mover mantém os buracos de cada ficheiro e os seus atributos
+estendidos, como um tipo de ficheiro RISC OS; qualquer atributo que o
+destino não consiga guardar é indicado num aviso no fim da operação.
 
 O menu de contexto começa por *Visualização*. Por baixo, um submenu nomeia
 aquilo sobre que o menu atua — *Ficheiro «notes.txt»*, um nome longo

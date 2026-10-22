@@ -4,7 +4,7 @@ cp — copïo ffeiliau a chyfeiriaduron
 
 ## SYNOPSIS
 
-`cp [-finrRvT] [-t dir] [--] source... dest`
+`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -20,10 +20,19 @@ Trosysgrifir ffeil gyrchfan sy'n bodoli yn ragosodedig, fe'i hepgorir
 o dan `-n`, a gofynnir amdani ar ffrwd y gwall safonol o dan `-i`
 (mae cwestiwn a wrthodwyd yn hepgor y copi hwnnw heb wall; ni thrinnir
 ateb annarllenadwy byth fel cydsyniad).
+Gwrthodir cyrchfan sy'n ffeil y ffynhonnell ei hun — yr un enw, enw
+arall arni, neu ddolen iddi — fel yr un ffeil, a'i gadael fel yr oedd.
 
 Mae'r methiant cyntaf yn atal y rhediad cyn unrhyw operand
 diweddarach. Mae `--` yn gorffen dosrannu opsiynau: mae pob ymresymiad
 diweddarach yn llwybr.
+
+Mae pob copi'n cario priodoleddau estynedig y ffynhonnell — math ffeil
+RISC OS, math a chrëwr Mac — lle bynnag y gall y cyrchfan eu cadw, ac mae'n
+cadw tyllau ffeil denau yn dyllau. Adroddir y priodoleddau na all cyrchfan
+eu cadw mewn un rhybudd pan ddaw'r rhediad i ben, ac mewn cofnod `omission`
+ar y ffrwd wybodaeth safonol; gyda `--preserve=xattr` mae copi o'r fath yn
+methu yn lle hynny.
 
 ## OPTIONS
 
@@ -46,6 +55,15 @@ diweddarach yn llwybr.
 - `--preserve=links` — mae dwy ffynhonnell sy'n enwi un nod yn cael dau
   enw yn y cyrchfan yn lle dau gopi, fel nad yw'r copi'n dyblu'r storfa'n
   ddistaw.
+- `--preserve=xattr` — rhaid cario pob priodoledd estynedig: mae copi na all
+  ei gyrchfan gadw un yn methu, gan ei enwi. Mae `--preserve=links,xattr` yn
+  gofyn am y ddau.
+- `--no-preserve=xattr` — peidio â chopïo unrhyw briodoledd estynedig.
+  Derbynnir `mode`, `ownership` a `timestamps` hefyd, ac nid ydynt yn cael eu
+  cadw beth bynnag.
+- `--sparse=WHEN` — sut y copïir ffeil denau: mae `auto`, y rhagosodiad, yn
+  cadw ei thyllau; mae `always` hefyd yn gadael heb ei ysgrifennu bob bloc o
+  sero y mae'n ei storio; mae `never` yn ysgrifennu pob beit.
 - `-d` — `-P` a `--preserve=links` gyda'i gilydd, fel yn yr offeryn GNU.
 - `-v, --verbose` — adrodd am bob copi fel `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copïo pob ffynhonnell i `dir`,

@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 423 open, 832 closed, 1255 total.
+**closed**, and a partial fix stays **open**. 425 open, 832 closed, 1257 total.
 
-### Open (423)
+### Open (425)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -451,6 +451,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1258 | the Settings Screensaver pane reads the catalogue by position with no generation: a store change that keeps the count is not seen by a listing pass, a preview render, refusal or pending render is matched to a tile by index alone so a removed saver can put the next one's picture on the old tile, a changed catalogue rebuilds the whole pane (previews, focus and an open list lost), an unchanged relist still repaints the pane, and a refused listing shows nothing on the pane | to fix: a catalogue generation in the `QueryScreensaver` reply and in `PreviewSubject::Screensaver`, pending renders restarted on a change, the pane rebuilt in place keyed by choice, `DesktopAnswer::adopt` reporting a change, and a refused listing stated on the pane; pinned by a listing that moves under a pass and a removal under a pending render. Beside it: a document at the saver-value bound reports the next value as one the setting does not accept, the browser works out whether a folder is in a saver store before it knows it needs to, and each pane's form holds its own copy of the catalogue |
 | D1259 | `SAVER_DISMISSED` carries no cause, so the screensaver vertical's PASS latch cannot tell the typed key from an output change, a backgrounded session or late pointer motion | to fix: a `by` field (input, display off, screen change, background) on the record, the vertical latching `by=input`; pinned by the session record tests |
 | D1260 | the screensaver vertical's tooling repeats what xtask already has: `saver_wheel_pane_to_end` copies `settings_wheel_strip_to_end`, `user_saver_store` spells the account's store by hand rather than through `tairix_users::default_home` and `tairix_appstore::saver_roots`, `plain_root_image` still leaves the encrypted and plaintext arms repeating three statements, `widest_chooser_picture` builds both themes for every saver bundle, and the vertical takes the whole desktop session as a build dependency for four record ids | to fix: one `wheel_to_end` helper, the store from the shared spellings, a protection parameter, the widest picture computed once, and the ids pinned by an xtask unit test |
+| D1261 | command apps print file names raw in their diagnostics and `-v` reports (`cp`, `mv`, `rm`, `ln`, `chmod`, `chown`): a name a foreign volume holds may carry control bytes that reach a terminal as an escape sequence, where GNU quotes it in the locale style; only `ls` holds the `quotearg` port | hoist that port to a shared crate and route every command app's name output through it; attribute keys are already escaped through `display_value` |
+| D1262 | `cp -r` has no refusal of a destination inside its own source: `cp -r a a/b` creates `a/b`, then lists `a` — which now holds `b` — and recurses into each new copy without end, where GNU refuses the operand ("cannot copy a directory into itself") | needs an identity- or realpath-based ancestor check, since a path comparison is fooled by links and `..`; present in HEAD |
 
 ### Closed (832)
 

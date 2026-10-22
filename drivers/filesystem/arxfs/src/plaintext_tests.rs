@@ -418,7 +418,7 @@ fn stored_content_hash(
         .expect("create");
     assert_eq!(fs.write_at(root, b"f", 0, content), Ok(content.len()));
     let phys = data_block_phys(&mut fs, b"f", 0);
-    let mut raw = [0u8; MAX_BLOCK_SIZE];
+    let mut raw = [0u8; MAX_BLOCK_LEN];
     fs.read_block(phys, &mut raw).expect("raw read");
     let off = fs.logical_hash_offset();
     let mut hash = [0u8; LOGICAL_HASH_LEN];

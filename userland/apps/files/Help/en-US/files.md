@@ -74,6 +74,9 @@ or the desktop copies them there; holding `Shift` moves them instead. The
 pointer shows a plus while a drop would copy and an arrow while it would
 move, and the folder a drop would land in is highlighted. A single file
 dragged onto an application's icon-bar slot opens it there.
+Copying or moving keeps each file's holes and extended attributes, such
+as a RISC OS filetype; any attribute the destination cannot keep is named
+in a warning once the operation ends.
 
 The right-click menu opens with *Display*. Beneath it a submenu names what
 the menu acts on — *File ‘notes.txt’*, a long name shortened in the middle so

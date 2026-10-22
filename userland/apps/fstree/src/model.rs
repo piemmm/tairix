@@ -528,6 +528,9 @@ pub struct Model {
     pub flat_scroll: usize,
     /// The lines the report overlay shows (a batch's per-file failures).
     pub report_lines: Vec<String>,
+    /// Advisory records awaiting the information stream (fd 3), which the
+    /// session loop delivers after the event that produced them.
+    pub advisories: Vec<Vec<u8>>,
     /// The volume list the `V` overlay shows, fetched when it opens.
     pub volumes: Vec<VolumeInfo>,
     /// Cursor index into [`Model::volumes`].
@@ -600,6 +603,7 @@ impl Model {
             flat_cursor: 0,
             flat_scroll: 0,
             report_lines: Vec::new(),
+            advisories: Vec::new(),
             volumes: Vec::new(),
             volume_cursor: 0,
             attrs: None,

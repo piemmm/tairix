@@ -19,6 +19,8 @@ tairix-crc32c = { path = "../../../lib/crc32c", version = "=0.0.0" }
 # The keyed per-boot hash an indexed directory's listing cursors are drawn
 # from, so no name can be chosen to collide with another's.
 tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+# Byte-addressed access to the device beneath the volume's blocks.
+tairix-bytedev = { path = "../../../lib/bytedev", version = "=0.0.0" }
 # Fallible zeroed buffers: block-sized scratch lives on the heap, not on the
 # small kernel stack the driver's paths nest on.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }

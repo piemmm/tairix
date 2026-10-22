@@ -4,7 +4,7 @@ cp — copy files and directories
 
 ## SYNOPSIS
 
-`cp [-finrRvT] [-t dir] [--] source... dest`
+`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -20,15 +20,25 @@ existing destination file is overwritten by default, skipped under
 `-n`, and asked about on the standard error stream under `-i` (a
 declined question skips that copy without error; an unreadable reply
 is never treated as consent).
+A destination that is the source's own file — the same name, another
+name for it, or a link to it — is refused as the same file and left as
+it was.
 
 The first failure stops the run before any later operand. `--` ends
 option parsing: every later argument is a path.
 
 GNU's `-a`/`--archive` and the `--preserve` set other than
-`--preserve=links` are **refused**, not narrowed. `-a` is
+`--preserve=links,xattr` are **refused**, not narrowed. `-a` is
 `-dR --preserve=all`, and `--preserve=all` includes a node's timestamps,
 which no call on this system can set — so honouring `-a` would report a
 preservation that did not happen. Use `-dR` for the rest of it.
+
+Each copy carries the source's extended attributes — a RISC OS filetype,
+a Mac type and creator — wherever the destination keeps them, and keeps a
+sparse file's holes as holes. Attributes a destination cannot keep are
+reported in one warning when the run ends, and in an `omission` record on
+the standard information stream; `--preserve=xattr` makes such a copy fail
+instead.
 
 ## OPTIONS
 
@@ -51,6 +61,14 @@ preservation that did not happen. Use `-dR` for the rest of it.
 - `--preserve=links` — two sources naming one node get two names at the
   destination rather than two copies, so the copy does not silently
   double the storage.
+- `--preserve=xattr` — every extended attribute must be carried: a copy
+  whose destination cannot keep one fails, naming it.
+  `--preserve=links,xattr` asks for both.
+- `--no-preserve=xattr` — copy no extended attributes. `mode`, `ownership`
+  and `timestamps` are accepted too, and are already not preserved.
+- `--sparse=WHEN` — how a sparse file is copied: `auto`, the default,
+  keeps its holes; `always` also leaves unwritten every block of zeros it
+  stores; `never` writes every byte.
 - `-d` — `-P` and `--preserve=links` together, as in the GNU tool.
 - `-v, --verbose` — report each copy as `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copy every source into `dir`,

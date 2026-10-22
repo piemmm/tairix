@@ -16,6 +16,7 @@ use core::time::Duration;
 use tairix_abi::{Errno, FileKind};
 use tairix_appdata::Settings as SettingsStore;
 use tairix_curses::{Event, InputMode, Pos, Screen, Tty, Window};
+use tairix_fscopy::Omissions;
 use tairix_glob::Pattern;
 use tairix_path::join;
 use tairix_sandbox::decode::{Isa, RegionKind, MAX_INPUT};
@@ -37,6 +38,7 @@ use crate::view_disasm::{describe, Decode, DisasmBody, DisasmPane, DisasmView};
 use crate::view_hex::{parse_offset, HexView};
 use crate::view_text::{JobOutcome, TextView};
 use crate::walk::{relative_to, FlatEntry, WalkPurpose, WalkState, Walker};
+use crate::OWN_WORD;
 
 /// Longest mode the prompt accepts: four octal digits (`7777`), the full
 /// permission word — a fixed validation bound on typed input, matching the
@@ -108,6 +110,9 @@ pub fn run<T: Tty>(
     let mut noted_hidden = None;
     loop {
         note_hidden_entries(model, info, &mut noted_hidden);
+        for record in model.advisories.drain(..) {
+            info.info(&record);
+        }
         clamp_scroll(model, screen.size().rows);
         refresh_viewer(
             model,
@@ -1203,7 +1208,7 @@ fn run_batch(model: &mut Model, fs: &mut dyn Fs, mut batch: Batch, refresh: Vec<
             for src in batch.succeeded() {
                 model.tags.remove_under(src);
             }
-            model.message = Some(batch.summary());
+            conclude(model, batch.summary(), batch.omissions());
             if !batch.failures().is_empty() {
                 model.report_lines = batch.failures().to_vec();
                 model.overlay = Overlay::Report;
@@ -2448,17 +2453,28 @@ fn handle_overwrite_prompt(
 fn run_op(model: &mut Model, fs: &mut dyn Fs, mut op: FileOp, refresh: Vec<String>) {
     match op.advance(fs) {
         OpProgress::Done => {
-            model.message = Some(op.summary());
+            conclude(model, op.summary(), op.omissions());
             refresh_after(model, fs, &refresh);
         }
         OpProgress::NeedsDecision => {
             model.prompt = Some(Prompt::Overwrite(OverwritePrompt { op, refresh }));
         }
         OpProgress::Failed(error) => {
-            model.message = Some(error.describe());
+            conclude(model, error.describe(), op.omissions());
             refresh_after(model, fs, &refresh);
         }
     }
+}
+
+/// End an operation's report with what its copies could not keep: said on
+/// the message line after `outcome`, and queued for the information stream.
+fn conclude(model: &mut Model, mut outcome: String, omissions: &Omissions) {
+    if let Some(report) = omissions.report(OWN_WORD) {
+        outcome.push_str(" — ");
+        outcome.push_str(&report.summary);
+        model.advisories.push(report.record);
+    }
+    model.message = Some(outcome);
 }
 
 /// Refresh the panes after an operation: re-list every affected tree node

@@ -34,6 +34,7 @@ use tairix_abi::raid_admin::{
 use tairix_abi::reply::{encode_page_reply, encode_status_reply};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityQuery, Errno};
+use tairix_bytedev::ByteDevice;
 use tairix_raid::{ArrayIdentity, ArraySuperblock};
 use tairix_raidmeta::RESERVED_METADATA_BLOCKS;
 
@@ -559,32 +560,16 @@ fn mint_identity(
 
 /// Whether `device` currently carries no filesystem, no array metadata, and no
 /// partition scheme — the create precondition, re-verified off the disk itself.
+/// A device that cannot be read, or whose table is present but malformed, is
+/// never blank.
 fn is_blank<D: Block>(device: &mut D) -> bool {
-    let Ok(geometry) = device.geometry() else {
+    let Ok(mut bytes) = ByteDevice::new(&mut *device) else {
         return false;
     };
-    let block_size = geometry.block_size as usize;
-    if block_size == 0 || block_size > 4096 {
+    if !matches!(tairix_fsprobe::recognise(&mut bytes), Ok(None)) {
         return false;
     }
-    let need = tairix_fsprobe::PROBE_HEAD_LEN
-        .div_ceil(block_size)
-        .saturating_mul(block_size)
-        .min(4096)
-        .max(block_size);
-    let mut head = [0u8; 4096];
-    if device.read_blocks(0, &mut head[..need]).is_err() {
-        return false;
-    }
-    if tairix_fsprobe::probe(&head[..need]).is_some() {
-        return false;
-    }
-    if tairix_fsprobe::probe_raid_member(&head[..need]).is_some() {
-        return false;
-    }
-    // A parseable partition table means the disk is not blank; only the
-    // no-scheme outcome leaves it eligible to be created over.
-    tairix_partition::parse_partition_table(device).is_err()
+    tairix_partition::parse_partition_table(device).is_err_and(|err| err.is_absent())
 }
 
 /// Admit a blank candidate into an absent slot of a live array and begin

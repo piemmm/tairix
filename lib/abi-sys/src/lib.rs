@@ -196,6 +196,8 @@ const NUM_FS_WATCH: u64 = SyscallNumber::FS_WATCH.as_u16() as u64;
 const NUM_FS_WATCH_READ: u64 = SyscallNumber::FS_WATCH_READ.as_u16() as u64;
 const NUM_FS_STAT: u64 = SyscallNumber::FS_STAT.as_u16() as u64;
 const NUM_FS_TRUNCATE: u64 = SyscallNumber::FS_TRUNCATE.as_u16() as u64;
+const NUM_FS_SEEK_REGION: u64 = SyscallNumber::FS_SEEK_REGION.as_u16() as u64;
+const NUM_FS_PUNCH: u64 = SyscallNumber::FS_PUNCH.as_u16() as u64;
 const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
 const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
@@ -3010,6 +3012,40 @@ pub extern "C" fn sys_fs_truncate(fd: u32, size: u64) -> i32 {
     }
 }
 
+/// `fs_seek_region`: the offset at which the next region of kind `region`
+/// (`TAIRIX_SEEK_REGION_DATA` or `_HOLE`) begins at or after `offset` of open
+/// file `fd` (`SyscallNumber::FS_SEEK_REGION`), or a `TAIRIX_E_*` code
+/// reinterpreted into the result: `TAIRIX_E_NO_DATA` when none does.
+#[must_use]
+#[export_name = "tairix_sys_fs_seek_region"]
+pub extern "C" fn sys_fs_seek_region(fd: u32, offset: u64, region: u32) -> u64 {
+    // SAFETY: see `sys_yield`; the call takes no memory operand.
+    unsafe {
+        raw_syscall(
+            NUM_FS_SEEK_REGION,
+            [u64::from(fd), offset, u64::from(region), 0, 0, 0],
+        )
+    }
+}
+
+/// `fs_punch`: make `len` bytes at `offset` of open file `fd` read as zeros
+/// and release their storage, keeping the file's length
+/// (`SyscallNumber::FS_PUNCH`). Returns a `TAIRIX_E_*` code.
+///
+/// The handle must be open for writing; `TAIRIX_E_NOT_SUPPORTED` where the
+/// volume's format keeps no holes.
+#[must_use]
+#[export_name = "tairix_sys_fs_punch"]
+pub extern "C" fn sys_fs_punch(fd: u32, offset: u64, len: u64) -> i32 {
+    // SAFETY: see `sys_yield`; the call takes no memory operand.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_PUNCH,
+            [u64::from(fd), offset, len, 0, 0, 0],
+        ))
+    }
+}
+
 /// `fs_sync`: flush the filesystem backing open handle `fd` to its backing
 /// store so prior writes are durable (`SyscallNumber::FS_SYNC`). Returns a
 /// `TAIRIX_E_*` code.
@@ -3942,6 +3978,8 @@ mod tests {
         (NUM_CPUFREQ_WAIT, "cpufreq_wait", 3),
         (NUM_NOTICE_READ, "notice_read", 3),
         (NUM_NOTICE_PUBLISH, "notice_publish", 3),
+        (NUM_FS_SEEK_REGION, "fs_seek_region", 3),
+        (NUM_FS_PUNCH, "fs_punch", 3),
     ];
 
     #[test]
@@ -4555,6 +4593,20 @@ mod tests {
         assert_eq!(number, NUM_SHARE_MAP);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(&args[1..], &[0; 5]);
+    }
+
+    #[test]
+    fn fs_seek_region_and_punch_marshal_descriptor_offset_and_operand() {
+        let (number, args) = capture(7, || {
+            assert_eq!(sys_fs_seek_region(3, 4096, 1), 7);
+        });
+        assert_eq!(number, NUM_FS_SEEK_REGION);
+        assert_eq!(args, [3, 4096, 1, 0, 0, 0]);
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_punch(5, 512, 1 << 20), 0);
+        });
+        assert_eq!(number, NUM_FS_PUNCH);
+        assert_eq!(args, [5, 512, 1 << 20, 0, 0, 0]);
     }
 
     #[test]

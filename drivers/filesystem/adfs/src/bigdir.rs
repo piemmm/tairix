@@ -13,12 +13,13 @@
 //! the directory object — so a directory of any size is handled without
 //! a size-proportional buffer.
 
+use crate::bytes::{get_u32, put_u32};
 use crate::dir::{
     accumulate_bytes, accumulate_words, bcd_increment, entries_in_order, fold_check, name_cmp,
     Object, MAX_NAME_LEN,
 };
-use crate::volume::{get_u32, put_u32};
 use tairix_abi::DriverError;
+use tairix_fsmeta::preset::acorn;
 
 /// The `SBPr` header marker.
 pub const BIG_START: [u8; 4] = *b"SBPr";
@@ -230,7 +231,7 @@ impl BigDir {
             exec: get_u32(&raw, 4),
             size: get_u32(&raw, 8),
             indaddr: get_u32(&raw, 12),
-            attr: (get_u32(&raw, 16) & 0xFF) as u16,
+            attr: acorn::attr_from_filecore(get_u32(&raw, 16).to_le_bytes()[0]),
         };
         store.read_at(
             self.header.heap_offset() + name_ptr,
@@ -322,7 +323,11 @@ impl BigDir {
         put_u32(&mut raw, 4, object.exec);
         put_u32(&mut raw, 8, object.size);
         put_u32(&mut raw, 12, object.indaddr);
-        put_u32(&mut raw, 16, u32::from(object.attr) & 0xFF);
+        put_u32(
+            &mut raw,
+            16,
+            u32::from(acorn::attr_to_filecore(object.attr)),
+        );
         put_u32(&mut raw, 20, name_len);
         put_u32(&mut raw, 24, name_ptr);
         store.write_at(gap_at, &raw)?;
@@ -436,7 +441,11 @@ impl BigDir {
         put_u32(&mut raw, 4, object.exec);
         put_u32(&mut raw, 8, object.size);
         put_u32(&mut raw, 12, object.indaddr);
-        put_u32(&mut raw, 16, u32::from(object.attr) & 0xFF);
+        put_u32(
+            &mut raw,
+            16,
+            u32::from(acorn::attr_to_filecore(object.attr)),
+        );
         store.write_at(at, &raw)
     }
 

@@ -1051,6 +1051,73 @@ fn readahead_falls_back_to_the_exact_span_when_the_coalesced_read_faults() {
     }
 }
 
+/// A device with one unreadable block: any read covering it fails, as a
+/// scratched disc's does, and every such attempt is counted.
+struct OneBadBlock {
+    store: Rc<RefCell<Store>>,
+    geo: BlockGeometry,
+    bad: u64,
+    attempts_on_bad: Rc<RefCell<u32>>,
+}
+
+impl Block for OneBadBlock {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        Ok(self.geo)
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        let bs = self.geo.block_size as usize;
+        let span = (buf.len() / bs) as u64;
+        if (lba..lba + span).contains(&self.bad) {
+            *self.attempts_on_bad.borrow_mut() += 1;
+            return Err(DriverError::DeviceFault);
+        }
+        let start = usize::try_from(lba).unwrap() * bs;
+        buf.copy_from_slice(&self.store.borrow().data[start..start + buf.len()]);
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_stream_nearing_a_bad_block_reads_it_once_ahead_not_once_per_request() {
+    let blocks = 256u64;
+    let bad = 20;
+    let (store, _) = MemDisk::with_geometry(BS, blocks);
+    let attempts_on_bad = Rc::new(RefCell::new(0));
+    let disk = OneBadBlock {
+        store,
+        geo: BlockGeometry {
+            block_size: BS,
+            block_count: blocks,
+        },
+        bad,
+        attempts_on_bad: Rc::clone(&attempts_on_bad),
+    };
+    let mut cache =
+        BlockCache::new(disk, BOOT_DISK_OWNER, roomy_budget(), unpressured(), sink()).unwrap();
+    for lba in 0..blocks {
+        let mut buf = block_of(0);
+        assert_eq!(
+            cache.read_blocks(lba, &mut buf).is_err(),
+            lba == bad,
+            "block {lba}"
+        );
+    }
+    assert_eq!(
+        *attempts_on_bad.borrow(),
+        2,
+        "one speculative read across the bad block, and the request for it"
+    );
+}
+
 /// A leaked cache-admission control with the block class disabled
 /// (`cache.block off`), for the switch tests below. Its own instance, so
 /// it never touches the process-global control other tests rely on.

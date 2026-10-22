@@ -36,6 +36,14 @@ pub enum VolumeFsType {
     Ext4 = 1,
     /// FAT32 (`drivers/filesystem/fat32`).
     Fat32 = 2,
+    /// ISO 9660 and its High Sierra predecessor, with the Joliet, Rock Ridge,
+    /// RISC OS, Apple, Amiga, XA and zisofs extensions
+    /// (`drivers/filesystem/iso9660`).
+    Iso9660 = 3,
+    /// UDF 1.02–2.60 (`drivers/filesystem/udf`).
+    Udf = 4,
+    /// Acorn ADFS / RISC OS `FileCore` (`drivers/filesystem/adfs`).
+    Adfs = 5,
 }
 
 impl VolumeFsType {
@@ -55,6 +63,9 @@ impl VolumeFsType {
             0 => Ok(Self::ARXFS),
             1 => Ok(Self::Ext4),
             2 => Ok(Self::Fat32),
+            3 => Ok(Self::Iso9660),
+            4 => Ok(Self::Udf),
+            5 => Ok(Self::Adfs),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -305,10 +316,18 @@ mod tests {
 
     #[test]
     fn fstype_round_trips_and_rejects_unknown() {
-        for fstype in [VolumeFsType::ARXFS, VolumeFsType::Ext4, VolumeFsType::Fat32] {
+        for fstype in [
+            VolumeFsType::ARXFS,
+            VolumeFsType::Ext4,
+            VolumeFsType::Fat32,
+            VolumeFsType::Iso9660,
+            VolumeFsType::Udf,
+            VolumeFsType::Adfs,
+        ] {
             assert_eq!(VolumeFsType::from_u8(fstype.as_u8()), Ok(fstype));
         }
-        assert_eq!(VolumeFsType::from_u8(3), Err(Errno::OutOfRange));
+        assert_eq!(VolumeFsType::from_u8(6), Err(Errno::OutOfRange));
+        assert_eq!(VolumeFsType::from_u8(u8::MAX), Err(Errno::OutOfRange));
     }
 
     #[test]

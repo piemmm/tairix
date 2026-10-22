@@ -12,8 +12,9 @@
 //! All logic here is pure in-memory buffer manipulation; the caller
 //! reads and writes the directory bytes through the map engines.
 
-use crate::volume::{get_u24, get_u32, put_u24, put_u32};
+use crate::bytes::{get_u24, get_u32, put_u24, put_u32};
 use tairix_abi::DriverError;
+use tairix_fsmeta::preset::acorn;
 
 /// Byte size of an old-format directory.
 pub const OLD_DIR_SIZE: usize = 1280;
@@ -34,15 +35,6 @@ pub const FIXED_NAME_LEN: usize = 10;
 /// directories; fixed directories stop at 10).
 pub const MAX_NAME_LEN: usize = 255;
 
-/// Owner-read attribute bit (`R`).
-pub const ATTR_OWNER_READ: u16 = 1 << 0;
-/// Owner-write attribute bit (`W`).
-pub const ATTR_OWNER_WRITE: u16 = 1 << 1;
-/// Locked-against-deletion attribute bit (`L`).
-pub const ATTR_LOCKED: u16 = 1 << 2;
-/// The object is a directory (`D`).
-pub const ATTR_DIRECTORY: u16 = 1 << 3;
-
 /// One directory object, format-independent.
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct Object {
@@ -58,7 +50,8 @@ pub struct Object {
     pub size: u32,
     /// Indirect disc address (new map) or start sector (old map).
     pub indaddr: u32,
-    /// `FileCore` attribute bits (`ATTR_*`).
+    /// The canonical `acorn.attr` bits, whatever layout the directory
+    /// stores them in.
     pub attr: u16,
 }
 
@@ -106,7 +99,7 @@ impl Object {
 
     /// Whether the object is a directory.
     pub fn is_dir(&self) -> bool {
-        self.attr & ATTR_DIRECTORY != 0
+        self.attr & acorn::ATTR_DIRECTORY != 0
     }
 }
 
@@ -326,7 +319,7 @@ impl FixedDir {
                 }
                 attr
             }
-            FixedFormat::New => u16::from(raw[25]) & 0x7F,
+            FixedFormat::New => acorn::attr_from_filecore(raw[25]),
         };
         Some(object)
     }
@@ -357,7 +350,7 @@ impl FixedDir {
                 raw[25] = seq;
             }
             FixedFormat::New => {
-                raw[25] = (object.attr & 0x7F) as u8;
+                raw[25] = acorn::attr_to_filecore(object.attr);
             }
         }
     }

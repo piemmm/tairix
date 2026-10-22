@@ -161,6 +161,9 @@ A failure mid-copy removes the half-written target and surfaces the
 kernel's error; nothing ever masquerades as a complete copy. Every
 operation is authorised by the kernel — a refusal appears verbatim on
 the message line with nothing changed.
+A copy keeps a file's holes and its extended attributes; any
+attribute the destination cannot keep is named on the message line
+once the operation ends.
 
 The top disk-statistics header shows the listed path, the backing
 volume's free/total bytes (when the System Information service can

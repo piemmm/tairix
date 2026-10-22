@@ -47,6 +47,26 @@ pub enum CpError {
     /// underlying [`Errno`]. Failing closed: an unanswerable prompt never
     /// counts as consent.
     Prompt(Errno),
+    /// The destination is the source's own node — the same name, a link to
+    /// it, or another name for it — which a copy would empty before reading.
+    /// Nothing is written.
+    SameFile {
+        /// The source as named.
+        source: String,
+        /// The destination as named.
+        target: String,
+    },
+    /// The destination refused an extended attribute the copy had to carry
+    /// (`--preserve=xattr`, or a failure that is no attribute's): its key,
+    /// the destination, and the refusal.
+    Attribute {
+        /// The attribute refused.
+        key: String,
+        /// The destination it was refused on.
+        target: String,
+        /// The refusal.
+        error: Errno,
+    },
 }
 
 impl fmt::Display for CpError {
@@ -57,7 +77,7 @@ impl fmt::Display for CpError {
                 f,
                 "{switch} is not available: preserving a node's timestamps needs \
                  a call this system does not have, so the option is refused \
-                 rather than honoured in part (--preserve=links is available)"
+                 rather than honoured in part (--preserve=links,xattr is available)"
             ),
             Self::IsDirectory => f.write_str("is a directory (use -r to copy)"),
             Self::NotADirectory => f.write_str("destination is not a directory"),
@@ -67,6 +87,14 @@ impl fmt::Display for CpError {
             Self::Write(errno) => write!(f, "cannot write destination: {errno}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
             Self::Prompt(errno) => write!(f, "cannot read confirmation: {errno}"),
+            Self::SameFile { source, target } => {
+                write!(f, "'{source}' and '{target}' are the same file")
+            }
+            Self::Attribute { key, target, error } => write!(
+                f,
+                "setting attribute '{}' for '{target}': {error}",
+                tairix_fsmeta::attr::display_value(key.as_bytes())
+            ),
         }
     }
 }

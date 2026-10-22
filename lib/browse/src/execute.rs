@@ -3,12 +3,12 @@
 //!
 //! Where [`clipboard`](crate::clipboard) decides *what* moves where (a
 //! [`PastePlan`](crate::clipboard::PastePlan) of source→dest items), this
-//! module decides *how* each item is executed and *how a byte-for-byte copy is
-//! streamed* — both as pure, host-provable models that touch no filesystem. The
-//! `files.app` `Run` binary performs the actual `fs_rename` /
-//! `fs_read`→`fs_write` / `fs_unlink` under the user's own identity in its own
-//! capability-checked tail; the engine only names the plan, so composing it
-//! grants nothing and the read-only picker never runs it.
+//! module decides *how* each item is executed — as pure, host-provable models
+//! that touch no filesystem. The `files.app` `Run` binary performs the actual
+//! `fs_rename` / file copy / `fs_unlink` under the user's own identity in its
+//! own capability-checked tail, each file's bytes and attributes through the
+//! shared copy engine (`lib/fscopy`); the engine here only names the plan, so
+//! composing it grants nothing and the read-only picker never runs it.
 //!
 //! # Move vs. copy
 //!
@@ -18,30 +18,18 @@
 //! operation and the two items' [`VolumeId`]s, so the file manager and any
 //! future caller share one definition of it.
 //!
-//! # Bounded, interruptible copy
-//!
-//! A copy never holds an unbounded buffer and never spins: the [`CopyCursor`]
-//! walks a known-length source in fixed [`COPY_CHUNK_LEN`] steps, yielding the
-//! next [`CopyChunk`] to transfer. The app reads and writes that chunk, then
-//! reports the bytes actually carried with [`CopyCursor::advance`]; between
-//! chunks it may cancel or be preempted, and the cursor resumes from exactly
-//! where it stopped (see [`CopyCursor::resume`]). It is fail closed: advancing
-//! past the source's length — a source that shrank or a miscounted transfer —
-//! is [`CopyError::Overrun`], never a silent wrap.
-//!
 //! # Recursive directory copy
 //!
-//! Where the [`CopyCursor`] streams one *file*, a [`CopyWalk`] copies a whole
-//! *tree*: the copy-side analogue of the delete-side
-//! [`DeleteWalk`](crate::delete::DeleteWalk). It drives a depth-first traversal
-//! that creates a destination directory *before* streaming its contents into it
-//! (the mirror of the delete walk removing contents before their container),
-//! keeps its own explicit stack so a deep tree cannot overflow the call stack,
-//! is bounded by [`MAX_COPY_DEPTH`], and holds its exact position between steps
-//! so the app can cancel or be preempted without losing or repeating work. It
-//! does no I/O — the app performs each `fs_mkdir` / `fs_readdir` /
-//! byte-streamed copy — so composing it grants nothing and the read-only picker
-//! never runs one.
+//! A [`CopyWalk`] copies a whole *tree*: the copy-side analogue of the
+//! delete-side [`DeleteWalk`](crate::delete::DeleteWalk). It drives a
+//! depth-first traversal that creates a destination directory *before* copying
+//! its contents into it (the mirror of the delete walk removing contents before
+//! their container), keeps its own explicit stack so a deep tree cannot
+//! overflow the call stack, is bounded by [`MAX_COPY_DEPTH`], and holds its
+//! exact position between steps so the app can cancel or be preempted without
+//! losing or repeating work. It does no I/O — the app performs each `fs_mkdir`
+//! / `fs_readdir` / file copy — so composing it grants nothing and the
+//! read-only picker never runs one.
 //!
 //! [`fs_rename`]: tairix_abi::SyscallNumber::FS_RENAME
 
@@ -108,170 +96,6 @@ pub fn paste_strategy(op: ClipboardOp, source: VolumeId, dest: VolumeId) -> Past
     }
 }
 
-/// The maximum number of bytes one [`CopyChunk`] transfers.
-///
-/// A fixed I/O transfer bound, not a hardware-scaled capacity: it caps the
-/// buffer a single copy step reads and writes so a large copy stays
-/// interruptible and its memory fixed, exactly as the kernel bounds one
-/// `fs_read`/`fs_write` with [`FS_IO_MAX`](tairix_abi::fs::FS_IO_MAX). A copy
-/// of any size is handled by iterating chunks, so this never caps a file's
-/// length. Chosen to match the per-call transfer bound so one chunk is one
-/// syscall's worth of work.
-pub const COPY_CHUNK_LEN: u64 = tairix_abi::fs::FS_IO_MAX as u64;
-
-/// One bounded step of a streamed copy: the byte range to read from the source
-/// and write to the destination.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct CopyChunk {
-    offset: u64,
-    len: u64,
-}
-
-impl CopyChunk {
-    /// The byte offset into the source (and destination) this chunk begins at.
-    #[must_use]
-    pub const fn offset(&self) -> u64 {
-        self.offset
-    }
-
-    /// The number of bytes this chunk transfers — never more than
-    /// [`COPY_CHUNK_LEN`].
-    #[must_use]
-    pub const fn len(&self) -> u64 {
-        self.len
-    }
-
-    /// `true` when the chunk transfers no bytes. A [`CopyCursor`] never yields
-    /// an empty chunk (it returns `None` when complete); this exists for
-    /// callers that hold a [`CopyChunk`] directly.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
-/// Why a copy cursor cannot advance — a fail-closed refusal.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum CopyError {
-    /// An advance (or a resume) would carry the copied count past the source's
-    /// total length: the source shrank under the copy, or a transfer reported
-    /// more bytes than it moved. Refused rather than wrapping or over-reading.
-    Overrun,
-}
-
-impl core::fmt::Display for CopyError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Overrun => f.write_str("copy advanced past the source length"),
-        }
-    }
-}
-
-/// A resumable, cancelable cursor over a byte-for-byte file copy.
-///
-/// Models the bounded, interruptible streaming copy without doing any I/O: it
-/// tracks how many bytes of a known-length source have been carried and yields
-/// the next [`CopyChunk`]. The app performs the read/write for that chunk with
-/// its own capability-checked syscalls, then calls [`advance`](Self::advance)
-/// with the number of bytes actually transferred; between chunks it may stop (a
-/// Cancel) or the task may be preempted, and the cursor picks up exactly where
-/// it left off. There is no unbounded buffer and no spin.
-///
-/// A short transfer (fewer bytes than the chunk asked for) simply advances the
-/// cursor by that amount and the next chunk covers the remainder; a transfer of
-/// zero bytes with data still outstanding is a truncated or failing source the
-/// *app* reports and stops on — the cursor makes no progress and never loops on
-/// its own.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct CopyCursor {
-    total: u64,
-    copied: u64,
-}
-
-impl CopyCursor {
-    /// A cursor for copying a source of `total` bytes, starting from the
-    /// beginning.
-    #[must_use]
-    pub const fn new(total: u64) -> Self {
-        Self { total, copied: 0 }
-    }
-
-    /// A cursor resumed after `copied` bytes of a `total`-byte source have
-    /// already been carried — the state persisted across a cancel or a
-    /// preemption.
-    ///
-    /// # Errors
-    ///
-    /// [`CopyError::Overrun`] when `copied` exceeds `total`.
-    pub const fn resume(total: u64, copied: u64) -> Result<Self, CopyError> {
-        if copied > total {
-            return Err(CopyError::Overrun);
-        }
-        Ok(Self { total, copied })
-    }
-
-    /// The source's total length in bytes.
-    #[must_use]
-    pub const fn total(&self) -> u64 {
-        self.total
-    }
-
-    /// The number of bytes copied so far.
-    #[must_use]
-    pub const fn copied(&self) -> u64 {
-        self.copied
-    }
-
-    /// The number of bytes still to copy.
-    #[must_use]
-    pub const fn remaining(&self) -> u64 {
-        self.total - self.copied
-    }
-
-    /// `true` once every byte has been copied.
-    #[must_use]
-    pub const fn is_complete(&self) -> bool {
-        self.copied == self.total
-    }
-
-    /// The next chunk to transfer, or `None` when the copy is complete.
-    ///
-    /// The chunk begins at [`copied`](Self::copied) and spans the lesser of
-    /// [`COPY_CHUNK_LEN`] and [`remaining`](Self::remaining), so it is always
-    /// non-empty until the copy finishes.
-    #[must_use]
-    pub const fn next_chunk(&self) -> Option<CopyChunk> {
-        let remaining = self.remaining();
-        if remaining == 0 {
-            return None;
-        }
-        let len = if remaining < COPY_CHUNK_LEN {
-            remaining
-        } else {
-            COPY_CHUNK_LEN
-        };
-        Some(CopyChunk {
-            offset: self.copied,
-            len,
-        })
-    }
-
-    /// Record that `bytes` more bytes were transferred, advancing the cursor.
-    ///
-    /// # Errors
-    ///
-    /// [`CopyError::Overrun`] when `bytes` exceeds [`remaining`](Self::remaining)
-    /// (a source that shrank, or a miscounted transfer); the cursor is left
-    /// unchanged.
-    pub fn advance(&mut self, bytes: u64) -> Result<(), CopyError> {
-        if bytes > self.remaining() {
-            return Err(CopyError::Overrun);
-        }
-        self.copied += bytes;
-        Ok(())
-    }
-}
-
 /// Why a [`CopyWalk`] cannot take the requested step — a fail-closed refusal.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CopyWalkError {
@@ -319,9 +143,12 @@ pub const MAX_COPY_DEPTH: usize = crate::MAX_WALK_DEPTH;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CopyAction<'a> {
     /// Create this destination directory (an `fs_mkdir`), *before* copying its
-    /// contents, so its children have somewhere to land. Report it with
+    /// contents, so its children have somewhere to land, and give it the
+    /// source directory's extended attributes. Report it with
     /// [`created`](CopyWalk::created).
     MakeDir {
+        /// The source directory's root-first absolute component path.
+        source: &'a [String],
         /// The destination directory's root-first absolute component path.
         dest: &'a [String],
     },
@@ -332,9 +159,9 @@ pub enum CopyAction<'a> {
         /// The source directory's root-first absolute component path.
         source: &'a [String],
     },
-    /// Copy this leaf file's bytes from `source` to `dest` — the app streams
-    /// the transfer with its own [`CopyCursor`] and capability-checked
-    /// `fs_read`/`fs_write` — then report it with
+    /// Copy this leaf file from `source` to `dest` — the app copies its bytes
+    /// and attributes through the shared copy engine with its own
+    /// capability-checked calls — then report it with
     /// [`copied_file`](CopyWalk::copied_file).
     CopyFile {
         /// The source file's root-first absolute component path.
@@ -407,8 +234,8 @@ struct CopyFrame {
 /// recursion into its children; for a regular file, a single
 /// [`CopyFile`](CopyAction::CopyFile).
 ///
-/// It does no I/O — the app performs each `fs_mkdir`, `fs_readdir`, and
-/// byte-streamed `fs_read`/`fs_write` with its own capability-checked syscalls
+/// It does no I/O — the app performs each `fs_mkdir`, `fs_readdir`, and file
+/// copy with its own capability-checked syscalls
 /// under the user's own identity — and it never recurses on the call stack (its
 /// own explicit stack cannot overflow), stays within [`MAX_COPY_DEPTH`], and
 /// holds its exact position between steps so the app can cancel or be preempted
@@ -492,7 +319,10 @@ impl CopyWalk {
             CopyKind::Directory if top.created => Some(CopyAction::List {
                 source: &top.source,
             }),
-            CopyKind::Directory => Some(CopyAction::MakeDir { dest: &top.dest }),
+            CopyKind::Directory => Some(CopyAction::MakeDir {
+                source: &top.source,
+                dest: &top.dest,
+            }),
         }
     }
 

@@ -3637,6 +3637,47 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_SEEK_REGION,
+        name: "fs_seek_region",
+        arg_count: 3,
+        args: [
+            // fd, byte offset, `SeekRegion` discriminant.
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // Ungated at the dispatcher, like `fs_read`: where a file's holes lie
+        // is metadata of the node the descriptor already reaches, decided by
+        // its backing. A read of placement, never of content; not audited.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_PUNCH,
+        name: "fs_punch",
+        arg_count: 3,
+        args: [
+            // fd, byte offset, length.
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Ungated at the dispatcher, like `fs_truncate`: punching a hole is
+        // writing zeros, so the handler refuses a handle not opened for
+        // writing and the descriptor's backing decides the rest. Destroys
+        // stored bytes; audited.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -4042,6 +4083,8 @@ mod tests {
             SyscallNumber::FS_TRUNCATE,
             SyscallNumber::FS_SYNC,
             SyscallNumber::FILE_MAP,
+            SyscallNumber::FS_SEEK_REGION,
+            SyscallNumber::FS_PUNCH,
         ] {
             assert_eq!(
                 spec_for(n).unwrap().required_capability,
@@ -4054,6 +4097,7 @@ mod tests {
             SyscallNumber::FS_OPEN,
             SyscallNumber::FS_WRITE,
             SyscallNumber::FS_TRUNCATE,
+            SyscallNumber::FS_PUNCH,
             SyscallNumber::FS_MKDIR,
             SyscallNumber::FS_UNLINK,
             SyscallNumber::FS_RENAME,

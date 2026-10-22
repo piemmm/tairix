@@ -97,6 +97,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
+use tairix_abi::SeekRegion;
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_log::Sink;
 use tairix_reclaim::{
@@ -983,6 +984,18 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         self.inner.read_link(node, out)
     }
 
+    /// Passed straight through: a write-through cache's inner driver always
+    /// holds the file's current placement.
+    fn seek_region(
+        &mut self,
+        file: NodeId,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        self.enforce_pressure();
+        self.inner.seek_region(file, offset, region)
+    }
+
     fn root(&self) -> NodeId {
         self.inner.root()
     }
@@ -1310,6 +1323,32 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         result
     }
 
+    /// A punch rewrites the file's bytes and its allocation as a write does,
+    /// so it invalidates and is journaled exactly as one.
+    fn punch(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        len: u64,
+    ) -> Result<(), DriverError> {
+        self.enforce_pressure();
+        let target = self.resolve_for_invalidation(dir, name);
+        let result = self.inner.punch(dir, name, offset, len);
+        match target {
+            Ok(Some(node)) => self.invalidate_written(dir, name, node),
+            Ok(None) => {
+                self.invalidate_lookup(dir.raw(), name);
+                self.invalidate_dirents(dir.raw());
+            }
+            Err(()) => self.purge(),
+        }
+        if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
+            changes.written(dir, name, target.ok().flatten().map(NodeId::from_raw));
+        }
+        result
+    }
+
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         self.enforce_pressure();
         let target = self.resolve_for_invalidation(dir, name);
@@ -1474,6 +1513,12 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> 
         let result = self.inner.stamp_owner(node, uid, gid);
         self.invalidate_sec(node.raw());
         result
+    }
+
+    /// Asked only where the record itself was not cached — a mapping layer
+    /// beneath the cache consults it to build the record the cache keeps.
+    fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
+        self.inner.records_ownership(node)
     }
 }
 

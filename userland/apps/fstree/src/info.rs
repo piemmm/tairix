@@ -1,12 +1,13 @@
 //! The Standard Information Stream seam (fd 3): structured, advisory,
 //! ignorable records about what the session shows.
 //!
-//! `fstree` emits exactly one record class: an `omission` when the file
-//! pane hides dot-named entries under the default hidden-entries toggle,
-//! so a capturing consumer (`fstree 3>info.jsonl`) knows the pane was not
-//! exhaustive and how to see the rest. Advisory only by the stream's
-//! contract: a record never affects the session, the exit status, or the
-//! screen, and an unattached fd 3 is a silent no-op.
+//! `fstree` emits two `omission` records: one when the file pane hides
+//! dot-named entries under the default hidden-entries toggle, so a capturing
+//! consumer (`fstree 3>info.jsonl`) knows the pane was not exhaustive and how
+//! to see the rest, and the copy engine's `fs.attributes_not_kept` when an
+//! operation's copies left extended attributes behind. Advisory only by the
+//! stream's contract: a record never affects the session, the exit status,
+//! or the screen, and an unattached fd 3 is a silent no-op.
 
 use alloc::format;
 use alloc::string::String;
@@ -82,7 +83,7 @@ fn omission_record(dir: &str, omitted: u64) -> Vec<u8> {
         JsonStr(dir)
     );
     let record = StdInfoRecord::new(
-        "fstree",
+        crate::OWN_WORD,
         StdInfoKind::Omission,
         "fs.hidden_entries_omitted",
         Severity::Info,

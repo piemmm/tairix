@@ -91,10 +91,16 @@ what is built.
   skipped source stays in place, and the emptied-source-directory removal
   above it is withheld so a skip never fails a move), `c` cancels the
   remaining steps — applied work stays, and the completion report counts
-  entries and skips. Copy streams through a fixed bounded buffer (never a
-  whole-file slurp); a mid-stream failure removes the partial target and
-  surfaces the kernel's errno, so a half-written file never masquerades
-  as a copy.
+  entries and skips. A file is copied by the shared engine
+  ([`tairix-fscopy`](../lib/fscopy.md)) through a buffer sized to the file
+  and at most 1 MiB, keeping its holes, then its extended attributes — a
+  directory the copy creates takes its source's too. Attributes the
+  destination cannot keep are left and said once, after the operation's
+  summary on the message line, with an `fs.attributes_not_kept` record on
+  fd 3; a batch gathers every entry's into one. A failure part-way —
+  including an attribute refused for a reason that is no attribute's —
+  removes the partial target and surfaces the kernel's errno, so a
+  half-made file never masquerades as a copy.
 - **Tagging.** `t` toggles a tag on the file pane's selected entry (and
   steps down, so a held key marks a run); `T` tags by a filename glob
   compiled by the one shared matcher (`lib/glob`) against the visible
@@ -226,11 +232,13 @@ grammar (`src/app.rs`) mutates, over two injected seams —
   editor's `stat_mode`/`set_mode` and
   `attr_list`/`attr_get`/`attr_set`/`attr_remove`, and the S2 mutating
   operations (`stat_kind`,
-  streamed `read`/`write`, `create`, `mkdir`, `remove_file`,
-  `remove_dir`, `rename` with its `RenameOutcome::CrossDevice` report);
+  streamed `read`/`write`, `size`, the hole-aware `next_region`, `set_len`,
+  `create`, `mkdir`, `remove_file`, `remove_dir`, `rename` with its
+  `RenameOutcome::CrossDevice` report);
   the `Run` binary implements it over the kernel-authorised `fs_*`
-  syscalls and the sysinfo mount walk (with one-slot source/destination
-  handle caches hoisting the per-chunk open off the copy path), the
+  syscalls and the sysinfo mount walk (with the shared one-slot
+  source/destination handle cache, `tairix_rt::copy::OpenFiles`, hoisting the
+  per-chunk open off the copy path), the
   tests over an in-memory tree. The trait carries exactly the operations
   the landed stages perform; each later stage extends it in place with
   the operations it introduces, together with their callers.
@@ -289,12 +297,13 @@ verb acts on the **name**, never on what the name points at:
   `fs_unlink` keep the name as typed; what the link named survives
   untouched.
 - A **link already at a destination** is a real loss, so the overwrite
-  question says so (`… exists as a symbolic link`) and an approved
-  replacement *removes* the link before creating the new object. That is
-  what keeps a create or truncate — both of which follow a final link —
-  from acting on whatever the link pointed at, anywhere on the volume. A
-  directory is never transferred onto a link: a link is a leaf however it
-  resolves.
+  question says so (`… exists as a symbolic link`). An approved replacement
+  of any occupant *removes* it, once the source has answered, before the new
+  object is created: a create or truncate follows a final link, so a link
+  left in place would act on whatever it pointed at, anywhere on the volume,
+  and a file emptied in place would be the source itself were the two names
+  one node. A directory is never transferred onto a link: a link is a leaf
+  however it resolves.
 
 The destination probe is therefore a `NO_FOLLOW` stat — the name as typed.
 A *following* probe would hand anyone who can plant a name inside a
@@ -330,7 +339,10 @@ refusals), the overwrite matrix (overwrite, skip, cancel, per-file
 questions in a merging directory copy), move (same-volume rename,
 cross-volume copy-then-remove, skip preserving the skipped source), and
 failure injection (a read or write failure mid-copy removes the partial
-target and surfaces the errno with the panes consistent). The S3 surface
+target and surfaces the errno with the panes consistent), and holes and
+attributes (a sparse file's holes kept, every attribute carried down a tree
+and across a volume, a refusal said once on the message line and fd 3, a
+batch's refusals gathered, a fault failing the copy). The S3 surface
 is covered the same way: tag toggle/figures, tree-pane refusal, glob
 tagging (matching and malformed patterns), invert/clear, batch delete
 continuing past a denied entry with the report in tag order, batch copy
@@ -446,7 +458,10 @@ host-tested end to end.
   whether the store is keeping the settings at all. A disabled
   confirmation makes `d` act immediately; the per-file overwrite
   questions are never configurable away.
-- **The Standard Information Stream.** When the file pane omits hidden
+- **The Standard Information Stream.** An operation whose copies left
+  attributes behind queues the copy engine's `fs.attributes_not_kept`
+  record, which the session loop delivers on fd 3 after the event. When the
+  file pane omits hidden
   entries the session emits one `fs.hidden_entries_omitted` advisory
   record per omission-state change on fd 3 through the injected `Info`
   seam (`info::note_hidden_entries`); the production seam writes

@@ -33,7 +33,7 @@ use crate::integrity::{DataFault, StoredForm, LOGICAL_HASH_LEN};
 use crate::xform;
 use crate::{
     as_u32, as_usize, extent_spec, is_all_zero, Block, Extent, Inode, RunStage, ARXFS,
-    COMPRESS_CLUSTER_BLOCKS, MAX_BLOCK_SIZE, RING_BLOCKS,
+    COMPRESS_CLUSTER_BLOCKS, MAX_BLOCK_LEN, RING_BLOCKS,
 };
 
 impl<B: Block> ARXFS<B> {
@@ -104,7 +104,7 @@ impl<B: Block> ARXFS<B> {
             Err(DriverError::NoSpace) => return Ok(None),
             Err(other) => return Err(other),
         };
-        let mut blk = [0u8; MAX_BLOCK_SIZE];
+        let mut blk = [0u8; MAX_BLOCK_LEN];
         for i in 0..as_usize(stored_blocks) {
             let offset = i * capu;
             let part = (frame_len - offset).min(capu);
@@ -321,7 +321,7 @@ impl<B: Block> ARXFS<B> {
         }
         // Per-block fallback: all-zero blocks become holes, the rest store
         // through the ordinary zero-detect/dedupe/raw pipeline.
-        let mut blk = [0u8; MAX_BLOCK_SIZE];
+        let mut blk = [0u8; MAX_BLOCK_LEN];
         for b in 0..COMPRESS_CLUSTER_BLOCKS {
             let bi = start + b;
             let old_ptr = self.block_ptr(inode, bi)?;
@@ -395,7 +395,7 @@ impl<B: Block> ARXFS<B> {
         self.release_cluster(ext, ino, start)?;
         inode.extent_root = self.btree_remove(inode.extent_root, start, extent_spec(ino))?;
         let capu = as_usize(self.data_capacity());
-        let mut blk = [0u8; MAX_BLOCK_SIZE];
+        let mut blk = [0u8; MAX_BLOCK_LEN];
         for b in 0..ext.len {
             let slice = &plain[as_usize(b) * capu..][..capu];
             blk[..capu].copy_from_slice(slice);

@@ -288,6 +288,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // what the emulated card received to a host file the vertical then checks
     // sample for sample.
     argv.extend(crate::audio_wav_args(spec, "virtio-sound-device"));
+    argv.extend(crate::optical_disc_args(spec));
 
     argv
 }
@@ -316,6 +317,7 @@ mod tests {
             interrupts: crate::InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            optical_disc: None,
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
@@ -335,6 +337,22 @@ mod tests {
         argv.iter()
             .map(|s| s.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn a_usb_optical_drive_is_attached_with_its_disc() {
+        let spec = fixture_spec(1).with_optical_disc("/tmp/riscos.iso");
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(
+            argv.iter()
+                .any(|a| a == "scsi-cd,bus=opticalbot.0,drive=optical0"),
+            "{argv:?}"
+        );
+        assert!(
+            argv.iter()
+                .any(|a| a.ends_with("readonly=on,file=/tmp/riscos.iso")),
+            "{argv:?}"
+        );
     }
 
     #[test]

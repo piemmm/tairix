@@ -127,6 +127,7 @@ plan's ledger. A `blocked` row names its blocker.
 | NEW-NAMESPACE | Boot namespace assembly from signed policy (`plans/NEW-NAMESPACE.md`) | planned |
 | FIX-IO | Storage I/O fault isolation (`plans/FIX-IO.md`) | in progress |
 | DEVICES | `lspci`/`lsusb`, USB mass storage, hotplug automount (`plans/DEVICES.md`) | done |
+| FOREIGN-MEDIA | ISO 9660, UDF, USB optical drives, and copies that keep holes and foreign metadata (`plans/FOREIGN-MEDIA.md`) | in progress |
 | EXT4-RW | ext2/ext3/ext4 written as Linux leaves them: jbd2 journaling and crash replay, every checksum, lazily initialised groups, extent trees to full depth, indexed directories, POSIX ACLs, over the shared `lib/writeback` core | done |
 | EXFAT | An exFAT driver, for the removable drives other systems format | planned |
 | FS-USERSPACE | Serve the filesystem drivers that parse removable media from user space (`plans/OPEN-DEFECTS.md`) | planned |
@@ -263,7 +264,11 @@ the land generator and the ray tracer draw from),
 program crate compiles under on a bare-metal target; `std`, as it runs only
 in build scripts),
 `lib/xml` (the one fail-closed XML element scanner, read by the SVG decoder
-and OpenRaster's layer stack), and `lib/util`.
+and OpenRaster's layer stack), `lib/bytedev` (the one byte-addressed reader
+over a block device, which every filesystem driver addressing a device in bytes
+or in a block of its own, and the volume probe, read through), `lib/fscopy` (the one file copy, keeping holes and
+extended attributes and reporting what a destination could not keep), and
+`lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its
 README requires this file to name them:
@@ -276,7 +281,7 @@ README requires this file to name them:
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init` |
 | `count`, `tailwindow` | `head`, `tail` |
 | `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`) |
-| `fallible` | `lib/audio`, `lib/countryside`, `lib/cursor`, `lib/discovery`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, TextEdit, `view`, Paint, WinterSun |
+| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/cursor`, `lib/discovery`, `lib/font`, `lib/fsprobe`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/terrain`, `lib/writeback`, the kernel, the ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `cp`, `mv`, `fstree`, the file manager, TextEdit, `view`, Paint, WinterSun |
 | `fmt` | `kernel/sec`, `kernel/ipc` |
 | `hexdump` | `fstree`, TextEdit |
 | `join` | `lib/procinfo`'s multi-valued readings, `netmap`'s host tooltip |
@@ -429,10 +434,12 @@ four root-view names; the VFS reserves no error for a legacy name, and a
 top-level create is ordinary write permission on `/`. Drivers: `arxfs`
 (native), `ext4` (ext2, ext3 and ext4 read and written as Linux leaves them —
 journaled, with crash replay, every checksum maintained and POSIX ACLs honoured
-— validated against `mke2fs`/`e2fsck`), `fat32`, and `adfs` (every Acorn
+— validated against `mke2fs`/`e2fsck`), `fat32`, `adfs` (every Acorn
 FileCore format, with RISC OS metadata carried by `lib/fsmeta`'s `acorn.*`
-keys). Each ships a first-party `format` and fails with `NoSpace` on
-exhaustion. The write-back core ARXFS and ext4 share — the dirty set with
+keys), `iso9660` (read-only, with Joliet, Rock Ridge and the RISC OS, Apple and
+Amiga records) and `udf` (1.02–2.60 read, rewritable media written;
+`plans/FOREIGN-MEDIA.md`). Each one that writes ships a first-party `format` and fails
+with `NoSpace` on exhaustion. The write-back core ARXFS and ext4 share — the dirty set with
 per-operation undo, the machine-wide bound, the commit window — is
 `lib/writeback`. Coverage: the `posix_fs_suite`
 (pjdfstest-equivalent), `fs_soak` (`cargo xtask fssoak`, every formatter over a

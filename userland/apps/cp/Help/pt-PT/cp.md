@@ -4,7 +4,7 @@ cp — copiar ficheiros e diretórios
 
 ## SYNOPSIS
 
-`cp [-finrRvT] [-t dir] [--] source... dest`
+`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -20,10 +20,20 @@ de destino existente é sobrescrito por omissão, saltado com `-n`, e
 perguntado no fluxo de erro padrão com `-i` (uma pergunta recusada
 salta essa cópia sem erro; uma resposta ilegível nunca é tratada como
 consentimento).
+Um destino que é o próprio ficheiro de origem — o mesmo nome, outro
+nome para ele ou uma ligação para ele — é recusado por ser o mesmo
+ficheiro e fica como estava.
 
 A primeira falha para a execução antes de qualquer operando posterior.
 `--` termina a análise de opções: cada argumento posterior é um
 caminho.
+
+Cada cópia leva os atributos estendidos da origem — um tipo de ficheiro
+RISC OS, o tipo e o criador de um Mac — onde quer que o destino os possa
+guardar, e mantém como buracos os buracos de um ficheiro esparso. Os
+atributos que um destino não pode guardar são comunicados num único aviso no
+fim da execução, e num registo `omission` no fluxo de informação padrão; com
+`--preserve=xattr` essa cópia falha em vez disso.
 
 ## OPTIONS
 
@@ -46,6 +56,14 @@ caminho.
 - `--preserve=links` — duas origens que nomeiam um só nó obtêm dois nomes
   no destino em vez de duas cópias, pelo que a cópia não duplica o
   armazenamento em silêncio.
+- `--preserve=xattr` — todos os atributos estendidos têm de ser levados: uma
+  cópia cujo destino não possa guardar um falha, indicando-o.
+  `--preserve=links,xattr` pede ambos.
+- `--no-preserve=xattr` — não copiar nenhum atributo estendido. `mode`,
+  `ownership` e `timestamps` também são aceites, e já não são preservados.
+- `--sparse=WHEN` — como é copiado um ficheiro esparso: `auto`, a
+  predefinição, mantém os seus buracos; `always` deixa também por escrever
+  cada bloco de zeros que guarda; `never` escreve todos os bytes.
 - `-d` — `-P` e `--preserve=links` juntas, como na ferramenta GNU.
 - `-v, --verbose` — reportar cada cópia como `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copiar todas as origens para

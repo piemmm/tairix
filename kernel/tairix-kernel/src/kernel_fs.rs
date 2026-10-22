@@ -26,6 +26,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
+use tairix_abi::SeekRegion;
 
 /// The mounted-volume filesystem driver, type-erased. See the module
 /// docs.
@@ -52,6 +53,15 @@ impl<T> KernelFs for T where
 impl FilesystemRead for Box<dyn KernelFs> {
     fn read_link(&mut self, node: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
         (**self).read_link(node, out)
+    }
+
+    fn seek_region(
+        &mut self,
+        file: NodeId,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        (**self).seek_region(file, offset, region)
     }
 
     fn root(&self) -> NodeId {
@@ -121,6 +131,16 @@ impl FilesystemWrite for Box<dyn KernelFs> {
         (**self).truncate(dir, name, size)
     }
 
+    fn punch(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        len: u64,
+    ) -> Result<(), DriverError> {
+        (**self).punch(dir, name, offset, len)
+    }
+
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         (**self).remove(dir, name)
     }
@@ -159,6 +179,10 @@ impl FilesystemSecurity for Box<dyn KernelFs> {
 
     fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
         (**self).stamp_owner(node, uid, gid)
+    }
+
+    fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
+        (**self).records_ownership(node)
     }
 }
 

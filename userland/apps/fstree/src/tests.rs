@@ -11,6 +11,7 @@ use alloc::{format, vec};
 
 use core::cell::{Cell as CoreCell, RefCell};
 
+use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
 use tairix_abi::{
     CapabilityId, Errno, FileKind, LoadHeader, ManifestHeader, RenameFlags, RxePermission, Segment,
@@ -32,13 +33,14 @@ use crate::info::{note_hidden_entries, Info};
 use crate::model::{
     ModePrompt, Model, Overlay, Pane, Prompt, RepeatOp, SettingsState, SortKey, View, Viewer,
 };
-use crate::ops::{is_inside, parent_of};
+use crate::ops::{is_inside, parent_of, Decision, FileOp, OpProgress};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
 use crate::settings::{SettingKey, Settings};
 use crate::tag::{TagEntry, TagRange};
 use crate::view_disasm::{Decode, DisasmPane, DisasmView};
 use crate::walk::{FlatEntry, WalkPurpose, WalkState, Walker};
+use crate::OWN_WORD;
 use tairix_appconf::{Keys, Registry};
 use tairix_procinfo::VolumeBytes;
 
@@ -77,6 +79,16 @@ struct FakeFs {
     /// A file another program creates at its path just before the next
     /// rename reaches it — after every look the app took.
     appears_at_rename: Option<(String, Vec<u8>)>,
+    /// The stored runs `(start, end)` of the files registered sparse; any
+    /// other file is all data.
+    runs: BTreeMap<String, Vec<(u64, u64)>>,
+    /// Every write as `(path, offset, len)`, so a test sees what was written.
+    writes: Vec<(String, u64, usize)>,
+    /// Setting this attribute key anywhere answers the errno.
+    attr_refusal: Option<(String, Errno)>,
+    /// Second names for files, each keyed by the name and holding the path
+    /// whose bytes it shares, as a hard link does.
+    names: BTreeMap<String, String>,
 }
 
 impl FakeFs {
@@ -102,7 +114,69 @@ impl FakeFs {
             attrs: BTreeMap::new(),
             attrs_unsupported: false,
             appears_at_rename: None,
+            runs: BTreeMap::new(),
+            writes: Vec::new(),
+            attr_refusal: None,
+            names: BTreeMap::new(),
         }
+    }
+
+    /// Give the file at `of` the second name `path`.
+    fn second_name(mut self, path: &str, of: &str) -> Self {
+        let len = self.files.get(of).map_or(0, |bytes| bytes.len() as u64);
+        self.names.insert(path.to_owned(), of.to_owned());
+        self.upsert_entry(parent_of(path), file(leaf_name(path), len, 0));
+        self
+    }
+
+    /// The path whose bytes `path` names.
+    fn node(&self, path: &str) -> String {
+        self.names
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| path.to_owned())
+    }
+
+    /// Register `path` as a sparse file `len` bytes long storing `runs`
+    /// (`(start, bytes)`, sorted and apart) and reading as zeros elsewhere.
+    fn sparse(mut self, path: &str, len: u64, runs: &[(u64, &[u8])]) -> Self {
+        let mut bytes = vec![0u8; usize::try_from(len).expect("fixture sizes fit in usize")];
+        for (start, run) in runs {
+            let start = usize::try_from(*start).expect("fixture offsets fit in usize");
+            bytes[start..start + run.len()].copy_from_slice(run);
+        }
+        self.files.insert(path.to_owned(), bytes);
+        self.runs.insert(
+            path.to_owned(),
+            runs.iter()
+                .map(|(start, run)| (*start, start + run.len() as u64))
+                .collect(),
+        );
+        self.upsert_entry(parent_of(path), file(leaf_name(path), len, 0));
+        self
+    }
+
+    /// Have every volume answer `errno` to setting the attribute `key`.
+    fn refuses_attr(mut self, key: &str, errno: Errno) -> Self {
+        self.attr_refusal = Some((key.to_owned(), errno));
+        self
+    }
+
+    /// The bytes written to `path`, summed over every write.
+    fn written(&self, path: &str) -> usize {
+        self.writes
+            .iter()
+            .filter(|(written, _, _)| written == path)
+            .map(|(_, _, len)| len)
+            .sum()
+    }
+
+    /// The value of `path`'s attribute `key`, if it carries one.
+    fn attr_of(&self, path: &str, key: &str) -> Option<Vec<u8>> {
+        self.attrs
+            .get(path)
+            .and_then(|set| set.iter().find(|(k, _)| k == key))
+            .map(|(_, value)| value.clone())
     }
 
     /// Have another program create `path` holding `bytes` just before the
@@ -288,6 +362,11 @@ impl Fs for FakeFs {
         if self.set_denied.iter().any(|denied| denied == path) {
             return Err(Errno::PermissionDenied);
         }
+        if let Some((refused, errno)) = &self.attr_refusal {
+            if refused == key {
+                return Err(*errno);
+            }
+        }
         // The real kernel validates the shared key grammar; the fake pins
         // the split the editor relies on (a namespace dot must exist).
         if !key.contains('.') {
@@ -328,7 +407,7 @@ impl Fs for FakeFs {
         if self.links.contains_key(path) {
             return Ok(FileKind::Symlink);
         }
-        if self.files.contains_key(path) {
+        if self.files.contains_key(path) || self.names.contains_key(path) {
             return Ok(FileKind::Regular);
         }
         Err(Errno::NotFound)
@@ -371,7 +450,7 @@ impl Fs for FakeFs {
                 return Err(*errno);
             }
         }
-        let bytes = self.files.get(path).ok_or(Errno::NotFound)?;
+        let bytes = self.files.get(&self.node(path)).ok_or(Errno::NotFound)?;
         let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
         if start >= bytes.len() {
             return Ok(0);
@@ -381,11 +460,47 @@ impl Fs for FakeFs {
         Ok(take)
     }
 
+    fn size(&mut self, path: &str) -> Result<u64, Errno> {
+        self.files
+            .get(&self.node(path))
+            .map(|bytes| bytes.len() as u64)
+            .ok_or(Errno::NotFound)
+    }
+
+    fn next_region(
+        &mut self,
+        path: &str,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, Errno> {
+        let len = self.size(path)?;
+        if offset >= len {
+            return Ok(None);
+        }
+        let runs = self
+            .runs
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| vec![(0, len)]);
+        let inside = runs
+            .iter()
+            .find(|(start, end)| (*start..*end).contains(&offset));
+        Ok(match (region, inside) {
+            (SeekRegion::Data, Some(_)) | (SeekRegion::Hole, None) => Some(offset),
+            (SeekRegion::Hole, Some((_, end))) => Some(*end),
+            (SeekRegion::Data, None) => runs
+                .iter()
+                .map(|(start, _)| *start)
+                .find(|&start| start > offset),
+        })
+    }
+
     fn create(&mut self, path: &str) -> Result<(), Errno> {
         if self.dirs.contains_key(path) {
             return Err(Errno::AlreadyExists);
         }
-        self.files.insert(path.to_owned(), Vec::new());
+        // A create truncates the node a second name shares.
+        self.files.insert(self.node(path), Vec::new());
         self.upsert_entry(
             parent_of(path),
             FsEntry {
@@ -405,13 +520,15 @@ impl Fs for FakeFs {
             }
         }
         let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
-        let file = self.files.get_mut(path).ok_or(Errno::NotFound)?;
+        let node = self.node(path);
+        let file = self.files.get_mut(&node).ok_or(Errno::NotFound)?;
         let end = start + bytes.len();
         if file.len() < end {
             file.resize(end, 0);
         }
         file[start..end].copy_from_slice(bytes);
         let size = file.len() as u64;
+        self.writes.push((path.to_owned(), offset, bytes.len()));
         self.upsert_entry(
             parent_of(path),
             FsEntry {
@@ -421,6 +538,22 @@ impl Fs for FakeFs {
                 modified: Time64::UNIX_EPOCH,
             },
         );
+        Ok(())
+    }
+
+    fn set_len(&mut self, path: &str, len: u64) -> Result<(), Errno> {
+        if let Some((failing, errno)) = &self.write_fail {
+            if failing == path {
+                return Err(*errno);
+            }
+        }
+        let len = usize::try_from(len).map_err(|_| Errno::LengthOutOfRange)?;
+        let node = self.node(path);
+        self.files
+            .get_mut(&node)
+            .ok_or(Errno::NotFound)?
+            .resize(len, 0);
+        self.upsert_entry(parent_of(path), file(leaf_name(path), len as u64, 0));
         Ok(())
     }
 
@@ -446,11 +579,15 @@ impl Fs for FakeFs {
 
     fn remove_file(&mut self, path: &str) -> Result<(), Errno> {
         // The name as typed: a link is unlinked as the leaf it is, and what
-        // it names is untouched.
-        let removed = self.links.remove(path).is_some() || self.files.remove(path).is_some();
+        // it names is untouched; a second name goes, its node stays.
+        let removed = self.names.remove(path).is_some()
+            || self.links.remove(path).is_some()
+            || self.files.remove(path).is_some();
         if !removed {
             return Err(Errno::NotFound);
         }
+        // A removed node's attributes go with it.
+        self.attrs.remove(path);
         self.drop_entry(path);
         Ok(())
     }
@@ -462,6 +599,7 @@ impl Fs for FakeFs {
             Some(_) => {}
         }
         self.dirs.remove(path);
+        self.attrs.remove(path);
         self.drop_entry(path);
         Ok(())
     }
@@ -1548,6 +1686,21 @@ fn copy_over_an_existing_file_asks_and_overwrites_on_o() {
 }
 
 #[test]
+fn overwriting_another_name_for_the_source_keeps_the_source_whole() {
+    let mut fs = fixture().second_name("/twin", "/big");
+    let mut op = FileOp::copy("/big", FileKind::Regular, "/twin");
+    assert_eq!(op.advance(&mut fs), OpProgress::NeedsDecision);
+    op.resolve(Decision::Overwrite);
+    assert_eq!(op.advance(&mut fs), OpProgress::Done);
+    assert_eq!(
+        fs.contents("/big"),
+        Some(vec![b'x'; 999]),
+        "the source keeps its bytes"
+    );
+    assert_eq!(fs.contents("/twin"), Some(vec![b'x'; 999]));
+}
+
+#[test]
 fn copy_over_an_existing_file_skips_on_s_and_cancels_on_c() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
@@ -1693,6 +1846,187 @@ fn a_write_failure_mid_copy_removes_the_partial_target() {
     let message = m.message.clone().expect("failure surfaced");
     assert!(message.contains("NoSpace"), "{message}");
     assert_eq!(fs.contents("/copy"), None);
+}
+
+// --- File operations: holes and extended attributes -------------------------
+
+/// `/src` carries an attribute of its own and holds a sparse file carrying
+/// RISC OS and Mac attributes; `/vol` is another volume.
+fn metadata_fixture() -> FakeFs {
+    FakeFs::new()
+        .dir("/", vec![dir("src"), dir("vol")])
+        .dir("/src", vec![dir("sub")])
+        .dir("/src/sub", vec![])
+        .dir("/vol", vec![])
+        .sparse(
+            "/src/image",
+            3 << 20,
+            &[(0, &[7; 5000]), (2 << 20, &[9; 100])],
+        )
+        .attr("/src/image", "acorn.filetype", b"ffd")
+        .attr("/src/image", "mac.type", b"TEXT")
+        .attr("/src", "acorn.attr", b"DLWR/wr")
+        .cross("/vol")
+}
+
+/// Copy (`c`) or move (`m`) the tree row under the root's first child to
+/// the typed destination.
+fn transfer_src(m: &mut Model, fs: &mut FakeFs, key: char, destination: &str) {
+    handle_event(m, fs, &mut decode(), &Event::Down);
+    handle_event(m, fs, &mut decode(), &Event::Char(key));
+    type_text(m, fs, destination);
+    handle_event(m, fs, &mut decode(), &Event::Enter);
+}
+
+#[test]
+fn a_copy_keeps_a_files_holes_and_every_attribute_in_the_tree() {
+    let mut fs = metadata_fixture();
+    let mut m = model(&mut fs);
+    transfer_src(&mut m, &mut fs, 'c', "/copy");
+    assert_eq!(fs.contents("/copy/image"), fs.contents("/src/image"));
+    assert_eq!(
+        fs.written("/copy/image"),
+        5100,
+        "only the stored runs are written"
+    );
+    assert_eq!(
+        fs.attr_of("/copy/image", "acorn.filetype").as_deref(),
+        Some(&b"ffd"[..])
+    );
+    assert_eq!(
+        fs.attr_of("/copy/image", "mac.type").as_deref(),
+        Some(&b"TEXT"[..])
+    );
+    assert_eq!(
+        fs.attr_of("/copy", "acorn.attr").as_deref(),
+        Some(&b"DLWR/wr"[..]),
+        "the new directory's own"
+    );
+    assert!(fs.has_dir("/copy/sub"));
+    assert_eq!(m.message.as_deref(), Some("copied 1 entry"));
+    assert!(m.advisories.is_empty());
+}
+
+#[test]
+fn a_cross_volume_move_keeps_holes_and_attributes_and_removes_the_source() {
+    let mut fs = metadata_fixture();
+    let mut m = model(&mut fs);
+    transfer_src(&mut m, &mut fs, 'm', "/vol");
+    assert_eq!(
+        fs.contents("/vol/src/image").map(|bytes| bytes.len()),
+        Some(3 << 20)
+    );
+    assert_eq!(fs.written("/vol/src/image"), 5100);
+    assert_eq!(
+        fs.attr_of("/vol/src/image", "acorn.filetype").as_deref(),
+        Some(&b"ffd"[..])
+    );
+    assert_eq!(
+        fs.attr_of("/vol/src", "acorn.attr").as_deref(),
+        Some(&b"DLWR/wr"[..])
+    );
+    assert!(!fs.has_dir("/src"));
+}
+
+#[test]
+fn what_a_destination_cannot_keep_is_said_once_on_the_message_line_and_fd_3() {
+    let mut fs = metadata_fixture().refuses_attr("mac.type", Errno::NotSupported);
+    let mut m = model(&mut fs);
+    transfer_src(&mut m, &mut fs, 'c', "/copy");
+    assert_eq!(
+        m.message.as_deref(),
+        Some(
+            "copied 1 entry — extended attributes not kept on 1 file \
+             (the destination cannot store them): mac.type"
+        )
+    );
+    assert_eq!(
+        fs.attr_of("/copy/image", "acorn.filetype").as_deref(),
+        Some(&b"ffd"[..]),
+        "the rest carried"
+    );
+    assert_eq!(m.advisories.len(), 1);
+    let record = String::from_utf8_lossy(&m.advisories[0]).into_owned();
+    assert!(record.contains("\"producer\":\"fstree\""), "{record}");
+    assert!(record.contains("fs.attributes_not_kept"), "{record}");
+}
+
+#[test]
+fn an_attribute_refused_for_a_fault_fails_the_copy_and_removes_the_target() {
+    let mut fs = metadata_fixture().refuses_attr("mac.type", Errno::DeviceFault);
+    let mut m = model(&mut fs);
+    transfer_src(&mut m, &mut fs, 'c', "/copy");
+    let message = m.message.clone().expect("failure surfaced");
+    assert!(
+        message.contains("/copy/image: attribute mac.type: DeviceFault"),
+        "{message}"
+    );
+    assert_eq!(fs.contents("/copy/image"), None);
+    assert_eq!(fs.attr_of("/copy/image", "acorn.filetype"), None);
+}
+
+#[test]
+fn a_batch_reports_what_all_its_copies_left_as_one() {
+    let mut fs = metadata_fixture()
+        .attr("/src/sub", "acorn.filetype", b"fff")
+        .refuses_attr("acorn.filetype", Errno::NotSupported);
+    fs = fs.dir("/src/sub", vec![file("note", 3, 0)]).attr(
+        "/src/sub/note",
+        "acorn.filetype",
+        b"fff",
+    );
+    let mut m = model(&mut fs);
+    tag(&mut m, "/src/image", FileKind::Regular, 3 << 20);
+    tag(&mut m, "/src/sub/note", FileKind::Regular, 3);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/vol");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert_eq!(
+        m.message.as_deref(),
+        Some(
+            "batch: copied 2 of 2 tagged — extended attributes not kept on 2 files \
+             (the destination cannot store them): acorn.filetype"
+        )
+    );
+    assert_eq!(m.advisories.len(), 1, "one record for the whole batch");
+    assert_eq!(
+        fs.attr_of("/vol/image", "mac.type").as_deref(),
+        Some(&b"TEXT"[..])
+    );
+}
+
+#[test]
+fn the_session_delivers_an_operations_advisory_record_to_fd_3() {
+    let mut fs = metadata_fixture().refuses_attr("mac.type", Errno::NotSupported);
+    let mut m = model(&mut fs);
+    let size = Size::new(24, 90);
+    let tty = ResizingTty::new(
+        size,
+        &[(b"\x1b[B", size), (b"c/copy\r", size), (b"q", size)],
+    );
+    let mut screen = tairix_curses::Screen::new(tty, tairix_termcap::TermType::Xterm256Color, size);
+    let mut host = service();
+    let mut store = SettingsStore::open(&mut host, OWN_WORD);
+    let mut info = CapturedInfo {
+        records: Vec::new(),
+    };
+    crate::app::run(
+        &mut m,
+        &mut fs,
+        &mut decode(),
+        &mut screen,
+        &mut info,
+        &mut store,
+    )
+    .expect("session ends");
+    assert!(fs.has_dir("/copy"), "the copy ran");
+    let copies: Vec<_> = info
+        .records
+        .iter()
+        .filter(|record| record.contains("fs.attributes_not_kept"))
+        .collect();
+    assert_eq!(copies.len(), 1, "{:?}", info.records);
+    assert!(m.advisories.is_empty(), "delivered, not left queued");
 }
 
 #[test]
@@ -2465,11 +2799,28 @@ impl Fs for SparseFs {
         Ok(take)
     }
 
+    fn size(&mut self, _path: &str) -> Result<u64, Errno> {
+        Ok(self.size)
+    }
+
+    fn next_region(
+        &mut self,
+        _path: &str,
+        _offset: u64,
+        _region: SeekRegion,
+    ) -> Result<Option<u64>, Errno> {
+        Err(Errno::NotSupported)
+    }
+
     fn create(&mut self, _path: &str) -> Result<(), Errno> {
         Err(Errno::PermissionDenied)
     }
 
     fn write(&mut self, _path: &str, _offset: u64, _bytes: &[u8]) -> Result<(), Errno> {
+        Err(Errno::PermissionDenied)
+    }
+
+    fn set_len(&mut self, _path: &str, _len: u64) -> Result<(), Errno> {
         Err(Errno::PermissionDenied)
     }
 
@@ -3386,10 +3737,6 @@ fn the_volume_list_renders_targets_types_and_space() {
 }
 
 // --- Settings -------------------------------------------------------------
-
-/// The command word this application's bundle is installed under; it selects
-/// nothing but the bundle-defaults layer.
-const OWN_WORD: &str = "fstree";
 
 /// A fake app-data service with an empty store and a bundle shipping no
 /// defaults — a fresh account of the shipped file manager.

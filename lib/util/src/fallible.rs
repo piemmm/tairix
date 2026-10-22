@@ -12,6 +12,7 @@
 //! buffer reserves exactly what it needs, and a scratch that is grown across
 //! uses reserves amortised so repeated growth is not quadratic.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -22,6 +23,13 @@ pub fn filled<T: Clone>(count: usize, value: T) -> Option<Vec<T>> {
     buffer.try_reserve_exact(count).ok()?;
     buffer.resize(count, value);
     Some(buffer)
+}
+
+/// `N` copies of `value` in a boxed array, or `None` when the allocator
+/// refuses room for them. Built on the heap, never staged on the stack, so a
+/// sector-sized buffer costs a caller on a small kernel stack nothing.
+pub fn boxed_array<T: Clone, const N: usize>(value: T) -> Option<Box<[T; N]>> {
+    filled(N, value)?.into_boxed_slice().try_into().ok()
 }
 
 /// The first `count` of `items`, or `None` when the allocator refuses room
@@ -71,6 +79,19 @@ pub fn concatenated(parts: &[&str]) -> Option<String> {
 #[must_use]
 pub fn reserve<T>(buffer: &mut Vec<T>, count: usize) -> bool {
     buffer.try_reserve_exact(count).is_ok()
+}
+
+/// Append `item` to `buffer`, reporting whether the allocator granted the
+/// room: a full buffer's room doubles, so a list pushed an item at a time
+/// costs amortised constant time where reserving each item exactly would
+/// copy the whole list on every push.
+#[must_use]
+pub fn push<T>(buffer: &mut Vec<T>, item: T) -> bool {
+    if buffer.len() == buffer.capacity() && buffer.try_reserve(1).is_err() {
+        return false;
+    }
+    buffer.push(item);
+    true
 }
 
 #[cfg(test)]

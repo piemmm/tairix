@@ -1,6 +1,6 @@
 //! Tests for the shared fallible allocation helpers.
 
-use super::{collected, concatenated, filled, grow_to, reserve};
+use super::{boxed_array, collected, concatenated, filled, grow_to, push, reserve};
 use alloc::vec::Vec;
 
 /// A count whose `T`-sized layout cannot be reserved on any target: the
@@ -17,6 +17,25 @@ fn a_refused_reservation_is_answered_not_aborted() {
     assert!(scratch.is_empty(), "a refused growth leaves the scratch");
     let mut buffer: Vec<u32> = Vec::new();
     assert!(!reserve(&mut buffer, UNRESERVABLE));
+}
+
+#[test]
+fn a_list_pushed_an_item_at_a_time_grows_by_doubling() {
+    let mut list: Vec<u32> = Vec::new();
+    let mut grown = 0;
+    for item in 0..4096 {
+        let before = list.capacity();
+        assert!(push(&mut list, item));
+        grown += usize::from(list.capacity() != before);
+    }
+    assert_eq!(list.len(), 4096);
+    assert_eq!(list[4095], 4095);
+    assert!(grown <= 13, "{grown} reallocations for 4096 pushes");
+}
+
+#[test]
+fn a_boxed_array_holds_its_copies() {
+    assert_eq!(boxed_array::<u8, 4>(5).as_deref(), Some(&[5; 4]));
 }
 
 #[test]

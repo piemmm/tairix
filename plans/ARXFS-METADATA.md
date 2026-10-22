@@ -1,7 +1,7 @@
 # ARXFS-METADATA.md — ARXFS extensible file metadata
 
-Status: **foundation and userland surface done; the preservation tooling
-remains.** The binding specification is
+Status: **foundation, userland surface and copy preservation done; the
+attribute CLI, named streams and archive and snapshot carriage remain.** The binding specification is
 `docs/src/filesystem/arxfs-spec.md` §21 and the registry reference is
 `docs/src/filesystem/metadata-registry.md`; this file holds the design and the
 work that is left (§10). It is binding under `AGENTS.md`: every rule here is
@@ -12,10 +12,11 @@ Delivered: the shared `lib/fsmeta` crate (key grammar, `AttrSet`/`AttrEntry`,
 the preset registry with checked `Time64` conversions, fuzz harness), the
 versioned `FilesystemAttrs` ABI and its `FilesystemAttrsProvider` facet, the
 ARXFS attribute store (a `BlockType::Attr` COW metadata block off the inode's
-`attr_root`, encrypted and mirrored like a directory block), and the
+`attr_root`, encrypted and mirrored like a directory block), the
 `fs_attr_get`/`fs_attr_set`/`fs_attr_list`/`fs_attr_remove` syscalls over the
-secured VFS. The ADFS driver already answers `acorn.*` presets through the same
-registry.
+secured VFS, and the one copy engine (`lib/fscopy`) every copying tool runs.
+ADFS answers `acorn.*`, the ISO 9660 driver `acorn.*`, `mac.*` and `amiga.*`,
+and UDF `mac.*`, all through the same registry.
 
 The goal has two parts:
 
@@ -243,21 +244,29 @@ dest driver    -> store natively if it understands them, else keep as ARXFS
   attributes; the destination driver maps them back to its native fields
   (charter §21 checked conversion — exact or `MetadataNotRepresentable`).
 - **ARXFS → foreign (different/foreign-incapable, e.g. FAT32)**: attributes
-  with no native home are reported as not representable; an exact-preservation
-  copy fails closed, a best-effort copy drops them only when the caller
-  explicitly requested a documented lossy policy (mirrors charter §21).
+  with no native home are refused by the destination. The default copy carries
+  every other attribute and reports each it left, so none is ever dropped
+  silently; an exact-preservation copy (`cp --preserve=xattr`) fails closed
+  instead (mirrors charter §21).
 
 ### 6.2 Copy semantics (cp / mv / desktop)
 
-- `cp`/`mv` and the desktop copy default to **preserve all representable
-  metadata** (the foreign-FS namespaces, `user`, `tairix`), like `cp
-  --preserve` does for mode/timestamps. Document the flag surface in
-  `userland/shell/` and the desktop.
+- `cp`, `mv`, `fstree` and the desktop copy **carry every attribute the
+  destination can keep by default** (`Attributes::Carry`), the foreign-FS
+  namespaces, `user` and `tairix` alike — where GNU `cp` copies attributes
+  only under `--preserve=xattr`, because a filetype is part of what a file is.
+  `cp --preserve=xattr` is the exact-preservation copy (`Attributes::Require`):
+  any attribute the destination refuses fails it. `--no-preserve=xattr`
+  carries none.
 - `mv` within one filesystem preserves attributes trivially (same inode or a
   metadata-only move); `mv`/`cp` across filesystems goes through §6.1.
-- A copy never silently loses metadata: when an attribute cannot be carried, the
-  tool reports it (and, where applicable, emits a `stdinfo` `omission` record,
-  charter §20.1) rather than dropping it quietly.
+- A copy never silently loses metadata: what a destination cannot keep is
+  classified (`Refusal`: unsupported, not representable, no room, not
+  permitted), gathered across the run, and reported once — a `warning:` line
+  and an `fs.attributes_not_kept` `stdinfo` `omission` record from a command,
+  the message line and fd 3 from `fstree`, a warning alert from the file
+  manager. A refusal that is no attribute's fails the copy.
+- A copy keeps a sparse file's holes, through the same engine.
 - Snapshot send/receive (plans/ARXFS-SNAPSHOT.md §6.3) carries the full
   attribute set so a backup round-trip is lossless.
 
@@ -415,18 +424,10 @@ order relative to the rest of the outstanding ARXFS work, and the two of them
 that are genuinely blocked on drivers and tools the tree does not have, are
 recorded in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
-- **Copy/move/archive preservation (§6.2, §6.3).** `cp`, `mv`, the desktop file
-  manager, and the archive tools must carry the representable attribute set by
-  default and report what they could not carry. A copy that preserves metadata
-  should preserve *sparseness* too, so this lands with the hole-aware seek and
-  punch-hole operations (`plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §4) — one pass
-  over the same tools. What could not be carried is reported: a `stdinfo`
-  `omission` record where a stream consumer exists (charter §20.1), a plain
-  diagnostic otherwise.
-  An exact-preservation copy that cannot represent an attribute on the target
-  fails closed with `MetadataNotRepresentable`; dropping happens only under an
-  explicitly requested, documented lossy policy. None of these tools links
-  `lib/fsmeta` yet.
+- **Archive preservation (§6.3).** `cp`, `mv`, `fstree` and the file
+  manager carry attributes and holes through `lib/fscopy`; the archive tools,
+  which do not exist yet, must carry the attribute set through the same engine
+  when they land.
 - **An attribute CLI.** No command app reads or writes attributes today. The
   graphical callers are `fstree`'s `a` editor and the file manager's Properties
   window (`plans/NEW-FILEMANAGER.md` FM8b), both over the capability-checked
@@ -438,17 +439,21 @@ recorded in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
   storage path yet, so `mac.resourcefork` cannot hold a real resource fork. The
   content path is the ordinary data pipeline addressed by a namespaced key — no
   second data path.
-- **Per-family foreign driver wiring (§7).** ADFS answers `acorn.*`; the Amiga,
-  Atari, and classic-Mac drivers do not exist, so their preset entries have no
-  producer. Each lands with its driver.
+- **Per-family foreign driver wiring (§7).** ADFS answers `acorn.*`; the ISO
+  9660 driver answers `acorn.*`, `mac.*` and `amiga.*` from a disc's records,
+  and UDF answers `mac.*` (`plans/FOREIGN-MEDIA.md`). The native AmigaDOS,
+  Atari and HFS drivers do not exist, so `atari.*` has no producer yet. Each
+  lands with its driver.
 - **Snapshot send/receive carrying the attribute set.** Depends on
   `plans/ARXFS-SNAPSHOT.md` §6.3; the stream must carry attributes or a backup
   round-trip is lossy.
 
-The tests §9 lists for the delivered parts pass. Items 5 (per-family preset
-round-trip beyond Acorn), 6 (lossless-or-fail-closed across a copy), 7
-(`cp`/`mv`/desktop preservation), 8 (named streams), and 9 (archive round-trip)
-land with the work above.
+The tests §9 lists for the delivered parts pass, items 6
+(lossless-or-fail-closed across a copy) and 7 (`cp`/`mv`/desktop
+preservation) among them, with the USB optical QEMU vertical carrying a RISC
+OS disc's filetypes onto ARXFS end to end. Item 5 (per-family preset
+round-trip beyond Acorn) passes for `mac.*` through UDF; 8 (named streams) and
+9 (archive round-trip) land with the work above.
 
 This file, like the rest of `plans/`, states the plan and the design, not a
 build log (charter §13): when the remaining work lands, replace its prose with

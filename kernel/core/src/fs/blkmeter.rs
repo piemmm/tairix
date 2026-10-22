@@ -24,7 +24,9 @@ use tairix_abi::blkio::{
     BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkMedium, BlkOp,
     BlkQueueCounters, BlkStatus, IoBudget,
 };
-use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
+use tairix_abi::driver::block::{
+    Block, BlockGeometry, DeviceHealth, DiscLayout, DiscardCapability,
+};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
 use tairix_log::{Field, FieldValue, Level, Sink};
@@ -616,6 +618,10 @@ impl<B: Block> Block for MeteredBlock<B> {
 
     fn medium(&self) -> Option<BlkMedium> {
         self.device.medium()
+    }
+
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        self.device.disc_layout()
     }
 
     fn device_name(&self) -> BlkDeviceName {

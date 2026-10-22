@@ -250,9 +250,7 @@ impl<M: IoApicMmio + Send + 'static, I: InterruptControl> IoApicController<M, I>
         built.try_reserve_exact(blocks.len()).ok()?;
         for mut block in blocks {
             let pins = block.wiring.len();
-            let mut pin_cache = Vec::new();
-            pin_cache.try_reserve_exact(pins).ok()?;
-            pin_cache.resize(pins, None);
+            let pin_cache = tairix_util::fallible::filled(pins, None)?;
             built.push(Block {
                 id: block.id,
                 gsi_base: block.gsi_base,

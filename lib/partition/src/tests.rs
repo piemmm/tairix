@@ -518,6 +518,13 @@ impl Block for TelemetryBlock {
         Some(DISK)
     }
 
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        Some(DiscLayout {
+            last_session_start: 300,
+            last_recorded: Some(900),
+        })
+    }
+
     fn backing_availability(&self) -> MountAvailability {
         MountAvailability::Recovering
     }
@@ -669,6 +676,50 @@ fn window_reports_the_underlying_disks_class_and_health() {
          spend discretionary I/O on a disk that is being given a chance to \
          come back"
     );
+}
+
+#[test]
+fn only_a_window_from_the_discs_start_reports_its_layout() {
+    // The drive counts its sessions from the disc's first block, so a window
+    // that starts anywhere else would send a filesystem to the wrong blocks.
+    let whole = PartitionBlock::new(
+        TelemetryBlock {
+            inner: VecBlock::new(512, 64),
+        },
+        0,
+        64,
+    )
+    .expect("window fits");
+    assert_eq!(
+        whole.disc_layout(),
+        Some(DiscLayout {
+            last_session_start: 300,
+            last_recorded: Some(900),
+        })
+    );
+    let inner = PartitionBlock::new(
+        TelemetryBlock {
+            inner: VecBlock::new(512, 64),
+        },
+        10,
+        4,
+    )
+    .expect("window fits");
+    assert_eq!(inner.disc_layout(), None);
+}
+
+#[test]
+fn only_a_missing_signature_is_an_absent_scheme() {
+    assert!(PartitionError::NoScheme.is_absent());
+    assert!(PartitionError::Mbr(MbrError::BadSignature).is_absent());
+    for present in [
+        PartitionError::Mbr(MbrError::Overlap),
+        PartitionError::Mbr(MbrError::CoversMbrSector),
+        PartitionError::TooManyPartitions,
+        PartitionError::Device(DriverError::DeviceFault),
+    ] {
+        assert!(!present.is_absent(), "{present:?} describes something");
+    }
 }
 
 #[test]

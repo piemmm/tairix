@@ -68,6 +68,10 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # in the workspace and every credential site shares it.
 tairix-util = { path = "../util", version = "=0.0.0" }
 
+# The one file copy's seams, which `copy` implements over this runtime's files
+# and which `replace_file` carries a file's extended attributes through.
+tairix-fscopy = { path = "../fscopy", version = "=0.0.0" }
+
 # The host trap seam used to assert the wrappers' marshalling without a kernel.
 # Enabled only for this crate's own tests, so the
 # `std`-pulling seam never reaches a shipping build.

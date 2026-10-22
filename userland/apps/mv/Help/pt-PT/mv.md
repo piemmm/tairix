@@ -19,6 +19,7 @@ preserva a identidade do nó. Um movimento cuja origem e destino estão
 em volumes diferentes não pode ser atómico: recorre a copiar a origem
 para o destino e depois remover a origem (os diretórios são
 reproduzidos recursivamente).
+Um ficheiro cuja cópia falha é removido, e a origem mantém-se.
 
 Um destino existente é sobrescrito por omissão, saltado com `-n`, e
 perguntado no fluxo de erro padrão com `-i` (uma pergunta recusada
@@ -26,6 +27,13 @@ salta esse movimento sem erro; uma resposta ilegível nunca é tratada
 como consentimento). A primeira falha para a execução antes de
 qualquer operando posterior. `--` termina a análise de opções: cada
 argumento posterior é um caminho.
+
+A cópia leva os buracos e os atributos estendidos de cada ficheiro — um tipo
+de ficheiro RISC OS, o tipo e o criador de um Mac — onde quer que o destino os
+possa guardar, e move uma ligação simbólica como uma ligação com o mesmo
+destino, nunca aquilo que ela designa. Os atributos que o destino não pode
+guardar são comunicados num único aviso no fim da execução, e num registo
+`omission` no fluxo de informação padrão.
 
 ## OPTIONS
 

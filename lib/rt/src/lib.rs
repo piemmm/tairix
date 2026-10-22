@@ -85,6 +85,8 @@ pub mod cachereport;
 
 pub mod changenotice;
 
+pub mod copy;
+
 pub mod io;
 
 pub mod keys;
@@ -423,6 +425,12 @@ const NUM_FS_STAT: u64 = SyscallNumber::FS_STAT.as_u16() as u64;
 
 /// `fs_truncate` syscall number (as above).
 const NUM_FS_TRUNCATE: u64 = SyscallNumber::FS_TRUNCATE.as_u16() as u64;
+
+/// `fs_seek_region` syscall number (as above).
+const NUM_FS_SEEK_REGION: u64 = SyscallNumber::FS_SEEK_REGION.as_u16() as u64;
+
+/// `fs_punch` syscall number (as above).
+const NUM_FS_PUNCH: u64 = SyscallNumber::FS_PUNCH.as_u16() as u64;
 
 /// `fs_sync` syscall number (as above).
 const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
@@ -5507,6 +5515,41 @@ pub fn fs_truncate(fd: u32, size: u64) -> i64 {
     ret as i64
 }
 
+/// Where the next region of `region`'s kind begins at or after `offset` of
+/// the file open at descriptor `fd` (`SyscallNumber::FS_SEEK_REGION`): the
+/// `SEEK_DATA` / `SEEK_HOLE` pair.
+///
+/// Returns the offset, or `-errno`: `-NoData` when there is none — the offset
+/// is at or past the end, or only holes follow it.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 offset-or-errno encoding.
+pub fn fs_seek_region(fd: u32, offset: u64, region: tairix_abi::SeekRegion) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; `fs_seek_region` takes
+    // no memory operand, only the descriptor, the offset and the kind.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_SEEK_REGION,
+            [u64::from(fd), offset, u64::from(region.as_u32()), 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Punch a hole of `len` bytes at `offset` in the file open at descriptor
+/// `fd` (`SyscallNumber::FS_PUNCH`): the range reads as zeros and its storage
+/// is released, the file's length unchanged.
+///
+/// The handle must have been opened for writing. Returns `0`, or `-errno`:
+/// `-NotSupported` where the volume's format keeps no holes.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_punch(fd: u32, offset: u64, len: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; `fs_punch` takes no
+    // memory operand, only the descriptor and the range.
+    let ret = unsafe { raw_syscall(NUM_FS_PUNCH, [u64::from(fd), offset, len, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Flush the mounted filesystem's pending writes to its backing store
 /// (`SyscallNumber::FS_SYNC`).
 ///
@@ -6444,6 +6487,44 @@ impl File {
     /// syscall.
     pub fn truncate(&self, size: u64) -> Result<(), i64> {
         let ret = fs_truncate(self.fd, size);
+        if ret < 0 {
+            Err(ret)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Where the next region of `region`'s kind begins at or after
+    /// `offset`, or `None` when none does.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the [`fs_seek_region`]
+    /// syscall, other than the `-NoData` that answers `None`.
+    #[allow(clippy::cast_sign_loss)] // A non-negative result is an offset.
+    pub fn seek_region(
+        &self,
+        offset: u64,
+        region: tairix_abi::SeekRegion,
+    ) -> Result<Option<u64>, i64> {
+        let ret = fs_seek_region(self.fd, offset, region);
+        if ret == -i64::from(Errno::NoData.as_i32()) {
+            Ok(None)
+        } else if ret < 0 {
+            Err(ret)
+        } else {
+            Ok(Some(ret as u64))
+        }
+    }
+
+    /// Punch a hole of `len` bytes at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the [`fs_punch`]
+    /// syscall.
+    pub fn punch(&self, offset: u64, len: u64) -> Result<(), i64> {
+        let ret = fs_punch(self.fd, offset, len);
         if ret < 0 {
             Err(ret)
         } else {

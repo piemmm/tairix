@@ -12,12 +12,7 @@
 //! table is rejected whole.
 
 use crate::{Partition, PartitionError, PartitionTable, PartitionType};
-use tairix_abi::driver::block::{Block, BlockGeometry};
-
-/// Largest logical-block size this crate stages a single block of, in
-/// bytes. GPT (and MBR) disks use 512- or 4096-byte logical blocks; the
-/// boot path reads one block at a time into a buffer of this size.
-pub const MAX_BLOCK_SIZE: usize = 4096;
+use tairix_abi::driver::block::{Block, BlockGeometry, MAX_BLOCK_LEN};
 
 /// GPT header signature: the ASCII bytes `"EFI PART"`.
 pub const HEADER_SIGNATURE: [u8; 8] = *b"EFI PART";
@@ -138,10 +133,10 @@ fn parse_header(block: &[u8]) -> Result<Header, GptError> {
 /// [`PartitionError::Device`] on a read fault.
 pub fn is_gpt_disk<B: Block>(dev: &mut B, geo: &BlockGeometry) -> Result<bool, PartitionError> {
     let bs = geo.block_size as usize;
-    if bs == 0 || bs > MAX_BLOCK_SIZE || geo.block_count < 2 {
+    if bs == 0 || bs > MAX_BLOCK_LEN || geo.block_count < 2 {
         return Ok(false);
     }
-    let mut block = [0u8; MAX_BLOCK_SIZE];
+    let mut block = [0u8; MAX_BLOCK_LEN];
     let buf = &mut block[..bs];
     dev.read_blocks(1, buf)?;
     Ok(parse_header(buf).is_ok())
@@ -155,10 +150,10 @@ pub fn is_gpt_disk<B: Block>(dev: &mut B, geo: &BlockGeometry) -> Result<bool, P
 /// [`PartitionError::Device`] on a read fault.
 pub fn parse<B: Block>(dev: &mut B, geo: &BlockGeometry) -> Result<PartitionTable, PartitionError> {
     let bs = geo.block_size as usize;
-    if bs == 0 || bs > MAX_BLOCK_SIZE {
+    if bs == 0 || bs > MAX_BLOCK_LEN {
         return Err(PartitionError::NoScheme);
     }
-    let mut block = [0u8; MAX_BLOCK_SIZE];
+    let mut block = [0u8; MAX_BLOCK_LEN];
 
     let header = {
         let buf = &mut block[..bs];

@@ -12,7 +12,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use super::{
-    change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
+    attribute_refusal, change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
     empty_confirmation_may_open, item_refusal, mode_flip_allowed, move_refusal, progress_control,
     read_refusal, remove_refusal, trash_read_refusal, BarPace, ProgressControl,
     COMPLETION_DWELL_NS,
@@ -345,5 +345,25 @@ fn a_completed_operation_closes_once_its_full_bar_has_been_seen() {
         completion_closes_at(u64::MAX - 1, motion),
         u64::MAX,
         "late on the clock it saturates rather than wrapping to now"
+    );
+}
+
+#[test]
+fn attributes_the_source_withheld_are_told_from_ones_the_copy_refused() {
+    assert_eq!(
+        attribute_refusal(&tairix_fscopy::AttrError::Read(Errno::PermissionDenied)),
+        "the source's extended attributes could not be read"
+    );
+    let refused = tairix_fscopy::AttrError::Write {
+        key: String::from("user.k"),
+        error: Errno::Busy,
+    };
+    assert_eq!(
+        attribute_refusal(&refused),
+        "a copy's extended attributes could not be set"
+    );
+    assert_eq!(
+        attribute_refusal(&tairix_fscopy::AttrError::Read(Errno::DeviceOffline)),
+        "its device was removed"
     );
 }

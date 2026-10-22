@@ -636,6 +636,58 @@ impl RealpathMode {
     }
 }
 
+/// Which kind of region of a file a hole-aware seek looks for: the
+/// `SEEK_DATA` / `SEEK_HOLE` pair.
+///
+/// A file is a sequence of *data* — bytes its volume stores — and *holes*,
+/// ranges that read as zeros and occupy no storage. The end of a file always
+/// begins a hole, so every byte before it lies in exactly one region and a
+/// file with no stored bytes is one hole from offset zero.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum SeekRegion {
+    /// The first byte at or after the offset that the volume stores.
+    Data = 0,
+    /// The first byte at or after the offset that lies in a hole.
+    Hole = 1,
+}
+
+impl SeekRegion {
+    /// The region kind `raw` selects, rejecting any other value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `raw` names neither kind.
+    pub const fn from_raw(raw: u32) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Data),
+            1 => Ok(Self::Hole),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Raw value, as carried on the ABI.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Where the next region of this kind begins at or after `offset` in a
+    /// file of `size` bytes that is data throughout — the answer of every
+    /// format that keeps no holes. `None` at or past the end, where there is
+    /// nothing left to seek.
+    #[must_use]
+    pub const fn in_solid_file(self, offset: u64, size: u64) -> Option<u64> {
+        if offset >= size {
+            return None;
+        }
+        match self {
+            Self::Data => Some(offset),
+            Self::Hole => Some(size),
+        }
+    }
+}
+
 /// The stable, system-wide identity of a filesystem node.
 ///
 /// A node is identified by the pair `(volume, node)`: `volume` is the

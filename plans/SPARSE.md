@@ -3,9 +3,7 @@
 Status: **done.** Sparse support is implemented in
 `drivers/filesystem/arxfs/`, specified in
 `docs/src/filesystem/arxfs-spec.md` §19, and covered by the §17 test set
-below. What remains is named in §19 of this file: two behaviours that need a
-filesystem operation TAIRiX does not expose yet, added in place with its first
-consumer as item S1 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
+below, the hole-aware seek and punch-hole (§19) among it.
 
 ARXFS represents a hole **implicitly**, as a gap between per-file extent-tree
 mappings — the form §2 permits — rather than as an explicit `Zero` extent
@@ -315,12 +313,10 @@ clone/reflink sparse file -> preserve ZERO extents exactly
 snapshot sparse file -> preserve ZERO extents exactly
 ```
 
-Two behaviours are conditional on interfaces TAIRiX does not yet expose, and
-are the whole of this appendix's remaining work (§19):
-
-If TAIRiX exposes `SEEK_DATA` / `SEEK_HOLE`-style behaviour, ARXFS must report ZERO extents and implicit holes as holes, not as data.
-
-If TAIRiX exposes an explicit punch-hole or zero-range API, ARXFS must implement it by creating ZERO extents and releasing replaced Data extents through the normal COW/refcount/free path.
+ARXFS reports ZERO extents and implicit holes as holes, not as data, to the
+hole-aware seek (`fs_seek_region`), and implements punch-hole (`fs_punch`) by
+releasing the replaced Data extents through the normal COW/refcount/free path
+(§19).
 
 ## 16. Performance Requirements
 
@@ -402,25 +398,21 @@ Every criterion below is met:
 - no RLE/FILL storage mode is introduced by this appendix;
 - the implementation uses first-party Rust only and adds no external dependency.
 ```
-## 19. Remaining work
+## 19. Seek and punch
 
-Both items need a filesystem operation TAIRiX does not expose yet. That
-interface is TAIRiX's own and `abi-v1` is unfrozen, so "the interface does not
-exist" is work to do, not a blocker: it is added in place, with its first
-consumer, as item **S1** of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §4. Neither
-item is optional once the operation lands (§15).
+- **`fs_seek_region`** (`SEEK_DATA` / `SEEK_HOLE`) answers from the extent tree
+  through the bounded tree cursor: an unmapped range is a hole, a file's end
+  always begins one, and `NoData` means no region of the asked kind follows.
+- **`fs_punch`** drops the mappings covering a range and releases the replaced
+  data extents through the copy-on-write refcount/free path — the code an
+  all-zero write already runs — so the range reads as zeros, a reflinked copy
+  keeps the blocks it shares while the unshared ones are freed, partial ends
+  are zeroed in place and adjacent holes merge. The range is clipped to the
+  file's length; an empty one changes nothing, a read-only volume refuses it,
+  and a punch over many extents runs as bounded transactions.
+- A copy keeps a sparse file sparse through the shared copy engine
+  (`lib/fscopy`), which seeks over the holes rather than reading them.
 
-- **`SEEK_DATA` / `SEEK_HOLE`.** No TAIRiX seek ABI exposes a hole-aware seek,
-  so ARXFS has nothing to answer. When one lands, the driver reports an
-  unmapped range as a hole from the extent tree it already walks; the file
-  offset arithmetic is the only new code.
-- **Punch-hole / zero-range.** No explicit punch-hole or zero-range operation
-  exists in the filesystem ABI. When one lands, ARXFS implements it by dropping
-  the covering mappings and releasing the replaced data extents through the
-  normal copy-on-write refcount/free path — the same code `store_block` already
-  runs for an all-zero write, so the operation is a bound and a range walk, not
-  a new pipeline.
-
-An explicit `Zero` extent record is **not** remaining work: §2 permits the
-implicit representation, ARXFS implements it, and adding the field would be an
-on-disk change buying nothing.
+An explicit `Zero` extent record is not needed: §2 permits the implicit
+representation, ARXFS implements it, and adding the field would be an on-disk
+change buying nothing.

@@ -1,0 +1,11 @@
+# Signed-AppInfo manifest source for the `optical` fixture of the USB optical
+# QEMU vertical (plans/DEVICES.md). Composed and planted only on that
+# vertical's disk image by tools/xtask: the crate lives outside the userland
+# discovery walk, so no production image ships it. CAP_CONSOLE_WRITE for its
+# report, CAP_FS_ACCESS to read the disc and the copy, and CAP_PROC_SPAWN to
+# run `cp`; each is intersected with the launching user's grants.
+id = "os.tairix.test.optical"
+name = "optical"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_PROC_SPAWN"]

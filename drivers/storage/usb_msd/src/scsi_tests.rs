@@ -9,7 +9,7 @@ use super::*;
 use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
-use tairix_abi::blkio::{BlkDeviceClass, BlkReissue, BlkRemovabilityEvidence};
+use tairix_abi::blkio::{BlkDeviceClass, BlkReissue, BlkRemovabilityEvidence, BlkStatus};
 
 /// One scripted answer to an executed command.
 struct Step {
@@ -259,6 +259,369 @@ fn autosense_maps_a_failed_read_without_request_sense() {
     assert_eq!(scsi.transport().calls.len(), 1);
 }
 
+fn atapi(executor: ScriptedExecutor) -> ScsiDevice<ScriptedExecutor> {
+    ScsiDevice::new(executor, CommandSet::Atapi)
+}
+
+/// What an optical drive's INQUIRY reports.
+const OPTICAL: Inquiry = Inquiry {
+    device_type: DEVICE_TYPE_MMC,
+    removable: true,
+};
+
+/// A disc `blocks` long as `READ CAPACITY` counts it, in 2048-byte blocks.
+fn disc_geometry(blocks: u64) -> BlockGeometry {
+    BlockGeometry {
+        block_size: 2048,
+        block_count: blocks,
+    }
+}
+
+/// GET CONFIGURATION's answer for the Random Writable feature, current or
+/// not.
+fn random_writable(current: bool) -> Vec<u8> {
+    let mut data = vec![0u8; 16];
+    data[3] = 12;
+    data[6..8].copy_from_slice(&0x0012u16.to_be_bytes());
+    data[8..10].copy_from_slice(&FEATURE_RANDOM_WRITABLE.to_be_bytes());
+    data[10] = u8::from(current);
+    data[11] = 4;
+    data
+}
+
+/// READ TOC/PMA/ATIP format 1: the last session's first track starts at
+/// `start`.
+fn session_info(start: u32) -> Vec<u8> {
+    let mut data = vec![0u8; 12];
+    data[1] = 10;
+    data[2] = 1;
+    data[3] = 2;
+    data[6] = 2;
+    data[8..12].copy_from_slice(&start.to_be_bytes());
+    data
+}
+
+/// READ DISC INFORMATION naming `last_track` the last session's last track.
+fn disc_information(last_track: u16) -> Vec<u8> {
+    let mut data = vec![0u8; 12];
+    data[1] = 32;
+    let [high, low] = last_track.to_be_bytes();
+    data[6] = low;
+    data[11] = high;
+    data
+}
+
+/// READ TRACK INFORMATION: a track at `start`, `size` long, with its next
+/// writable address when one is given.
+fn track_information(start: u32, size: u32, next_writable: Option<u32>) -> Vec<u8> {
+    let mut data = vec![0u8; 32];
+    data[1] = 30;
+    data[8..12].copy_from_slice(&start.to_be_bytes());
+    if let Some(next) = next_writable {
+        data[7] = TRACK_NWA_VALID;
+        data[12..16].copy_from_slice(&next.to_be_bytes());
+    }
+    data[24..28].copy_from_slice(&size.to_be_bytes());
+    data
+}
+
+#[test]
+fn an_optical_drive_reports_its_disc_as_an_optical_disc() {
+    let executor = ScriptedExecutor::new();
+    let mut scsi = transparent(executor);
+    let report = scsi.probe(0, OPTICAL).expect("probed");
+    assert_eq!(report.medium.form, BlkForm::OpticalDisc);
+    assert_eq!(report.medium.removability, BlkRemovability::from_rmb(true));
+    assert_eq!(
+        report.medium.class(),
+        BlkDeviceClass::Rotational,
+        "a disc spins up slowly"
+    );
+    assert!(
+        scsi.transport().calls.is_empty(),
+        "no disk page is asked of a drive"
+    );
+}
+
+#[test]
+fn a_multisession_disc_reports_where_its_last_session_starts() {
+    let mut executor = ScriptedExecutor::new();
+    executor.pass_with(random_writable(false));
+    executor.pass_with(session_info(22_000));
+    executor.pass_with(disc_information(2));
+    executor.pass_with(track_information(22_000, 8_000, None));
+    let mut scsi = transparent(executor);
+    let disc = scsi.disc(0, disc_geometry(30_000)).expect("read");
+    assert_eq!(
+        disc.layout,
+        DiscLayout {
+            last_session_start: 22_000,
+            last_recorded: Some(29_999),
+        }
+    );
+    assert!(!disc.random_writable);
+    assert_eq!(disc.geometry, disc_geometry(30_000));
+    let ops: Vec<u8> = scsi
+        .transport()
+        .calls
+        .iter()
+        .map(|(_, cdb, _, _)| cdb[0])
+        .collect();
+    assert_eq!(
+        ops,
+        [0x46, 0x43, 0x51, 0x52],
+        "no MODE SENSE is sent to an optical drive"
+    );
+    let (_, track_cdb, _, _) = &scsi.transport().calls[3];
+    assert_eq!(
+        &track_cdb[1..6],
+        &[0x01, 0, 0, 0, 2],
+        "the last session's last track, by number"
+    );
+}
+
+#[test]
+fn an_open_track_is_recorded_up_to_its_next_writable_address() {
+    // A packet-written disc: READ CAPACITY counts less than the open track
+    // already holds.
+    let mut executor = ScriptedExecutor::new();
+    executor.pass_with(random_writable(false));
+    executor.pass_with(session_info(0));
+    executor.pass_with(disc_information(1));
+    executor.pass_with(track_information(0, 300_000, Some(5_000)));
+    let mut scsi = transparent(executor);
+    let disc = scsi.disc(0, disc_geometry(1_000)).expect("read");
+    assert_eq!(disc.layout.last_recorded, Some(4_999));
+    assert_eq!(
+        disc.geometry.block_count, 5_000,
+        "every recorded block is readable"
+    );
+}
+
+#[test]
+fn a_short_track_answer_is_not_read_past_its_end() {
+    let mut short = track_information(0, 8_000, None);
+    short[7] |= TRACK_LRA_VALID;
+    short.truncate(28);
+    let mut executor = ScriptedExecutor::new();
+    executor.pass_with(random_writable(false));
+    executor.pass_with(session_info(0));
+    executor.pass_with(disc_information(1));
+    executor.pass_with(short);
+    let mut scsi = transparent(executor);
+    let disc = scsi.disc(0, disc_geometry(8_000)).expect("read");
+    assert_eq!(
+        disc.layout.last_recorded,
+        Some(7_999),
+        "the track's size, not an address it never sent"
+    );
+}
+
+#[test]
+fn a_rewritable_disc_is_writable_and_a_refusing_drive_reads_as_a_pressed_disc() {
+    let mut executor = ScriptedExecutor::new();
+    executor.pass_with(random_writable(true));
+    executor.fail_then_sense(0x05, 0x24, 0x00);
+    executor.fail_then_sense(0x05, 0x20, 0x00);
+    let mut scsi = atapi(executor);
+    let disc = scsi.disc(0, disc_geometry(2_295_104)).expect("read");
+    assert!(
+        disc.random_writable,
+        "a DVD-RAM's Random Writable feature is current"
+    );
+    assert_eq!(
+        disc.layout,
+        DiscLayout {
+            last_session_start: 0,
+            last_recorded: Some(2_295_103),
+        }
+    );
+    let (_, cdb, _, _) = &scsi.transport().calls[0];
+    assert_eq!(cdb.len(), 12, "an ATAPI drive takes 12-byte packets");
+}
+
+#[test]
+fn a_disc_query_whose_exchange_breaks_ends_the_queries_and_its_reset_is_expected() {
+    let mut executor = ScriptedExecutor::new();
+    // The bridge mishandles GET CONFIGURATION; its reset puts it back in step.
+    executor.failures.push_back(Errno::WouldBlock);
+    executor.failures_resync = true;
+    executor.fail_then_sense(0x06, 0x29, 0x00);
+    executor.pass_with(vec![0x5A; 2048]);
+    let mut scsi = removable_unit(executor);
+    let disc = scsi.disc(0, disc_geometry(30_000)).expect("a pressed disc");
+    assert_eq!(
+        disc,
+        Disc {
+            layout: DiscLayout {
+                last_session_start: 0,
+                last_recorded: Some(29_999),
+            },
+            geometry: disc_geometry(30_000),
+            random_writable: false,
+        }
+    );
+    assert_eq!(
+        scsi.transport().calls.len(),
+        1,
+        "no query follows the break"
+    );
+    let mut buf = [0u8; 2048];
+    assert_eq!(
+        scsi.read(0, 0, 2048, &mut buf),
+        Ok(()),
+        "the reset's attention was the one expected"
+    );
+}
+
+#[test]
+fn a_disc_not_ready_or_changed_is_read_again_not_described_as_refused() {
+    for (key, asc, ascq, answer) in [
+        (0x02, 0x04, 0x01, Errno::WouldBlock),
+        (0x02, 0x3A, 0x00, Errno::DeviceOffline),
+        (0x06, 0x28, 0x00, Errno::DeviceOffline),
+    ] {
+        let mut executor = ScriptedExecutor::new();
+        executor.pass_with(random_writable(false));
+        executor.fail_then_sense(key, asc, ascq);
+        let mut scsi = removable_unit(executor);
+        assert_eq!(
+            scsi.disc(0, disc_geometry(30_000)),
+            Err(answer),
+            "{key:02x}/{asc:02x}"
+        );
+        assert_eq!(
+            scsi.take_readiness(0),
+            None,
+            "bring-up leaves the serve loop nothing"
+        );
+    }
+    // Another attention is asked past, never read as a drive with no TOC.
+    let mut executor = ScriptedExecutor::new();
+    executor.pass_with(random_writable(false));
+    executor.fail_then_sense(0x06, 0x2A, 0x09);
+    executor.pass_with(session_info(22_000));
+    executor.pass_with(disc_information(2));
+    executor.pass_with(track_information(22_000, 8_000, None));
+    let mut scsi = removable_unit(executor);
+    let disc = scsi.disc(0, disc_geometry(30_000)).expect("read");
+    assert_eq!(disc.layout.last_session_start, 22_000);
+}
+
+#[test]
+fn a_session_starts_within_what_the_disc_recorded() {
+    let mut executor = ScriptedExecutor::new();
+    executor.pass_with(random_writable(false));
+    executor.pass_with(session_info(25_000));
+    executor.pass_with(disc_information(1));
+    executor.pass_with(track_information(0, 20_000, None));
+    let mut scsi = transparent(executor);
+    let disc = scsi.disc(0, disc_geometry(30_000)).expect("read");
+    assert_eq!(
+        disc.layout,
+        DiscLayout {
+            last_session_start: 0,
+            last_recorded: Some(19_999),
+        }
+    );
+}
+
+#[test]
+fn a_last_recorded_address_outside_its_track_is_not_believed() {
+    let mut track = track_information(0, 8_000, None);
+    track[7] |= TRACK_LRA_VALID;
+    track[28..32].copy_from_slice(&4_000_000_000u32.to_be_bytes());
+    let mut executor = ScriptedExecutor::new();
+    executor.pass_with(random_writable(false));
+    executor.pass_with(session_info(0));
+    executor.pass_with(disc_information(1));
+    executor.pass_with(track);
+    let mut scsi = transparent(executor);
+    let disc = scsi.disc(0, disc_geometry(8_000)).expect("read");
+    assert_eq!(
+        disc.layout.last_recorded,
+        Some(7_999),
+        "the track's own extent"
+    );
+    assert_eq!(disc.geometry, disc_geometry(8_000));
+}
+
+#[test]
+fn an_aborted_or_causeless_refusal_is_asked_again_and_a_recovered_one_completes() {
+    for key in [0x0B, 0x00] {
+        let mut executor = ScriptedExecutor::new();
+        executor.fail_with_sense(Sense {
+            key,
+            asc: 0x00,
+            ascq: 0x00,
+        });
+        let mut scsi = transparent(executor);
+        let mut buf = [0u8; 2048];
+        assert_eq!(
+            scsi.read(0, 7, 2048, &mut buf),
+            Err(Errno::WouldBlock),
+            "{key:02x}"
+        );
+    }
+    let mut executor = ScriptedExecutor::new();
+    executor.steps.push_back(Step {
+        passed: false,
+        data: vec![0x5A; 2048],
+        sense: Some(Sense {
+            key: 0x01,
+            asc: 0x17,
+            ascq: 0x01,
+        }),
+    });
+    let mut scsi = transparent(executor);
+    let mut buf = [0u8; 2048];
+    assert_eq!(
+        scsi.read(0, 7, 2048, &mut buf),
+        Ok(()),
+        "recovered, and carried out"
+    );
+    assert!(buf.iter().all(|&byte| byte == 0x5A));
+}
+
+#[test]
+fn a_medium_error_is_one_requests_and_never_the_units() {
+    for key in [0x03, 0x04, 0x08] {
+        let mut executor = ScriptedExecutor::new();
+        executor.fail_with_sense(Sense {
+            key,
+            asc: 0x11,
+            ascq: 0x05,
+        });
+        let mut scsi = transparent(executor);
+        let mut buf = [0u8; 2048];
+        assert_eq!(scsi.read(0, 7, 2048, &mut buf), Err(Errno::MediumError));
+        assert_eq!(scsi.take_readiness(0), None, "the unit is still ready");
+    }
+    let mut executor = ScriptedExecutor::new();
+    executor.fail_with_sense(Sense {
+        key: 0x03,
+        asc: 0x11,
+        ascq: 0x00,
+    });
+    let mut scsi = transparent(executor);
+    let state = LunState {
+        geometry: disc_geometry(64),
+        write_protected: true,
+        report: unreported(),
+        disc_layout: None,
+    };
+    let mut lun = LunBlock::new(&mut scsi, 0, state);
+    let mut buf = [0u8; 2048];
+    let err = lun
+        .read_blocks(3, &mut buf)
+        .expect_err("a scratched sector");
+    assert_eq!(err, DriverError::MediumError);
+    assert_eq!(
+        BlkStatus::for_driver_health(err),
+        Some(BlkStatus::MediumError)
+    );
+}
+
 #[test]
 fn a_read_whose_medium_is_gone_asks_the_device_and_records_it() {
     let mut executor = ScriptedExecutor::new();
@@ -378,6 +741,7 @@ fn small_lun_state(write_protected: bool) -> LunState {
         },
         write_protected,
         report: unreported(),
+        disc_layout: None,
     }
 }
 
@@ -406,6 +770,7 @@ fn lun_block_validates_shape_and_range() {
         },
         write_protected: false,
         report: unreported(),
+        disc_layout: None,
     };
     let mut lun = LunBlock::new(&mut scsi, 0, state);
     let mut torn = [0u8; 100];
@@ -798,4 +1163,75 @@ fn a_unit_coming_ready_holds_its_request_and_one_losing_its_medium_goes_offline(
     let mut lun = LunBlock::new(&mut scsi, 0, small_lun_state(false));
     assert_eq!(lun.flush(), Err(DriverError::DeviceOffline));
     assert_eq!(scsi.take_readiness(0), Some(Readiness::MediumChanged));
+}
+
+/// A transparent device whose unit 0's medium can leave it.
+fn removable_unit(executor: ScriptedExecutor) -> ScsiDevice<ScriptedExecutor> {
+    let mut scsi = transparent(executor);
+    let mut medium = BlkMedium::of_transport(BlkTransport::Usb);
+    medium.removability = BlkRemovability::Removable(BlkRemovabilityEvidence::Inquiry);
+    scsi.set_medium(0, medium);
+    scsi
+}
+
+#[test]
+fn a_removable_unit_reset_unbidden_has_its_medium_read_again() {
+    // The reset's attention may have replaced the one a change of disc raised.
+    let mut executor = ScriptedExecutor::new();
+    executor.fail_then_sense(0x06, 0x29, 0x00);
+    let mut scsi = removable_unit(executor);
+    let mut buf = [0u8; 512];
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::DeviceOffline));
+    assert_eq!(scsi.take_readiness(0), Some(Readiness::MediumChanged));
+    assert_eq!(
+        scsi.transport().calls.len(),
+        2,
+        "the read and its sense, not retried"
+    );
+    let mut executor = ScriptedExecutor::new();
+    executor.fail_then_sense(0x06, 0x29, 0x00);
+    let mut scsi = removable_unit(executor);
+    assert_eq!(scsi.test_unit_ready(0), Ok(Readiness::MediumChanged));
+}
+
+#[test]
+fn a_probe_answered_with_the_expected_reset_uses_the_expectation_up() {
+    let mut executor = ScriptedExecutor::new();
+    executor.fail_then_sense(0x06, 0x29, 0x00);
+    executor.fail_then_sense(0x05, 0x20, 0x00);
+    executor.fail_then_sense(0x06, 0x29, 0x00);
+    let mut scsi = removable_unit(executor);
+    scsi.reset_transport().expect("reset");
+    scsi.probe(0, removable_inquiry()).expect("probed");
+    // A reset after the one the probe answered is nobody's here.
+    let mut buf = [0u8; 512];
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::DeviceOffline));
+    assert_eq!(scsi.take_readiness(0), Some(Readiness::MediumChanged));
+}
+
+#[test]
+fn a_reset_this_layer_ran_raises_the_attention_it_expects() {
+    let mut executor = ScriptedExecutor::new();
+    executor.fail_then_sense(0x06, 0x29, 0x00);
+    executor.pass_with(vec![0x5A; 512]);
+    executor.fail_then_sense(0x06, 0x29, 0x00);
+    let mut scsi = removable_unit(executor);
+    scsi.reset_transport().expect("reset");
+    let mut buf = [0u8; 512];
+    assert_eq!(
+        scsi.read(0, 0, 512, &mut buf),
+        Ok(()),
+        "consumed and retried"
+    );
+    assert!(buf.iter().all(|&byte| byte == 0x5A));
+    // The unit answered: a later reset is one this layer did not run.
+    assert_eq!(scsi.test_unit_ready(0), Ok(Readiness::MediumChanged));
+    // The reset a broken exchange's recovery ran is expected too.
+    let mut scsi = broken_read_after(|executor| executor.fail_then_sense(0x06, 0x29, 0x00));
+    let mut medium = BlkMedium::of_transport(BlkTransport::Usb);
+    medium.removability = BlkRemovability::Removable(BlkRemovabilityEvidence::Inquiry);
+    scsi.set_medium(0, medium);
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(scsi.take_reissue(0), BlkReissue::Now);
+    assert_eq!(scsi.take_readiness(0), None);
 }

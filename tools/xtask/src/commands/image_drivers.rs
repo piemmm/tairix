@@ -1475,6 +1475,39 @@ pub fn usb_audio_driver_store_files(
         .map_err(Clone::clone)
 }
 
+/// The signed **USB optical set** — the xHCI host-controller driver, the USB
+/// mass-storage driver and the volume manager — each paired with its store
+/// path: the `/System/Drivers/` set the USB optical vertical plants, from the
+/// controller down to the volume a disc is attached as. No display or input
+/// driver rides with them, so the console stays the text console the serial
+/// script drives. Built once per xtask process and memoised.
+///
+/// # Errors
+///
+/// As [`build_volmgr_bundle`].
+pub fn optical_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            Ok(vec![
+                store_file(USB_XHCI_STORE_PATH, build_xhci_bundle(ctx, arch, profile)?),
+                store_file(
+                    USB_MSD_STORE_PATH,
+                    build_usb_msd_bundle(ctx, arch, profile)?,
+                ),
+                store_file(VOLMGR_STORE_PATH, build_volmgr_bundle(ctx, arch, profile)?),
+            ])
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
 /// The signed **virtio-net driver bundle alone**, paired with its store path
 /// — the `/System/Drivers/` set the stream vertical (`plans/NETWORK.md` N5c)
 /// plants. That vertical drives the network stack over a text (UART) console,

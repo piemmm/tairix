@@ -559,6 +559,14 @@ enum FsDisk {
     /// driver's channel to `audiod`. Only this disk carries the fixtures; no
     /// production image ships them.
     UsbAudioRootDisk,
+    /// The encrypted root whose read-only `/System` volume carries the
+    /// standard store, the signed xHCI, USB mass-storage and volume-manager
+    /// drivers, and the test-only `optical` fixture bundle — the USB optical
+    /// vertical's backing (`plans/DEVICES.md`). The run attaches a USB optical
+    /// drive holding the RISC OS disc ([`optical_disc`]); `devmgr` autoloads
+    /// the three drivers down to the volume the disc is attached as. Only this
+    /// disk carries the fixture; no production image ships it.
+    OpticalRootDisk,
     /// The [`Self::AudioRootDisk`] layout with the HD Audio driver in place of
     /// the virtio sound driver: the HD Audio verticals' backing
     /// (`plans/SOUND.md` SND11). The kernel discovers QEMU's `intel-hda`
@@ -1276,6 +1284,15 @@ const STALLTRACE_PROVOKED_MARKER: &str = tairix_test_stalltrace::PROVOKED_MARKER
 /// so the bundle it installs under and the word the script types cannot
 /// drift.
 const STALLTRACE_COMMAND_LINE: &str = "stalltrace\n";
+
+/// The bare command word the USB optical vertical types at the shell, with
+/// its newline. Pinned to the fixture's own `COMMAND` by a unit test below.
+const OPTICAL_COMMAND_LINE: &str = "optical\n";
+
+/// Serial marker the USB optical vertical waits for before typing the shell
+/// `exit` that completes its PASS chain: the `optical` fixture's pass, read
+/// from its own definition so the script and the program cannot drift.
+const OPTICAL_PASS_PREFIX: &str = tairix_test_optical::PASS_MARKER;
 
 /// Serial marker the stream-socket vertical waits for before typing the
 /// shell `exit` that completes its PASS chain: the `tcpecho` client's success
@@ -7816,6 +7833,49 @@ static TESTS: &[QemuTest] = &[
         serial: AUDIOTONE_SERIAL,
         expect: Expect::Pass,
     },
+    // `plans/DEVICES.md`: the USB optical vertical. A USB optical drive on
+    // QEMU's xHCI controller holds a RISC OS disc (`FsDisk::OpticalRootDisk`).
+    // `devmgr` autoloads the host-controller driver against the controller,
+    // the mass-storage driver against the drive, which answers as a
+    // multimedia unit, and the volume manager against the unit it publishes;
+    // the disc is recognised as ISO 9660 and attached under `/Storage`. The
+    // scripted root shell runs `optical`, which waits on the mount table for
+    // that volume, copies it onto ARXFS with the real `cp`, and checks every
+    // file's bytes and RISC OS filetype on the disc and in the copy. On its
+    // `OPTICAL DISC CHECKED` the monitor changes the disc in the drive, and
+    // the fixture waits for the first volume to go and the second disc's to
+    // come — through a fresh publication of the unit — and reads it back. The
+    // guest sink arms on the fixture's exit and passes on the shell's, typed
+    // only once `OPTICAL PASS` appeared; a failing fixture parks with its
+    // reason, so the run times out loudly.
+    QemuTest {
+        package: "tairix-test-optical-qemu-aarch64",
+        binary: "tairix-test-optical-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::OpticalRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, OPTICAL_COMMAND_LINE),
+            (OPTICAL_PASS_PREFIX, Duration::ZERO, "exit\n"),
+        ],
+        expect: Expect::Pass,
+    },
     // `plans/SOUND.md` SND7: the same vertical over QEMU's USB speaker
     // behind a `qemu-xhci` controller (`FsDisk::UsbAudioRootDisk`). The
     // kernel discovers the controller's PCI function, `devmgr` autoloads the
@@ -12267,13 +12327,14 @@ pub(crate) struct StoreSet {
     /// The application/service bundles the stream vertical plants: the shared
     /// set plus the test-only `tcpecho` fixture bundle.
     apps_with_tcpecho: &'static [AppStoreFile],
-    /// The application/service bundles the audio verticals plant: the shared
-    /// set plus the test-only `audiotone` fixture bundle.
-    apps_with_audiotone: &'static [AppStoreFile],
-    /// The signed driver bundles an audio vertical plants: the virtio sound
-    /// driver, or the USB audio pair, as its disk says — and no display or
-    /// input driver, to keep the UART console the serial script drives.
-    audio_drivers: &'static [AppStoreFile],
+    /// The application/service bundles a device vertical plants: the shared
+    /// set plus the test-only fixture bundle that drives the device its disk
+    /// attaches — `audiotone` for a sound card, `optical` for a disc.
+    device_apps: &'static [AppStoreFile],
+    /// The signed driver bundles a device vertical plants: the device's own,
+    /// as its disk says — and no display or input driver, to keep the UART
+    /// console the serial script drives.
+    device_drivers: &'static [AppStoreFile],
     /// The application/service bundles the ECN vertical plants: the stream
     /// vertical's `tcpecho`-augmented set plus a planted `system.conf` that
     /// turns `net.tcp.ecn` on stack-wide.
@@ -12396,7 +12457,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         dhcpv4: dhcp_net_apps,
         dhcpv6: dhcpv6_net_apps,
     } = net_config_stores(ctx, t, arch, profile)?;
-    let (apps_with_audiotone, audio_drivers) = audio_stores(ctx, t, arch, profile)?;
+    let (device_apps, device_drivers) = device_stores(ctx, t, arch, profile)?;
     Ok(StoreSet {
         apps,
         apps_with_memsoak,
@@ -12407,8 +12468,8 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         autoload_drivers,
         virtio_gpu_drivers,
         apps_with_tcpecho,
-        apps_with_audiotone,
-        audio_drivers,
+        device_apps,
+        device_drivers,
         apps_with_tcpecho_ecn,
         apps_with_tcpserve,
         net_only_drivers,
@@ -12530,14 +12591,15 @@ fn net_config_stores(
     })
 }
 
-/// The audio verticals' two extra store sets: the `audiotone` fixture bundle
-/// beside the shared application set, and the signed drivers for the sound
-/// card the disk's layout attaches. Empty for every other disk layout.
+/// A device vertical's two extra store sets: the fixture bundle that drives
+/// the device the disk's layout attaches, beside the shared application set,
+/// and the signed drivers for that device. Empty for every other disk
+/// layout.
 ///
 /// Its own function rather than two more arms inline, because
 /// [`stores_for`]'s job is to name one set per layout and a layout that
 /// needs two was making it a list rather than a table.
-fn audio_stores(
+fn device_stores(
     ctx: &Context,
     t: &QemuTest,
     arch: PieArch,
@@ -12554,12 +12616,44 @@ fn audio_stores(
         FsDisk::HdaAudioRootDisk => {
             super::image_drivers::hda_audio_driver_store_files(ctx, arch, profile)?
         }
+        FsDisk::OpticalRootDisk => {
+            return Ok((
+                super::image_apps::optical_store_files(ctx, arch, profile)?,
+                super::image_drivers::optical_driver_store_files(ctx, arch, profile)?,
+            ));
+        }
         _ => return Ok((EMPTY, EMPTY)),
     };
     Ok((
         super::image_apps::audio_store_files(ctx, arch, profile)?,
         drivers,
     ))
+}
+
+/// Put the RISC OS disc in a USB optical drive for the optical vertical, and
+/// change it for the second disc once the fixture has checked the first: each
+/// image is written beside the kernel binary, a stale one removed first so the
+/// drive never holds an earlier run's disc.
+///
+/// # Errors
+///
+/// A disc's image could not be replaced.
+fn optical_disc(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result<Spec, String> {
+    if t.fs_disk != FsDisk::OpticalRootDisk {
+        return Ok(spec);
+    }
+    let disc = |ext: &str, image: Vec<u8>| -> Result<PathBuf, String> {
+        let path = sidecar_path(kernel, t, replica, ext);
+        remove_stale_sidecar(t.package, "optical disc", &path)?;
+        std::fs::write(&path, image)
+            .map_err(|e| format!("test --qemu ({}): write {}: {e}", t.package, path.display()))?;
+        Ok(path)
+    };
+    let first = disc("riscos.iso", tairix_test_iso9660_image::riscos_disc())?;
+    let second = disc("second.iso", tairix_test_iso9660_image::second_disc())?;
+    Ok(spec
+        .with_optical_disc(&first)
+        .with_optical_disc_change(tairix_test_optical::SWAP_MARKER, &second))
 }
 
 /// Path of a per-run sidecar file for `t` — a planted backing image, or the
@@ -18667,6 +18761,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         | FsDisk::UsbAudioRootDisk
         | FsDisk::HdaAudioRootDisk
         | FsDisk::LifecycleAudioRootDisk
+        | FsDisk::OpticalRootDisk
         | FsDisk::RtcRootDisk => Some(net_root_fs_disk_image(t, stores)?),
     })
 }
@@ -18685,8 +18780,8 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         autoload_drivers,
         virtio_gpu_drivers,
         apps_with_tcpecho,
-        apps_with_audiotone,
-        audio_drivers,
+        device_apps,
+        device_drivers,
         apps_with_tcpecho_ecn,
         apps_with_tcpserve,
         net_only_drivers,
@@ -18705,14 +18800,11 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         FsDisk::HoverRootDisk => (autoload_drivers, apps_with_framestats, "hover-root.img"),
         FsDisk::SvgTextRootDisk => (autoload_drivers, apps_with_svgtext, "svgtext-root.img"),
         FsDisk::StreamRootDisk => (net_only_drivers, apps_with_tcpecho, "stream-root.img"),
-        FsDisk::AudioRootDisk => (audio_drivers, apps_with_audiotone, "audio-root.img"),
-        FsDisk::UsbAudioRootDisk => (audio_drivers, apps_with_audiotone, "usb-audio-root.img"),
-        FsDisk::HdaAudioRootDisk => (audio_drivers, apps_with_audiotone, "hda-audio-root.img"),
-        FsDisk::LifecycleAudioRootDisk => (
-            audio_drivers,
-            apps_with_audiotone,
-            "lifecycle-audio-root.img",
-        ),
+        FsDisk::AudioRootDisk => (device_drivers, device_apps, "audio-root.img"),
+        FsDisk::UsbAudioRootDisk => (device_drivers, device_apps, "usb-audio-root.img"),
+        FsDisk::HdaAudioRootDisk => (device_drivers, device_apps, "hda-audio-root.img"),
+        FsDisk::LifecycleAudioRootDisk => (device_drivers, device_apps, "lifecycle-audio-root.img"),
+        FsDisk::OpticalRootDisk => (device_drivers, device_apps, "optical-root.img"),
         FsDisk::EcnRootDisk => (net_only_drivers, apps_with_tcpecho_ecn, "ecn-root.img"),
         FsDisk::ListenRootDisk => (net_only_drivers, apps_with_tcpserve, "listen-root.img"),
         FsDisk::NetToolRootDisk => (net_only_drivers, apps, "net-tool-root.img"),
@@ -19406,6 +19498,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     spec = interrupt_controller_gates(spec, t.binary);
     spec = x86_64_topology_gates(spec, t.binary);
     spec = message_source_gates(spec, t.binary);
+    spec = optical_disc(t, kernel, replica, spec)?;
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
     spec = spec.with_display(t.display);
@@ -19699,13 +19792,13 @@ mod tests {
         BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
         DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES,
         LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL, LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER,
-        MEMSOAK_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL, RISCV64_TARGET, SCRIPTED_LIFECYCLE,
-        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, STARTUP_PLAYED_MARKER,
-        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
-        SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
-        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
-        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
-        VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
+        MEMSOAK_PASS_PREFIX, OPTICAL_COMMAND_LINE, OPTICAL_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL,
+        RISCV64_TARGET, SCRIPTED_LIFECYCLE, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
+        STARTUP_PLAYED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
+        SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX,
+        TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
+        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
+        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -21135,6 +21228,23 @@ mod tests {
     #[test]
     fn tcpecho_script_marker_matches_the_fixture_marker() {
         assert_eq!(TCPECHO_PASS_PREFIX, tairix_test_tcpecho::PASS_MARKER);
+    }
+
+    /// The optical vertical types the fixture's own command word and waits
+    /// for the pass line the fixture prints.
+    #[test]
+    fn optical_script_matches_the_fixture_vocabulary() {
+        assert_eq!(
+            OPTICAL_COMMAND_LINE.trim_end_matches('\n'),
+            tairix_test_optical::COMMAND
+        );
+        assert!(
+            OPTICAL_COMMAND_LINE.ends_with('\n'),
+            "the shell needs the return"
+        );
+        let pass = tairix_test_optical::pass_line();
+        assert!(pass.starts_with(OPTICAL_PASS_PREFIX), "{pass}");
+        assert!(!tairix_test_optical::swap_line().contains(OPTICAL_PASS_PREFIX));
     }
 
     /// The audio verticals' serial-script marker is exactly the `audiotone`

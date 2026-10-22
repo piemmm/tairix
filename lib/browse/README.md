@@ -287,16 +287,12 @@ can never diverge in navigation semantics, listing policy, or look.
   verbs. `paste_strategy(op, source, dest)` decides from the clipboard
   operation and the two items' `VolumeId`s (the 16-byte `fs_stat` volume id):
   a `Copy` streams, a `Cut` within one volume is a single `Rename`, a `Cut`
-  across volumes is `CopyThenDelete` — the one `mv`/`st_dev` decision.
-  `CopyCursor` walks a known-length source in fixed `COPY_CHUNK_LEN` steps,
-  yielding the next `CopyChunk` to transfer; the app reads/writes it and
-  reports the bytes carried with `advance`, so a large copy stays bounded and
-  interruptible with no unbounded buffer and no spin, and it `resume`s from a
-  persisted offset after a cancel or a preemption. It is fail closed:
-  advancing (or resuming) past the source length is `CopyError::Overrun`,
-  never a silent wrap. The engine does no I/O and the source is deleted only
-  after a cross-volume copy fully succeeds — the app performs every syscall
-  under the user's own identity, so the read-only picker never runs it.
+  across volumes is `CopyThenDelete` — the one `mv`/`st_dev` decision. Each
+  file is copied by the shared copy engine (`lib/fscopy`), its holes and
+  extended attributes with it. The model does no I/O and the source is deleted
+  only after a cross-volume copy fully succeeds — the app performs every
+  syscall under the user's own identity, so the read-only picker never runs
+  it.
 - **Recursive copy** (`execute::CopyWalk`, `plans/NEW-FILEMANAGER.md` FM7b):
   the model of *how* a whole tree is copied — the copy-side analogue of
   `delete::DeleteWalk`. Where a delete removes contents before their container,
@@ -305,10 +301,11 @@ can never diverge in navigation semantics, listing policy, or look.
   the walk from resolved `(source, dest, is_directory)` items (the app supplies
   each item's kind, which the path-only clipboard does not carry) and is **fail
   closed** — an empty set or a source/dest naming the root yields no walk.
-  `next_action` yields the next `CopyAction` — `MakeDir { dest }` (the app
-  `fs_mkdir`s it and reports `created`), `List { source }` (the app reads it and
-  reports its children with `expand`), or `CopyFile { source, dest }` (the app
-  streams the bytes with a `CopyCursor` and reports `copied_file`). It does no
+  `next_action` yields the next `CopyAction` — `MakeDir { source, dest }` (the
+  app `fs_mkdir`s it, gives it the source's attributes and reports `created`),
+  `List { source }` (the app reads it and reports its children with `expand`),
+  or `CopyFile { source, dest }` (the app copies it through the copy engine and
+  reports `copied_file`). It does no
   I/O, keeps its own explicit stack (so a deep tree cannot overflow the call
   stack), stays within the shared `MAX_COPY_DEPTH` (a deeper tree is
   `CopyWalkError::TooDeep`, never descended without limit — the same
@@ -337,7 +334,7 @@ can never diverge in navigation semantics, listing policy, or look.
 - **Delete execution** (`delete::DeleteWalk`, `plans/NEW-FILEMANAGER.md` FM7b):
   the model of *how* a `DeletePlan` is carried out — the depth-first traversal
   that removes a directory's contents before the directory itself, the
-  delete-side analogue of `execute::CopyCursor`. `DeleteWalk::from_plan` starts
+  delete-side analogue of `execute::CopyWalk`. `DeleteWalk::from_plan` starts
   the walk; `next_action` yields the next `DeleteAction` — `List(path)` (the app
   reads that directory and reports its children with `expand`, so they are
   removed first) or `Remove { path, is_directory }` (the app unlinks the leaf or

@@ -144,6 +144,21 @@ is, so it declares it:
   | `SolidState` | 5 s   | 2 s   | 10 s  | 10 s  | 32 MiB/s   | 2       | 32 (parallel) | 30 s |
   | `Virtual`    | 10 s  | 10 s  | 10 s  | 10 s  | 8 MiB/s    | 2       | 16 (parallel) | ≈30 s |
 
+- The record also says what **form** the medium takes (`BlkForm`:
+  `Unspecified`, or `OpticalDisc` for a disc in a multimedia drive), which is
+  how a consumer tells a disc from a disk: the volume manager attaches a disc
+  whole, and the desktop draws it with the optical-disc icon.
+- A disc's **layout** — where its last session starts and the last block it
+  recorded, as far as the drive can say (`Block::disc_layout`,
+  `DiscLayout`) — rides the geometry completion beside its size
+  (`BlkCompletion::disc_layout`), validated against the block count on
+  decode — a layout past the device's end, or a last session starting after
+  the last block recorded, reads as none — so a relaying layer carries it as
+  faithfully as the geometry. A geometry frame bearing a flag this build does
+  not define, or layout fields in a frame that declares no layout, is
+  decoded as a fatal completion rather than read as partly meant. The
+  ISO 9660 and UDF readers start from the last session, and UDF finds a
+  write-once disc's virtual allocation table at its last recorded block.
 - The medium travels to the consumer in the **geometry completion**
   (`BlkCompletion::medium`) as one 8-byte record (`BlkMedium::encode`) — the
   same record the mount table (`MountRecord::medium`) and the hardware tree
@@ -204,7 +219,16 @@ geometry query whose binding is not the current publication's as
 card's blocks. A driver that publishes once uses the zero binding; one that
 re-publishes draws each binding from the monotonic clock, which no two
 publications on the machine share — not even across a reloaded driver. The
-retracted node also revokes the grants consumers inherited through it.
+retracted node also revokes the grants consumers inherited through it, and its
+retraction tells the kernel's volume service, which withdraws the volume that
+medium was attached as even though the unit's endpoint lives on; the next
+medium is attached afresh under its own binding, through the data window its
+own publication conferred. The service marks the retracted publication's
+device slot — the endpoint and that window — rather than the volumes it can
+see, so a volume an attach or a recovery was still building over it is
+withdrawn the moment that operation lets go, however the two raced, and a new
+attach naming the retracted window is refused `Errno::Stale` before its client
+is asked anything.
 
 ## What a device can promise a background consumer
 
@@ -859,7 +883,8 @@ would not answer its own reset — so the unit's health rides it out in its grac
 window rather than failing it at once.
 
 Per logical unit (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS, exactly one for
-CBI; up to 16) the driver runs `INQUIRY` (non-disk types are skipped), then
+CBI; up to 16) the driver runs `INQUIRY` (a direct-access disk or a multimedia
+drive is served, any other type skipped), then
 brings the unit up on its own one-shot timers inside the serve loop, so one disk
 spinning up never holds back its siblings:
 
@@ -885,6 +910,19 @@ spinning up never holds back its siblings:
   before any byte reaches the device), not merely reported. A unit ready to a
   test whose geometry or write policy cannot be read is re-tried within its
   ready budget, then given up on.
+- **Optical drives.** A multimedia unit (peripheral type `05h`, over BOT, UAS,
+  or an ATAPI drive's 12-byte packets, `08:02:50`) serves its disc as an
+  `OpticalDisc` and asks the disc what it is rather than probing a disk's
+  pages: GET CONFIGURATION's Random Writable feature decides whether it is
+  written, READ TOC format 1 gives the last session's start, and READ DISC
+  INFORMATION and READ TRACK INFORMATION its last recorded block. A drive that
+  refuses any of these, or breaks the exchange of one (which ends the
+  queries), reads as a pressed, single-session disc; a disc not yet ready, or
+  that left or changed, fails the bring-up so it is read again, and another
+  unit attention is asked past once. A session starts within what the disc
+  recorded, and a last recorded address outside its own track is not
+  believed. The mode page comes from MODE SENSE(10). MEDIUM ERROR, BLANK
+  CHECK and HARDWARE ERROR fail the one request, never the unit.
 - **Empty and rejected units.** A unit with no medium — a card reader's empty
   slot — is present, not failed: it is tested for a medium every two seconds
   and published the moment one arrives. A removable unit whose medium was
@@ -892,7 +930,12 @@ spinning up never holds back its siblings:
   a fixed one is refused. A device none of whose units answers INQUIRY as a
   disk fails its bring-up.
 
-A media command the unit answers with a unit attention is sent once more. One
+A media command the unit answers with a unit attention is sent once more; one
+answered RECOVERED ERROR was carried out, and ABORTED COMMAND or a check
+condition naming no cause is answered reissuably. A reset attention on a unit
+whose medium can leave is read as a possible change of medium unless a reset
+this driver's transport ran — for any command, a probe or disc query included —
+is still owed. One
 it answers "coming ready" is held (see above) while the unit is tested on its
 timer: its endpoint leaves the serve set, so the calls queued behind it wait in
 the kernel rather than waking the loop. One it answers with no medium, or a
@@ -915,9 +958,14 @@ answered reissuably while the unit is `Recovering` — and only a unit that
 stays unwell past the window is failed closed to its consumers, while the
 other LUNs and every other mount keep running (`plans/FIX-IO.md` IO3). A
 hot-unplug surfaces as the URB endpoint vanishing: the driver retracts its
-LUN nodes and exits cleanly so a re-plug re-enumerates and reloads it. The
-engine, descriptor reader, and block service are host-proven over scripted
-doubles; the live path is Pi 4 metal acceptance (QEMU models no Pi USB).
+LUN nodes and exits cleanly so a re-plug re-enumerates and reloads it. A
+serving removable unit is tested every two seconds (`MEDIA_POLL_NS`), so a disc
+ejected while nothing reads it is retracted all the same. The engine,
+descriptor reader, and block service are host-proven over scripted doubles;
+the USB optical vertical (`tairix-test-optical-qemu-aarch64`) drives a QEMU
+`usb-bot` + `scsi-cd` drive on its xHCI controller end to end — changing the
+disc mid-run, so the second disc is read back through a fresh publication of
+the unit — and the rest of the live path is Pi 4 metal acceptance.
 
 ### Volume manager (automount policy) — `drivers/storage/volmgr`
 

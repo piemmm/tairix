@@ -153,6 +153,11 @@ impl Path {
     }
 }
 
+/// Whether `name` is a component [`Path::parse`] admits.
+pub(crate) fn is_component(name: &str) -> bool {
+    validate_component(name).is_ok()
+}
+
 /// Validate a single path component against the [`Path`] invariants.
 fn validate_component(name: &str) -> Result<(), VfsError> {
     if name == "." || name == ".." {

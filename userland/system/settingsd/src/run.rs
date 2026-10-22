@@ -79,10 +79,7 @@ mod program {
 
     /// A zeroed buffer of `len` bytes, or `None` when the heap cannot hold it.
     fn buffer(len: usize) -> Option<Vec<u8>> {
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(len).ok()?;
-        bytes.resize(len, 0);
-        Some(bytes)
+        tairix_util::fallible::filled(len, 0)
     }
 
     /// Serve calls until the rendezvous fails, returning the exit code.

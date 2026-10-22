@@ -4,7 +4,7 @@ cp — copiar archivos y directorios
 
 ## SYNOPSIS
 
-`cp [-finrRvT] [-t dir] [--] source... dest`
+`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -20,10 +20,20 @@ archivo de destino existente se sobrescribe por defecto, se omite con
 `-n` y se pregunta por la salida de error estándar con `-i` (una
 pregunta rechazada omite esa copia sin error; una respuesta ilegible
 nunca se considera consentimiento).
+Un destino que es el propio archivo de origen —el mismo nombre, otro
+nombre suyo o un enlace a él— se rechaza por ser el mismo archivo y
+queda como estaba.
 
 El primer fallo detiene la ejecución antes de cualquier operando
 posterior. `--` termina el análisis de opciones: cada argumento
 posterior es una ruta.
+
+Cada copia lleva los atributos extendidos del origen —un tipo de archivo
+de RISC OS, el tipo y el creador de un Mac— allí donde el destino puede
+guardarlos, y conserva como huecos los huecos de un archivo disperso. Los
+atributos que un destino no puede guardar se notifican en un único aviso al
+terminar la ejecución, y en un registro `omission` en el flujo de
+información estándar; con `--preserve=xattr` esa copia falla en su lugar.
 
 ## OPTIONS
 
@@ -47,6 +57,14 @@ posterior es una ruta.
 - `--preserve=links` — dos fuentes que nombran un mismo nodo obtienen dos
   nombres en el destino en lugar de dos copias, de modo que la copia no
   duplica el almacenamiento en silencio.
+- `--preserve=xattr` — todos los atributos extendidos deben copiarse: una
+  copia cuyo destino no pueda guardar uno falla y lo nombra.
+  `--preserve=links,xattr` pide ambas cosas.
+- `--no-preserve=xattr` — no copiar ningún atributo extendido. También se
+  aceptan `mode`, `ownership` y `timestamps`, que de por sí no se conservan.
+- `--sparse=WHEN` — cómo se copia un archivo disperso: `auto`, el valor
+  predeterminado, conserva sus huecos; `always` además deja sin escribir cada
+  bloque de ceros que almacena; `never` escribe cada byte.
 - `-d` — `-P` y `--preserve=links` juntas, como en la herramienta GNU.
 - `-v, --verbose` — informar de cada copia como `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copiar cada origen dentro de

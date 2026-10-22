@@ -7,15 +7,15 @@
 
 use crate::bigdir::{BigDir, DirStore, BIG_DIR_GRAIN};
 use crate::dir::{FixedDir, FixedFormat, NEW_DIR_SIZE, NEW_DIR_SIZE_U32};
-use crate::disc::{
-    boot_block_checksum, DiscRecord, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE, DISC_RECORD_IN_BOOT_BLOCK,
-    DISC_RECORD_SIZE, FRAG_BAD, FRAG_ROOT,
-};
-use crate::newmap::{bits_set, bits_set_field, zone_check, MAX_ZONE_BYTES};
+use crate::newmap::{bits_set, bits_set_field, MAX_ZONE_BYTES};
 use crate::oldmap::{OldMap, OLD_SECTOR_SIZE};
-use crate::volume::Volume;
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
+use tairix_bytedev::ByteDevice;
+use tairix_fsprobe::adfs::{
+    boot_block_checksum, zone_check, DiscRecord, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE,
+    DISC_RECORD_IN_BOOT_BLOCK, DISC_RECORD_SIZE, FRAG_BAD, FRAG_ROOT,
+};
 
 /// Disc id stamped into freshly formatted volumes.
 const FORMAT_DISC_ID: u16 = 0x5253; // "RS"
@@ -199,7 +199,7 @@ pub(crate) fn map_coverage_bits(record: &DiscRecord) -> u64 {
 /// while formatting (the root's location is known before the map is
 /// mountable).
 struct VolumeWindow<'a, B: Block> {
-    volume: &'a mut Volume<B>,
+    volume: &'a mut ByteDevice<B>,
     base: u64,
     len: u32,
 }
@@ -209,24 +209,24 @@ impl<B: Block> DirStore for VolumeWindow<'_, B> {
         if u64::from(offset) + buf.len() as u64 > u64::from(self.len) {
             return Err(DriverError::BadMagic);
         }
-        self.volume.read_bytes(self.base + u64::from(offset), buf)
+        self.volume.read(self.base + u64::from(offset), buf)
     }
 
     fn write_at(&mut self, offset: u32, data: &[u8]) -> Result<(), DriverError> {
         if u64::from(offset) + data.len() as u64 > u64::from(self.len) {
             return Err(DriverError::BadMagic);
         }
-        self.volume.write_bytes(self.base + u64::from(offset), data)
+        self.volume.write(self.base + u64::from(offset), data)
     }
 }
 
 /// Format `volume` as an old-map variant (S/M/L/D).
 fn format_old_map<B: Block>(
-    volume: &mut Volume<B>,
+    volume: &mut ByteDevice<B>,
     variant: AdfsVariant,
 ) -> Result<(), DriverError> {
     let size = variant.fixed_size().ok_or(DriverError::Unsupported)?;
-    if size > volume.device_bytes() {
+    if size > volume.capacity() {
         return Err(DriverError::NoSpace);
     }
     // A floppy's sector count is far below `u32`.
@@ -239,19 +239,19 @@ fn format_old_map<B: Block>(
     let root_sectors = u32::try_from(format.size() as u64 / OLD_SECTOR_SIZE).unwrap_or(0);
     // Zero the gap between the map and the root (a D-format volume is
     // recognised by the zero bytes at the start of sector 2).
-    volume.zero_bytes(2 * OLD_SECTOR_SIZE, root_offset - 2 * OLD_SECTOR_SIZE)?;
+    volume.zero(2 * OLD_SECTOR_SIZE, root_offset - 2 * OLD_SECTOR_SIZE)?;
     let mut map = OldMap::initialise(disc_sectors, root_sector + root_sectors, FORMAT_DISC_ID);
     map.store(volume)?;
     let root = FixedDir::initialise(format, *b"Nick", b"$", root_sector);
-    volume.write_bytes(root_offset, &root.data[..format.size()])
+    volume.write(root_offset, &root.data[..format.size()])
 }
 
 /// Format `volume` as a new-map variant (E/E+/F/F+/hard disc).
 fn format_new_map<B: Block>(
-    volume: &mut Volume<B>,
+    volume: &mut ByteDevice<B>,
     variant: AdfsVariant,
 ) -> Result<(), DriverError> {
-    let mut record = new_map_record(variant, volume.device_bytes())?;
+    let mut record = new_map_record(variant, volume.capacity())?;
     record.disc_id = FORMAT_DISC_ID;
     let map_offset = record.map_offset();
     let map_bytes = record.map_size();
@@ -308,7 +308,7 @@ fn format_new_map<B: Block>(
     };
     write_fresh_map(volume, &record, &layout)?;
     // Zero the reserved second map copy area.
-    volume.zero_bytes(map_offset + map_bytes, map_bytes)?;
+    volume.zero(map_offset + map_bytes, map_bytes)?;
     if record.nzones > 1 {
         write_boot_block(volume, &record)?;
     }
@@ -321,7 +321,7 @@ fn format_new_map<B: Block>(
         BigDir::initialise(&mut window, root_size, b"$", record.root)?;
     } else {
         let root = FixedDir::initialise(FixedFormat::New, *b"Nick", b"$", record.root);
-        volume.write_bytes(root_offset, &root.data[..NEW_DIR_SIZE])?;
+        volume.write(root_offset, &root.data[..NEW_DIR_SIZE])?;
     }
     Ok(())
 }
@@ -343,7 +343,7 @@ struct MapLayout {
 /// extents, one free fragment per gap, and the trailing defect
 /// fragment covering map bits past the end of the disc.
 fn write_fresh_map<B: Block>(
-    volume: &mut Volume<B>,
+    volume: &mut ByteDevice<B>,
     record: &DiscRecord,
     layout: &MapLayout,
 ) -> Result<(), DriverError> {
@@ -458,7 +458,7 @@ fn write_fresh_map<B: Block>(
         }
         buf[0] = zone_check(&buf[..sector]);
         let at = record.map_offset() + zone * record.sector_size();
-        volume.write_bytes(at, &buf[..sector])?;
+        volume.write(at, &buf[..sector])?;
     }
     Ok(())
 }
@@ -486,14 +486,14 @@ fn link_free(buf: &mut [u8; MAX_ZONE_BYTES], record: &DiscRecord, prev: Option<u
 
 /// Write the checksummed boot block embedding the disc record.
 fn write_boot_block<B: Block>(
-    volume: &mut Volume<B>,
+    volume: &mut ByteDevice<B>,
     record: &DiscRecord,
 ) -> Result<(), DriverError> {
     let mut block = [0u8; BOOT_BLOCK_SIZE];
     block[DISC_RECORD_IN_BOOT_BLOCK..DISC_RECORD_IN_BOOT_BLOCK + DISC_RECORD_SIZE]
         .copy_from_slice(&record.encode());
     block[BOOT_BLOCK_SIZE - 1] = boot_block_checksum(&block);
-    volume.write_bytes(BOOT_BLOCK_OFFSET, &block)
+    volume.write(BOOT_BLOCK_OFFSET, &block)
 }
 
 /// Format `volume` as `variant`, laying out an empty, valid filesystem.
@@ -503,7 +503,7 @@ fn write_boot_block<B: Block>(
 /// * [`DriverError::NoSpace`] if the device is too small.
 /// * [`DriverError::DeviceFault`] on an unrecoverable block access.
 pub(crate) fn format_volume<B: Block>(
-    volume: &mut Volume<B>,
+    volume: &mut ByteDevice<B>,
     variant: AdfsVariant,
 ) -> Result<(), DriverError> {
     if variant.is_old_map() {

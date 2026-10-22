@@ -10,21 +10,26 @@
 
 use alloc::string::String;
 use tairix_abi::{Errno, RenameFlags};
+pub use tairix_fscopy::{AttributeStore, PathFiles};
 
 /// What kind of object a path or directory entry is, as far as `mv` cares.
 ///
 /// The distinction `mv` needs only matters on the cross-device fallback: a
 /// directory is reproduced by [`FileSystem::mkdir`] and a recursive descent,
-/// while everything else — a regular file, a symbolic link followed to its
-/// target, a device node — is copied as a stream of bytes. An in-filesystem
-/// rename moves either kind atomically without caring which it is.
+/// a symbolic link is reproduced as a link, and everything else is copied as
+/// a stream of bytes. An in-filesystem rename moves every kind atomically
+/// without caring which it is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntryKind {
     /// A directory, whose entries the cross-device fallback reproduces under
     /// the destination before removing the source.
     Directory,
-    /// Any non-directory object, copied as a byte stream on the fallback.
+    /// Any other non-link object, copied as a byte stream on the fallback.
     File,
+    /// A symbolic link, moved as itself: the fallback stores the same target
+    /// in a link at the destination and unlinks the source link, never
+    /// touching what it names.
+    Symlink,
 }
 
 /// The result of a successful [`FileSystem::rename`].
@@ -62,19 +67,18 @@ pub struct Entry {
 /// The client first asks [`kind`](FileSystem::kind) what a source is, then
 /// tries [`rename`](FileSystem::rename). A [`RenameOutcome::Renamed`] is the
 /// whole move. A [`RenameOutcome::CrossDevice`] drives the fallback: a
-/// non-directory source is streamed through [`read`](FileSystem::read) into a
-/// destination created with [`create`](FileSystem::create) and filled with
-/// [`write`](FileSystem::write); a directory source is reproduced with
+/// non-directory source is copied, through the files it reaches by path
+/// ([`PathFiles`]), into a destination created with
+/// [`create`](FileSystem::create); a directory source is reproduced with
 /// [`mkdir`](FileSystem::mkdir) and a recursive walk
 /// ([`read_dir`](FileSystem::read_dir)); then the source is removed depth-first
 /// with [`remove_file`](FileSystem::remove_file) and
 /// [`remove_dir`](FileSystem::remove_dir).
-pub trait FileSystem {
-    /// Return the [`EntryKind`] of `path`.
-    ///
-    /// A final symbolic link is followed: a link to a regular file reports
-    /// [`EntryKind::File`]. A missing path reports [`Errno::NotFound`], which
-    /// the client treats as "absent" when probing a destination.
+pub trait FileSystem: AttributeStore + PathFiles {
+    /// Return the [`EntryKind`] of the object `path` names itself: a final
+    /// symbolic link reports [`EntryKind::Symlink`]. A missing path reports
+    /// [`Errno::NotFound`], which the client treats as "absent" when probing a
+    /// destination.
     ///
     /// # Errors
     ///
@@ -82,6 +86,30 @@ pub trait FileSystem {
     /// missing path or [`Errno::PermissionDenied`] when the caller may not
     /// reach it.
     fn kind(&self, path: &str) -> Result<EntryKind, Errno>;
+
+    /// Return the [`EntryKind`] of what `path` resolves to, a final symbolic
+    /// link followed: whether a destination is a directory to move into.
+    ///
+    /// # Errors
+    ///
+    /// As [`kind`](FileSystem::kind); a dangling link is
+    /// [`Errno::NotFound`].
+    fn resolved_kind(&self, path: &str) -> Result<EntryKind, Errno>;
+
+    /// The target the symbolic link at `path` stores, exactly as stored.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises while reading the link.
+    fn read_link(&self, path: &str) -> Result<String, Errno>;
+
+    /// Create the symbolic link `link` storing `target` verbatim.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
+    /// taken name, [`Errno::NotSupported`] on a format that stores no links.
+    fn symlink(&self, target: &str, link: &str) -> Result<(), Errno>;
 
     /// Rename `source` onto `dest`, replacing an existing `dest` of a
     /// compatible kind unless `flags` refuses the replacement.
@@ -97,17 +125,6 @@ pub trait FileSystem {
     /// for an unwritable destination directory, or [`Errno::AlreadyExists`]
     /// for an occupied one under [`RenameFlags::NO_REPLACE`].
     fn rename(&self, source: &str, dest: &str, flags: RenameFlags) -> Result<RenameOutcome, Errno>;
-
-    /// Read up to `buf.len()` bytes of `path` starting at `offset`, returning
-    /// the number of bytes written into `buf` (`0` at end-of-file).
-    ///
-    /// An implementation must return at most `buf.len()` bytes and must report
-    /// a short read (fewer than requested) only at end-of-file.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises while reading the file.
-    fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
 
     /// Return the entry at position `index` in the directory `path`, or
     /// [`None`] once `index` is past the last entry.
@@ -137,13 +154,6 @@ pub trait FileSystem {
     ///
     /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`].
     fn create(&self, path: &str) -> Result<(), Errno>;
-
-    /// Write every byte of `bytes` to `path` starting at `offset`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises while writing.
-    fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno>;
 
     /// Remove the non-directory object at `path` (unlink one link).
     ///

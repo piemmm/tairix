@@ -12,10 +12,13 @@
 //! Reference: the RISC OS PRM `FileCore` formats chapter and the Linux
 //! `fs/adfs/map.c` reference implementation.
 
-use crate::disc::{DiscRecord, DISC_RECORD_SIZE, DISC_RECORD_SIZE_U32, FRAG_ROOT};
-use crate::volume::Volume;
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
+use tairix_bytedev::ByteDevice;
+use tairix_fsprobe::adfs::{
+    boot_block_checksum, zone_check, DiscRecord, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE,
+    DISC_RECORD_IN_BOOT_BLOCK, DISC_RECORD_SIZE, DISC_RECORD_SIZE_U32, FRAG_ROOT,
+};
 
 /// Largest map sector (zone) size: `log2secsize` is at most 10.
 pub const MAX_ZONE_BYTES: usize = 1024;
@@ -222,11 +225,14 @@ impl NewMap {
     ///   the device, a zone check fails, or the cross-check bytes do
     ///   not XOR to `0xFF`.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
-    pub fn open<B: Block>(volume: &mut Volume<B>, record: DiscRecord) -> Result<Self, DriverError> {
+    pub fn open<B: Block>(
+        volume: &mut ByteDevice<B>,
+        record: DiscRecord,
+    ) -> Result<Self, DriverError> {
         record.validate()?;
         if usize::from(record.nzones) > MAX_ZONES
             || record.sector_size() > MAX_ZONE_BYTES as u64
-            || record.disc_size > volume.device_bytes()
+            || record.disc_size > volume.capacity()
         {
             return Err(DriverError::BadMagic);
         }
@@ -275,7 +281,7 @@ impl NewMap {
     /// address and remaining length from that offset.
     fn lookup_run<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         frag_id: u32,
         mut map_offset: u64,
     ) -> Result<FragmentRun, DriverError> {
@@ -346,7 +352,7 @@ impl NewMap {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     pub fn locate<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         indaddr: u32,
         byte_offset: u64,
     ) -> Result<(u64, u64), DriverError> {
@@ -370,7 +376,7 @@ impl NewMap {
     /// Total bytes of map allocation carried by fragment id `frag_id`.
     pub fn object_allocated_bytes<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         frag_id: u32,
     ) -> Result<u64, DriverError> {
         let mut bits = 0u64;
@@ -387,7 +393,7 @@ impl NewMap {
     }
 
     /// Total free bytes on the volume.
-    pub fn free_bytes<B: Block>(&self, volume: &mut Volume<B>) -> Result<u64, DriverError> {
+    pub fn free_bytes<B: Block>(&self, volume: &mut ByteDevice<B>) -> Result<u64, DriverError> {
         let mut bits = 0u64;
         for zone in 0..u32::from(self.record.nzones) {
             let staged = self.load_zone(volume, zone)?;
@@ -466,7 +472,7 @@ impl NewMap {
     /// allocated bit carries the id.
     fn take_fragments<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         frag_id: u32,
         home: u32,
         first_min_bit: u32,
@@ -521,7 +527,7 @@ impl NewMap {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block access.
     pub fn extend_object<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         frag_id: u32,
         new_bytes: u64,
     ) -> Result<bool, DriverError> {
@@ -615,7 +621,7 @@ impl NewMap {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block access.
     pub fn shrink_object<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         frag_id: u32,
         new_bytes: u64,
     ) -> Result<(), DriverError> {
@@ -725,7 +731,7 @@ impl NewMap {
     /// * [`DriverError::BadMagic`] if zone 0 no longer validates.
     pub fn set_root_size<B: Block>(
         &mut self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         boot_block: bool,
         new_size: u32,
     ) -> Result<(), DriverError> {
@@ -735,15 +741,12 @@ impl NewMap {
         staged.bytes[4..4 + DISC_RECORD_SIZE].copy_from_slice(&encoded);
         self.store_zone(volume, 0, &mut staged)?;
         if boot_block {
-            use crate::disc::{
-                boot_block_checksum, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE, DISC_RECORD_IN_BOOT_BLOCK,
-            };
             let mut block = [0u8; BOOT_BLOCK_SIZE];
-            volume.read_bytes(BOOT_BLOCK_OFFSET, &mut block)?;
+            volume.read(BOOT_BLOCK_OFFSET, &mut block)?;
             block[DISC_RECORD_IN_BOOT_BLOCK..DISC_RECORD_IN_BOOT_BLOCK + DISC_RECORD_SIZE]
                 .copy_from_slice(&encoded);
             block[BOOT_BLOCK_SIZE - 1] = boot_block_checksum(&block);
-            volume.write_bytes(BOOT_BLOCK_OFFSET, &block)?;
+            volume.write(BOOT_BLOCK_OFFSET, &block)?;
         }
         Ok(())
     }
@@ -757,7 +760,7 @@ impl NewMap {
     ///   the underlying zone reads.
     fn unused_id_in_zone<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         zone: u32,
     ) -> Result<Option<u32>, DriverError> {
         let ids_per_zone = self.record.ids_per_zone();
@@ -800,7 +803,7 @@ impl NewMap {
     ///   the underlying zone access.
     pub fn allocate_object<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         bytes: u64,
     ) -> Result<u32, DriverError> {
         let need = self.bits_for(bytes);
@@ -835,7 +838,7 @@ impl NewMap {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block access.
     pub fn free_object<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         frag_id: u32,
     ) -> Result<(), DriverError> {
         let mut freed_any = false;
@@ -944,12 +947,16 @@ impl NewMap {
     }
 
     /// Load and verify zone `zone` from the map area of `volume`.
-    fn load_zone<B: Block>(&self, volume: &mut Volume<B>, zone: u32) -> Result<Zone, DriverError> {
+    fn load_zone<B: Block>(
+        &self,
+        volume: &mut ByteDevice<B>,
+        zone: u32,
+    ) -> Result<Zone, DriverError> {
         // The sector size was validated against `MAX_ZONE_BYTES`.
         let sector = usize::try_from(self.record.sector_size()).unwrap_or(MAX_ZONE_BYTES);
         let mut bytes = [0u8; MAX_ZONE_BYTES];
         let offset = self.record.map_offset() + u64::from(zone) * self.record.sector_size();
-        volume.read_bytes(offset, &mut bytes[..sector])?;
+        volume.read(offset, &mut bytes[..sector])?;
         let (start_bit, end_bit, start_block) = self.zone_geometry(zone);
         let staged = Zone {
             bytes,
@@ -967,37 +974,12 @@ impl NewMap {
     /// Write zone `zone` back, refreshing its check byte.
     fn store_zone<B: Block>(
         &self,
-        volume: &mut Volume<B>,
+        volume: &mut ByteDevice<B>,
         zone: u32,
         staged: &mut Zone,
     ) -> Result<(), DriverError> {
         staged.bytes[0] = zone_check(&staged.bytes[..staged.len]);
         let offset = self.record.map_offset() + u64::from(zone) * self.record.sector_size();
-        volume.write_bytes(offset, &staged.bytes[..staged.len])
+        volume.write(offset, &staged.bytes[..staged.len])
     }
-}
-
-/// The zone check byte over one map sector (`ZoneCheck`), the 4-lane
-/// carry-propagating byte sum `FileCore` defines; byte 0 (the check byte
-/// itself) is excluded from the sum.
-pub(crate) fn zone_check(map: &[u8]) -> u8 {
-    let (mut v0, mut v1, mut v2, mut v3) = (0u32, 0u32, 0u32, 0u32);
-    let mut i = map.len() - 4;
-    while i > 0 {
-        v0 += u32::from(map[i]) + (v3 >> 8);
-        v3 &= 0xFF;
-        v1 += u32::from(map[i + 1]) + (v0 >> 8);
-        v0 &= 0xFF;
-        v2 += u32::from(map[i + 2]) + (v1 >> 8);
-        v1 &= 0xFF;
-        v3 += u32::from(map[i + 3]) + (v2 >> 8);
-        v2 &= 0xFF;
-        i -= 4;
-    }
-    v0 += v3 >> 8;
-    v1 += u32::from(map[1]) + (v0 >> 8);
-    v2 += u32::from(map[2]) + (v1 >> 8);
-    v3 += u32::from(map[3]) + (v2 >> 8);
-    // Masked to a single byte, so the narrowing never truncates.
-    u8::try_from((v0 ^ v1 ^ v2 ^ v3) & 0xFF).unwrap_or(0)
 }

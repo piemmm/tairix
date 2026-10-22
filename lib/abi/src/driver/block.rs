@@ -34,12 +34,39 @@ impl<B: Block + ?Sized> BlockClass for B {
     }
 }
 
+/// Where an optical disc's newest structures lie, as its drive reports them:
+/// what a filesystem recorded across several sessions, or written once in
+/// increments, is found from here rather than from the start of the disc.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DiscLayout {
+    /// The first logical block of the last session's first track: where a
+    /// multisession disc's current volume descriptors are counted from. Zero
+    /// for a disc of one session.
+    pub last_session_start: u64,
+    /// The last logical block recorded, where a write-once disc keeps its
+    /// newest table (UDF's virtual allocation table), or `None` when the
+    /// drive cannot say.
+    pub last_recorded: Option<u64>,
+}
+
+/// Smallest logical block a device may present.
+pub const MIN_BLOCK_SIZE: u32 = 512;
+
+/// Largest logical block a device may present: a validation bound on
+/// untrusted geometry, not a capacity. No Tier-1 device presents a larger
+/// one, and every staging buffer in the storage stack is sized to it.
+pub const MAX_BLOCK_SIZE: u32 = 4096;
+
+/// [`MAX_BLOCK_SIZE`] as a buffer length: what one block's staging buffer is
+/// sized to.
+pub const MAX_BLOCK_LEN: usize = MAX_BLOCK_SIZE as usize;
+
 /// Geometry of a block device.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct BlockGeometry {
-    /// Size of a single logical block, in bytes. Must be a power of
-    /// two; common values are 512 and 4096.
+    /// Size of a single logical block, in bytes: a power of two in
+    /// [`MIN_BLOCK_SIZE`]`..=`[`MAX_BLOCK_SIZE`].
     pub block_size: u32,
     /// Total number of logical blocks. The device's byte capacity is
     /// `block_size as u64 * block_count`.
@@ -431,6 +458,28 @@ pub trait Block {
         None
     }
 
+    /// Where the optical disc this device reads keeps its newest structures:
+    /// the start of its last session and its last recorded block.
+    ///
+    /// `None` for a device that is no optical drive, or reads a disc of one
+    /// session it cannot say more of. A device that *wraps* another forwards
+    /// the inner answer while it addresses the same blocks — a window that
+    /// starts part-way into the disc addresses different ones and answers
+    /// `None` — so a filesystem is never sent to a session through a window
+    /// that does not hold it.
+    ///
+    /// Reporting the layout is a pure observation of what the drive read when
+    /// the disc arrived: it touches no hardware and cannot fail.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        None
+    }
+
     /// This device's own short name, for a consumer that reports the device
     /// to a reader.
     ///
@@ -575,6 +624,10 @@ impl<B: Block + ?Sized> Block for &mut B {
 
     fn medium(&self) -> Option<BlkMedium> {
         (**self).medium()
+    }
+
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        (**self).disc_layout()
     }
 
     fn device_name(&self) -> BlkDeviceName {

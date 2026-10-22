@@ -175,6 +175,8 @@ extern "C" {
 #define TAIRIX_SYS_CONSOLE_DAMAGE 148u
 #define TAIRIX_SYS_CONSOLE_RELINQUISH 149u
 #define TAIRIX_SYS_SHARE_MAP 150u
+#define TAIRIX_SYS_FS_SEEK_REGION 151u
+#define TAIRIX_SYS_FS_PUNCH 152u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -325,6 +327,12 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_REALPATH_MODE_EXISTING 0u
 #define TAIRIX_REALPATH_MODE_FINAL 1u
 #define TAIRIX_REALPATH_MODE_MISSING 2u
+
+/* fs_seek_region() region kind (uint32_t): DATA finds the next byte the volume
+* stores, HOLE the next byte of a hole; a file's end always begins one. Any
+* other value is rejected with TAIRIX_E_OUT_OF_RANGE. */
+#define TAIRIX_SEEK_REGION_DATA 0u
+#define TAIRIX_SEEK_REGION_HOLE 1u
 
 /* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the
 * owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode
@@ -702,6 +710,8 @@ uint64_t tairix_sys_fd_redeem_location(uint64_t a0, void * a1, uintptr_t a2, voi
 uint64_t tairix_sys_console_damage(void * a0, uintptr_t a1);
 int32_t tairix_sys_console_relinquish(void);
 uint64_t tairix_sys_share_map(void * a0);
+uint64_t tairix_sys_fs_seek_region(uint32_t a0, uint64_t a1, uint32_t a2);
+int32_t tairix_sys_fs_punch(uint32_t a0, uint64_t a1, uint64_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

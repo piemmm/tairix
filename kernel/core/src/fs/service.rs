@@ -33,7 +33,7 @@ use tairix_abi::sysinfo::{
 use tairix_abi::time::Time64;
 use tairix_abi::{
     CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
-    RenameFlags, UnlinkFlags,
+    RenameFlags, SeekRegion, UnlinkFlags,
 };
 use zeroize::Zeroize;
 
@@ -455,6 +455,46 @@ pub trait FilesystemService: Send + Sync {
         path: &str,
         size: u64,
     ) -> Result<(), Errno>;
+
+    /// Where the next region of `region`'s kind begins at or after `offset`
+    /// of the regular file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NoData`] when none does — the offset is at or past the end,
+    /// or only holes follow it — [`Errno::IsADirectory`] for a directory,
+    /// else the stable [`Errno`] for the VFS refusal. The default fails
+    /// closed with [`Errno::NotImplemented`].
+    fn seek_region(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _offset: u64,
+        _region: SeekRegion,
+    ) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Punch a hole of `len` bytes at `offset` in the regular file at `path`:
+    /// the range reads as zeros and its storage is released, the file's
+    /// length unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotSupported`] where the format keeps no holes, else the
+    /// stable [`Errno`] for the VFS refusal. The default fails closed with
+    /// [`Errno::NotImplemented`].
+    fn punch(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _offset: u64,
+        _len: u64,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 
     /// Flush the mounted filesystem's pending writes to its backing store.
     ///

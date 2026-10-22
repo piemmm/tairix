@@ -23,9 +23,9 @@ FAT12/FAT16 volume has non-zero values there and is rejected with
 this driver accepts.
 
 The device logical-block size and the FAT bytes-per-sector are
-decoupled: all I/O is staged one logical block at a time, so a 4096-byte
-FAT sector over a 512-byte block device (or the reverse) works without a
-special case.
+decoupled: all I/O is byte-addressed through `tairix-bytedev`, so a
+4096-byte FAT sector over a 512-byte block device (or the reverse) works
+without a special case.
 
 ## Names
 

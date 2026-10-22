@@ -56,7 +56,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 
-use tairix_abi::driver::block::{Block, BlockClass};
+use tairix_abi::driver::block::{Block, BlockClass, MAX_BLOCK_LEN};
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
@@ -65,7 +65,7 @@ use tairix_abi::driver::filesystem::{
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
 };
-use tairix_abi::fs::FS_SYMLINK_MAX;
+use tairix_abi::fs::{SeekRegion, FS_SYMLINK_MAX};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_collections::{RangeKey, RangeSet};
@@ -190,10 +190,6 @@ where
     fs.write_all(node, file_name, 0, bytes)
 }
 
-/// Largest block size the driver stages through its on-stack scratch
-/// buffers. No Tier-1 block device exceeds 4096 bytes per block.
-const MAX_BLOCK_SIZE: usize = 4096;
-
 /// Widest value any of the driver's B-trees stores beside a key.
 ///
 /// A mutation's node buffer carries one entry of this width past the block, so
@@ -213,7 +209,7 @@ const MIN_BLOCK_SIZE: usize = 512;
 // A run must cover at least one block of every supported geometry, so a
 // transfer always makes progress, and a whole number of them, so no request is
 // misaligned.
-const _: () = assert!(RUN_BYTES >= MAX_BLOCK_SIZE && RUN_BYTES.is_multiple_of(MAX_BLOCK_SIZE));
+const _: () = assert!(RUN_BYTES >= MAX_BLOCK_LEN && RUN_BYTES.is_multiple_of(MAX_BLOCK_LEN));
 
 /// Staging for the coalesced run reads of one serving read
 /// ([`ARXFS::read_block_run`]).
@@ -225,7 +221,7 @@ struct RunStage {
     /// The run window, absent when its allocation was refused.
     window: RunWindow,
     /// The fallback single block, used only while `window` is absent.
-    block: [u8; MAX_BLOCK_SIZE],
+    block: [u8; MAX_BLOCK_LEN],
     /// Device blocks one request through this stage covers.
     blocks: usize,
 }
@@ -239,7 +235,7 @@ impl RunStage {
         let blocks = if window.is_empty() { 1 } else { want };
         Self {
             window,
-            block: [0u8; MAX_BLOCK_SIZE],
+            block: [0u8; MAX_BLOCK_LEN],
             blocks,
         }
     }
@@ -2244,7 +2240,7 @@ impl<B: Block> ARXFS<B> {
             self.saved_txn = self.roots();
             self.schedule.opened();
         }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let published = match self.commit_prepare(&mut buf) {
             Ok(published) => published,
             Err(err) => {
@@ -2367,7 +2363,7 @@ impl<B: Block> ARXFS<B> {
     /// plaintext copy of the old volume would still verify under its own
     /// checksum.
     fn erase_ring(&mut self) -> Result<(), DriverError> {
-        let erased = [0u8; MAX_BLOCK_SIZE];
+        let erased = [0u8; MAX_BLOCK_LEN];
         (0..RING_BLOCKS).try_for_each(|phys| self.write_device(phys, &erased))
     }
 
@@ -2386,7 +2382,7 @@ impl<B: Block> ARXFS<B> {
             .ok()
             .and_then(NonZeroUsize::new)
             .filter(|size| {
-                (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&size.get()) && size.is_power_of_two()
+                (MIN_BLOCK_SIZE..=MAX_BLOCK_LEN).contains(&size.get()) && size.is_power_of_two()
             })
             .ok_or(DriverError::Unsupported)?;
         if geo.block_count <= RING_BLOCKS + 8 {
@@ -2609,7 +2605,7 @@ impl<B: Block> ARXFS<B> {
     /// * [`DriverError`] from the device if no copy can be read at all.
     pub fn probe_protection(block: &mut B) -> Result<VolumeProtection, DriverError> {
         let block_size = Self::checked_geometry(block)?.0.get();
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let (claim, walk) = Self::walk_copies(
             block,
             &mut buf[..block_size],
@@ -2700,7 +2696,7 @@ impl<B: Block> ARXFS<B> {
         // Set before anything is read as metadata, so a read-only handle's
         // mount repairs nothing.
         fs.read_only = read_only;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
 
         let mut best: Option<(Superblock, u64, ServedBy)> = None;
         let uuid_pin: Option<u128> = Some(fs.fs_uuid);
@@ -3014,7 +3010,7 @@ impl<B: Block> ARXFS<B> {
         keying: Keying<'_>,
         pin: Pin,
     ) -> Result<Established, DriverError> {
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let mut refused = None;
         let mut claimed = None;
         let (verified, walk) =
@@ -3649,7 +3645,7 @@ impl<B: Block> ARXFS<B> {
     /// damaged candidate is never shared.
     fn byte_identical(&mut self, phys: u64, content: &[u8]) -> bool {
         let capu = as_usize(self.data_capacity());
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         match self.read_data_block(phys, &mut buf) {
             Ok(()) => content.len() <= capu && buf[..content.len()] == *content,
             Err(_) => false,
@@ -4047,7 +4043,7 @@ impl<B: Block> ARXFS<B> {
     ) -> Result<(), DriverError> {
         let bs = self.block_size;
         let per = self.dirents_per_block();
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         for blk in 0..self.dir_block_count(dir) {
             let ptr = self.block_ptr(dir, blk)?;
             if ptr == 0 {
@@ -4100,7 +4096,7 @@ impl<B: Block> ARXFS<B> {
         name: &[u8],
     ) -> Result<u32, DriverError> {
         let per = self.dirents_per_block();
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         for blk in 0..self.dir_block_count(dir) {
             let ptr = self.block_ptr(dir, blk)?;
             if ptr == 0 {
@@ -4296,7 +4292,7 @@ impl<B: Block> ARXFS<B> {
         let cluster_bytes = capu * as_usize(COMPRESS_CLUSTER_BLOCKS);
         let mut done = 0usize;
         let mut pos = offset;
-        let mut blk = [0u8; MAX_BLOCK_SIZE];
+        let mut blk = [0u8; MAX_BLOCK_LEN];
         while done < data.len() {
             if length == WriteLength::MayBeShort && done > 0 && self.writeback_full() {
                 self.note_refusal();
@@ -4373,29 +4369,202 @@ impl<B: Block> ARXFS<B> {
         if !self.shrink_tail_step(inode, ino, keep)? {
             return Ok(false);
         }
-        let tail = as_usize(size % cap);
+        let tail = size % cap;
         if tail != 0 {
-            let bi = size / cap;
-            // A fully kept cluster whose last block holds the partial
-            // tail must also be decomposed before that block is
-            // rewritten per block.
-            if let Some((start, ext)) = self.extent_lookup(inode, bi)? {
-                if ext.compressed {
-                    self.decompose_cluster(inode, ino, start, &ext)?;
-                }
-            }
-            let old_ptr = self.block_ptr(inode, bi)?;
-            if old_ptr != 0 {
-                let mut blk = [0u8; MAX_BLOCK_SIZE];
-                self.read_data_block(old_ptr, &mut blk)?;
-                for byte in &mut blk[tail..as_usize(cap)] {
-                    *byte = 0;
-                }
-                self.store_block(inode, ino, bi, old_ptr, &mut blk)?;
-            }
+            self.zero_in_block(inode, ino, size / cap, tail, cap)?;
         }
         inode.size = size;
         Ok(true)
+    }
+
+    /// Zero bytes `[from, to)` of logical block `bi` of file `inode` (number
+    /// `ino`). A block left all zeros becomes a hole, exactly as an all-zero
+    /// write's does; a hole is already zeros and is left alone.
+    fn zero_in_block(
+        &mut self,
+        inode: &mut Inode,
+        ino: u32,
+        bi: u64,
+        from: u64,
+        to: u64,
+    ) -> Result<(), DriverError> {
+        // A compressed cluster is rewritten per block only once it is opened
+        // into per-block records.
+        if let Some((start, ext)) = self.extent_lookup(inode, bi)? {
+            if ext.compressed {
+                self.decompose_cluster(inode, ino, start, &ext)?;
+            }
+        }
+        let old_ptr = self.block_ptr(inode, bi)?;
+        if old_ptr == 0 {
+            return Ok(());
+        }
+        let mut blk = [0u8; MAX_BLOCK_LEN];
+        self.read_data_block(old_ptr, &mut blk)?;
+        blk[as_usize(from)..as_usize(to)].fill(0);
+        self.store_block(inode, ino, bi, old_ptr, &mut blk)
+    }
+
+    /// The extent covering logical block `bi` of `inode` or, failing that,
+    /// the first one after it.
+    fn extent_at_or_after(
+        &mut self,
+        inode: &Inode,
+        bi: u64,
+    ) -> Result<Option<(u64, Extent)>, DriverError> {
+        if let Some(found) = self.extent_lookup(inode, bi)? {
+            return Ok(Some(found));
+        }
+        match self.btree_get_ceil(inode.extent_root, bi, extent_spec(0))? {
+            Some((start, value)) => Ok(Some((start, Extent::decode(&value, self.total_blocks)?))),
+            None => Ok(None),
+        }
+    }
+
+    /// Release the storage of whole logical blocks `[first, last)` of file
+    /// `inode` (number `ino`), an extent at a time, through the same
+    /// copy-on-write release an all-zero write runs: a shared block loses one
+    /// referrer and only an unshared one is freed. Answers `false` when the
+    /// write-back bound stops the step before the range is clear, so a punch
+    /// of any size is a sequence of bounded transactions.
+    fn release_blocks(
+        &mut self,
+        inode: &mut Inode,
+        ino: u32,
+        first: u64,
+        last: u64,
+    ) -> Result<bool, DriverError> {
+        let spec = extent_spec(ino);
+        let mut bi = first;
+        let mut released = false;
+        let mut opened = None;
+        while bi < last {
+            let Some((start, ext)) = self.extent_at_or_after(inode, bi)? else {
+                break;
+            };
+            if start >= last {
+                break;
+            }
+            if released && self.writeback_full() {
+                self.note_refusal();
+                return Ok(false);
+            }
+            let ext_end = start.saturating_add(ext.len);
+            if ext.compressed {
+                if start < first || ext_end > last {
+                    // A cluster is a sealed unit: one the range only partly
+                    // covers is opened into per-block records first. Opening
+                    // the same one twice means it did not open: fail closed.
+                    if opened == Some(start) {
+                        return Err(DriverError::DeviceFault);
+                    }
+                    opened = Some(start);
+                    self.decompose_cluster(inode, ino, start, &ext)?;
+                    released = true;
+                    continue;
+                }
+                self.release_cluster(&ext, ino, start)?;
+                inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
+            } else {
+                let (lo, hi) = (start.max(bi), ext_end.min(last));
+                self.release_data_run(ext.phys + (lo - start), hi - lo, ino, lo)?;
+                inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
+                if lo > start {
+                    let head = Extent::raw(ext.phys, lo - start).encode();
+                    inode.extent_root = self.btree_insert(inode.extent_root, start, &head, spec)?;
+                }
+                if hi < ext_end {
+                    let rest = Extent::raw(ext.phys + (hi - start), ext_end - hi).encode();
+                    inode.extent_root = self.btree_insert(inode.extent_root, hi, &rest, spec)?;
+                }
+            }
+            // Strictly ahead, so even a corrupt tree cannot hold the walk.
+            bi = ext_end.min(last).max(bi + 1);
+            released = true;
+        }
+        Ok(true)
+    }
+
+    /// Where the next region of `region`'s kind begins at or after `offset`
+    /// of file `inode`: a mapped logical block is data, an unmapped one a
+    /// hole. The hole search walks the extent tree a leaf at a time, so its
+    /// cost is the extents it passes, never a collected map.
+    fn region_after(
+        &mut self,
+        inode: &Inode,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        if offset >= inode.size {
+            return Ok(None);
+        }
+        let cap = self.data_capacity();
+        let bi = offset / cap;
+        let covering = self.extent_lookup(inode, bi)?;
+        match (region, covering) {
+            (SeekRegion::Data, Some(_)) | (SeekRegion::Hole, None) => Ok(Some(offset)),
+            (SeekRegion::Data, None) => Ok(self
+                .btree_get_ceil(inode.extent_root, bi, extent_spec(0))?
+                .map(|(start, _)| start.saturating_mul(cap))
+                .filter(|&at| at < inode.size)),
+            (SeekRegion::Hole, Some((start, ext))) => {
+                let mut end = start.saturating_add(ext.len);
+                let mut walk = TreeWalk::new(self.block_size)?;
+                walk.seek(end);
+                'leaves: while end.saturating_mul(cap) < inode.size
+                    && self.btree_next_leaf(inode.extent_root, extent_spec(0), &mut walk)?
+                {
+                    for (key, value) in walk.entries() {
+                        if key != end {
+                            break 'leaves;
+                        }
+                        end = key.saturating_add(Extent::decode(value, self.total_blocks)?.len);
+                    }
+                }
+                Ok(Some(end.saturating_mul(cap).min(inode.size)))
+            }
+        }
+    }
+
+    /// One transaction of punching `[offset, end)` out of file `ino`,
+    /// returning `true` once the range reads as zeros and holds no storage
+    /// the format can release. The whole blocks are released first, over as
+    /// many transactions as the write-back bound needs; the partial ends are
+    /// zeroed in place in the last.
+    fn punch_step(&mut self, ino: u32, offset: u64, end: u64) -> Result<bool, DriverError> {
+        let mut child = self.read_inode(ino)?;
+        let end = end.min(child.size);
+        if offset >= end {
+            self.end_operation()?;
+            return Ok(true);
+        }
+        let cap = self.data_capacity();
+        let (head, tail) = (offset / cap, end / cap);
+        let first = if offset.is_multiple_of(cap) {
+            head
+        } else {
+            head + 1
+        };
+        let done = first >= tail || self.release_blocks(&mut child, ino, first, tail)?;
+        if done {
+            if head == tail {
+                self.zero_in_block(&mut child, ino, head, offset % cap, end % cap)?;
+            } else {
+                if !offset.is_multiple_of(cap) {
+                    self.zero_in_block(&mut child, ino, head, offset % cap, cap)?;
+                }
+                if !end.is_multiple_of(cap) {
+                    self.zero_in_block(&mut child, ino, tail, 0, end % cap)?;
+                }
+            }
+        }
+        let now = self.now();
+        child.times.modified = now;
+        child.times.changed = now;
+        child.content_gen = self.mint_content_gen()?;
+        self.write_inode(ino, &child)?;
+        self.end_operation()?;
+        Ok(done)
     }
 
     /// Map a [`NodeId`] to a validated inode index.
@@ -4878,7 +5047,7 @@ impl<B: Block> ARXFS<B> {
     ) -> Result<(), DriverError> {
         let capu = as_usize(self.data_capacity());
         let domain = self.protection.dedupe_domain;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         self.read_data_block(src_ptr, &mut buf)?;
         let hash = self.protection.content_hash.of(&buf[..capu]);
         if usize::try_from(self.data_refcount(src_ptr)?).unwrap_or(usize::MAX) >= REVERSE_REF_CAP {
@@ -5168,7 +5337,7 @@ impl<B: Block> ARXFS<B> {
         if inode.attr_root == 0 {
             return Ok(AttrSet::new());
         }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         self.read_meta(inode.attr_root, BlockType::Attr, &mut buf)?;
         let end = self.crypto_trailer_offset();
         AttrSet::decode(&buf[HEADER_LEN..end]).map_err(DriverError::from)
@@ -5197,7 +5366,7 @@ impl<B: Block> ARXFS<B> {
         if encoded.len() > self.attr_capacity() {
             return Err(DriverError::NoSpace);
         }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         buf[HEADER_LEN..HEADER_LEN + encoded.len()].copy_from_slice(&encoded);
         let new = self.cow_meta(
             inode.attr_root,
@@ -5378,6 +5547,18 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
         }
     }
 
+    fn seek_region(
+        &mut self,
+        file: NodeId,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        let ino = self.ino_of(file)?;
+        let inode = self.read_inode(ino)?;
+        Self::deny_non_file_content(inode.kind)?;
+        self.region_after(&inode, offset, region)
+    }
+
     fn read_link(&mut self, link: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
         let ino = self.ino_of(link)?;
         let inode = self.read_inode(ino)?;
@@ -5484,6 +5665,23 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         while !self.release(|fs| {
             let (ino, _) = fs.resolve_file(dir, name)?;
             fs.truncate_step(ino, size)
+        })? {}
+        Ok(())
+    }
+
+    /// Bounded like a truncate: a punch over a huge range is many
+    /// transactions, each publishing the blocks it released.
+    fn punch(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        len: u64,
+    ) -> Result<(), DriverError> {
+        let end = offset.checked_add(len).ok_or(DriverError::OutOfRange)?;
+        while !self.release(|fs| {
+            let (ino, _) = fs.resolve_file(dir, name)?;
+            fs.punch_step(ino, offset, end)
         })? {}
         Ok(())
     }

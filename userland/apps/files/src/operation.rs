@@ -24,6 +24,7 @@ use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::Errno;
 use tairix_browse::render::progress_cancel_at;
 use tairix_browse::DeletePlan;
+use tairix_fscopy::AttrError;
 use tairix_geometry::{Rect, Scale};
 use tairix_theme::{MotionInteraction, MotionTheme, Theme};
 
@@ -217,6 +218,20 @@ pub const fn create_refusal(error: Errno) -> &'static str {
         Errno::PermissionDenied => "the destination folder may not be written to",
         Errno::ReadOnly => "the destination volume is read-only",
         _ => device_refusal(error, "the destination could not be created"),
+    }
+}
+
+/// Why a copy's extended attributes could not be carried: the source would
+/// not give them, or the copy would not take them.
+#[must_use]
+pub const fn attribute_refusal(error: &AttrError) -> &'static str {
+    match error {
+        AttrError::Read(error) => {
+            device_refusal(*error, "the source's extended attributes could not be read")
+        }
+        AttrError::Write { error, .. } => {
+            device_refusal(*error, "a copy's extended attributes could not be set")
+        }
     }
 }
 

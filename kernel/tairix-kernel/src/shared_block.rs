@@ -49,7 +49,9 @@ use alloc::sync::Arc;
 use core::ops::Deref;
 
 use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
-use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
+use tairix_abi::driver::block::{
+    Block, BlockGeometry, DeviceHealth, DiscLayout, DiscardCapability,
+};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
@@ -84,6 +86,9 @@ pub struct SharedBlock<B: Block> {
     /// like the medium, so a consumer above this boundary reports the disk
     /// rather than whatever sits on it.
     name: BlkDeviceName,
+    /// The disc's layout, read once at construction: a later disc is a later
+    /// device, so it is served lock-free like the medium.
+    disc_layout: Option<DiscLayout>,
 }
 
 impl<B: Block> SharedBlock<B> {
@@ -98,11 +103,13 @@ impl<B: Block> SharedBlock<B> {
         let geometry = device.geometry()?;
         let medium = device.medium();
         let name = device.device_name();
+        let disc_layout = device.disc_layout();
         Ok(Self {
             device: SleepLock::new(device),
             geometry,
             medium,
             name,
+            disc_layout,
         })
     }
 
@@ -265,6 +272,11 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R>
     /// a window is not a device of its own.
     fn device_name(&self) -> BlkDeviceName {
         self.shared.name
+    }
+
+    /// The disc's layout, served from the cache like the medium.
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        self.shared.disc_layout
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -455,9 +467,19 @@ mod tests {
         }
     }
 
+    /// The layout [`MemBlock`] reports, as an optical disc's drive would.
+    const LAYOUT: DiscLayout = DiscLayout {
+        last_session_start: 4,
+        last_recorded: Some(15),
+    };
+
     impl Block for MemBlock {
         fn medium(&self) -> Option<BlkMedium> {
             Some(BlkMedium::of_transport(BlkTransport::Nvme))
+        }
+
+        fn disc_layout(&self) -> Option<DiscLayout> {
+            Some(LAYOUT)
         }
 
         fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -709,6 +731,8 @@ mod tests {
             Some(BlkMedium::of_transport(BlkTransport::Nvme))
         );
         assert_eq!(window.geometry().unwrap(), shared.geometry());
+        assert_eq!(window.disc_layout(), Some(LAYOUT));
+        assert_eq!(shared.handle().disc_layout(), Some(LAYOUT));
     }
 
     #[test]

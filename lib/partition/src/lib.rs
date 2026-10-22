@@ -38,7 +38,9 @@ pub mod gpt;
 pub mod mbr;
 
 use tairix_abi::blkio::{BlkDeviceName, BlkMedium, BlkReissue};
-use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
+use tairix_abi::driver::block::{
+    Block, BlockGeometry, DeviceHealth, DiscLayout, DiscardCapability, MAX_BLOCK_LEN,
+};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
@@ -173,6 +175,20 @@ pub enum PartitionError {
     Device(DriverError),
 }
 
+impl PartitionError {
+    /// Whether the device carries no partition scheme at all — no GPT header
+    /// and no MBR signature — as opposed to one that is malformed, or that a
+    /// device fault kept from being read. Only an absent scheme leaves a
+    /// device holding nothing a table would have described.
+    #[must_use]
+    pub const fn is_absent(&self) -> bool {
+        matches!(
+            self,
+            Self::NoScheme | Self::Mbr(mbr::MbrError::BadSignature)
+        )
+    }
+}
+
 impl From<DriverError> for PartitionError {
     fn from(e: DriverError) -> Self {
         PartitionError::Device(e)
@@ -224,10 +240,10 @@ pub fn grow_root_to_medium<B: Block>(dev: &mut B) -> Result<Option<Partition>, P
         return Ok(None);
     }
     let bs = geo.block_size as usize;
-    if !(mbr::MBR_SECTOR_LEN..=gpt::MAX_BLOCK_SIZE).contains(&bs) {
+    if !(mbr::MBR_SECTOR_LEN..=MAX_BLOCK_LEN).contains(&bs) {
         return Err(PartitionError::NoScheme);
     }
-    let mut block = [0u8; gpt::MAX_BLOCK_SIZE];
+    let mut block = [0u8; MAX_BLOCK_LEN];
     let block = &mut block[..bs];
     dev.read_blocks(0, block)?;
     let mut sector = [0u8; mbr::MBR_SECTOR_LEN];
@@ -256,7 +272,7 @@ fn read_lba0<B: Block>(
     if bs == mbr::MBR_SECTOR_LEN {
         dev.read_blocks(0, out)?;
     } else {
-        let mut block = [0u8; gpt::MAX_BLOCK_SIZE];
+        let mut block = [0u8; MAX_BLOCK_LEN];
         let buf = block.get_mut(..bs).ok_or(PartitionError::NoScheme)?;
         dev.read_blocks(0, buf)?;
         out.copy_from_slice(&buf[..mbr::MBR_SECTOR_LEN]);
@@ -382,6 +398,16 @@ impl<B: Block> Block for PartitionBlock<B> {
     /// budget and shown its drive, rather than an unknown one.
     fn medium(&self) -> Option<BlkMedium> {
         self.inner.medium()
+    }
+
+    /// The drive's layout counts blocks from the disc's start, so only a
+    /// window that starts there addresses the blocks it names.
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        if self.start_block == 0 {
+            self.inner.disc_layout()
+        } else {
+            None
+        }
     }
 
     /// A window onto a disk is not a device of its own, so it is named by

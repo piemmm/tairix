@@ -347,6 +347,18 @@ pub const TARGETS: &[Target] = &[
             "ADFS mount / decode (maps, disc records, boot block, fixed + big directories)",
     },
     Target {
+        package: "tairix-drv-fs-iso9660",
+        test: "fuzz_iso9660_mount",
+        description:
+            "ISO 9660 mount / walk (descriptors, records, Rock Ridge, RISC OS, zisofs, XARs)",
+    },
+    Target {
+        package: "tairix-drv-fs-udf",
+        test: "fuzz_udf_mount",
+        description:
+            "UDF mount / walk / write (anchors, sequences, maps, entries, descriptors, names)",
+    },
+    Target {
         package: "tairix-raidmeta",
         test: "fuzz_superblock",
         description:

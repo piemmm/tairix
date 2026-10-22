@@ -1,17 +1,18 @@
-//! A window's refusals, stated one alert at a time in the order they arose.
+//! A window's refusals and warnings, stated one alert at a time in the order
+//! they arose.
 //!
-//! A refusal that arrives while another's alert is up waits behind it rather
+//! A notice that arrives while another's alert is up waits behind it rather
 //! than replacing it or being lost. Each source keeps at most one waiting — a
-//! newer refusal replaces its own source's older one — so the queue is bounded
-//! by the sources a window has, never by how often one of them refuses.
+//! newer notice replaces its own source's older one — so the queue is bounded
+//! by the sources a window has, never by how often one of them speaks.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 
-use tairix_abi::window_ipc::AlertSpec;
+use tairix_abi::window_ipc::{AlertSeverity, AlertSpec};
 use tairix_abi::Errno;
 
-use crate::client::{refusal_alert, WindowClient, WindowTransport};
+use crate::client::{notice_alert, WindowClient, WindowTransport};
 
 /// What [`Notices::raise`] did.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,7 +72,15 @@ impl<S: Copy + Eq> Notices<S> {
     /// State, from `source`, that what `title` names was not done because of
     /// `reason`.
     pub fn refuse(&mut self, source: S, title: &str, reason: &str) {
-        if let Ok(notice) = refusal_alert(title, reason) {
+        if let Ok(notice) = notice_alert(AlertSeverity::Error, title, reason) {
+            self.state(source, notice);
+        }
+    }
+
+    /// Warn, from `source`, that what `title` names was done short of the
+    /// whole, as `reason` says.
+    pub fn warn(&mut self, source: S, title: &str, reason: &str) {
+        if let Ok(notice) = notice_alert(AlertSeverity::Warning, title, reason) {
             self.state(source, notice);
         }
     }

@@ -221,13 +221,42 @@ fn unsupported_class_combinations_are_left_unserved() {
     ]);
     assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
 
-    // An ATAPI sub-class over BOT is not implemented either.
+    // The SFF-8070i floppy sub-class is not implemented either.
     let bytes = stream(&[
-        &interface(0, [0x08, 0x02, PROTOCOL_BOT]),
+        &interface(0, [0x08, 0x05, PROTOCOL_BOT]),
         &endpoint(0x81, 0x02),
         &endpoint(0x02, 0x02),
     ]);
     assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
+
+    // ATAPI is served over BOT only.
+    let bytes = stream(&[
+        &interface(0, [0x08, SUBCLASS_ATAPI, PROTOCOL_CBI]),
+        &endpoint(0x81, 0x02),
+        &endpoint(0x02, 0x02),
+        &endpoint(0x83, 0x03),
+    ]);
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
+}
+
+#[test]
+fn an_atapi_optical_drive_over_bot_is_served_in_packets() {
+    let bytes = stream(&[
+        &interface(0, [0x08, SUBCLASS_ATAPI, PROTOCOL_BOT]),
+        &endpoint(0x81, 0x02),
+        &endpoint(0x02, 0x02),
+    ]);
+    assert_eq!(
+        find_storage_interface(&bytes, 0),
+        Ok(StorageInterface {
+            interface_number: 0,
+            command_set: CommandSet::Atapi,
+            protocol: StorageProtocol::Bot {
+                bulk_in: 1,
+                bulk_out: 2,
+            },
+        })
+    );
 }
 
 #[test]

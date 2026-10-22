@@ -19,6 +19,7 @@ node's identity. A move whose source and destination lie on different
 volumes cannot be atomic: it falls back to copying the source to the
 destination and then removing the source (directories are reproduced
 recursively).
+A file whose copy fails is removed, and its source is kept.
 
 An existing destination is overwritten by default, skipped under
 `-n`, and asked about on the standard error stream under `-i` (a
@@ -26,6 +27,13 @@ declined question skips that move without error; an unreadable reply
 is never treated as consent). The first failure stops the run before
 any later operand. `--` ends option parsing: every later argument is
 a path.
+
+The copy carries each file's holes and extended attributes — a RISC OS
+filetype, a Mac type and creator — wherever the destination keeps them, and
+moves a symbolic link as a link storing the same target, never what it
+names. Attributes the destination cannot keep are reported in one warning
+when the run ends, and in an `omission` record on the standard information
+stream, before the sources are gone for good.
 
 ## OPTIONS
 

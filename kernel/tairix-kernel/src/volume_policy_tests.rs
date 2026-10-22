@@ -136,6 +136,15 @@ impl FilesystemSecurity for TwoNodeFs {
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
         Err(DriverError::Unsupported)
     }
+
+    fn stamp_owner(&mut self, node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
+        self.node_info(node).map(|_| ())
+    }
+
+    fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
+        // An ownerless format, as FAT32 is.
+        self.node_info(node).map(|_| false)
+    }
 }
 
 impl FilesystemStats for TwoNodeFs {
@@ -206,13 +215,46 @@ fn the_late_cell_is_set_once_and_fail_closed_before_install() {
 
 #[test]
 fn the_identity_map_forwards_every_facet_method_it_does_not_replace() {
-    // The security facet is deliberately *replaced* — the mapped record is
-    // mount policy, not stored state — so it is asserted as a replacement
-    // rather than as a forward. Everything else must reach the driver.
+    // The security of a node whose ownership the format does not record is
+    // deliberately *mapped* — mount policy, not stored state — so it is
+    // asserted as a mapping; a node with recorded ownership, and everything
+    // else, must reach the driver.
     let mut mapped = GroupMappedFs::new(conformance::fixture(), STORAGE);
     conformance::assert_read_forwards(&mut mapped);
     conformance::assert_write_forwards(&mut mapped);
-    conformance::assert_security_replaced(&mut mapped);
+    conformance::assert_security_forwards(&mut mapped);
+    conformance::assert_unrecorded_security_mapped(&mut mapped);
     conformance::assert_stats_forwards(&mut mapped);
     conformance::assert_attrs_forwards(&mut mapped);
+}
+
+/// A format that records an owner for some nodes and not others — a UDF disc
+/// written by two systems, a Rock Ridge disc with a bare entry — keeps the
+/// recorded owner's rules and maps only the rest.
+#[test]
+fn a_recorded_owner_keeps_its_rules_beside_mapped_nodes() {
+    let mut fs = tairix_kernel_core::fs::wrapper_conformance::fixture();
+    let root = fs.root();
+    let file = fs.lookup(root, conformance::FILE_NAME).expect("file");
+    let dir = fs.lookup(root, conformance::DIR_NAME).expect("dir");
+    let owned = NodeSecurity::new(0o640, 1000, 1000);
+    fs.set_security(file, owned).expect("store");
+    let mut mapped = GroupMappedFs::new(fs, STORAGE);
+
+    let kept = mapped.security(file).expect("recorded");
+    assert_eq!((kept.mode, kept.uid, kept.gid), (0o640, 1000, 1000));
+    let stood_in = mapped.security(dir).expect("mapped");
+    assert_eq!(
+        (stood_in.mode, stood_in.uid, stood_in.gid),
+        (0o775, 0, STORAGE.0)
+    );
+
+    // A recorded owner's record stays the format's to store.
+    let changed = NodeSecurity::new(0o600, 1000, 1000);
+    assert_eq!(mapped.set_security(file, changed), Ok(()));
+    assert_eq!(mapped.security(file).expect("recorded").mode, 0o600);
+    assert_eq!(
+        mapped.set_security(dir, changed),
+        Err(DriverError::Unsupported)
+    );
 }

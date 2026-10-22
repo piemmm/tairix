@@ -202,6 +202,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 147 | `fd_redeem_location` | `Handle` (location), `*const ProcId grantor`, `usize len`, `user_ptr` (path out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | yes |
 | 148 | `console_damage` | `user_ptr` (out: `DamageRect`), `len` | `u64` (bytes, `0` when none owed) | — | no |
 | 149 | `console_relinquish` | — | `errno` | `CAP_MEM_DMA` | yes |
+| 150 | `share_map`    | `user_ptr` (len out)                    | `u64` (base)  | — (the spawn grant)     | yes     |
+| 151 | `fs_seek_region` | `u32 fd`, `u64 offset`, `u32 region` | `u64` (offset) | — | no |
+| 152 | `fs_punch`     | `u32 fd`, `u64 offset`, `u64 len`       | `errno`       | —                       | yes     |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -212,6 +215,16 @@ value, and the per-topic-authorised publish. Neither takes a capability — the
 desktop topic is gated on the publisher holding a seat's live display lease and
 every kernel-owned topic refuses a userland publish outright. See
 [System notices](../abi/notice.md).
+
+`fs_seek_region` (no. 151) and `fs_punch` (no. 152) are the `SEEK_DATA` /
+`SEEK_HOLE` and punch-hole pair over an open file. `fs_seek_region` answers
+where the next data or hole (`SeekRegion`) begins at or after an offset —
+`NoData` when none does, a file's end always beginning a hole — on a handle
+opened for reading; `fs_punch` makes a range read as zeros and releases its
+storage, keeping the file's length, on a handle opened for writing, and is
+refused `NotSupported` where the format keeps no holes. Both are gated in the
+handler exactly as `fs_read` is, and they are what the copy engine
+(`lib/fscopy`) keeps a sparse file's holes through.
 
 `fs_chdir` (no. 65) and `fs_getcwd` (no. 66) give each process a working
 directory. A path handed to any path-taking filesystem call (`fs_open`,
@@ -533,7 +546,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), `fd_grant`, and — enforced *in the handler* on a path-backed descriptor, or against the grantor's captured set on a delegated one — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `file_map` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), `fd_grant`, and — enforced *in the handler* on a path-backed descriptor, or against the grantor's captured set on a delegated one — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_seek_region`, `fs_punch`, `file_map` |
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |

@@ -34,8 +34,8 @@ use proptest::prelude::*;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange, OpenFlags,
-    PowerAction, RandomFlags, RealpathMode, SyscallNumber, SyscallSpec, UnlinkFlags, SYSCALLS,
-    SYSCALL_MAX_ARGS,
+    PowerAction, RandomFlags, RealpathMode, SeekRegion, SyscallNumber, SyscallSpec, UnlinkFlags,
+    SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
@@ -901,6 +901,20 @@ impl SyscallHandlers for CountingHandlers {
         Ok(0)
     }
     fn fs_truncate(&self, _c: &CallerContext<'_>, _fd: u32, _size: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_seek_region(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _region: SeekRegion,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_punch(&self, _c: &CallerContext<'_>, _fd: u32, _offset: u64, _len: u64) -> SyscallResult {
         self.bump();
         Ok(0)
     }

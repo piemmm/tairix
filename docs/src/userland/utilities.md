@@ -1913,14 +1913,16 @@ source is copied only with `-r`, which reproduces the whole subtree;
 naming a directory without `-r` is an error. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `tairix-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It links
+only `lib/*` crates — the copy itself is the shared engine
+([`tairix-fscopy`](../lib/fscopy.md)) — never a kernel or driver crate
+(`AGENTS.md` §17.4).
 
 ### Grammar
 
 ```
-cp [-dfilnPrRsvT] [-t dir] [--] source... dest
+cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
+   [-t dir] [--] source... dest
 ```
 
 | Token                     | Meaning                                            |
@@ -1933,6 +1935,9 @@ cp [-dfilnPrRsvT] [-t dir] [--] source... dest
 | `-s`, `--symbolic-link`   | a symbolic link naming the source                  |
 | `-P`, `--no-dereference`  | reproduce a link source as a link, verbatim        |
 | `--preserve=links`        | keep two sources' shared node shared               |
+| `--preserve=xattr`        | fail a copy whose destination cannot keep an extended attribute |
+| `--no-preserve=xattr`     | copy no extended attributes                        |
+| `--sparse=WHEN`           | `auto` (keep holes, the default), `always` (also leave stored zeros unwritten), `never` (write every byte) |
 | `-d`                      | `-P` and `--preserve=links` together               |
 | `-v`, `--verbose`         | report each copy                                   |
 | `-t dir`, `--target-directory=dir` | copy every source into `dir`              |
@@ -1951,7 +1956,17 @@ truncates through its own create and needs none. `-a`/`--archive` and the
 other `--preserve` members are **refused**: `-a` is `-dR --preserve=all`,
 `--preserve=all` includes timestamps, and no syscall sets a timestamp, so
 honouring it would report a preservation that did not happen. `-dR` is the
-rest of `-a`.
+rest of `-a`. `--no-preserve` accepts `links`, `xattr`, `all`, and — as
+no-ops, since they are never preserved — `mode`, `ownership`, `timestamps`
+and `context`.
+
+Extended attributes are **carried by default**, where GNU `cp` copies them
+only under `--preserve=xattr`: a RISC OS filetype or a Mac type and creator
+is part of what a file is, and dropping it silently would change the file.
+What a destination cannot keep is left and reported once, after the run, as
+`cp: warning: extended attributes not kept on N files (why): keys` on
+`stderr` and an `fs.attributes_not_kept` `omission` record on `stdinfo`;
+`--preserve=xattr` turns any such refusal into a failed copy.
 | `--`                      | end option parsing; every later argument is a path |
 | *source*                  | a file or directory to copy                        |
 | *dest*                    | the destination path (the last operand)            |
@@ -1974,9 +1989,10 @@ regular file's bytes from source to destination, and walks each directory
 `-r` must reproduce. The operations that reach the outside world are
 injected seams, the same discipline as `rm`'s `Removal`/`Output`:
 
-- `FileSystem` — learn a path's kind, read a file's bytes and a
-  directory's entries, and create directories, files, and bytes (plus
-  remove a destination file for `-f`).
+- `FileSystem` — learn a path's kind and identity, read a directory's
+  entries, and create directories and files (plus remove a destination
+  file for `-f`); a file's bytes are read and written through its
+  supertrait, the copy engine's by-path seam (`tairix_fscopy::PathFiles`).
 - `Prompt` — ask the `-i` overwrite question; a declined question skips
   that copy without error, and an unanswerable one fails closed — never
   treated as consent.
@@ -1990,9 +2006,12 @@ destination file (a new one still copies).
 
 ### Streaming and recursion
 
-A regular file is streamed in fixed-size chunks (matching `cat`'s
-granularity), so an arbitrarily large file copies with a bounded buffer.
-A directory is reproduced by creating its destination — or merging into
+A regular file is copied by the shared engine through one `CHUNK_LEN`
+(1 MiB) buffer, so an arbitrarily large file copies with a bounded one: its
+bytes where the source stores them and a hole where it keeps one
+(`--sparse`), then its extended attributes. A directory `cp` creates carries
+its source's attributes too. A directory is reproduced by creating its
+destination — or merging into
 an existing one — then copying each entry, files and nested directories
 alike, under the destination. Entries are read into a list before the
 copy descends, so the walk does not depend on directory indices staying
@@ -2016,8 +2035,16 @@ retried exactly once. Without `-f`, a create failure surfaces as a
   a `CpError::NotADirectory`.
 - An operand that cannot be inspected surfaces the underlying `Errno` as
   `CpError::Stat`, and the run stops before any later operand.
+- A destination that is the source's own node — the same name, another
+  name for it, or a link to it, compared by the identity a following probe
+  reports, before any question is asked — is `CpError::SameFile` ("'a' and
+  'a' are the same file", the GNU wording), and nothing is written: the
+  create would otherwise empty the very file it was about to read.
 - An unreadable source is `CpError::Read`; an uncreatable destination is
-  `CpError::Create`; a failed write is `CpError::Write`.
+  `CpError::Create`; a failed write is `CpError::Write`; an attribute the
+  destination refuses under `--preserve=xattr`, or refuses for a reason that
+  is no attribute's, is `CpError::Attribute`, naming the key in its display
+  form, so a key's control bytes never reach the terminal.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
@@ -2034,8 +2061,12 @@ directory-without-`-r` refusal, recursive reproduction of a nested tree,
 a recursive merge into an existing directory, the recursive-onto-a-file
 refusal, the missing-source fail-closed path, a failure stopping before a
 later source, the unreadable-source / uncreatable-destination /
-failed-write paths, the `-f` remove-and-retry recovery, and the
-trailing-slash base-name join.
+failed-write paths, the `-f` remove-and-retry recovery, the trailing-slash
+base-name join, a sparse file copied with its holes under each `--sparse`
+mode, attributes carried, refused and reported once, a destination that is
+the source itself (the same name, a second name, a link) refused and left
+whole, an attribute key reported escaped, and the help document kept in step
+with the options.
 
 ## `mv` — move (rename) files and directories (`userland/apps/mv`)
 
@@ -2048,9 +2079,10 @@ source — each source is moved *into* it under its base name. Unlike
 operand. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `tairix-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It links
+only `lib/*` crates — a cross-volume move copies through the shared engine
+([`tairix-fscopy`](../lib/fscopy.md)) — never a kernel or driver crate
+(`AGENTS.md` §17.4).
 
 ### Grammar
 
@@ -2087,9 +2119,11 @@ reach the outside world are injected seams, mirroring the other userland
 crates (`cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s `Removal`, `cp`'s
 `FileSystem`):
 
-- `FileSystem` — learn a path's kind, rename a path, read a file's bytes
-  and a directory's entries, create directories/files/bytes, and remove
-  files and directories (for the cross-device relocation and for `-f`).
+- `FileSystem` — learn a path's kind, rename a path, read a directory's
+  entries, create directories and files, and remove files and directories
+  (for the cross-device relocation and for `-f`); a file's bytes go
+  through its supertrait, the copy engine's by-path seam
+  (`tairix_fscopy::PathFiles`).
 - `Output` — write the usage banner to the terminal (`mv` is silent on
   success).
 
@@ -2103,11 +2137,16 @@ A rename cannot be atomic when its source and destination live on
 different filesystems. Rather than overload an `Errno`, the `rename` seam
 reports that case as an explicit `RenameOutcome::CrossDevice` outcome
 (`AGENTS.md` §2.11). The engine then performs the POSIX relocation: it
-copies the source to the destination — streaming a regular file in
-fixed-size chunks (matching `cat`'s and `cp`'s granularity) and
-reproducing a directory subtree depth-first — and only then removes the
-source, depth-first, so a directory is unlinked after its contents. A
-failure during the copy leaves the source in place.
+copies the source to the destination — a regular file through the shared
+copy engine with its holes and extended attributes, a symbolic link
+recreated with the target it stores (never followed, so what it names is
+neither copied nor removed), and a directory subtree depth-first — and only
+then removes the source, depth-first, so a directory is unlinked after its
+contents. A failure during the copy leaves the source in place, and a file
+whose copy failed is removed again, so no partial file is left under the
+destination's name; the files a failed directory relocation finished stay
+whole. Attributes the destination cannot keep are left and reported once, as
+`cp` reports them.
 
 ### No-clobber and force
 
@@ -2146,7 +2185,8 @@ source, `-n` skipping an existing destination, the default overwrite, the
 failed-rename path, the blocking-destination refusal and its `-f`
 remove-and-retry recovery, the cross-device file / large-file /
 directory relocations, the cross-device read/write/remove fail-closed
-paths, and the trailing-slash base-name join.
+paths with no partial file left behind, an attribute key reported escaped,
+and the trailing-slash base-name join.
 
 ## `chmod` — change file mode bits (`userland/apps/chmod`)
 

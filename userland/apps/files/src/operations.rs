@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 
 pub use tairix_browse::Reading;
 use tairix_browse::Tally;
+use tairix_fscopy::Omissions;
 
 /// How an operation ended. What was done before the end stays done.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,13 +67,16 @@ pub fn run_slice(
     }
 }
 
-/// An operation's answer: what it did, and how it ended.
+/// An operation's answer: what it did, how it ended, and what its copies
+/// could not keep.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Finished {
     /// What was done before it ended.
     pub done: Tally,
     /// How it ended.
     pub ending: Ending,
+    /// The extended attributes its copies' destinations could not keep.
+    pub omissions: Omissions,
 }
 
 /// Where an operation stands, as its progress window shows it: borrowed from
@@ -205,6 +209,7 @@ impl<J> OperationDesk<J> {
                 Finished {
                     done: Tally::default(),
                     ending: Ending::Cancelled,
+                    omissions: Omissions::default(),
                 },
             ));
         }
@@ -291,9 +296,9 @@ impl<J> OperationDesk<J> {
         !running.orphaned && self.owe()
     }
 
-    /// The running operation ended, answering whether the loop is owed a wake
-    /// to collect it.
-    pub fn finish(&mut self, ending: Ending) -> bool {
+    /// The running operation ended as `ending`, its copies having left
+    /// `omissions`, answering whether the loop is owed a wake to collect it.
+    pub fn finish(&mut self, ending: Ending, omissions: Omissions) -> bool {
         let Some(running) = self.running.take() else {
             return false;
         };
@@ -305,6 +310,7 @@ impl<J> OperationDesk<J> {
             Finished {
                 done: running.reading.done,
                 ending,
+                omissions,
             },
         ));
         self.owe()

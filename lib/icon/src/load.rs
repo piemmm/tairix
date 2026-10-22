@@ -284,6 +284,7 @@ pub const ICON_KINDS: [IconKind; core::mem::variant_count::<IconKind>()] = [
     IconKind::CommandProgram,
     IconKind::ElfExecutable,
     IconKind::WasmModule,
+    IconKind::DiskOptical,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

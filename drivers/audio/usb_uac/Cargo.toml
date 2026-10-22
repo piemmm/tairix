@@ -18,6 +18,8 @@ workspace = true
 # dependency.
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The fallible buffer fill (`fallible::filled`).
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The configuration walk, alternate settings, periodic arithmetic (feedback
 # and pacing), and the URB client the program drives.
 tairix-usb = { path = "../../../lib/usb", version = "=0.0.0" }

@@ -37,6 +37,7 @@ use tairix_abi::driver::filesystem::{
     VolumeHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
+use tairix_abi::SeekRegion;
 
 use super::memfs::{RwMockFs, SYSTEM_ONLY_NAME};
 
@@ -48,6 +49,11 @@ pub const FILE_BODY: &[u8] = b"conformance";
 pub const LINK_NAME: &[u8] = b"link";
 /// The subdirectory the fixture holds.
 pub const DIR_NAME: &[u8] = b"dir";
+/// A regular file the fixture holds as [`SPARSE_HOLE`] bytes of hole
+/// followed by [`FILE_BODY`].
+pub const SPARSE_NAME: &[u8] = b"sparse";
+/// Bytes of hole at the start of [`SPARSE_NAME`].
+pub const SPARSE_HOLE: u64 = 64;
 
 /// An inner driver supporting every method of every facet: a root holding
 /// a regular file with contents, a symbolic link naming it, and a
@@ -71,8 +77,16 @@ pub fn fixture() -> RwMockFs {
     let _ = file;
     fs.create_link(root, LINK_NAME, FILE_NAME)
         .expect("the fixture creates a symbolic link");
-    fs.create(root, DIR_NAME, NodeKind::Directory)
+    let dir = fs
+        .create(root, DIR_NAME, NodeKind::Directory)
         .expect("the fixture creates a directory");
+    // An ownerless format's node beside recorded ones, which a wrapper that
+    // answers ownership itself would report as recorded.
+    fs.forget_ownership(dir);
+    fs.create(root, SPARSE_NAME, NodeKind::RegularFile)
+        .expect("the fixture creates a sparse file");
+    fs.write_at(root, SPARSE_NAME, SPARSE_HOLE, FILE_BODY)
+        .expect("the fixture writes past a hole");
     fs
 }
 
@@ -147,6 +161,18 @@ pub fn assert_read_forwards<W: FilesystemRead + ?Sized>(wrapper: &mut W) {
         listed > 0,
         "the wrapper reports an empty listing for a populated directory"
     );
+
+    // The default answers "all data", which would hide the hole beneath.
+    let sparse = child(wrapper, SPARSE_NAME);
+    assert_eq!(
+        wrapper.seek_region(sparse, 0, SeekRegion::Data),
+        Ok(Some(SPARSE_HOLE)),
+        "`seek_region` is not being forwarded: the wrapper hid a hole"
+    );
+    assert_eq!(
+        wrapper.seek_region(sparse, 0, SeekRegion::Hole),
+        Ok(Some(0))
+    );
 }
 
 /// Every [`FilesystemWrite`] method reaches the inner driver.
@@ -194,6 +220,30 @@ pub fn assert_write_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapp
         .expect("`rename` is not being forwarded");
     wrapper
         .remove(root, b"renamed")
+        .expect("`remove` is not being forwarded");
+    // A punch whose default refuses as a format limit.
+    wrapper
+        .create(root, b"punched", NodeKind::RegularFile)
+        .expect("`create` is not being forwarded");
+    wrapper
+        .write_at(root, b"punched", 0, FILE_BODY)
+        .expect("`write_at` is not being forwarded");
+    match wrapper.punch(root, b"punched", 0, 4) {
+        Ok(()) => {}
+        Err(DriverError::Unsupported) => panic!(
+            "`punch` answered `Unsupported` on a driver that keeps holes: the \
+             wrapper is refusing on its own behalf"
+        ),
+        Err(error) => panic!("`punch` is not being forwarded ({error:?})"),
+    }
+    let punched = child(wrapper, b"punched");
+    assert_eq!(
+        wrapper.seek_region(punched, 0, SeekRegion::Data),
+        Ok(Some(4)),
+        "the punched hole did not reach the inner driver"
+    );
+    wrapper
+        .remove(root, b"punched")
         .expect("`remove` is not being forwarded");
     wrapper.flush().expect("`flush` is not being forwarded");
     assert_volume_host_forwards(wrapper);
@@ -267,10 +317,17 @@ fn assert_allocation_class_forwards<W: FilesystemRead + FilesystemWrite + ?Sized
         .expect("`remove` is not being forwarded");
 }
 
-/// Both [`FilesystemSecurity`] methods reach the inner driver, and a
+/// Every [`FilesystemSecurity`] method reaches the inner driver, and a
 /// stored record survives the round trip.
 pub fn assert_security_forwards<W: FilesystemRead + FilesystemSecurity + ?Sized>(wrapper: &mut W) {
     let file = child(wrapper, FILE_NAME);
+    let dir = child(wrapper, DIR_NAME);
+    assert_eq!(wrapper.records_ownership(file), Ok(true));
+    assert_eq!(
+        wrapper.records_ownership(dir),
+        Ok(false),
+        "`records_ownership` is not being forwarded"
+    );
     let stored = wrapper
         .security(file)
         .expect("`security` is not being forwarded");
@@ -301,29 +358,32 @@ pub fn assert_security_forwards<W: FilesystemRead + FilesystemSecurity + ?Sized>
     );
 }
 
-/// The wrapper *replaces* the security facet rather than forwarding it:
-/// it still answers a real record (never an invented refusal), and its
-/// refusal to store one is the declared mount policy.
-pub fn assert_security_replaced<W: FilesystemRead + FilesystemSecurity + ?Sized>(wrapper: &mut W) {
-    let file = child(wrapper, FILE_NAME);
-    wrapper
-        .security(file)
-        .expect("a replacing wrapper still answers a record");
+/// The wrapper *maps* the record of a node whose ownership the format does
+/// not record, rather than forwarding it: it still answers a real record
+/// (never an invented refusal), and its refusal to store one is the declared
+/// mount policy. Nodes whose ownership is recorded forward, which
+/// [`assert_security_forwards`] asserts.
+pub fn assert_unrecorded_security_mapped<W: FilesystemRead + FilesystemSecurity + ?Sized>(
+    wrapper: &mut W,
+) {
+    let dir = child(wrapper, DIR_NAME);
+    let mapped = wrapper
+        .security(dir)
+        .expect("a mapping wrapper still answers a record");
     assert_eq!(
-        wrapper.set_security(file, NodeSecurity::new(0o600, 1, 1)),
+        wrapper.set_security(dir, NodeSecurity::new(0o700, 1, 1)),
         Err(DriverError::Unsupported),
         "a mapped record is mount policy, so storing one is refused whole"
     );
-    let mapped = wrapper.security(file).expect("record");
     assert_eq!(
-        wrapper.stamp_owner(file, 1, 1),
+        wrapper.stamp_owner(dir, 1, 1),
         Ok(()),
         "a creation on a mapped volume is not refused"
     );
     assert_eq!(
-        wrapper.security(file).expect("record"),
+        wrapper.security(dir).expect("record"),
         mapped,
-        "and takes the mapped owner, like every other node"
+        "and takes the mapped owner, like every other unrecorded node"
     );
 }
 

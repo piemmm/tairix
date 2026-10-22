@@ -1,0 +1,19 @@
+[package]
+name = "tairix-bytedev"
+description = "TAIRiX byte-addressed I/O over a block device: whole device blocks move directly between the caller's buffer and the device in coalesced runs, and only a range's partial ends are staged. The one reader every block-backed filesystem driver and the volume probe read through."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The size of one coalesced device transfer, shared with the write-back runs.
+tairix-writeback = { path = "../writeback", version = "=0.0.0" }
+# Fallible allocation, so a refused staging buffer is an error, not an abort.
+tairix-util = { path = "../util", version = "=0.0.0" }

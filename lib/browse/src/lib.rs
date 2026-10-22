@@ -48,8 +48,7 @@
 //!   [`DeleteWalk`] driven cursor that carries the recursive removal out
 //!   depth-first, bounded and interruptible (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //! * [`execute`](mod@execute) — the pure paste-execution model: the
-//!   [`paste_strategy`] move-vs-copy volume decision, the bounded, resumable
-//!   [`CopyCursor`] streaming single-file copy, and the depth-first,
+//!   [`paste_strategy`] move-vs-copy volume decision and the depth-first,
 //!   depth-bounded [`CopyWalk`] recursive directory-copy cursor the management
 //!   verbs run (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //! * [`media`](mod@media) — the one closed content-type [`MediaType`] registry
@@ -184,8 +183,8 @@ pub use entry::{
 };
 pub use error::BrowseError;
 pub use execute::{
-    paste_strategy, CopyAction, CopyChunk, CopyCursor, CopyError, CopyKind, CopyWalk,
-    CopyWalkError, PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
+    paste_strategy, CopyAction, CopyKind, CopyWalk, CopyWalkError, PasteStrategy, VolumeId,
+    MAX_COPY_DEPTH,
 };
 pub use format::{format_datetime, format_minute, format_size};
 pub use layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};

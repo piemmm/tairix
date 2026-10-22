@@ -10387,20 +10387,22 @@ where
         // only when no volume is attached on a block-service endpoint it
         // declares — decided atomically with the removal so an attach cannot
         // race in between.
+        // The node's declared block-service endpoints, ownership-gated on
+        // `parent_id` (a node the caller does not own is `NotFound`, so a
+        // non-owner never learns whether a node is busy). A build with no
+        // store wired fails closed `NotImplemented`.
+        let endpoints = self.hw_tree.node_endpoints(parent_id, node_id)?;
         let mut removed = if flags.is_orderly() {
-            // Read the node's declared block-service endpoints, ownership-gated
-            // on `parent_id` (a node the caller does not own is `NotFound`, so
-            // a non-owner never learns whether a node is busy). The filesystem
-            // service then holds its mount registry lock across *both* the
-            // busy check and the removal closure, so the "is any volume still
-            // attached on one of these endpoints?" decision and the removal
-            // are one atomic step against a concurrent attach. A build with no
-            // store wired fails closed `NotImplemented`.
-            let endpoints = self.hw_tree.node_endpoints(parent_id, node_id)?;
+            // The filesystem service holds its mount registry lock across
+            // *both* the busy check and the removal closure, so the "is any
+            // volume still attached on one of these endpoints?" decision and
+            // the removal are one atomic step against a concurrent attach.
             let hw_tree = self.hw_tree;
             let outcome = self
                 .filesystem
-                .remove_if_endpoints_idle(&endpoints, &mut || hw_tree.remove(parent_id, node_id));
+                .remove_if_endpoints_idle(endpoints.as_slice(), &mut || {
+                    hw_tree.remove(parent_id, node_id)
+                });
             match outcome {
                 Ok(removed) => removed,
                 Err(Errno::Busy) => {
@@ -10470,6 +10472,11 @@ where
         }
 
         self.retire_removed_dma(&removed, flags.is_orderly());
+
+        // A driver retracting the node it serves a medium through lives on:
+        // its endpoint stays bound for the next medium, so the volumes on
+        // this one are told now, as they would be had the driver died.
+        crate::callreg::notify_publication_retracted(endpoints.as_slice());
 
         // Any display node that just left the tree — the named child or a
         // transitive descendant — takes its seat with it, through the same
@@ -12771,6 +12778,62 @@ where
         authority.admit_length(size)?;
         self.filesystem
             .truncate(authority.uid, authority.caps, authority.path, size)?;
+        Ok(0)
+    }
+
+    /// `fs_seek_region(fd, offset, region)` — where the next data or hole of
+    /// an open file begins, so a copy reads only what the volume stores.
+    fn fs_seek_region(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        offset: u64,
+        region: tairix_abi::SeekRegion,
+    ) -> SyscallResult {
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), fd)
+            .ok_or(Errno::NotFound)?;
+        // Where the holes lie is what reading the file reveals.
+        if !handle.flags.is_read() {
+            return Err(Errno::PermissionDenied);
+        }
+        // A resource, pipe or pty has no regions to report.
+        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+        authority.admit()?;
+        self.filesystem.seek_region(
+            authority.uid,
+            authority.caps,
+            authority.path,
+            offset,
+            region,
+        )
+    }
+
+    /// `fs_punch(fd, offset, len)` — release the storage of a range of an
+    /// open file, which then reads as zeros.
+    fn fs_punch(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        offset: u64,
+        len: u64,
+    ) -> SyscallResult {
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), fd)
+            .ok_or(Errno::NotFound)?;
+        // Punching a hole is writing zeros.
+        if !handle.flags.is_write() {
+            return Err(Errno::PermissionDenied);
+        }
+        offset.checked_add(len).ok_or(Errno::OutOfRange)?;
+        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+        authority.admit()?;
+        self.filesystem
+            .punch(authority.uid, authority.caps, authority.path, offset, len)?;
         Ok(0)
     }
 
@@ -37485,7 +37548,7 @@ mod tests {
             &self,
             _parent_id: u32,
             node_id: u32,
-        ) -> Result<alloc::vec::Vec<u64>, Errno> {
+        ) -> Result<crate::hwtree::NodeEndpoints, Errno> {
             // Model the same fail-closed ownership gate `remove` uses: a node
             // the caller does not own (listed unremovable) is `NotFound`, so a
             // non-owner never learns whether it is busy. Otherwise report the
@@ -37499,7 +37562,9 @@ mod tests {
                 .read()
                 .iter()
                 .find(|(id, _)| *id == node_id)
-                .map(|(_, bases)| bases.clone())
+                .map(|(_, bases)| crate::hwtree::NodeEndpoints::try_from(bases.as_slice()))
+                .transpose()
+                .map_err(|_| Errno::OutOfRange)?
                 .unwrap_or_default();
             Ok(endpoints)
         }
@@ -40915,6 +40980,66 @@ mod tests {
             removed[0],
             (9, 42),
             "removal is scoped to the caller's own node (`AGENTS.md` §4)"
+        );
+    }
+
+    /// What the vanish observer was told of retracted publications.
+    struct Retractions(tairix_sync::SpinLock<alloc::vec::Vec<u64>>);
+
+    impl crate::callreg::EndpointVanishObserver for Retractions {
+        fn endpoint_vanished(&self, _id: tairix_kernel_ipc::EndpointId) {}
+
+        fn publication_retracted(&self, id: tairix_kernel_ipc::EndpointId) {
+            self.0.lock().push(id.0);
+        }
+    }
+
+    /// A driver surprise-removing the node it serves a medium through — the
+    /// medium left, the driver lives on — has every endpoint the node
+    /// declared reported retracted, so a volume on it does not stay mounted
+    /// refusing every request.
+    #[test]
+    fn a_surprise_removal_reports_the_nodes_endpoints_retracted() {
+        install_trace_filter();
+        let retractions: &'static Retractions = crate::forever(Box::new(Retractions(
+            tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
+        )));
+        crate::callreg::install_vanish_observer(retractions);
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
+            .expect("the node has no live driver");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let endpoint = 0x5EED_0000_0501_u64;
+        source.set_endpoints(43, alloc::vec![endpoint]);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(h.hw_remove_node(&ctx, 43, 0), Ok(0));
+        assert!(
+            retractions.0.lock().contains(&endpoint),
+            "the node's endpoint is reported retracted"
         );
     }
 
@@ -51512,6 +51637,34 @@ mod tests {
             Ok(())
         }
 
+        fn seek_region(
+            &self,
+            uid: u32,
+            _caps: &dyn tairix_abi::CapabilityQuery,
+            path: &str,
+            offset: u64,
+            region: tairix_abi::SeekRegion,
+        ) -> Result<u64, Errno> {
+            self.record(alloc::format!(
+                "seek uid={uid} path={path} offset={offset} region={region:?}"
+            ));
+            Ok(offset)
+        }
+
+        fn punch(
+            &self,
+            uid: u32,
+            _caps: &dyn tairix_abi::CapabilityQuery,
+            path: &str,
+            offset: u64,
+            len: u64,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "punch uid={uid} path={path} offset={offset} len={len}"
+            ));
+            Ok(())
+        }
+
         fn sync(&self, uid: u32, _caps: &dyn tairix_abi::CapabilityQuery) -> Result<(), Errno> {
             self.record(alloc::format!("sync uid={uid}"));
             self.sync_stamp.store(
@@ -51844,6 +51997,70 @@ mod tests {
         assert_eq!(
             h.fs_read(&ctx, wo, 0, 0x1000, 5),
             Err(Errno::PermissionDenied)
+        );
+    }
+
+    /// A seek reveals what a read would, so it needs a readable handle; a
+    /// punch writes zeros, so it needs a writable one. Each is refused before
+    /// the filesystem is reached, and an overflowing range never reaches it.
+    #[test]
+    fn a_seek_needs_a_readable_handle_and_a_punch_a_writable_one() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"AB");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let ro = u32::try_from(
+            h.fs_open(&ctx, 0x1000, 2, OpenFlags::READ)
+                .expect("open ro"),
+        )
+        .unwrap();
+        let wo = u32::try_from(
+            h.fs_open(&ctx, 0x1000, 2, OpenFlags::WRITE)
+                .expect("open wo"),
+        )
+        .unwrap();
+        assert_eq!(
+            h.fs_seek_region(&ctx, ro, 7, tairix_abi::SeekRegion::Hole),
+            Ok(7)
+        );
+        assert_eq!(
+            h.fs_seek_region(&ctx, wo, 7, tairix_abi::SeekRegion::Hole),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.fs_punch(&ctx, wo, 4, 8), Ok(0));
+        assert_eq!(h.fs_punch(&ctx, ro, 4, 8), Err(Errno::PermissionDenied));
+        assert_eq!(h.fs_punch(&ctx, wo, u64::MAX, 2), Err(Errno::OutOfRange));
+        let calls = fs.calls();
+        assert_eq!(calls.iter().filter(|c| c.starts_with("seek ")).count(), 1);
+        assert_eq!(calls.iter().filter(|c| c.starts_with("punch ")).count(), 1);
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "punch uid=1000 path=/AB offset=4 len=8"),
+            "{calls:?}"
         );
     }
 

@@ -54,8 +54,8 @@ over a resolution-independent design grid, so the same glyph is
   and shared by Google and used according to terms described in the Creative
   Commons 3.0 Attribution License).
 - The drive kinds are `Disk` (the generic drive), `DiskHard`,
-  `DiskSolidState`, `DiskNvme`, `DiskUsb`, `DiskExternal` and `DiskSdCard`;
-  they share one built-in disk glyph. `disk_icon(medium)` maps the
+  `DiskSolidState`, `DiskNvme`, `DiskUsb`, `DiskExternal`, `DiskSdCard` and
+  `DiskOptical`; they share one built-in disk glyph. `disk_icon(medium)` maps the
   `BlkMedium` a mounted volume's device declared onto its kind, and resolves a
   paravirtual device and an unknown medium alike to the generic `Disk`
   rather than guessing. The mapping lives here, beside the vocabulary, so

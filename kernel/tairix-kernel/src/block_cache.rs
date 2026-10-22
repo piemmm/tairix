@@ -73,9 +73,12 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
-use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
+use tairix_abi::driver::block::{
+    Block, BlockGeometry, DeviceHealth, DiscLayout, DiscardCapability, MAX_BLOCK_SIZE,
+};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
@@ -120,11 +123,6 @@ const READAHEAD_INIT_BYTES: u64 = 32 * 1024;
 /// transfer. Bounds only what the cache *guesses*; what it retains is bounded
 /// by the budget and its LRU.
 const READAHEAD_MAX_BYTES: u64 = 256 * 1024;
-
-/// The widest device block the cache will retain. A device reporting
-/// a larger (or zero) block size is served uncached: per-block entries
-/// must stay individually bounded.
-const MAX_BLOCK_SIZE: u32 = 4096;
 
 /// One retained device block: its bytes and its recency tick.
 struct Entry {
@@ -180,6 +178,11 @@ pub struct BlockCache<B: Block> {
     /// stream. Only ever a hint — a wrong guess costs at most one
     /// bounded, budget-gated over-read, never a wrong result.
     readahead_window: u64,
+    /// The blocks a failed speculative read covered past its request, one
+    /// of which faulted: no later window reaches into them, so a stream
+    /// nearing a bad block does not read it once per request. Forgotten
+    /// once a stream reads on past them.
+    readahead_suspect: Option<Range<u64>>,
 }
 
 impl<B: Block> BlockCache<B> {
@@ -238,7 +241,9 @@ impl<B: Block> BlockCache<B> {
             lru: BTreeMap::new(),
             readahead_next: None,
             readahead_window: 0,
+            readahead_suspect: None,
         };
+        // Served uncached, so every entry stays individually bounded.
         if geometry.block_size == 0 || geometry.block_size > MAX_BLOCK_SIZE {
             cache.poison("uncacheable_geometry");
         }
@@ -590,8 +595,8 @@ impl<B: Block> BlockCache<B> {
     /// that wants `blocks` blocks: `blocks` (no speculation) unless a
     /// sequential stream is detected, in which case a bounded readahead
     /// window is opened and doubled up to [`READAHEAD_MAX_BYTES`],
-    /// clamped to the end of the device. Never returns fewer than
-    /// `blocks`.
+    /// clamped to the end of the device and short of any blocks a failed
+    /// speculation left suspect. Never returns fewer than `blocks`.
     ///
     /// Readahead is a pure performance hint: it turns one device
     /// round-trip per block of a sequential read (the filesystem's
@@ -609,6 +614,14 @@ impl<B: Block> BlockCache<B> {
     /// normal — the over-read is discarded as fast as it arrives and
     /// there is nothing to win.
     fn plan_readahead(&mut self, lba: u64, blocks: u64, sequential: bool, admissible: bool) -> u64 {
+        if sequential
+            && self
+                .readahead_suspect
+                .as_ref()
+                .is_some_and(|suspect| lba >= suspect.end)
+        {
+            self.readahead_suspect = None;
+        }
         if blocks > self.span_blocks(READAHEAD_TRIGGER_BYTES) || !sequential || !admissible {
             self.readahead_window = 0;
             return blocks;
@@ -625,8 +638,13 @@ impl<B: Block> BlockCache<B> {
         }
         .min(widest);
         self.readahead_window = window;
-        let remaining = self.geometry.block_count.saturating_sub(lba);
-        window.min(remaining).max(blocks)
+        let mut reach = window.min(self.geometry.block_count.saturating_sub(lba));
+        if let Some(suspect) = &self.readahead_suspect {
+            if lba < suspect.end && lba.saturating_add(reach) > suspect.start {
+                reach = suspect.start.saturating_sub(lba);
+            }
+        }
+        reach.max(blocks)
     }
 
     /// The shared read path: serve from cache when the whole span is
@@ -673,16 +691,9 @@ impl<B: Block> BlockCache<B> {
             .unwrap_or(0)
             .saturating_mul(self.block_size());
         if want_bytes > buf.len() {
-            // A fallible, zeroed staging buffer for the one coalesced
-            // readahead device read. `vec![0; want_bytes]` would abort on
-            // allocation failure; the kernel must instead fail closed and
-            // fall back to the exact read, so the buffer is grown through
-            // `try_reserve_exact` and then zeroed — deterministic OOM, no
-            // panic.
-            #[allow(clippy::slow_vector_initialization)]
-            let mut scratch = Vec::new();
-            if scratch.try_reserve_exact(want_bytes).is_ok() {
-                scratch.resize(want_bytes, 0);
+            // A refused readahead buffer falls back to the exact read: a real
+            // read never fails for want of a speculative one.
+            if let Some(mut scratch) = tairix_util::fallible::filled(want_bytes, 0) {
                 if forward(&mut self.device, lba, &mut scratch).is_ok() {
                     buf.copy_from_slice(&scratch[..buf.len()]);
                     self.populate(lba, prefetch, &scratch, &mut allowance);
@@ -694,10 +705,10 @@ impl<B: Block> BlockCache<B> {
                 // for the requested blocks alone — a speculative
                 // over-read never widens a caller's fault.
                 Self::wipe(&mut scratch);
+                self.readahead_window = 0;
+                self.readahead_suspect =
+                    Some(lba.saturating_add(blocks)..lba.saturating_add(prefetch));
             }
-            // Reservation failed under memory pressure: fall through to
-            // the exact-span read (never fail a real read for want of a
-            // speculative buffer).
         }
         forward(&mut self.device, lba, buf)?;
         self.populate(lba, blocks, buf, &mut allowance);
@@ -776,6 +787,10 @@ impl<B: Block> Block for BlockCache<B> {
     /// layer.
     fn medium(&self) -> Option<BlkMedium> {
         self.device.medium()
+    }
+
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        self.device.disc_layout()
     }
 
     fn device_name(&self) -> BlkDeviceName {

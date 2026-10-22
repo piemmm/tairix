@@ -263,9 +263,7 @@ impl NameFilter {
             .saturating_mul(FILTER_BITS_PER_NAME)
             .checked_next_power_of_two()?
             .max(u64::BITS as usize);
-        let mut words = Vec::new();
-        words.try_reserve_exact(bits / u64::BITS as usize).ok()?;
-        words.resize(bits / u64::BITS as usize, 0);
+        let words = tairix_util::fallible::filled(bits / u64::BITS as usize, 0)?;
         let mut filter = Self { lengths: 0, words };
         for name in names {
             filter.lengths |= length_bit(name);
@@ -325,9 +323,7 @@ fn fates(entries: &[Entry], changes: &[EntryChange], mode: SortMode) -> Option<V
             unfound -= 1;
         }
     }
-    let mut fates = Vec::new();
-    fates.try_reserve_exact(changes.len()).ok()?;
-    fates.resize(changes.len(), Fate::Untouched);
+    let mut fates = tairix_util::fallible::filled(changes.len(), Fate::Untouched)?;
     for touch in &touched {
         if let (Some(slot), Some(change)) = (fates.get_mut(touch.change), changes.get(touch.change))
         {

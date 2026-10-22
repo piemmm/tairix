@@ -56,7 +56,7 @@ use crate::dedupe::DedupeIndex;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 use crate::pagecache::{page_payload_len, BlockCache, MAX_CACHED_PAGES};
 use crate::superblock::RING_BLOCKS;
-use crate::{as_u32, ARXFS, MAX_BLOCK_SIZE};
+use crate::{as_u32, ARXFS, MAX_BLOCK_LEN};
 use tairix_writeback::WritePhase;
 
 /// Upper bound on the transient pending-discard queue, in **runs**. The queue
@@ -337,7 +337,7 @@ impl<B: Block> ARXFS<B> {
             return Ok(());
         }
         self.map_make_room()?;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let bs = self.block_size;
         self.read_block(region_block, &mut buf)?;
         BlockHeader::decode_verify(
@@ -384,7 +384,7 @@ impl<B: Block> ARXFS<B> {
     fn map_write(&mut self, region_block: u64) -> Result<(), DriverError> {
         let bs = self.block_size;
         let start = self.map_geometry()?.start();
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         {
             let alloc = self.allocator()?;
             let payload = alloc
@@ -436,7 +436,7 @@ impl<B: Block> ARXFS<B> {
     fn map_stamp(&mut self, clean: bool, generation: u64) -> Result<(), DriverError> {
         let geom = self.map_geometry()?;
         let bs = self.block_size;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let header = MapHeader {
             covered: geom.covered(),
             region_start: geom.start(),
@@ -1311,7 +1311,7 @@ impl<B: Block> ARXFS<B> {
             return false;
         }
         let bs = self.block_size;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         if self.read_block(geom.header_block(), &mut buf).is_err() {
             return false;
         }

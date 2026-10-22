@@ -45,7 +45,7 @@ use crate::allocmap::{bit_get, bit_set};
 use crate::header::{BlockHeader, BlockType, ReservedOwner, HEADER_LEN};
 use crate::pagecache::{page_payload_len, BlockCache};
 use crate::superblock::RING_BLOCKS;
-use crate::{as_usize, ARXFS, MAX_BLOCK_SIZE};
+use crate::{as_usize, ARXFS, MAX_BLOCK_LEN};
 
 /// Share of the volume's free space one scratch array may occupy.
 ///
@@ -404,7 +404,7 @@ impl<B: Block> ARXFS<B> {
     fn scratch_zero(&mut self, array: &mut ScratchArray) -> Result<(), DriverError> {
         array.cache.clear();
         let bs = self.block_size;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         for page in 0..array.blocks {
             for byte in &mut buf[..bs] {
                 *byte = 0;
@@ -432,7 +432,7 @@ impl<B: Block> ARXFS<B> {
             array.cache.remove(victim);
         }
         let bs = self.block_size;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let phys = array.start + page;
         self.read_block(phys, &mut buf)?;
         let header = BlockHeader::decode_verify(
@@ -456,7 +456,7 @@ impl<B: Block> ARXFS<B> {
         page: u64,
     ) -> Result<(), DriverError> {
         let bs = self.block_size;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let payload = array.cache.peek(page).ok_or(DriverError::DeviceFault)?;
         let len = payload.len().min(bs - HEADER_LEN);
         buf[HEADER_LEN..HEADER_LEN + len].copy_from_slice(&payload[..len]);

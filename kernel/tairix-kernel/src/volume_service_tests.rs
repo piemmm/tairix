@@ -45,9 +45,12 @@ use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, DriverHandle, Errno};
 use tairix_caps::CapabilitySet;
+use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
 use tairix_drv_fs_arxfs::{EntropySource, Keying, ARXFS};
 use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
+use tairix_drv_fs_iso9660::Iso9660;
+use tairix_drv_fs_udf::{FormatOptions, Udf};
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
 use tairix_kernel_core::fs::{FilesystemService, FinalLink};
 use tairix_kernel_core::fswatch::WatchRegistry;
@@ -65,6 +68,7 @@ use crate::system_mount::{FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
 use crate::test_support::{RamBlock, BLOCK_SIZE};
 use crate::volume_policy::LATE_STORAGE_GID;
 use crate::volume_service::{RuntimeVolumeService, VOLUME_SERVICE};
+use tairix_kernel_core::callreg::EndpointVanishObserver as _;
 use tairix_kernel_core::VolumeService as _;
 
 /// One audited decision: its event id, the volume it names, and its cause.
@@ -115,6 +119,7 @@ fn audited(id: u32, volume: &str) -> Vec<Option<String>> {
 /// The service's own event ids, as the volume manager and an operator read
 /// them back.
 const ATTACH_REFUSED: u32 = 4173;
+const SURPRISE_REMOVED_CLEAN: u32 = 4176;
 const SURPRISE_REMOVED_LOST: u32 = 4178;
 const ATTACHED_READ_ONLY: u32 = 4180;
 const NAME_TAKEN: u32 = 4181;
@@ -242,6 +247,9 @@ struct ServedDevice {
     /// Taken by the first request: the server says it has the request, then
     /// answers nothing until the gate opens — a device that stops answering.
     hold_first: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    /// The publication the device's medium is served under: a request made
+    /// for another is refused stale, as a medium-changing driver's is.
+    binding: u64,
 }
 
 impl ServedDevice {
@@ -256,6 +264,7 @@ impl ServedDevice {
             pull_after: None,
             pulled: false,
             hold_first: None,
+            binding: 0,
         }
     }
 
@@ -304,6 +313,12 @@ fn serve(
                 Ok(_) if device.lock().unwrap().pulled => {
                     encode_error_completion(&mut reply, Errno::DeviceOffline).unwrap()
                 }
+                Ok(request)
+                    if request.op != BlkOp::Geometry
+                        && request.binding != device.lock().unwrap().binding =>
+                {
+                    encode_error_completion(&mut reply, Errno::Stale).unwrap()
+                }
                 Ok(request) => {
                     let mut device = device.lock().unwrap();
                     let bytes = request.blocks as usize * BLOCK_SIZE;
@@ -316,8 +331,9 @@ fn serve(
                                 block_count: geometry.block_count,
                                 flags: 0,
                                 medium: device.medium,
+                                disc_layout: None,
                                 name: device.block.device_name(),
-                                binding: 0,
+                                binding: device.binding,
                             }
                             .encode(&mut reply)
                             .unwrap()
@@ -813,6 +829,267 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_stick_pulled_mid_commit_returns_read_only_scenario(window_ptr, facility);
     an_unpublished_transaction_is_recorded_lost_scenario(window_ptr, facility);
     a_device_that_stops_answering_holds_up_no_other_scenario(window_ptr, facility);
+    a_disc_image_attaches_read_only_scenario(window_ptr, facility);
+    a_udf_volume_attaches_writable_scenario(window_ptr, facility);
+    an_adfs_volume_attaches_writable_scenario(window_ptr, facility);
+    a_changed_medium_retracts_its_volume_and_serves_the_next_scenario(window_ptr, facility);
+    a_medium_that_leaves_while_its_volume_attaches_retracts_it_scenario(window_ptr, facility);
+    a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(window_ptr, facility);
+    an_attach_naming_a_retracted_publication_is_refused_scenario();
+}
+
+/// A drive whose medium changes retracts the node it published the first
+/// under, its endpoint living on: the first medium's volume is retracted at
+/// once, not left mounted refusing every request, and the next medium
+/// attaches over the same endpoint through a fresh client and the window
+/// its own publication conferred.
+fn a_changed_medium_retracts_its_volume_and_serves_the_next_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (first, first_identity) = fat32_image(0x0D15_C040, b"first disc payload");
+    let (second, second_identity) = fat32_image(0x0D15_C041, b"second disc payload");
+    let owner = 0x70_1050;
+    let endpoint_id = 0xB1D0_5E17_0000_0050_u64;
+    let endpoint = register_endpoint(endpoint_id, owner);
+    let blocks = (first.data.len() / BLOCK_SIZE) as u64;
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        binding: 1,
+        ..ServedDevice::new(first)
+    }));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, first_region) = sharedreg::create(facility, ProcessId(0x70_0050), 8).expect("region");
+    let attach = |window: u64, name: &[u8]| {
+        VOLUME_SERVICE.attach(&VolumeAttachRequest {
+            endpoint: endpoint_id,
+            window,
+            first_lba: 0,
+            blocks,
+            fstype: VolumeFsType::Fat32,
+            name,
+        })
+    };
+    attach(first_region, b"disc1").expect("attach the first disc");
+    assert_volume_reads("/Storage/disc1/hello.txt", b"first disc payload");
+
+    {
+        let mut drive = device.lock().unwrap();
+        drive.block = second;
+        drive.binding = 2;
+    }
+    tairix_kernel_core::callreg::notify_publication_retracted(&[endpoint_id]);
+    assert_eq!(
+        VOLUME_FOREST.resolve(&first_identity),
+        None,
+        "the first disc's root retracts"
+    );
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        FS_SERVICE
+            .read(0, &NoCaps, "/Storage/disc1/hello.txt", 0, &mut buf)
+            .err(),
+        Some(Errno::NotFound),
+        "the first disc's mount is gone, not left refusing"
+    );
+
+    let (_va, second_region) =
+        sharedreg::create(facility, ProcessId(0x70_0051), 8).expect("region");
+    attach(second_region, b"disc2").expect("the next disc attaches over the same endpoint");
+    assert_volume_reads("/Storage/disc2/hello.txt", b"second disc payload");
+    assert!(VOLUME_FOREST.resolve(&second_identity).is_some());
+    assert_eq!(
+        device.lock().unwrap().geometries,
+        2,
+        "the next disc is reached through a fresh client"
+    );
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: second_identity,
+            force: false,
+        })
+        .expect("the second disc detaches");
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("server thread");
+    assert_every_attached_volume_is_served();
+}
+
+/// The driver answers every request an attach makes, then retracts the
+/// publication before the volume is entered: the volume is retracted as the
+/// attach lets go, never published over a medium that has left.
+fn a_medium_that_leaves_while_its_volume_attaches_retracts_it_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C060, b"departing payload");
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let owner = 0x70_1060;
+    let endpoint_id = 0xB1D0_5E17_0000_0060_u64;
+    let (received, has_request) = mpsc::channel();
+    let (open_gate, gate) = mpsc::channel();
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        hold_first: Some((received, gate)),
+        ..ServedDevice::new(image)
+    }));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        register_endpoint(endpoint_id, owner),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0060), 8).expect("region");
+    let attaching = thread::spawn(move || {
+        VOLUME_SERVICE.attach(&VolumeAttachRequest {
+            endpoint: endpoint_id,
+            window: region,
+            first_lba: 0,
+            blocks,
+            fstype: VolumeFsType::Fat32,
+            name: b"gone1",
+        })
+    });
+    let held = has_request.recv_timeout(Duration::from_secs(60));
+    if held.is_ok() {
+        tairix_kernel_core::callreg::notify_publication_retracted(&[endpoint_id]);
+    }
+    // Answered whatever happened, so a failure never wedges the suite.
+    open_gate.send(()).unwrap();
+    held.expect("the device holds the attach's first request");
+    assert_eq!(attaching.join().expect("the attach thread"), Ok(()));
+    assert_eq!(
+        VOLUME_FOREST.resolve(&identity),
+        None,
+        "a volume built over a medium that left is not published"
+    );
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        FS_SERVICE
+            .read(0, &NoCaps, "/Storage/gone1/hello.txt", 0, &mut buf)
+            .err(),
+        Some(Errno::NotFound),
+        "nor mounted"
+    );
+    assert_eq!(audited(SURPRISE_REMOVED_CLEAN, "gone1"), [None]);
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("scenario server thread");
+    assert_every_attached_volume_is_served();
+}
+
+/// A card pulled with a write unflushed, put back, and pulled again while
+/// its volume is recovered, the reader's endpoint living on throughout: the
+/// recovered volume is retracted as the recovery lets go, never restored
+/// over a card that has left.
+fn a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C061, b"scenario payload");
+    let pristine = image.data.clone();
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let owner = 0x70_1061;
+    let endpoint_id = 0xB1D0_5E17_0000_0061_u64;
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        binding: 1,
+        ..ServedDevice::new(image)
+    }));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        register_endpoint(endpoint_id, owner),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let attach = move |window: u64| {
+        VOLUME_SERVICE.attach(&VolumeAttachRequest {
+            endpoint: endpoint_id,
+            window,
+            first_lba: 0,
+            blocks,
+            fstype: VolumeFsType::Fat32,
+            name: b"card1",
+        })
+    };
+    let (_va, first) = sharedreg::create(facility, ProcessId(0x70_0061), 8).expect("region");
+    attach(first).expect("attach the card");
+    FS_SERVICE
+        .write(0, &NoCaps, "/Storage/card1/hello.txt", 0, false, b"D")
+        .expect("write dirties the journal");
+    {
+        let mut reader = device.lock().unwrap();
+        reader.block = RamBlock { data: pristine };
+        reader.binding = 2;
+    }
+    tairix_kernel_core::callreg::notify_publication_retracted(&[endpoint_id]);
+    assert_eq!(
+        mount_record(b"card1").availability(),
+        MountAvailability::UnavailableDirty,
+        "the pulled card's volume keeps its unflushed write"
+    );
+
+    let (received, has_request) = mpsc::channel();
+    let (open_gate, gate) = mpsc::channel();
+    {
+        let mut reader = device.lock().unwrap();
+        reader.binding = 3;
+        reader.hold_first = Some((received, gate));
+    }
+    let (_va, second) = sharedreg::create(facility, ProcessId(0x70_0062), 8).expect("region");
+    let recovering = thread::spawn(move || attach(second));
+    let held = has_request.recv_timeout(Duration::from_secs(60));
+    if held.is_ok() {
+        tairix_kernel_core::callreg::notify_publication_retracted(&[endpoint_id]);
+    }
+    open_gate.send(()).unwrap();
+    held.expect("the reader holds the recovery's first request");
+    assert_eq!(recovering.join().expect("the recovery thread"), Ok(()));
+    assert_eq!(
+        VOLUME_FOREST.resolve(&identity),
+        None,
+        "a volume recovered over a card that left again is retracted"
+    );
+    assert_eq!(
+        audited(SURPRISE_REMOVED_CLEAN, "card1"),
+        [None],
+        "the replay was committed, so its retraction is clean"
+    );
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("scenario server thread");
+    assert_every_attached_volume_is_served();
+}
+
+/// An attach naming a window whose publication was retracted, while an
+/// operation still holds its slot, is refused before the window's client is
+/// asked anything: all it would be answered is stale.
+fn an_attach_naming_a_retracted_publication_is_refused_scenario() {
+    let pressure: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(&AMPLE)));
+    let service: &'static RuntimeVolumeService = Box::leak(Box::new(RuntimeVolumeService::new()));
+    service.install(&SINK, pressure, None);
+    let (endpoint, window) = (0xB1D0_5E17_0000_0063_u64, 0x63);
+    let holder = service.pin_device(endpoint, window).expect("a slot");
+    service.publication_retracted(EndpointId(endpoint));
+    let request = VolumeAttachRequest {
+        endpoint,
+        window,
+        first_lba: 0,
+        blocks: 1,
+        fstype: VolumeFsType::Fat32,
+        name: b"stale1",
+    };
+    assert_eq!(service.attach(&request), Err(Errno::Stale));
+    assert_eq!(
+        audited(ATTACH_REFUSED, "stale1"),
+        [Some(String::from("publication_retracted"))]
+    );
+    drop(holder);
 }
 
 /// The driver handle of the volume shown at `/Storage/<name>`.
@@ -2331,4 +2608,154 @@ fn a_stick_pulled_mid_commit_returns_read_only_scenario(
         Some(Errno::ReadOnly)
     );
     retire(identity, false, back);
+}
+
+/// A real `genisoimage` disc with Rock Ridge and Joliet.
+const ISO_FIXTURE: &[u8] =
+    include_bytes!("../../../drivers/filesystem/iso9660/tests/fixtures/rr-joliet.sparse");
+
+/// An ISO 9660 disc image attaches read-only, the refusal audited as the
+/// format's, and serves its files.
+fn a_disc_image_attaches_read_only_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    let image = ext_fixture::sparse(ISO_FIXTURE);
+    let identity = Iso9660::open(RamBlock {
+        data: image.clone(),
+    })
+    .expect("a disc")
+    .volume_identity();
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0030,
+            owner: 0x70_1030,
+            region_task: 0x70_0030,
+            name: b"disc",
+            fstype: VolumeFsType::Iso9660,
+        },
+        ServedDevice::new(RamBlock { data: image }),
+    );
+    round.outcome.expect("the disc attaches");
+    assert_eq!(
+        audited(ATTACHED_READ_ONLY, "disc"),
+        [Some(String::from("format_read_only"))]
+    );
+    assert_eq!(mount_record(b"disc").fstype_bytes(), b"iso9660");
+    assert_volume_reads("/Storage/disc/README.TXT", b"hello\n");
+    assert_eq!(
+        FS_SERVICE
+            .write(0, &NoCaps, "/Storage/disc/README.TXT", 0, false, b"X")
+            .err(),
+        Some(Errno::ReadOnly)
+    );
+    retire(identity, false, round);
+}
+
+/// A UDF volume attaches writable: a file written through the production
+/// service reads back.
+fn a_udf_volume_attaches_writable_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    let options = FormatOptions {
+        label: "Exchange",
+        revision: 0x0201,
+        serial: [4; 8],
+        now: tairix_abi::time::Time64::from_secs(1_700_000_000),
+    };
+    let udf = Udf::format(RamBlock::new(SECTORS_8MIB), &options).expect("formats");
+    let identity = udf.volume_identity();
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0031,
+            owner: 0x70_1031,
+            region_task: 0x70_0031,
+            name: b"exchange",
+            fstype: VolumeFsType::Udf,
+        },
+        ServedDevice::new(udf.into_device()),
+    );
+    round.outcome.expect("the volume attaches");
+    assert!(audited(ATTACHED_READ_ONLY, "exchange").is_empty());
+    FS_SERVICE
+        .open(
+            0,
+            &NoCaps,
+            "/Storage/exchange/note.txt",
+            OpenFlags::WRITE.union(OpenFlags::CREATE),
+        )
+        .expect("a file is made");
+    FS_SERVICE
+        .write(
+            0,
+            &NoCaps,
+            "/Storage/exchange/note.txt",
+            0,
+            false,
+            b"udf payload",
+        )
+        .expect("and written");
+    assert_volume_reads("/Storage/exchange/note.txt", b"udf payload");
+    retire(identity, false, round);
+}
+
+/// An ADFS volume attaches writable through the same path.
+fn an_adfs_volume_attaches_writable_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    let adfs = Adfs::format(RamBlock::new(1600), AdfsVariant::E).expect("formats");
+    let identity = adfs.volume_identity();
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0032,
+            owner: 0x70_1032,
+            region_task: 0x70_0032,
+            name: b"acorn",
+            fstype: VolumeFsType::Adfs,
+        },
+        ServedDevice::new(adfs.into_device()),
+    );
+    round.outcome.expect("the volume attaches");
+    FS_SERVICE
+        .open(
+            0,
+            &NoCaps,
+            "/Storage/acorn/ReadMe",
+            OpenFlags::WRITE.union(OpenFlags::CREATE),
+        )
+        .expect("a file is made");
+    FS_SERVICE
+        .write(0, &NoCaps, "/Storage/acorn/ReadMe", 0, false, b"filecore")
+        .expect("and written");
+    assert_volume_reads("/Storage/acorn/ReadMe", b"filecore");
+    retire(identity, false, round);
+}
+
+#[test]
+fn an_evidence_window_anywhere_in_an_extent_is_read_as_its_whole_blocks() {
+    let request = VolumeAttachRequest {
+        endpoint: 1,
+        window: 1,
+        first_lba: 100,
+        blocks: 1000,
+        fstype: VolumeFsType::Udf,
+        name: b"x",
+    };
+    let evidence = tairix_fsprobe::Evidence {
+        offset: 64 * 2048 + 10,
+        len: 4096,
+    };
+    // 512-byte blocks: from the block the window opens in to the one it
+    // closes in, in the device's own block numbers.
+    assert_eq!(
+        crate::volume_service::evidence_blocks(&request, 512, evidence),
+        Some((100 + 256, 9 * 512))
+    );
+    let past = tairix_fsprobe::Evidence {
+        offset: 999 * 512,
+        len: 1024,
+    };
+    assert_eq!(
+        crate::volume_service::evidence_blocks(&request, 512, past),
+        None
+    );
 }

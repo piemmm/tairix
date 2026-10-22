@@ -81,6 +81,9 @@ cambio, los mueve. El puntero muestra un signo más mientras soltar copiaría
 y una flecha mientras movería, y la carpeta donde caería lo soltado aparece
 resaltada. Un solo archivo arrastrado a la ranura de una aplicación en la
 barra de iconos se abre allí.
+Copiar o mover conserva los huecos de cada archivo y sus atributos
+extendidos, como un tipo de archivo de RISC OS; cualquier atributo que el
+destino no pueda conservar se indica en un aviso al terminar la operación.
 
 El menú contextual empieza por *Mostrar*. Debajo, un submenú nombra aquello
 sobre lo que actúa el menú — *Archivo «notes.txt»*, con un nombre largo

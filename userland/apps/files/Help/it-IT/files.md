@@ -79,6 +79,9 @@ invece, le sposta. Il cursore mostra un più finché il rilascio copierebbe e
 una freccia finché sposterebbe, e la cartella in cui finirebbe il rilascio è
 evidenziata. Un singolo file trascinato sulla posizione di un'applicazione
 nella barra delle icone vi viene aperto.
+Copiare o spostare conserva i buchi di ogni file e i suoi attributi
+estesi, come un tipo di file RISC OS; ogni attributo che la destinazione
+non può conservare viene indicato in un avviso al termine dell'operazione.
 
 Il menu contestuale si apre con *Visualizza*. Sotto, un sottomenu nomina ciò
 su cui agisce il menu — *File «notes.txt»*, con un nome lungo accorciato nel

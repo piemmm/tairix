@@ -380,6 +380,80 @@ fn a_create_over_a_no_longer_blank_device_is_refused() {
     assert!(disks[0].block_is_blank(0), "the blank member is untouched");
 }
 
+#[path = "../../../../../lib/fsprobe/tests/support/images.rs"]
+mod images;
+
+/// Ask for a mirror over two candidates of 128 blocks, the second shaped by
+/// `plant` after it was offered, answering the create's reply and whether
+/// the first was left untouched.
+fn create_over_planted(plant: impl FnOnce(&MemberDisk)) -> (Result<ArrayUuidBytes, Errno>, bool) {
+    let mut registry = MemberRegistry::new();
+    let mut disks = Vec::new();
+    let n1 = register_candidate(&mut registry, &mut disks, 128);
+    let n2 = register_candidate(&mut registry, &mut disks, 128);
+    plant(&disks[1]);
+    let mut arrays = TestArrays(Vec::new());
+    let mut out = [0u8; RAID_CONTROL_MAX_REPLY];
+    let frame = frame_of(&RaidControlOp::Create {
+        level: RaidLevel::Mirror,
+        chunk_blocks: 0,
+        members: MemberNodeList::new(&[n1, n2]).unwrap(),
+    });
+    let effects = handle_control(
+        &mut registry,
+        &mut arrays,
+        &admin_caps(),
+        &frame,
+        NOW,
+        NOW_NS,
+        |index| disks.get(index).cloned(),
+        plant_minted,
+        no_remove(),
+        &mut out,
+    );
+    (
+        decode_create_reply(&out[..effects.reply_len]),
+        disks[0].block_is_blank(0),
+    )
+}
+
+#[test]
+fn a_create_over_a_disc_image_is_refused() {
+    // An ISO 9660 image carries nothing at its head: only recognising the
+    // whole extent tells it from an empty disk.
+    let image = images::iso::image(&images::iso::Spec {
+        volume_id: b"DISC",
+        ..Default::default()
+    });
+    let (reply, untouched) = create_over_planted(|disk| disk.write_bytes(0, &image));
+    assert_eq!(reply, Err(Errno::Busy));
+    assert!(untouched, "the blank member is untouched");
+}
+
+#[test]
+fn a_create_over_a_malformed_partition_table_is_refused() {
+    // Two overlapping partitions: the table describes something this build
+    // cannot read, which an array would destroy.
+    let mut mbr = [0u8; 512];
+    for (index, start) in [8u32, 16].into_iter().enumerate() {
+        let entry = 446 + index * 16;
+        mbr[entry + 4] = 0x83;
+        mbr[entry + 8..entry + 12].copy_from_slice(&start.to_le_bytes());
+        mbr[entry + 12..entry + 16].copy_from_slice(&16u32.to_le_bytes());
+    }
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+    let (reply, untouched) = create_over_planted(|disk| disk.write_bytes(0, &mbr));
+    assert_eq!(reply, Err(Errno::Busy));
+    assert!(untouched, "the blank member is untouched");
+}
+
+#[test]
+fn a_create_over_two_blank_candidates_of_the_same_size_succeeds() {
+    let (reply, _) = create_over_planted(|_| {});
+    assert_eq!(reply, Ok(MINTED));
+}
+
 #[test]
 fn a_create_with_a_width_outside_the_level_floor_is_refused() {
     // RAID10 needs at least two mirrored pairs; two devices is below the floor.

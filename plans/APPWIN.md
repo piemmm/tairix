@@ -600,7 +600,7 @@ application draws the chrome that names who is speaking.
   manager's refusals and delete questions, the document host's open and save
   failures and its save-changes question, a document the viewer or the player
   cannot open, a window an application was refused (`app::refuse`, every one
-  built by the one `refusal_alert`), the picker's replace question, the
+  built by the one `notice_alert`), the picker's replace question, the
   session's confirmation and resolution prompts, and a refused drop
   (`plans/NEW-TASKBAR.md` T21). Forms and progress are not alerts, but
   neither is drawn inside the window it serves: each is an owned dialog

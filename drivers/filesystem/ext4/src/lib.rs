@@ -37,7 +37,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity,
     NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeHost, VolumeStats,
 };
-use tairix_abi::fs::FS_SYMLINK_MAX;
+use tairix_abi::fs::{SeekRegion, FS_SYMLINK_MAX};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_reclaim::{CacheBudget, PinnedAccounting, PressureGauge};
@@ -419,7 +419,7 @@ impl<B: Block> Ext4<B> {
     /// what the replay left — it may have rewritten the superblock, geometry
     /// and all — and that second reading refuses a log still needing one.
     fn assemble(mut dev: Device<B>, writable: bool, may_replay: bool) -> Result<Self, DriverError> {
-        let bytes = dev.bytes().ok_or(DriverError::DeviceFault)?;
+        let bytes = dev.bytes();
         if bytes < SUPERBLOCK_OFFSET + SUPERBLOCK_LEN as u64 {
             return Err(DriverError::BadMagic);
         }
@@ -1655,6 +1655,52 @@ impl<B: Block> Ext4<B> {
         }
         self.read_file(inode.ino, &inode.head, inode.size, offset, buf)
     }
+
+    /// Where the next region of `region`'s kind begins at or after `offset`
+    /// of `inode`, a mapped run at a time. An unwritten extent reads as zeros
+    /// and holds no data, so it is a hole; inline contents are data
+    /// throughout.
+    fn region_after(
+        &mut self,
+        inode: &Inode,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        if inode.flags & INODE_FLAG_ENCRYPT != 0 {
+            return Err(DriverError::Unsupported);
+        }
+        if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
+            return Ok(region.in_solid_file(offset, inode.size));
+        }
+        if offset >= inode.size {
+            return Ok(None);
+        }
+        let bs = u64::from(self.layout.block_size);
+        let last = (inode.size - 1) / bs;
+        let mut block = offset / bs;
+        while block <= last {
+            let (data, run) = match self.map_lookup(inode.ino, &inode.head, block)? {
+                Mapping::Mapped {
+                    len,
+                    unwritten: false,
+                    ..
+                } => (true, Some(len)),
+                Mapping::Mapped { len, .. } => (false, Some(len)),
+                Mapping::Hole { len } => (false, len),
+            };
+            if data == (region == SeekRegion::Data) {
+                return Ok(Some((block * bs).max(offset)));
+            }
+            match run {
+                Some(len) if len > 0 => block = block.saturating_add(len),
+                _ => break,
+            }
+        }
+        Ok(match region {
+            SeekRegion::Data => None,
+            SeekRegion::Hole => Some(inode.size),
+        })
+    }
 }
 
 impl<B: Block> FilesystemRead for Ext4<B> {
@@ -1687,6 +1733,20 @@ impl<B: Block> FilesystemRead for Ext4<B> {
             Some(NodeKind::Directory | NodeKind::Symlink) => Err(DriverError::Unsupported),
             None => Err(DriverError::NotFound),
         }
+    }
+
+    fn seek_region(
+        &mut self,
+        file: NodeId,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        let ino = node_inode(file)?;
+        let inode = self.read_inode(ino)?;
+        if inode.kind() != Some(NodeKind::RegularFile) {
+            return Err(DriverError::Unsupported);
+        }
+        self.region_after(&inode, offset, region)
     }
 
     fn read_link(&mut self, link: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {

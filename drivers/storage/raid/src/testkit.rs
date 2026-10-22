@@ -115,6 +115,12 @@ impl MemberDisk {
         state.bytes[at..end].fill(fill);
     }
 
+    /// Write `bytes` at byte `offset` of the device, bypassing the [`Block`]
+    /// surface, so a test can plant another format's structures.
+    pub(crate) fn write_bytes(&self, offset: usize, bytes: &[u8]) {
+        self.0.borrow_mut().bytes[offset..offset + bytes.len()].copy_from_slice(bytes);
+    }
+
     /// Whether device block `lba` is entirely zero.
     pub(crate) fn block_is_blank(&self, lba: u64) -> bool {
         let state = self.0.borrow();

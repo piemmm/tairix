@@ -25,7 +25,7 @@ use tairix_abi::blkio::{
     decode_outcome, BlkCompletion, BlkDeviceName, BlkMedium, BlkOp, BlkOutcome, BlkRequest,
     BlkStatus, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DiscLayout, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
 use tairix_abi::driver::DriverError;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{CapabilityId, Errno};
@@ -51,12 +51,6 @@ const CLIENT_ID_BASE: u64 = 0xB1D0_0000_0000_0000;
 
 /// The next client claimant id to mint.
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(CLIENT_ID_BASE);
-
-/// Smallest logical block size the client accepts from a device.
-const MIN_BLOCK_SIZE: u32 = 512;
-
-/// Largest logical block size the client accepts from a device.
-const MAX_BLOCK_SIZE: u32 = 4096;
 
 /// A [`Block`] device served by a user-space block driver over a call
 /// endpoint and a shared data window.
@@ -86,6 +80,9 @@ pub struct BlkClient {
     /// instead of asserting one nobody declared; for patience it is served the
     /// bounded unclassified envelope.
     declared_medium: Option<BlkMedium>,
+    /// Where the disc the device held at connect keeps its newest
+    /// structures, as its driver reported them.
+    disc_layout: Option<DiscLayout>,
     /// The binding of the publication this client connected to, repeated on
     /// every request so none reaches a medium that has since replaced it.
     binding: u64,
@@ -174,6 +171,7 @@ impl BlkClient {
             // endpoint that never answers fails closed promptly rather than
             // being granted a spinning disk's patience on nothing but hope.
             declared_medium: None,
+            disc_layout: None,
             binding: 0,
             meter: DeviceIoMeter::new(endpoint_id, audit),
         };
@@ -203,6 +201,7 @@ impl BlkClient {
         // unknown and served the bounded unclassified envelope, so it cannot
         // buy patience and cannot be reported as a medium it never declared.
         client.declared_medium = completion.medium;
+        client.disc_layout = completion.disc_layout;
         client.binding = completion.binding;
         // The device has now answered for itself, so the fold adopts the
         // envelope its medium earns and the name its driver declares. The name
@@ -496,6 +495,12 @@ impl Block for BlkClient {
         self.declared_medium
     }
 
+    /// The layout of the disc the device held at connect; a later disc is a
+    /// later publication, which this client never reaches.
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        self.disc_layout
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
     }
@@ -690,6 +695,7 @@ mod tests {
         /// `None` declares a medium word this build does not recognise, which
         /// is how a device speaking an unknown medium is simulated.
         reported_medium: Option<BlkMedium>,
+        reported_layout: Option<DiscLayout>,
     }
 
     impl MemDevice {
@@ -700,6 +706,7 @@ mod tests {
                 read_only: false,
                 reported_block_size: BLOCK_SIZE_U32,
                 reported_medium: Some(MEM_DEVICE_MEDIUM),
+                reported_layout: None,
             }
         }
 
@@ -735,6 +742,7 @@ mod tests {
                         let mut device = device.lock().unwrap();
                         match request.op {
                             BlkOp::Geometry => BlkCompletion {
+                                disc_layout: device.reported_layout,
                                 name: BlkDeviceName::new(MEM_DEVICE_NAME),
                                 block_size: device.reported_block_size,
                                 block_count: device.block_count(),
@@ -849,6 +857,31 @@ mod tests {
             MEM_DEVICE_CLASS.budget().deadline_ns,
             BlkDeviceClass::Virtual.budget().deadline_ns
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn connect_adopts_the_disc_layout_the_device_reported() {
+        let id = fresh_endpoint_id();
+        let endpoint = register_endpoint(id);
+        let window = leak_window();
+        let layout = DiscLayout {
+            last_session_start: 16,
+            last_recorded: Some(40),
+        };
+        let mut mem = MemDevice::new(64);
+        mem.reported_layout = Some(layout);
+        let device = StdArc::new(Mutex::new(mem));
+        let server = serve(
+            endpoint,
+            Window(window),
+            StdArc::clone(&device),
+            1,
+            StdArc::new(AtomicBool::new(false)),
+        );
+        let hold = KernelHold::for_test(window, BLK_DATA_LEN);
+        let client = BlkClient::connect(id, hold, &SINK).expect("connect");
+        assert_eq!(client.disc_layout(), Some(layout));
         server.join().unwrap();
     }
 
@@ -1140,6 +1173,7 @@ mod tests {
                             block_count: 8,
                             flags: 0,
                             medium: Some(SCRIPTED_DEVICE_MEDIUM),
+                            disc_layout: None,
                             name: BlkDeviceName::new(SCRIPTED_DEVICE_NAME),
                             binding: 0,
                         }

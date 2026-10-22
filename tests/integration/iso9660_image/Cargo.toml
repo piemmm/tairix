@@ -1,0 +1,22 @@
+[package]
+name = "tairix-test-iso9660-image"
+description = "ISO 9660 discs mastered for tests: directory records, volume descriptors and system use entries (SUSP, Rock Ridge, Apple, Amiga, RISC OS) written from their specifications apart from the driver that reads them, whole trees laid out into an image, and the RISC OS disc the QEMU optical vertical copies onto ARXFS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` + `alloc`, so it links into the driver's and the probe's host
+# tests, the host build tool that plants the vertical's disc, and the
+# freestanding guest program that checks what was copied from it.
+[dev-dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-drv-fs-iso9660 = { path = "../../../drivers/filesystem/iso9660", version = "=0.0.0" }

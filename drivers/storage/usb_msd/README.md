@@ -5,8 +5,9 @@
 **interface** node it serves is discovered (`AGENTS.md` §18): SCSI
 transparent over Bulk-Only Transport (`08:06:50`, the ubiquitous stick/disk),
 UFI floppies over BOT (`08:04:50`) and over Control/Bulk/Interrupt
-(`08:04:00`, the classic USB floppy drive), and USB Attached SCSI
-(`08:06:62`). The crate is a `lib` (its `BIND_KEYS` bind table plus the
+(`08:04:00`, the classic USB floppy drive), USB Attached SCSI
+(`08:06:62`), and optical drives — any of those carrying a multimedia unit,
+and ATAPI drives over BOT (`08:02:50`). The crate is a `lib` (its `BIND_KEYS` bind table plus the
 host-testable device logic: the configuration-descriptor reader, the
 transport-neutral SCSI command layer, the three wire transports, and the
 block-service state machine) **and** a `Run` binary (the process).
@@ -32,8 +33,9 @@ binary works behind any host controller that speaks the URB transport
    completion interrupt for CBI, or the four Pipe-Usage-named bulk pipes for
    UAS (`src/desc.rs`, fail-closed on every hostile length).
 3. Discovers the units (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS,
-   exactly one for CBI) and sends each `INQUIRY` (non-disk units are
-   skipped). Every disk then comes up on its own one-shot timers inside the
+   exactly one for CBI) and sends each `INQUIRY` (a direct-access disk or a
+   multimedia drive is served, any other type skipped). Every unit then comes
+   up on its own one-shot timers inside the
    serve loop (`src/ready.rs`), so one disk spinning up never holds back its
    siblings. `TEST UNIT READY`'s sense (consumed per failed attempt — UAS and
    CBI/UFI deliver it in-band, BOT via `REQUEST SENSE`) is classified by key,
@@ -50,9 +52,22 @@ binary works behind any host controller that speaks the URB transport
    disk), so it never decides the unit's patience. Then
    `READ CAPACITY(10)`/`(16)` (validated geometry; 16-byte form past the
    32-bit LBA horizon) and the write-protect bit (`MODE SENSE(6)` for the
-   transparent set, `MODE SENSE(10)` for UFI); a unit ready to a test whose
-   geometry cannot be read is re-tried within its ready budget, then given
-   up on.
+   transparent set, `MODE SENSE(10)` for UFI, ATAPI and multimedia units); a
+   unit ready to a test whose geometry cannot be read is re-tried within its
+   ready budget, then given up on. A multimedia unit's disc is served as
+   `BlkForm::OpticalDisc` and asked what it is instead of probed as a disk:
+   `GET CONFIGURATION`'s Random Writable feature (written only when current),
+   `READ TOC` format 1 (the last session's start), and `READ DISC INFORMATION`
+   with `READ TRACK INFORMATION` (its last recorded block), all carried to the
+   consumer as its `DiscLayout`. A drive refusing one, or breaking the
+   exchange of one (which ends the queries), reads as a pressed,
+   single-session disc; a disc not yet ready, or that left or changed, fails
+   the bring-up so it is read again, and another unit attention is asked past
+   once. A session starts within what the disc recorded, and a last recorded
+   address outside its track is not believed. `MEDIUM ERROR`, `BLANK CHECK`
+   and `HARDWARE ERROR` fail the one request, never the unit; `RECOVERED
+   ERROR` completes the command, and `ABORTED COMMAND` or a check condition
+   naming no cause is answered reissuably.
 4. Publishes one **storage-class** hardware-tree node per ready LUN, carrying
    a `tairix,usb-msd-lun` compatible key, two grants — a block-service call
    endpoint and a 32 KiB shared data window (`tairix_abi::blkio` — the
@@ -117,8 +132,10 @@ binary works behind any host controller that speaks the URB transport
    an exchange, its control requests included, runs within what the
    exchange has left; the reset recovery a broken exchange owes runs in an
    exchange of its own, as long as the command it serves, so a command that
-   spent its exchange still gets its reset. A media command
-   answered with a unit attention is sent once more. One answered "coming
+   spent its exchange still gets its reset. Whatever command broke, its
+   reset's attention is then owed by every unit, so a unit whose medium can
+   leave reads any other reset attention as a possible change of medium. A
+   media command answered with a unit attention is sent once more. One answered "coming
    ready" is held — `DriverError::NotReady`, which the shared engine answers
    `Answer::Hold` — with no health folded and no reissue spent: the unit's
    endpoint leaves the serve set, so the calls queued behind it wait in the
@@ -167,14 +184,16 @@ and disk enclosure), UFI floppy drives over BOT (`08:04:50`) or CBI
 driver enumerates and serves over the URB transport (the Pi 4's USB-A ports
 via the xHCI HCD). Up to 16 LUNs. Logical block sizes 512–4096 (powers of
 two). Deliberately not covered (per `plans/DEVICES.md` §3/D5): the
-interrupt-less CB variant (protocol `0x01`), ATAPI sub-classes (tape,
-optical), UAS command queueing / task-management IUs / SuperSpeed bulk
+interrupt-less CB variant (protocol `0x01`), tape, software eject and tray
+locking (`plans/FOREIGN-MEDIA.md`), UAS command queueing / task-management
+IUs / SuperSpeed bulk
 streams (one command in flight serves the synchronous block service; a
 protocol violation fails the exchange closed), and the BOT→UAS alternate-
 setting switch (a dual BOT+UAS device runs its default BOT setting; UAS
 serves devices exposing it as the default interface). Media are polled for
-with `TEST UNIT READY` every two seconds, as Linux's `sd` does; the media event
-notification MMC defines is an optical-drive command outside the served set. Runtime unload is
+with `TEST UNIT READY` every two seconds, as Linux's `sd` does — an empty
+unit for a medium, a serving removable one for its medium leaving — and MMC's
+media event notification is not used. Runtime unload is
 driven by `devmgr` through the kernel driver-unload mechanism; the driver
 also exits by itself when its interface vanishes.
 
@@ -202,5 +221,10 @@ quiesced transport holds a stalling sibling reissuable, any unit's definitive
 answer recovers the whole device, and an elapsed window fails a sibling
 closed). The URB transport
 is proven in `lib/usb` (bulk, the no-data and data-stage control-OUT, the
-EP0 stall recovery, and the per-pipe bulk routing). The end-to-end path is
-the metal acceptance item (QEMU models no Pi USB; `plans/PI.md` §0.4).
+EP0 stall recovery, and the per-pipe bulk routing). `src/scsi_tests.rs` also
+covers the multimedia set: a multisession disc, an open track recorded up to
+its next writable address, a rewritable disc, refusing drives, a short track
+answer, and per-request medium errors. The USB optical QEMU vertical
+(`tairix-test-optical-qemu-aarch64`) runs a `usb-bot` + `scsi-cd` drive on
+QEMU's xHCI controller end to end; the rest of the live path is the metal
+acceptance item (`plans/PI.md` §0.4).

@@ -1579,7 +1579,7 @@ fn data_block_integrity_layers_are_distinct_and_fail_closed() {
         let classify = |bytes: alloc::vec::Vec<u8>, at: u64| {
             let mut fs =
                 ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), keying).expect("remount");
-            let mut buf = [0u8; MAX_BLOCK_SIZE];
+            let mut buf = [0u8; MAX_BLOCK_LEN];
             fs.read_data_block_classified(at, &mut buf)
         };
         // Recompute the physical checksum over a block's at-rest bytes so a
@@ -1647,7 +1647,7 @@ fn identical_content_shares_a_logical_hash_distinct_content_differs() {
 
     let stored_hash = |fs: &mut ARXFS<MemBlock>, name: &[u8]| -> [u8; LOGICAL_HASH_LEN] {
         let phys = data_block_phys(fs, name, 0);
-        let mut raw = [0u8; MAX_BLOCK_SIZE];
+        let mut raw = [0u8; MAX_BLOCK_LEN];
         fs.read_block(phys, &mut raw).expect("raw read");
         let off = fs.logical_hash_offset();
         let mut hash = [0u8; LOGICAL_HASH_LEN];
@@ -1730,7 +1730,7 @@ fn data_block_capacity_reserves_the_integrity_trailer() {
 
 /// Read the on-disk stored-form descriptor of the data block at `phys`.
 fn stored_form_at(fs: &mut ARXFS<MemBlock>, phys: u64) -> StoredForm {
-    let mut raw = [0u8; MAX_BLOCK_SIZE];
+    let mut raw = [0u8; MAX_BLOCK_LEN];
     fs.read_block(phys, &mut raw).expect("raw read");
     let off = fs.compression_desc_offset();
     read_stored_form(&raw[off..off + COMPRESSION_DESCRIPTOR_LEN]).expect("descriptor parses")
@@ -2771,7 +2771,7 @@ fn a_retained_cluster_serves_repeat_reads_without_the_transform_pipeline() {
     // Corrupt the stored cluster head on the device. Only the data block
     // is touched; the metadata tree stays intact.
     let (_, ext) = extent_of(&mut fs, b"c", 0);
-    let mut raw = [0u8; MAX_BLOCK_SIZE];
+    let mut raw = [0u8; MAX_BLOCK_LEN];
     fs.read_block(ext.phys, &mut raw).expect("raw read");
     raw[HEADER_LEN] ^= 0xFF;
     fs.write_device(ext.phys, &raw).expect("raw write");
@@ -5795,7 +5795,7 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
 
     let mut fs =
         ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING).expect("still mounts");
-    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let mut buf = [0u8; MAX_BLOCK_LEN];
     assert_eq!(
         fs.read_data_block_classified(phys, &mut buf),
         Err(DataFault::Physical),
@@ -6607,7 +6607,7 @@ fn confirming_map_invalidation_leaves_authoritative_blocks_staged() {
     let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     assert!(fs.map_is_stamped_clean());
     let authoritative = fs.map_region_start() + fs.map_region_blocks();
-    let block = [0xA5; MAX_BLOCK_SIZE];
+    let block = [0xA5; MAX_BLOCK_LEN];
     let block_size = fs.block_size;
     fs.dirty
         .stage(
@@ -7601,7 +7601,7 @@ fn rename_rejects_bad_destination_name() {
 /// Read the whole value of attribute `key` on `node` into an owned vector, or
 /// `None` when the attribute is absent.
 fn get_attr_vec(fs: &mut ARXFS<MemBlock>, node: NodeId, key: &[u8]) -> Option<alloc::vec::Vec<u8>> {
-    let mut buf = alloc::vec![0u8; MAX_BLOCK_SIZE];
+    let mut buf = alloc::vec![0u8; MAX_BLOCK_LEN];
     fs.get_attr(node, key, &mut buf)
         .expect("get_attr")
         .map(|n| buf[..n].to_vec())
@@ -7611,7 +7611,7 @@ fn get_attr_vec(fs: &mut ARXFS<MemBlock>, node: NodeId, key: &[u8]) -> Option<al
 fn list_attr_keys(fs: &mut ARXFS<MemBlock>, node: NodeId) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
     let mut out = alloc::vec::Vec::new();
     let mut i = 0u64;
-    let mut buf = alloc::vec![0u8; MAX_BLOCK_SIZE];
+    let mut buf = alloc::vec![0u8; MAX_BLOCK_LEN];
     while let Some(n) = fs.list_attr(node, i, &mut buf).expect("list_attr") {
         out.push(buf[..n].to_vec());
         i += 1;
@@ -9610,7 +9610,7 @@ fn deep_inode_tree(count: u32) -> (ARXFS<MemBlock>, Vec<u64>) {
 /// The level of the tree at `root` (0 for a single leaf), read from its root
 /// node — the depth the walk must descend on every step.
 fn tree_level(fs: &mut ARXFS<MemBlock>, root: u64) -> u32 {
-    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let mut buf = [0u8; MAX_BLOCK_LEN];
     fs.read_meta(root, BlockType::Btree, &mut buf)
         .expect("read root node");
     rd_u32(&buf, btree::N_LEVEL)
@@ -9777,7 +9777,7 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
     // decrease, which is the shape that would otherwise descend forever.
     let (mut fs, _) = deep_inode_tree(60);
     let root = fs.inode_tree_root;
-    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let mut buf = [0u8; MAX_BLOCK_LEN];
     fs.read_meta(root, BlockType::Btree, &mut buf)
         .expect("root");
     wr_u64(&mut buf, btree::N_ENTRIES + 8, root);
@@ -9798,7 +9798,7 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
     );
 
     // A node claiming a level no device could hold a tree that deep for.
-    let mut deep = [0u8; MAX_BLOCK_SIZE];
+    let mut deep = [0u8; MAX_BLOCK_LEN];
     fs.read_meta(root, BlockType::Btree, &mut deep)
         .expect("root");
     wr_u32(&mut deep, btree::N_LEVEL, 200);
@@ -9813,11 +9813,11 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
 
     // A leaf claiming more entries than its block can hold: reading them
     // would index past the buffer.
-    let mut wide = [0u8; MAX_BLOCK_SIZE];
+    let mut wide = [0u8; MAX_BLOCK_LEN];
     let leaf = tree_nodes(&mut fs, root, spec)
         .into_iter()
         .find(|node| {
-            let mut probe = [0u8; MAX_BLOCK_SIZE];
+            let mut probe = [0u8; MAX_BLOCK_LEN];
             fs.read_meta(*node, BlockType::Btree, &mut probe).is_ok()
                 && tree_level(&mut fs, *node) == 0
         })
@@ -9845,7 +9845,7 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
         fs.create(root, name.as_bytes(), NodeKind::RegularFile)
             .expect("create");
     }
-    let mut leaf = [0u8; MAX_BLOCK_SIZE];
+    let mut leaf = [0u8; MAX_BLOCK_LEN];
     let inode_root = fs.inode_tree_root;
     fs.read_meta(inode_root, BlockType::Btree, &mut leaf)
         .expect("the small tree is one leaf");
@@ -9881,7 +9881,7 @@ fn the_write_path_refuses_an_impossible_tree_as_the_read_path_does() {
     let mut record = [0u8; INODE_SIZE];
     record[0] = 1;
 
-    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let mut buf = [0u8; MAX_BLOCK_LEN];
     fs.read_meta(root, BlockType::Btree, &mut buf)
         .expect("root");
     wr_u64(&mut buf, btree::N_ENTRIES + 8, root);
@@ -9898,7 +9898,7 @@ fn the_write_path_refuses_an_impossible_tree_as_the_read_path_does() {
         Err(DriverError::DeviceFault)
     );
 
-    let mut deep = [0u8; MAX_BLOCK_SIZE];
+    let mut deep = [0u8; MAX_BLOCK_LEN];
     fs.read_meta(root, BlockType::Btree, &mut deep)
         .expect("root");
     wr_u32(&mut deep, btree::N_LEVEL, 200);
@@ -9934,20 +9934,20 @@ fn a_merge_of_two_empty_siblings_is_refused_rather_than_indexed_into() {
     let spec = inode_spec();
     fs.begin().expect("begin");
 
-    let mut leaf = [0u8; MAX_BLOCK_SIZE];
+    let mut leaf = [0u8; MAX_BLOCK_LEN];
     fs.btree_init_node(&mut leaf, 0, 1);
     wr_u64(&mut leaf, btree::N_ENTRIES, 7);
     let low = fs
         .cow_meta(0, &mut leaf, BlockType::Btree, spec.owner, 0)
         .expect("seal the one-entry leaf");
 
-    let mut empty = [0u8; MAX_BLOCK_SIZE];
+    let mut empty = [0u8; MAX_BLOCK_LEN];
     fs.btree_init_node(&mut empty, 0, 0);
     let high = fs
         .cow_meta(0, &mut empty, BlockType::Btree, spec.owner, 0)
         .expect("seal the empty leaf");
 
-    let mut root = [0u8; MAX_BLOCK_SIZE];
+    let mut root = [0u8; MAX_BLOCK_LEN];
     fs.btree_init_node(&mut root, 1, 2);
     let second = btree::N_ENTRIES + btree::INTERNAL_STRIDE;
     wr_u64(&mut root, btree::N_ENTRIES, 7);
@@ -11366,3 +11366,6 @@ mod plaintext;
 
 #[path = "reserve_tests.rs"]
 mod reserve;
+
+#[path = "region_tests.rs"]
+mod region;

@@ -30,6 +30,8 @@ path = "src/run.rs"
 # The protocol, the closed set of documents, and the `Errno` table every
 # refusal fails closed with.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The fallible buffer fill (`fallible::filled`).
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The machine configuration's engine: the registry a change names and the
 # canonical render the document is replaced with.
 tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }

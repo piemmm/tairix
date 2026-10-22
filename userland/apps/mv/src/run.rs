@@ -42,10 +42,14 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags};
-    use tairix_abi::{Errno, RenameFlags};
+    use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion};
+    use tairix_abi::{Errno, FileKind, RenameFlags};
     use tairix_help::BundleHelp;
-    use tairix_mv::{parse, run, Entry, EntryKind, FileSystem, Prompt, RenameOutcome, USAGE};
+    use tairix_mv::{
+        parse, run, AttributeStore, Entry, EntryKind, FileSystem, PathFiles, Prompt, RenameOutcome,
+        USAGE,
+    };
+    use tairix_rt::copy::{OpenFiles, RtAttributes};
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_rt::File;
 
@@ -67,14 +71,27 @@ mod program {
             let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
             entries.push(Entry {
                 name: String::from(name),
-                kind: if entry.kind.is_dir() {
-                    EntryKind::Directory
-                } else {
-                    EntryKind::File
-                },
+                kind: entry_kind(entry.kind),
             });
         }
         Ok(entries)
+    }
+
+    /// The distinction `mv` acts on: a link is moved as itself.
+    fn entry_kind(kind: FileKind) -> EntryKind {
+        match kind {
+            FileKind::Directory => EntryKind::Directory,
+            FileKind::Symlink => EntryKind::Symlink,
+            FileKind::Regular => EntryKind::File,
+        }
+    }
+
+    /// What `path` is under `flags`: a resolve-only open that requests no
+    /// read authority and learns only the metadata.
+    fn probe(path: &str, flags: OpenFlags) -> Result<EntryKind, Errno> {
+        let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+        let stat = file.stat().map_err(Errno::from_syscall)?;
+        Ok(entry_kind(stat.kind))
     }
 
     /// The directory a path's final component lives in, with any trailing
@@ -106,16 +123,14 @@ mod program {
     /// the copy path. A mutation under the snapshotted directory drops the
     /// snapshot, so a stale listing is never served.
     struct RtFileSystem {
-        reader: RefCell<Option<(String, File)>>,
-        writer: RefCell<Option<(String, File)>>,
+        files: OpenFiles,
         listing: RefCell<Option<(String, Vec<Entry>)>>,
     }
 
     impl RtFileSystem {
         fn new() -> Self {
             Self {
-                reader: RefCell::new(None),
-                writer: RefCell::new(None),
+                files: OpenFiles::default(),
                 listing: RefCell::new(None),
             }
         }
@@ -125,14 +140,7 @@ mod program {
         /// its parent (or of the path itself, for a removed or renamed
         /// directory).
         fn forget(&self, path: &str) {
-            let mut reader = self.reader.borrow_mut();
-            if matches!(&*reader, Some((name, _)) if name == path) {
-                *reader = None;
-            }
-            let mut writer = self.writer.borrow_mut();
-            if matches!(&*writer, Some((name, _)) if name == path) {
-                *writer = None;
-            }
+            self.files.forget(path);
             let mut listing = self.listing.borrow_mut();
             if matches!(&*listing, Some((dir, _)) if dir.trim_end_matches('/') == parent_of(path)
                 || dir.trim_end_matches('/') == path.trim_end_matches('/'))
@@ -142,18 +150,64 @@ mod program {
         }
     }
 
+    impl PathFiles for RtFileSystem {
+        fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+            self.files.read(path, offset, buf)
+        }
+
+        fn size(&self, path: &str) -> Result<u64, Errno> {
+            self.files.size(path)
+        }
+
+        fn next_region(
+            &self,
+            path: &str,
+            offset: u64,
+            region: SeekRegion,
+        ) -> Result<Option<u64>, Errno> {
+            self.files.next_region(path, offset, region)
+        }
+
+        fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+            self.files.write(path, offset, bytes)
+        }
+
+        fn set_len(&self, path: &str, len: u64) -> Result<(), Errno> {
+            self.files.set_len(path, len)
+        }
+    }
+
     impl FileSystem for RtFileSystem {
         fn kind(&self, path: &str) -> Result<EntryKind, Errno> {
-            // A resolve-only open: no read authority is requested, the
-            // handle is closed on drop, and only the metadata is learned.
-            let file =
-                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
-            let stat = file.stat().map_err(Errno::from_syscall)?;
-            Ok(if stat.kind.is_dir() {
-                EntryKind::Directory
-            } else {
-                EntryKind::File
-            })
+            // `NO_FOLLOW` is how a link is described as itself.
+            probe(path, OpenFlags::NO_FOLLOW)
+        }
+
+        fn resolved_kind(&self, path: &str) -> Result<EntryKind, Errno> {
+            probe(path, OpenFlags::empty())
+        }
+
+        fn read_link(&self, path: &str) -> Result<String, Errno> {
+            // The buffer is the ABI's own target bound, so one call always
+            // suffices: a longer target cannot exist.
+            let mut buf = alloc::vec![0u8; tairix_abi::fs::FS_SYMLINK_MAX];
+            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
+            if ret < 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
+            let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
+            let target = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
+            Ok(String::from(target))
+        }
+
+        fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {
+            let ret = tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes());
+            if ret != 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            self.forget(link);
+            Ok(())
         }
 
         fn rename(
@@ -173,22 +227,6 @@ mod program {
                 // but the signal to relocate by copy-then-remove.
                 Errno::CrossVolume => Ok(RenameOutcome::CrossDevice),
                 other => Err(other),
-            }
-        }
-
-        fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-            let mut open = self.reader.borrow_mut();
-            let cached = matches!(&*open, Some((name, _)) if name == path);
-            if !cached {
-                let file =
-                    File::open(path.as_bytes(), OpenFlags::READ).map_err(Errno::from_syscall)?;
-                *open = Some((String::from(path), file));
-            }
-            match &*open {
-                Some((_, file)) => file.read_at(offset, buf).map_err(Errno::from_syscall),
-                // Unreachable by construction (the handle was just
-                // installed), but fail closed rather than panic.
-                None => Err(Errno::NotFound),
             }
         }
 
@@ -225,35 +263,6 @@ mod program {
             Ok(())
         }
 
-        fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-            let mut open = self.writer.borrow_mut();
-            let cached = matches!(&*open, Some((name, _)) if name == path);
-            if !cached {
-                let file =
-                    File::open(path.as_bytes(), OpenFlags::WRITE).map_err(Errno::from_syscall)?;
-                *open = Some((String::from(path), file));
-            }
-            let Some((_, file)) = &*open else {
-                // Unreachable by construction (the handle was just
-                // installed), but fail closed rather than panic.
-                return Err(Errno::NotFound);
-            };
-            // The kernel may accept a short write; every byte is the seam's
-            // contract, so loop until the chunk is on disk or refused.
-            let mut written = 0usize;
-            while written < bytes.len() {
-                let n = file
-                    .write_at(offset + written as u64, &bytes[written..])
-                    .map_err(Errno::from_syscall)?;
-                if n == 0 {
-                    // A zero-byte accept would spin forever; fail closed.
-                    return Err(Errno::LengthOutOfRange);
-                }
-                written += n;
-            }
-            Ok(())
-        }
-
         fn remove_file(&self, path: &str) -> Result<(), Errno> {
             let ret = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::empty());
             if ret != 0 {
@@ -275,6 +284,21 @@ mod program {
             }
             self.forget(path);
             Ok(())
+        }
+    }
+
+    /// The extended attributes, through the shared runtime-backed store.
+    impl AttributeStore for RtFileSystem {
+        fn attr_keys(&self, path: &str) -> Result<Vec<String>, Errno> {
+            RtAttributes.attr_keys(path)
+        }
+
+        fn attr_value(&self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+            RtAttributes.attr_value(path, key)
+        }
+
+        fn attr_set(&self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+            RtAttributes.attr_set(path, key, value)
         }
     }
 
@@ -343,6 +367,7 @@ mod program {
             &RtPrompt,
             &BundleHelp::new("mv"),
             &Stdout,
+            &Stderr,
         ) {
             Ok(()) => 0,
             Err(err) => {

@@ -19,6 +19,7 @@ gyfrol. Ni all symudiad y mae ei ffynhonnell a'i gyrchfan ar gyfrolau
 gwahanol fod yn atomig: mae'n syrthio'n ôl ar gopïo'r ffynhonnell i'r
 gyrchfan ac yna dileu'r ffynhonnell (atgynhyrchir cyfeiriaduron yn
 ailadroddus).
+Caiff ffeil y mae ei chopïo'n methu ei dileu, a chedwir y ffynhonnell.
 
 Trosysgrifir cyrchfan sy'n bodoli yn ragosodedig, fe'i hepgorir o dan
 `-n`, a gofynnir amdani ar ffrwd y gwall safonol o dan `-i` (mae
@@ -26,6 +27,12 @@ cwestiwn a wrthodwyd yn hepgor y symudiad hwnnw heb wall; ni thrinnir
 ateb annarllenadwy byth fel cydsyniad). Mae'r methiant cyntaf yn atal
 y rhediad cyn unrhyw operand diweddarach. Mae `--` yn gorffen dosrannu
 opsiynau: mae pob ymresymiad diweddarach yn llwybr.
+
+Mae'r copi'n cario tyllau a phriodoleddau estynedig pob ffeil — math ffeil
+RISC OS, math a chrëwr Mac — lle bynnag y gall y cyrchfan eu cadw, ac mae'n
+symud dolen symbolaidd fel dolen sy'n storio'r un targed, byth yr hyn y mae'n
+ei henwi. Adroddir y priodoleddau na all y cyrchfan eu cadw mewn un rhybudd pan
+ddaw'r rhediad i ben, ac mewn cofnod `omission` ar y ffrwd wybodaeth safonol.
 
 ## OPTIONS
 

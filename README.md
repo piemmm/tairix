@@ -115,6 +115,7 @@ for filesystems, the feature section below.
 | NIC completion-interrupt masking (no per-frame interrupt storm) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | Receive pre-filter (foreign traffic shed before the stack wakes) | ✓ | ✓ | ✓ | — |
 | USB host controller (xHCI: enumeration, hubs, hotplug, isochronous streams) | ✓ qemu-xhci | ✓ qemu-xhci + ◐ VL805 | ✓ qemu-xhci | — |
+| USB optical drives (multimedia units, sessions, removal) | ▢ | ✓ qemu-xhci | ▢ | — |
 | Input devices | ✓ virtio + ◐ ps2 | ✓ virtio + ◐ USB HID | ✓ virtio | ✓ host |
 | Touch input (multitouch frames; tap, scroll and pinch gestures) | ◐ virtio | ◐ virtio + ◐ USB HID | ◐ virtio | ▢ |
 | Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio + Pi jack, I²S, HDMI | ◐ virtio + USB + HD Audio | ▢ |
@@ -166,8 +167,10 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Online grow | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Device-health monitoring → triggered scrub | ✓ | — | — | — | — |
 
-TAIRiX ships drivers for ARXFS (native) and for ext2/ext3/ext4, FAT32, and
-ADFS as interoperability drivers for foreign volumes.
+TAIRiX ships drivers for ARXFS (native) and for ext2/ext3/ext4, FAT32,
+ADFS, ISO 9660 (read-only: Joliet, Rock Ridge, High Sierra) and UDF 1.02–2.60
+as interoperability drivers for foreign volumes. A copy onto ARXFS keeps a
+file's RISC OS filetype, Mac type and creator, Amiga comment and holes.
 
 ## Security & attack-vector prevention
 

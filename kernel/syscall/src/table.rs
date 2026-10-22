@@ -14,9 +14,9 @@ use tairix_abi::{
     i32_from_register, i32_register_is_canonical, i64_from_register, spec_for, AbiType,
     CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
     MapFlags, OpenFlags, PeerWatchOp, PortWidth, PowerAction, RandomFlags, RealpathMode,
-    RenameFlags, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags,
-    WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
-    SYSCALL_MAX_ARGS,
+    RenameFlags, SchedPriority, SeekRegion, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec,
+    UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK,
+    PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId};
@@ -2685,6 +2685,33 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Find where the next region of kind `region` begins at or after
+    /// `offset` of open file `fd`.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_seek_region(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _region: SeekRegion,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Punch a hole of `len` bytes at `offset` in open file `fd`.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_punch(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _offset: u64,
+        _len: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Flush the filesystem backing open handle `fd` to its store
     /// (`PREREQUISITES.md` P-A).
     ///
@@ -4187,6 +4214,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     .fs_truncate(caller, decode_u32(args.0[0]), args.0[1])
             }
             SyscallNumber::FS_SYNC => self.handlers.fs_sync(caller, decode_u32(args.0[0])),
+            SyscallNumber::FS_SEEK_REGION => {
+                // args[2] selects the region kind, refused here for any
+                // undefined value.
+                let region = SeekRegion::from_raw(decode_u32(args.0[2]))?;
+                self.handlers
+                    .fs_seek_region(caller, decode_u32(args.0[0]), args.0[1], region)
+            }
+            SyscallNumber::FS_PUNCH => {
+                self.handlers
+                    .fs_punch(caller, decode_u32(args.0[0]), args.0[1], args.0[2])
+            }
             SyscallNumber::FS_MKDIR => {
                 let path_len = decode_len(args.0[1])?;
                 self.handlers.fs_mkdir(caller, args.0[0], path_len)
@@ -5893,6 +5931,28 @@ mod tests {
 
         fn fs_truncate(&self, _c: &CallerContext<'_>, _fd: u32, _size: u64) -> SyscallResult {
             self.record("fs_truncate");
+            Ok(0)
+        }
+
+        fn fs_seek_region(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _offset: u64,
+            _region: SeekRegion,
+        ) -> SyscallResult {
+            self.record("fs_seek_region");
+            Ok(0)
+        }
+
+        fn fs_punch(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _offset: u64,
+            _len: u64,
+        ) -> SyscallResult {
+            self.record("fs_punch");
             Ok(0)
         }
 

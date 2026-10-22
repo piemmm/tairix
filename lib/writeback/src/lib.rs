@@ -62,13 +62,11 @@ impl RunWindow {
     /// reservation is refused.
     #[must_use]
     pub fn new(span: usize) -> Self {
-        let mut bytes = Vec::new();
-        // `vec![0; span]` aborts on allocation failure, where an I/O path
-        // must fall back to its per-block form instead.
-        if span > 0 && bytes.try_reserve_exact(span).is_ok() {
-            bytes.resize(span, 0);
+        // A refused window falls back to the per-block form, where
+        // `vec![0; span]` would abort.
+        Self {
+            bytes: tairix_util::fallible::filled(span, 0).unwrap_or_default(),
         }
-        Self { bytes }
     }
 
     /// Whether the window is absent and the caller must fall back.
@@ -82,9 +80,7 @@ impl RunWindow {
     /// rather than carrying it into the new buffer.
     pub fn reserve(&mut self, span: usize) -> Option<&mut [u8]> {
         if self.bytes.len() < span {
-            let mut grown = Vec::new();
-            grown.try_reserve_exact(span).ok()?;
-            grown.resize(span, 0);
+            let grown = tairix_util::fallible::filled(span, 0)?;
             self.bytes.zeroize();
             self.bytes = grown;
         }

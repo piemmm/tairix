@@ -245,7 +245,10 @@ pub use groups::{
     build_identity_table, load_groups_db, system_identity_table, GroupsDbSource, GroupsLoadError,
     LateGroupsDb, NullGroupsDbSource, GROUPS_DB, GROUPS_DB_PATH, NULL_GROUPS_DB,
 };
-pub use hwtree::{HwDriverTree, HwNodeLiveness, HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
+pub use hwtree::{
+    node_endpoints_of, HwDriverTree, HwNodeLiveness, HwTreeSource, NodeEndpoints, NullHwTreeSource,
+    NULL_HW_TREE,
+};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase, SchedWaitQueueArch};
 pub use introspect::{IntrospectSource, NullIntrospectSource, NULL_INTROSPECT};
 pub use introspect_source::KernelIntrospectSource;

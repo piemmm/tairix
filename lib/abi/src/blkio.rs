@@ -20,13 +20,13 @@
 mod medium;
 
 pub use medium::{
-    BlkCommandCost, BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkRotation,
+    BlkCommandCost, BlkForm, BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkRotation,
     BlkRotationEvidence, BlkTransport, BLK_EVIDENCE_NONE, BLK_FACT_UNKNOWN, BLK_MEDIUM_LEN,
     BLK_REMOVABILITY_FIXED, BLK_REMOVABILITY_REMOVABLE, BLK_ROTATION_NON_ROTATING,
     BLK_ROTATION_ROTATING, BLK_TRANSPORT_UNDECLARED,
 };
 
-use crate::driver::block::Block;
+use crate::driver::block::{Block, DiscLayout};
 use crate::le::{put_i32, put_u32, put_u64, read_i32, read_u32, read_u64};
 use crate::sysinfo::MountAvailability;
 use crate::{DriverError, Errno};
@@ -569,7 +569,7 @@ impl BlkReissue {
 
 /// Byte offsets of the completion frame:
 /// `status(4) || errno(4) || reissue(4) || block_size(4) || block_count(8) ||
-/// flags(4) || medium(8) || binding(8) || name`.
+/// flags(4) || medium(8) || binding(8) || session(8) || recorded(8) || name`.
 const COMPLETION_STATUS_OFF: usize = 0;
 const COMPLETION_ERRNO_OFF: usize = 4;
 const COMPLETION_REISSUE_OFF: usize = 8;
@@ -588,12 +588,23 @@ const COMPLETION_MEDIUM_OFF: usize = COMPLETION_GEOMETRY_OFF + 16;
 pub const BLK_COMPLETION_LEN: usize = COMPLETION_NAME_OFF + BLK_DEVICE_NAME_LEN;
 
 const COMPLETION_BINDING_OFF: usize = COMPLETION_MEDIUM_OFF + BLK_MEDIUM_LEN;
+/// Offsets of the disc layout: the last session's start, then the last
+/// recorded block.
+const COMPLETION_SESSION_OFF: usize = COMPLETION_BINDING_OFF + 8;
+const COMPLETION_RECORDED_OFF: usize = COMPLETION_SESSION_OFF + 8;
 /// Offset of the declared device name within the geometry payload.
-const COMPLETION_NAME_OFF: usize = COMPLETION_BINDING_OFF + 8;
+const COMPLETION_NAME_OFF: usize = COMPLETION_RECORDED_OFF + 8;
 
 /// [`BlkCompletion::flags`] bit: the logical unit is write-protected; a
 /// [`BlkOp::Write`] will be refused [`Errno::PermissionDenied`].
 pub const BLK_FLAG_READ_ONLY: u32 = 1;
+
+/// The flags word's bit on the wire saying the frame carries a disc layout:
+/// a framing detail, so [`BlkCompletion::flags`] never holds it.
+const WIRE_DISC_LAYOUT: u32 = 1 << 1;
+
+/// The recorded-block field's "the drive cannot say".
+const WIRE_UNRECORDED: u64 = u64::MAX;
 
 /// A successful block-service completion.
 ///
@@ -624,6 +635,11 @@ pub struct BlkCompletion {
     /// endpoint grant is the authority — it only tells one publication from
     /// the next.
     pub binding: u64,
+    /// Where the optical disc's newest structures lie ([`Block::disc_layout`]),
+    /// for a device that reports one. A layout naming a block past the
+    /// device's end reads as none: like the medium it grants nothing, and a
+    /// filesystem that followed it would only read the wrong blocks.
+    pub disc_layout: Option<DiscLayout>,
     /// The device's own short name, as the serving driver declares it
     /// ([`Block::device_name`]).
     ///
@@ -643,6 +659,22 @@ fn medium_record(reply: &[u8]) -> Option<[u8; BLK_MEDIUM_LEN]> {
         .get(COMPLETION_MEDIUM_OFF..COMPLETION_BINDING_OFF)?
         .try_into()
         .ok()
+}
+
+/// The disc layout a frame carries, or none when it names a block past the
+/// device's `block_count` blocks or a last session starting after the last
+/// block recorded: a last recorded block out of range says only that the
+/// drive could not tell.
+fn disc_layout(reply: &[u8], block_count: u64) -> Option<DiscLayout> {
+    let last_session_start = read_u64(reply, COMPLETION_SESSION_OFF);
+    let recorded = read_u64(reply, COMPLETION_RECORDED_OFF);
+    let last_recorded = (recorded < block_count).then_some(recorded);
+    (last_session_start < block_count
+        && last_recorded.is_none_or(|last| last >= last_session_start))
+    .then_some(DiscLayout {
+        last_session_start,
+        last_recorded,
+    })
 }
 
 /// Write one completion frame (`status || errno || reissue || geometry`) into
@@ -666,10 +698,27 @@ fn encode_frame(
     put_u32(buf, COMPLETION_REISSUE_OFF, reissue.as_u32());
     put_u32(buf, COMPLETION_GEOMETRY_OFF, geometry.block_size);
     put_u64(buf, COMPLETION_GEOMETRY_OFF + 4, geometry.block_count);
-    put_u32(buf, COMPLETION_GEOMETRY_OFF + 12, geometry.flags);
+    let layout_bit = if geometry.disc_layout.is_some() {
+        WIRE_DISC_LAYOUT
+    } else {
+        0
+    };
+    put_u32(
+        buf,
+        COMPLETION_GEOMETRY_OFF + 12,
+        (geometry.flags & !WIRE_DISC_LAYOUT) | layout_bit,
+    );
     buf[COMPLETION_MEDIUM_OFF..COMPLETION_BINDING_OFF]
         .copy_from_slice(&BlkMedium::encode(geometry.medium));
     put_u64(buf, COMPLETION_BINDING_OFF, geometry.binding);
+    let (session, recorded) = geometry.disc_layout.map_or((0, 0), |layout| {
+        (
+            layout.last_session_start,
+            layout.last_recorded.unwrap_or(WIRE_UNRECORDED),
+        )
+    });
+    put_u64(buf, COMPLETION_SESSION_OFF, session);
+    put_u64(buf, COMPLETION_RECORDED_OFF, recorded);
     buf[COMPLETION_NAME_OFF..COMPLETION_NAME_OFF + BLK_DEVICE_NAME_LEN]
         .copy_from_slice(&geometry.name.to_le_bytes());
     Ok(BLK_COMPLETION_LEN)
@@ -797,9 +846,9 @@ impl BlkOutcome {
 
 /// Decode a block-service completion into its full [`BlkOutcome`], fail
 /// closed. A frame too short to classify, one whose geometry is truncated
-/// under a data-valid status, or one bearing an unknown status word all
-/// resolve to [`BlkStatus::Fatal`] / [`Errno::DeviceFault`] — never a
-/// spurious success.
+/// under a data-valid status, one bearing an unknown status word or flag, or
+/// one carrying layout fields it declares no layout for all resolve to
+/// [`BlkStatus::Fatal`] / [`Errno::DeviceFault`] — never a spurious success.
 #[must_use]
 pub fn decode_outcome(reply: &[u8]) -> BlkOutcome {
     let fatal = BlkOutcome {
@@ -819,16 +868,29 @@ pub fn decode_outcome(reply: &[u8]) -> BlkOutcome {
         if reply.len() < BLK_COMPLETION_LEN {
             return fatal;
         }
+        let block_count = read_u64(reply, COMPLETION_GEOMETRY_OFF + 4);
+        let flags = read_u32(reply, COMPLETION_GEOMETRY_OFF + 12);
+        let laid_out = flags & WIRE_DISC_LAYOUT != 0;
+        // A flag this build does not define, or a layout the frame says it
+        // does not carry, is a frame it cannot read as its sender meant.
+        if flags & !(BLK_FLAG_READ_ONLY | WIRE_DISC_LAYOUT) != 0
+            || (!laid_out
+                && (read_u64(reply, COMPLETION_SESSION_OFF) != 0
+                    || read_u64(reply, COMPLETION_RECORDED_OFF) != 0))
+        {
+            return fatal;
+        }
         BlkOutcome {
             status,
             geometry: BlkCompletion {
                 block_size: read_u32(reply, COMPLETION_GEOMETRY_OFF),
-                block_count: read_u64(reply, COMPLETION_GEOMETRY_OFF + 4),
-                flags: read_u32(reply, COMPLETION_GEOMETRY_OFF + 12),
+                block_count,
+                flags: flags & !WIRE_DISC_LAYOUT,
                 // A malformed medium does not discard an otherwise
                 // well-formed completion; it reads as undeclared.
                 medium: medium_record(reply).and_then(|record| BlkMedium::decode(&record)),
                 binding: read_u64(reply, COMPLETION_BINDING_OFF),
+                disc_layout: laid_out.then(|| disc_layout(reply, block_count)).flatten(),
                 // Re-validated on the way in, so an unprintable or
                 // overlong declaration reads as the unnamed device rather
                 // than reaching a surface that prints it.
@@ -2791,6 +2853,7 @@ fn classify<B: Block>(
             // device can name it rather than the volumes on it. A layer whose
             // member declared none relays none.
             let medium = device.medium();
+            let disc_layout = device.disc_layout();
             let name = device.device_name();
             Served::Device(device.geometry().map(|geometry| BlkCompletion {
                 block_size: geometry.block_size,
@@ -2798,6 +2861,7 @@ fn classify<B: Block>(
                 flags: if read_only { BLK_FLAG_READ_ONLY } else { 0 },
                 medium,
                 binding: publication.binding,
+                disc_layout,
                 name,
             }))
         }
@@ -2944,12 +3008,111 @@ mod tests {
     }
 
     #[test]
+    fn a_geometry_completion_carries_a_disc_layout_inside_the_device() {
+        let layout = DiscLayout {
+            last_session_start: 3000,
+            last_recorded: Some(4999),
+        };
+        let completion = BlkCompletion {
+            block_size: 2048,
+            block_count: 5000,
+            flags: BLK_FLAG_READ_ONLY,
+            medium: Some(USB_DISK),
+            disc_layout: Some(layout),
+            name: BlkDeviceName::UNNAMED,
+            binding: 0,
+        };
+        let mut frame = [0u8; BLK_COMPLETION_LEN];
+        completion.encode(&mut frame).expect("the frame fits");
+        assert_eq!(decode_outcome(&frame).geometry, completion);
+        let undeclared = BlkCompletion {
+            disc_layout: None,
+            ..completion
+        };
+        undeclared.encode(&mut frame).expect("the frame fits");
+        assert_eq!(decode_outcome(&frame).geometry, undeclared);
+        // A layout naming a block past the device reads as none of it.
+        let past = BlkCompletion {
+            disc_layout: Some(DiscLayout {
+                last_session_start: 5000,
+                last_recorded: None,
+            }),
+            ..completion
+        };
+        past.encode(&mut frame).expect("the frame fits");
+        assert_eq!(decode_outcome(&frame).geometry.disc_layout, None);
+        let beyond = BlkCompletion {
+            disc_layout: Some(DiscLayout {
+                last_session_start: 0,
+                last_recorded: Some(5000),
+            }),
+            ..completion
+        };
+        beyond.encode(&mut frame).expect("the frame fits");
+        assert_eq!(
+            decode_outcome(&frame).geometry.disc_layout,
+            Some(DiscLayout {
+                last_session_start: 0,
+                last_recorded: None,
+            }),
+            "a recorded block out of range says only that the drive could not tell"
+        );
+        assert_eq!(decode_outcome(&frame).geometry.flags, BLK_FLAG_READ_ONLY);
+        let inverted = BlkCompletion {
+            disc_layout: Some(DiscLayout {
+                last_session_start: 3000,
+                last_recorded: Some(2999),
+            }),
+            ..completion
+        };
+        inverted.encode(&mut frame).expect("the frame fits");
+        assert_eq!(
+            decode_outcome(&frame).geometry.disc_layout,
+            None,
+            "a session cannot start after the last block recorded"
+        );
+    }
+
+    #[test]
+    fn a_geometry_frame_this_build_cannot_read_as_meant_is_fatal() {
+        let completion = BlkCompletion {
+            block_size: 2048,
+            block_count: 5000,
+            flags: BLK_FLAG_READ_ONLY,
+            medium: Some(USB_DISK),
+            disc_layout: None,
+            name: BlkDeviceName::UNNAMED,
+            binding: 0,
+        };
+        let mut frame = [0u8; BLK_COMPLETION_LEN];
+        completion.encode(&mut frame).expect("the frame fits");
+        let mut unknown_flag = frame;
+        put_u32(
+            &mut unknown_flag,
+            COMPLETION_GEOMETRY_OFF + 12,
+            BLK_FLAG_READ_ONLY | 1 << 7,
+        );
+        assert_eq!(decode_outcome(&unknown_flag).status, BlkStatus::Fatal);
+        for at in [COMPLETION_SESSION_OFF, COMPLETION_RECORDED_OFF] {
+            let mut stray = frame;
+            put_u64(&mut stray, at, 7);
+            assert_eq!(
+                decode_outcome(&stray).status,
+                BlkStatus::Fatal,
+                "a layout field set in a frame without a layout"
+            );
+        }
+        assert_eq!(decode_outcome(&frame).geometry, completion);
+    }
+
+    #[test]
     fn a_geometry_completion_carries_the_name_its_device_declared() {
         let completion = BlkCompletion {
             block_size: 512,
             block_count: 8,
             flags: 0,
             medium: Some(USB_DISK),
+            disc_layout: None,
             name: BlkDeviceName::new("fixture-blk"),
             binding: 0,
         };
@@ -3346,6 +3509,7 @@ mod tests {
             block_count: 0x2_0000_0000,
             flags: BLK_FLAG_READ_ONLY,
             medium: Some(USB_DISK),
+            disc_layout: None,
             name: BlkDeviceName::UNNAMED,
             binding: 0,
         };
@@ -3369,6 +3533,7 @@ mod tests {
                 block_count: 9,
                 flags: 0,
                 medium: Some(medium),
+                disc_layout: None,
                 name: BlkDeviceName::UNNAMED,
                 binding: 0,
             };
@@ -3390,6 +3555,7 @@ mod tests {
             block_count: 4,
             flags: 0,
             medium: Some(USB_DISK),
+            disc_layout: None,
             name: BlkDeviceName::UNNAMED,
             binding: 0,
         };
@@ -3508,6 +3674,7 @@ mod tests {
             block_count: 7,
             flags: BLK_FLAG_READ_ONLY,
             medium: Some(USB_DISK),
+            disc_layout: None,
             name: BlkDeviceName::UNNAMED,
             binding: 0,
         };
@@ -4817,6 +4984,7 @@ mod tests {
                 block_count: BLOCK_COUNT,
                 flags: 0,
                 medium: Some(MEM_BLOCK_MEDIUM),
+                disc_layout: None,
                 name: BlkDeviceName::UNNAMED,
                 binding: 0,
             })
@@ -4828,6 +4996,7 @@ mod tests {
                 block_count: BLOCK_COUNT,
                 flags: BLK_FLAG_READ_ONLY,
                 medium: Some(MEM_BLOCK_MEDIUM),
+                disc_layout: None,
                 name: BlkDeviceName::UNNAMED,
                 binding: 0,
             })

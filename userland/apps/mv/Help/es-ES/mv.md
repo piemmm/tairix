@@ -19,6 +19,7 @@ conserva la identidad del nodo. Un movimiento cuyo origen y destino
 están en volúmenes distintos no puede ser atómico: recurre a copiar
 el origen al destino y luego eliminar el origen (los directorios se
 reproducen recursivamente).
+Un archivo cuya copia falla se elimina, y su origen se conserva.
 
 Un destino existente se sobrescribe por defecto, se omite con `-n` y
 se pregunta por la salida de error estándar con `-i` (una pregunta
@@ -26,6 +27,13 @@ rechazada omite ese movimiento sin error; una respuesta ilegible
 nunca se considera consentimiento). El primer fallo detiene la
 ejecución antes de cualquier operando posterior. `--` termina el
 análisis de opciones: cada argumento posterior es una ruta.
+
+La copia lleva los huecos y los atributos extendidos de cada archivo —un
+tipo de archivo de RISC OS, el tipo y el creador de un Mac— allí donde el
+destino puede guardarlos, y mueve un enlace simbólico como un enlace con el
+mismo destino, nunca lo que este nombra. Los atributos que el destino no puede
+guardar se notifican en un único aviso al terminar la ejecución, y en un
+registro `omission` en el flujo de información estándar.
 
 ## OPTIONS
 

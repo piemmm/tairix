@@ -480,6 +480,35 @@ fn mac_finderflags_round_trip() {
 }
 
 #[test]
+fn finder_information_carries_only_what_it_records() {
+    let mut finder = mac::FinderInfo::default();
+    assert_eq!(finder.key(0), None);
+    assert_eq!(finder.set(b"mac.type", b"TEXT"), Ok(true));
+    assert_eq!(finder.set(b"mac.finderflags", &[0x01, 0x00]), Ok(true));
+    assert_eq!(
+        finder.set(b"mac.type", b"TOOLONG"),
+        Err(MetadataError::NotRepresentable)
+    );
+    assert_eq!(finder.set(b"acorn.filetype", b"fff"), Ok(false));
+    let keys: Vec<&[u8]> = (0..).map_while(|index| finder.key(index)).collect();
+    assert_eq!(keys, [&b"mac.type"[..], b"mac.finderflags"]);
+    let mut out = [0u8; mac::FINDER_VALUE_MAX];
+    assert_eq!(finder.value(b"mac.type", &mut out), Some(4));
+    assert_eq!(&out, b"TEXT");
+    assert_eq!(finder.value(b"mac.finderflags", &mut out), Some(2));
+    assert_eq!(&out[..2], &[0x01, 0x00]);
+    assert_eq!(
+        finder.value(b"mac.creator", &mut out),
+        None,
+        "a zero code records none"
+    );
+    assert!(finder.clear(b"mac.type"));
+    assert!(!finder.clear(b"mac.type"));
+    assert!(!finder.clear(b"mac.creator"));
+    assert_eq!(finder.key(0), Some(&b"mac.finderflags"[..]));
+}
+
+#[test]
 fn acorn_attr_round_trips() {
     // A locked, publicly readable directory in canonical order.
     let attr = 0b0010_1101; // R, L, D, r
@@ -626,4 +655,103 @@ fn atari_epoch_secs() -> i64 {
 fn format_index(i: usize) -> alloc::string::String {
     use alloc::string::ToString;
     i.to_string()
+}
+
+#[test]
+fn filecore_keeps_public_access_in_bits_four_and_five() {
+    // RISC OS PRM vol. 2 ch. 28: R, W, L, D, then public read and write.
+    let on_disc = 0b0011_0101;
+    let attr = acorn::attr_from_filecore(on_disc);
+    let (value, len) = acorn::attr_to_value(attr).expect("encode");
+    assert_eq!(&value[..len], b"RL/rw");
+    assert_eq!(acorn::attr_to_filecore(attr), on_disc);
+    // Its reserved bits carry nothing, and a canonical bit it has no place
+    // for is not stored.
+    assert_eq!(acorn::attr_from_filecore(0b1100_0000), 0);
+    assert_eq!(
+        acorn::attr_to_filecore(acorn::ATTR_EXECUTE_ONLY | acorn::ATTR_PRIVATE),
+        0
+    );
+    for byte in 0u8..=0b0011_1111 {
+        assert_eq!(
+            acorn::attr_to_filecore(acorn::attr_from_filecore(byte)),
+            byte,
+            "every defined bit round-trips"
+        );
+    }
+    assert_eq!(
+        acorn::attr_from_filecore(0xFF) & !acorn::FILECORE_ATTR_BITS,
+        0
+    );
+}
+
+#[test]
+fn a_typed_object_carries_every_acorn_key_and_an_untyped_one_only_its_words() {
+    let (load, exec) = acorn::encode_typed(0xFFF, 0x12_3456_789A).expect("typed");
+    let typed = acorn::Object {
+        load,
+        exec,
+        attr: acorn::ATTR_OWNER_READ | acorn::ATTR_PUBLIC_READ,
+    };
+    let keys: Vec<_> = (0..).map_while(|index| typed.key(index)).collect();
+    assert_eq!(keys, acorn::KEYS);
+    let mut out = [0u8; acorn::ATTR_VALUE_MAX];
+    let mut value = |object: &acorn::Object, key: &[u8]| {
+        object
+            .value(key, &mut out)
+            .expect("representable")
+            .map(|len| out[..len].to_vec())
+    };
+    assert_eq!(
+        value(&typed, b"acorn.filetype").as_deref(),
+        Some(&b"fff"[..])
+    );
+    assert_eq!(
+        value(&typed, b"acorn.datestamp").as_deref(),
+        Some(&b"123456789a"[..])
+    );
+    assert_eq!(value(&typed, b"acorn.attr").as_deref(), Some(&b"R/r"[..]));
+
+    let untyped = acorn::Object {
+        load: 0x8000,
+        exec: 0x8004,
+        attr: 0,
+    };
+    let keys: Vec<_> = (0..).map_while(|index| untyped.key(index)).collect();
+    assert_eq!(keys, acorn::KEYS[..3]);
+    assert_eq!(
+        value(&untyped, b"acorn.loadaddr").as_deref(),
+        Some(&b"00008000"[..])
+    );
+    assert_eq!(value(&untyped, b"acorn.filetype"), None);
+    assert_eq!(value(&untyped, b"mac.type"), None);
+}
+
+#[test]
+fn an_attribute_outside_the_canonical_bits_is_not_rendered() {
+    let object = acorn::Object {
+        load: 0,
+        exec: 0,
+        attr: 0x8000,
+    };
+    let mut out = [0u8; acorn::ATTR_VALUE_MAX];
+    assert_eq!(
+        object.value(b"acorn.attr", &mut out),
+        Err(MetadataError::NotRepresentable)
+    );
+}
+
+#[test]
+fn fileswitch_attributes_map_by_meaning_not_by_position() {
+    // RISC OS PRM vol. 2 ch. 27: R, W, owner execute-only, L, public read,
+    // public write.
+    let attr = acorn::attr_from_fileswitch(0b0011_1111);
+    let (value, len) = acorn::attr_to_value(attr).expect("encode");
+    assert_eq!(&value[..len], b"RWLE/rw");
+    assert_eq!(
+        acorn::attr_from_fileswitch(1 << 3),
+        acorn::ATTR_LOCKED,
+        "locked is bit 3 here, where FileCore keeps the directory bit"
+    );
+    assert_eq!(acorn::attr_from_fileswitch(0b1100_0000), 0, "reserved bits");
 }

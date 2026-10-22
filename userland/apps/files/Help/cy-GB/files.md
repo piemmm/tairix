@@ -80,6 +80,9 @@ eu symud yn lle hynny. Mae'r pwyntydd yn dangos plws tra byddai gollwng yn
 copïo a saeth tra byddai'n symud, ac mae'r ffolder y byddai gollwng yn
 glanio ynddi wedi'i hamlygu. Caiff un ffeil a lusgir ar slot rhaglen ar y
 bar eiconau ei hagor yno.
+Mae copïo neu symud yn cadw tyllau pob ffeil a'i phriodoleddau
+estynedig, megis math ffeil RISC OS; caiff unrhyw briodoledd na all y
+gyrchfan ei chadw ei henwi mewn rhybudd pan ddaw'r weithred i ben.
 
 Mae'r ddewislen clic de yn dechrau gyda *Dangos*. Oddi tani mae
 is-ddewislen yn enwi'r hyn y mae'r ddewislen yn gweithredu arno — *Ffeil

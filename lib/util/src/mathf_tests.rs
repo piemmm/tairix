@@ -707,26 +707,40 @@ fn logarithm_saturates_instead_of_diverging() {
 }
 
 #[test]
-fn a_power_of_a_positive_base_matches_the_host_and_is_nought_below_it() {
-    for (x, p) in [
-        (2.0_f64, 3.0_f64),
-        (0.5, 0.25),
-        (9.0, 0.5),
-        (1e-3, 2.0 / 3.0),
+fn a_power_of_a_positive_base_is_accurate_and_nought_below_it() {
+    for (x, p, expected) in [
+        (2.0_f64, 3.0_f64, 8.0),
+        (0.5, 0.25, 0.840_896_415_253_714_5),
+        (9.0, 0.5, 3.0),
+        (1e-3, 2.0 / 3.0, 0.010_000_000_000_000_002),
     ] {
-        let expected = x.powf(p);
-        assert!((power(x, p) - expected).abs() <= 4.0 * f64::EPSILON * expected);
+        assert!(
+            (power(x, p) - expected).abs() <= 4.0 * f64::EPSILON * expected,
+            "power({x}, {p}) = {:e}",
+            power(x, p)
+        );
     }
     assert!(power(0.0, 2.0).abs() < f64::EPSILON);
     assert!(power(-4.0, 0.5).abs() < f64::EPSILON);
 }
 
 #[test]
-fn the_hyperbolic_tangent_is_odd_bounded_and_matches_the_host() {
-    for x in [-20.0_f64, -1.5, -0.25, 0.0, 0.25, 1.5, 20.0] {
-        assert!((tanh(x) - x.tanh()).abs() <= 4.0 * f64::EPSILON);
+fn the_hyperbolic_tangent_is_odd_bounded_and_accurate() {
+    for (x, expected) in [
+        (0.0_f64, 0.0),
+        (0.25, 0.244_918_662_403_709_13),
+        (1.5, 0.905_148_253_644_866_4),
+        (20.0, 1.0),
+    ] {
+        for (x, expected) in [(x, expected), (-x, -expected)] {
+            assert!(
+                (tanh(x) - expected).abs() <= 4.0 * f64::EPSILON,
+                "tanh({x}) = {:e}",
+                tanh(x)
+            );
+            assert!(tanh(x).abs() <= 1.0);
+        }
         assert!((tanh(-x) + tanh(x)).abs() < f64::EPSILON);
-        assert!(tanh(x).abs() <= 1.0);
     }
 }
 

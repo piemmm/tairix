@@ -10,16 +10,19 @@
 //!
 //! The command *set* also varies by device: a disk speaks the SCSI
 //! transparent set, a USB floppy speaks UFI (12-byte fixed CDBs and
-//! `MODE SENSE(10)`, USB Mass Storage UFI 1.0). [`CommandSet`] carries that
-//! per-device spelling so the logic exists once.
+//! `MODE SENSE(10)`, USB Mass Storage UFI 1.0), and an optical drive behind
+//! an ATAPI bridge takes the transparent set in 12-byte packets.
+//! [`CommandSet`] carries that per-device spelling so the logic exists once.
+//! An optical drive's disc is read through the multimedia commands
+//! ([`ScsiDevice::disc`], MMC-6).
 
 use core::num::NonZeroU32;
 
 use tairix_abi::blkio::{
-    BlkDeviceName, BlkMedium, BlkReissue, BlkRemovability, BlkRotation, BlkRotationEvidence,
-    BlkTransport, CommandBudget, CommandKind,
+    BlkDeviceName, BlkForm, BlkMedium, BlkReissue, BlkRemovability, BlkRotation,
+    BlkRotationEvidence, BlkTransport, CommandBudget, CommandKind,
 };
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DiscLayout};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::{DriverError, Errno};
 
@@ -93,6 +96,18 @@ pub enum CommandSet {
     /// and the set carries no `SYNCHRONIZE CACHE` (the medium is written
     /// through).
     Ufi,
+    /// The transparent set carried as ATAPI packets (sub-class `0x02`, an
+    /// optical drive behind an ATAPI bridge): every CDB is padded to the
+    /// 12-byte packet, and write protection is read with `MODE SENSE(10)`,
+    /// the only form ATAPI defines.
+    Atapi,
+}
+
+impl CommandSet {
+    /// Whether every command block is padded to 12 bytes.
+    const fn pads(self) -> bool {
+        matches!(self, Self::Ufi | Self::Atapi)
+    }
 }
 
 /// Fixed UFI command-block length (UFI 1.0 §3.2: all commands are 12-byte
@@ -155,14 +170,24 @@ pub struct Sense {
     pub ascq: u8,
 }
 
+/// Sense key: a check condition that names no cause.
+const SENSE_KEY_NO_SENSE: u8 = 0x00;
 /// Sense key: the addressed unit is not ready.
 const SENSE_KEY_NOT_READY: u8 = 0x02;
+/// Sense key: the medium could not be read or written where addressed.
+const SENSE_KEY_MEDIUM_ERROR: u8 = 0x03;
+/// Sense key: the unit failed in hardware carrying out the command.
+const SENSE_KEY_HARDWARE_ERROR: u8 = 0x04;
 /// Sense key: the command was illegal for this device.
 const SENSE_KEY_ILLEGAL_REQUEST: u8 = 0x05;
 /// Sense key: unit attention (media change / reset notification).
 const SENSE_KEY_UNIT_ATTENTION: u8 = 0x06;
 /// Sense key: the medium is write-protected.
 const SENSE_KEY_DATA_PROTECT: u8 = 0x07;
+/// Sense key: a write-once medium holds nothing where addressed.
+const SENSE_KEY_BLANK_CHECK: u8 = 0x08;
+/// Sense key: the unit aborted the command; asked again, it may complete.
+const SENSE_KEY_ABORTED_COMMAND: u8 = 0x0B;
 
 impl Sense {
     /// Reconstruct fixed-format sense from a UFI command-completion
@@ -201,6 +226,16 @@ pub struct Inquiry {
 
 /// Peripheral device type of a direct-access block device.
 pub const DEVICE_TYPE_DIRECT_ACCESS: u8 = 0x00;
+/// Peripheral device type of a multimedia (optical) drive (MMC-6 §4.1).
+pub const DEVICE_TYPE_MMC: u8 = 0x05;
+
+impl Inquiry {
+    /// Whether the unit is an optical drive.
+    #[must_use]
+    pub const fn is_optical(&self) -> bool {
+        self.device_type == DEVICE_TYPE_MMC
+    }
+}
 
 /// A logical unit's brought-up state: its geometry, write policy and what
 /// it is.
@@ -213,7 +248,32 @@ pub struct LunState {
     pub write_protected: bool,
     /// What the unit reported of itself ([`ScsiDevice::probe`]).
     pub report: UnitReport,
+    /// Where an optical drive's disc keeps its newest structures
+    /// ([`ScsiDevice::disc`]); `None` for any other unit.
+    pub disc_layout: Option<DiscLayout>,
 }
+
+/// What an optical drive reports of the disc it holds.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Disc {
+    /// Where the disc's newest structures lie.
+    pub layout: DiscLayout,
+    /// The disc's blocks as far as it is recorded, which on a disc whose
+    /// last session is still open runs past what `READ CAPACITY` counts.
+    pub geometry: BlockGeometry,
+    /// Whether any block may be rewritten in place: the drive's Random
+    /// Writable feature is current for this disc (MMC-6 §5.3.13).
+    pub random_writable: bool,
+}
+
+/// GET CONFIGURATION's Random Writable feature (MMC-6 §5.3.13).
+const FEATURE_RANDOM_WRITABLE: u16 = 0x0020;
+/// READ TRACK INFORMATION's byte 6 bit: the track is blank.
+const TRACK_BLANK: u8 = 0x40;
+/// READ TRACK INFORMATION's byte 7 bits: the next writable and the last
+/// recorded addresses are valid.
+const TRACK_NWA_VALID: u8 = 0x01;
+const TRACK_LRA_VALID: u8 = 0x02;
 
 /// What a unit reported of itself beyond its standard INQUIRY.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -276,6 +336,14 @@ pub struct ScsiDevice<T: ScsiTransport> {
     /// recovery found it, until the serve engine asks
     /// ([`Self::take_reissue`]).
     reissue: [BlkReissue; MAX_LUNS],
+    /// Which units' medium can leave them.
+    removable: [bool; MAX_LUNS],
+    /// Which units' next reset attention is the one a transport reset this
+    /// layer ran raised.
+    expecting_reset: [bool; MAX_LUNS],
+    /// The last command's exchange broke and the reset recovery it ran put
+    /// the transport back in step.
+    resynced: bool,
 }
 
 impl<T: ScsiTransport> ScsiDevice<T> {
@@ -287,13 +355,52 @@ impl<T: ScsiTransport> ScsiDevice<T> {
             budgets: [unknown_unit_budget(); MAX_LUNS],
             readiness: [None; MAX_LUNS],
             reissue: [BlkReissue::Paced; MAX_LUNS],
+            removable: [false; MAX_LUNS],
+            expecting_reset: [false; MAX_LUNS],
+            resynced: false,
         }
     }
 
     /// Serve `lun` with the budget its `medium` is given from now on.
     pub fn set_medium(&mut self, lun: u8, medium: BlkMedium) {
-        if let Some(budget) = self.budgets.get_mut(usize::from(lun)) {
+        let index = usize::from(lun);
+        if let Some(budget) = self.budgets.get_mut(index) {
             *budget = medium.class().budget().command;
+        }
+        if let Some(removable) = self.removable.get_mut(index) {
+            *removable = matches!(medium.removability, BlkRemovability::Removable(_));
+        }
+    }
+
+    /// `lun` carried out a command: a reset attention it had yet to raise
+    /// for a reset this layer ran, it never will.
+    fn answered(&mut self, lun: u8) {
+        if let Some(expecting) = self.expecting_reset.get_mut(usize::from(lun)) {
+            *expecting = false;
+        }
+    }
+
+    /// What `sense`, refusing a command `lun` was sent, says of the unit's
+    /// readiness. A reset this layer did not run stands, on a unit whose
+    /// medium can leave, for whatever change of medium its attention
+    /// replaced, so the medium is read again.
+    fn classify(&mut self, lun: u8, sense: Sense) -> Readiness {
+        if !Readiness::is_reset(sense) {
+            let readiness = Readiness::of_sense(sense);
+            if readiness == Readiness::Ready {
+                self.answered(lun);
+            }
+            return readiness;
+        }
+        let index = usize::from(lun);
+        let expected = self
+            .expecting_reset
+            .get_mut(index)
+            .is_some_and(core::mem::take);
+        if !expected && self.removable.get(index).copied().unwrap_or(false) {
+            Readiness::MediumChanged
+        } else {
+            Readiness::Attention
         }
     }
 
@@ -353,14 +460,19 @@ impl<T: ScsiTransport> ScsiDevice<T> {
         }
         let exchange_ns = self.budget(lun).exchange_ns(kind, data.len());
         let mut padded = [0u8; UFI_CDB_LEN];
-        let cdb = match self.set {
-            CommandSet::Ufi if cdb.len() < UFI_CDB_LEN => {
-                padded[..cdb.len()].copy_from_slice(cdb);
-                &padded[..]
-            }
-            _ => cdb,
+        let cdb = if self.set.pads() && cdb.len() < UFI_CDB_LEN {
+            padded[..cdb.len()].copy_from_slice(cdb);
+            &padded[..]
+        } else {
+            cdb
         };
-        self.transport.execute(lun, cdb, data, exchange_ns)
+        let outcome = self.transport.execute(lun, cdb, data, exchange_ns);
+        self.resynced = outcome.is_err() && self.transport.take_resynced();
+        if self.resynced {
+            // Whatever the command, every unit may answer the reset.
+            self.expecting_reset = [true; MAX_LUNS];
+        }
+        outcome
     }
 
     /// The sense data explaining the last failed command: the transport's
@@ -429,10 +541,11 @@ impl<T: ScsiTransport> ScsiDevice<T> {
     /// What `outcome` says of `lun`'s readiness.
     fn readiness_of(&mut self, lun: u8, outcome: CommandOutcome) -> Result<Readiness, Errno> {
         if outcome.passed {
+            self.answered(lun);
             return Ok(Readiness::Ready);
         }
         match self.sense_for_failure(lun) {
-            Ok(sense) => Ok(Readiness::of_sense(sense)),
+            Ok(sense) => Ok(self.classify(lun, sense)),
             Err(Errno::NotImplemented | Errno::LengthOutOfRange) => Ok(Readiness::BecomingReady),
             Err(err) => Err(err),
         }
@@ -457,6 +570,12 @@ impl<T: ScsiTransport> ScsiDevice<T> {
                 .with_removability(BlkRemovability::from_rmb(inquiry.removable)),
             max_transfer_blocks: None,
         };
+        if inquiry.is_optical() {
+            // A disc spins at no rate a drive states, and the disk pages
+            // mean nothing to it.
+            report.medium = report.medium.with_form(BlkForm::OpticalDisc);
+            return Ok(report);
+        }
         if self.set == CommandSet::Ufi {
             return Ok(report);
         }
@@ -493,7 +612,9 @@ impl<T: ScsiTransport> ScsiDevice<T> {
         let cb = [0x12, EVPD, page, 0, VPD_ALLOCATION, 0];
         let outcome = self.command(lun, &cb, DataPhase::In(&mut data), CommandKind::Query)?;
         if !outcome.passed {
-            self.sense_for_failure(lun)?;
+            // Classified for the reset attention it may carry.
+            let sense = self.sense_for_failure(lun)?;
+            self.classify(lun, sense);
             return Ok(None);
         }
         Ok(VpdPage::parse(
@@ -515,7 +636,9 @@ impl<T: ScsiTransport> ScsiDevice<T> {
         cb[14] = ATA_IDENTIFY_DEVICE;
         let outcome = self.command(lun, &cb, DataPhase::In(&mut data), CommandKind::Media)?;
         if !outcome.passed {
-            self.sense_for_failure(lun)?;
+            // Classified for the reset attention it may carry.
+            let sense = self.sense_for_failure(lun)?;
+            self.classify(lun, sense);
             return Ok(None);
         }
         Ok(rotation_of_identify(
@@ -631,7 +754,7 @@ impl<T: ScsiTransport> ScsiDevice<T> {
                     self.command(lun, &cb, DataPhase::In(&mut data), CommandKind::Media)?;
                 outcome.passed && outcome.transferred >= 3 && data[2] & 0x80 != 0
             }
-            CommandSet::Ufi => {
+            CommandSet::Ufi | CommandSet::Atapi => {
                 // MODE SENSE(10), all pages, header-only allocation.
                 let mut data = [0u8; 8];
                 let cb = [0x5A, 0, 0x3F, 0, 0, 0, 0, 0, 8, 0];
@@ -641,6 +764,156 @@ impl<T: ScsiTransport> ScsiDevice<T> {
             }
         };
         Ok(protected)
+    }
+
+    /// What the optical drive at `lun` reports of its disc, which `READ
+    /// CAPACITY` measured as `geometry`: where its last session starts (`READ
+    /// TOC/PMA/ATIP` format 1), the last block it recorded (`READ DISC
+    /// INFORMATION`, then `READ TRACK INFORMATION` for the last session's
+    /// last track), and whether it may be rewritten in place (`GET
+    /// CONFIGURATION`). A query the drive refuses, or the first whose
+    /// exchange breaks, leaves what is left at what a pressed disc of one
+    /// session gives: the first session, every counted block recorded, read
+    /// only.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] once the device is gone; [`Errno::WouldBlock`] for
+    /// a disc not yet ready and [`Errno::DeviceOffline`] for one that left or
+    /// changed while it was asked, so it is read again.
+    pub fn disc(&mut self, lun: u8, geometry: BlockGeometry) -> Result<Disc, Errno> {
+        let counted = geometry
+            .block_count
+            .checked_sub(1)
+            .ok_or(Errno::OutOfRange)?;
+        let mut disc = Disc {
+            layout: DiscLayout {
+                last_session_start: 0,
+                last_recorded: Some(counted),
+            },
+            geometry,
+            random_writable: false,
+        };
+        let mut feature = [0u8; 16];
+        // One feature, Random Writable, after the feature header.
+        let [high, low] = FEATURE_RANDOM_WRITABLE.to_be_bytes();
+        let cb = [0x46, 0x02, high, low, 0, 0, 0, 0, 16, 0];
+        let Some(returned) = self.mmc_query(lun, &cb, &mut feature)? else {
+            return Ok(disc);
+        };
+        disc.random_writable = returned >= 12
+            && u16::from_be_bytes([feature[8], feature[9]]) == FEATURE_RANDOM_WRITABLE
+            && feature[10] & 0x01 != 0;
+        let mut toc = [0u8; 12];
+        let cb = [0x43, 0, 0x01, 0, 0, 0, 0, 0, 12, 0];
+        let Some(returned) = self.mmc_query(lun, &cb, &mut toc)? else {
+            return Ok(disc);
+        };
+        let session_start = (returned >= 12)
+            .then(|| u64::from(u32::from_be_bytes([toc[8], toc[9], toc[10], toc[11]])));
+        let recorded = self.last_recorded(lun)?.unwrap_or(counted);
+        disc.geometry.block_count = recorded
+            .max(counted)
+            .checked_add(1)
+            .ok_or(Errno::OutOfRange)?;
+        disc.layout = DiscLayout {
+            // A session begins where the disc holds something.
+            last_session_start: session_start
+                .filter(|&start| start <= recorded)
+                .unwrap_or(0),
+            last_recorded: Some(recorded),
+        };
+        Ok(disc)
+    }
+
+    /// The last block the disc at `lun` recorded, from its last session's
+    /// last track, or `None` when the drive cannot say.
+    fn last_recorded(&mut self, lun: u8) -> Result<Option<u64>, Errno> {
+        let mut info = [0u8; 12];
+        let cb = [0x51, 0, 0, 0, 0, 0, 0, 0, 12, 0];
+        if self
+            .mmc_query(lun, &cb, &mut info)?
+            .is_none_or(|returned| returned < 12)
+        {
+            return Ok(None);
+        }
+        let track = u32::from(u16::from_be_bytes([info[11], info[6]]));
+        let mut data = [0u8; 32];
+        let [b2, b3, b4, b5] = track.to_be_bytes();
+        let cb = [0x52, 0x01, b2, b3, b4, b5, 0, 0, 32, 0];
+        let Some(returned) = self
+            .mmc_query(lun, &cb, &mut data)?
+            .filter(|&returned| returned >= 28)
+        else {
+            return Ok(None);
+        };
+        let word = |at: usize| {
+            u64::from(u32::from_be_bytes([
+                data[at],
+                data[at + 1],
+                data[at + 2],
+                data[at + 3],
+            ]))
+        };
+        let start = word(8);
+        let end = start + word(24);
+        // An older drive's 28-byte answer stops short of the last recorded
+        // address its flag may still claim, and one outside the track is no
+        // address of it.
+        let recorded =
+            if data[7] & TRACK_LRA_VALID != 0 && returned >= 32 && (start..end).contains(&word(28))
+            {
+                Some(word(28))
+            } else if data[6] & TRACK_BLANK != 0 {
+                start.checked_sub(1)
+            } else if data[7] & TRACK_NWA_VALID != 0 {
+                // The next writable address follows the last one written.
+                word(12).checked_sub(1).filter(|&last| last >= start)
+            } else {
+                end.checked_sub(1)
+            };
+        Ok(recorded)
+    }
+
+    /// Run a multimedia query `cdb` into `data`: how many bytes it returned,
+    /// none for a query the drive refused, and `None` once its exchange broke
+    /// (the reset recovery already run), which ends the queries. An attention
+    /// the query consumed is asked past once.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] once the device is gone; for a unit not ready, or
+    /// whose disc left or changed, the error a media command answers
+    /// ([`readiness_errno`]), so the disc is read again rather than taken for
+    /// one its drive cannot describe.
+    fn mmc_query(&mut self, lun: u8, cdb: &[u8], data: &mut [u8]) -> Result<Option<usize>, Errno> {
+        let mut retried = false;
+        loop {
+            let outcome =
+                match self.command(lun, cdb, DataPhase::In(&mut *data), CommandKind::Query) {
+                    Ok(outcome) => outcome,
+                    Err(Errno::NotFound) => return Err(Errno::NotFound),
+                    Err(_) => return Ok(None),
+                };
+            if outcome.passed {
+                self.answered(lun);
+                return Ok(Some(outcome.transferred));
+            }
+            let sense = match self.sense_for_failure(lun) {
+                Ok(sense) => sense,
+                Err(Errno::NotImplemented | Errno::LengthOutOfRange) => return Ok(Some(0)),
+                Err(Errno::NotFound) => return Err(Errno::NotFound),
+                Err(_) => return Ok(None),
+            };
+            match self.classify(lun, sense) {
+                Readiness::Ready => return Ok(Some(outcome.transferred)),
+                Readiness::Refused(_) => return Ok(Some(0)),
+                Readiness::Attention if !retried => retried = true,
+                readiness => {
+                    return Err(readiness_errno(readiness).unwrap_or_else(|| sense_errno(sense)))
+                }
+            }
+        }
     }
 
     /// SYNCHRONIZE CACHE(10): commit every completed write to the medium.
@@ -684,14 +957,24 @@ impl<T: ScsiTransport> ScsiDevice<T> {
                 Err(err) => return Err(self.after_broken_exchange(lun, err)),
             };
             if outcome.passed {
+                self.answered(lun);
                 return Ok(Ok(outcome));
             }
             let sense = self.sense_for_failure(lun)?;
-            if Readiness::of_sense(sense) == Readiness::Attention && !retried {
-                retried = true;
-                continue;
+            match self.classify(lun, sense) {
+                Readiness::Ready => {
+                    return Ok(Ok(CommandOutcome {
+                        passed: true,
+                        ..outcome
+                    }));
+                }
+                Readiness::Attention if !retried => retried = true,
+                Readiness::MediumChanged => {
+                    self.record_readiness(lun, Readiness::MediumChanged);
+                    return Ok(Err(sense));
+                }
+                _ => return Ok(Err(sense)),
             }
-            return Ok(Err(sense));
         }
     }
 
@@ -701,7 +984,7 @@ impl<T: ScsiTransport> ScsiDevice<T> {
     /// is held; without its medium, the unit is retracted. A reset that did
     /// not put the transport back in step leaves nothing to ask.
     fn after_broken_exchange(&mut self, lun: u8, err: Errno) -> Errno {
-        if !self.transport.take_resynced() {
+        if !self.resynced {
             return err;
         }
         match self.test_unit_ready(lun) {
@@ -718,19 +1001,15 @@ impl<T: ScsiTransport> ScsiDevice<T> {
 
     /// The error a media command refused with `sense` answers.
     fn refusal(&mut self, lun: u8, sense: Sense) -> Errno {
-        self.record_readiness(lun, Readiness::of_sense(sense))
+        let readiness = self.classify(lun, sense);
+        self.record_readiness(lun, readiness)
             .unwrap_or_else(|| sense_errno(sense))
     }
 
-    /// Record `readiness` for the serve loop when it acts on it — a unit
-    /// coming ready has its request held, one without its medium is
-    /// retracted — answering the error that tells the request so.
+    /// Record `readiness` for the serve loop when it acts on it, answering
+    /// the error that tells the request so ([`readiness_errno`]).
     fn record_readiness(&mut self, lun: u8, readiness: Readiness) -> Option<Errno> {
-        let errno = match readiness {
-            Readiness::BecomingReady | Readiness::NeedsStart => Errno::WouldBlock,
-            Readiness::NoMedium | Readiness::MediumChanged => Errno::DeviceOffline,
-            _ => return None,
-        };
+        let errno = readiness_errno(readiness)?;
         if let Some(slot) = self.readiness.get_mut(usize::from(lun)) {
             *slot = Some(readiness);
         }
@@ -809,6 +1088,7 @@ impl<T: ScsiTransport> ScsiDevice<T> {
     ///
     /// The transport's or device's refusal.
     pub fn reset_transport(&mut self) -> Result<(), Errno> {
+        self.expecting_reset = [true; MAX_LUNS];
         self.transport.reset()
     }
 
@@ -875,9 +1155,29 @@ fn rw_command(op10: u8, op16: u8, lba: u64, blocks: u32) -> RwCommand {
 fn sense_errno(sense: Sense) -> Errno {
     match sense.key {
         SENSE_KEY_DATA_PROTECT => Errno::PermissionDenied,
-        SENSE_KEY_NOT_READY | SENSE_KEY_UNIT_ATTENTION => Errno::WouldBlock,
+        // One request's blocks, not the unit: a scratch on a disc, a bad
+        // sector, an unwritten stretch of a write-once disc, or the drive's
+        // hardware failing to reach them.
+        SENSE_KEY_MEDIUM_ERROR | SENSE_KEY_BLANK_CHECK | SENSE_KEY_HARDWARE_ERROR => {
+            Errno::MediumError
+        }
+        SENSE_KEY_NO_SENSE
+        | SENSE_KEY_NOT_READY
+        | SENSE_KEY_UNIT_ATTENTION
+        | SENSE_KEY_ABORTED_COMMAND => Errno::WouldBlock,
         SENSE_KEY_ILLEGAL_REQUEST => Errno::OutOfRange,
         _ => Errno::NotImplemented,
+    }
+}
+
+/// The error a command answers for a unit whose `readiness` the serve loop
+/// acts on: one coming ready has its request held, one without its medium is
+/// retracted.
+const fn readiness_errno(readiness: Readiness) -> Option<Errno> {
+    match readiness {
+        Readiness::BecomingReady | Readiness::NeedsStart => Some(Errno::WouldBlock),
+        Readiness::NoMedium | Readiness::MediumChanged => Some(Errno::DeviceOffline),
+        _ => None,
     }
 }
 
@@ -895,6 +1195,7 @@ fn driver_error(err: Errno) -> DriverError {
         Errno::DeviceOffline => DriverError::DeviceOffline,
         Errno::TimedOut => DriverError::TimedOut,
         Errno::BadMagic => DriverError::BadMagic,
+        Errno::MediumError => DriverError::MediumError,
         _ => DriverError::DeviceFault,
     }
 }
@@ -1100,6 +1401,11 @@ impl<T: ScsiTransport> Block for LunBlock<'_, T> {
     /// What the unit reported of its medium ([`ScsiDevice::probe`]).
     fn medium(&self) -> Option<BlkMedium> {
         Some(self.state.report.medium)
+    }
+
+    /// What an optical drive reported of its disc ([`ScsiDevice::disc`]).
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        self.state.disc_layout
     }
 
     /// What the unit said once its transport's reset had run

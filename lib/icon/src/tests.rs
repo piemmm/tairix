@@ -288,6 +288,18 @@ fn disk_icon_draws_only_what_the_device_reported() {
         IconKind::DiskSdCard
     );
     assert_eq!(disk_icon(Some(usb.with_rotation(flash))), IconKind::DiskUsb);
+    // An optical drive's disc is a disc whatever the bus.
+    assert_eq!(
+        disk_icon(Some(usb.with_form(tairix_abi::blkio::BlkForm::OpticalDisc))),
+        IconKind::DiskOptical
+    );
+    assert_eq!(
+        disk_icon(Some(
+            ata.with_rotation(spinning)
+                .with_form(tairix_abi::blkio::BlkForm::OpticalDisc)
+        )),
+        IconKind::DiskOptical
+    );
     // A disk in a USB enclosure whose bridge reported its rotation is a hard
     // disk, exactly as one on an ATA bus is.
     let enclosed = BlkRotation::from_rate_field(5400, BlkRotationEvidence::RotationRateVpd);

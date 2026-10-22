@@ -1206,6 +1206,20 @@ platform floor).
   Lifting the refusal means adding that call — an ABI + VFS + per-driver
   change, its own entry, not a corner of this stage.
 
+  `cp`, `mv`'s cross-volume copy, `fstree` and the file manager's paste copy
+  through one engine (`lib/fscopy`): a file's bytes with its holes kept over
+  `fs_seek_region` (`cp --sparse=auto|always|never`, GNU's semantics), then
+  its extended attributes, a created directory's too. Attributes are
+  **carried by default** — a documented divergence from GNU, whose `cp`
+  copies them only under `--preserve=xattr`, because a RISC OS filetype or a
+  Mac type and creator is part of what the file is. What a destination
+  cannot keep is left and reported once per run: `stderr`'s `warning:` line
+  and an `fs.attributes_not_kept` `stdinfo` record in the command apps,
+  `fstree`'s message line and fd 3, the file manager's warning alert.
+  `--preserve=xattr` makes any refusal fail the copy; `--no-preserve=xattr`
+  carries none. `mv` across volumes recreates a symbolic link rather than
+  following it.
+
   The Stage E list originally also named "`stat`'s link fields", which
   presupposed a bundle that did not exist. Authoring a GNU `stat` is a
   bundle of its own rather than a link-field addition, so it is Stage F.

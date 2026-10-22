@@ -904,6 +904,36 @@ pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
     args
 }
 
+/// The block backend [`optical_disc_args`] attaches the disc as, which a
+/// change of disc names.
+const OPTICAL_DRIVE: &str = "optical0";
+
+/// The arguments attaching [`Spec::optical_disc`]: an MMC drive on a
+/// bulk-only USB mass-storage device behind its own `qemu-xhci` controller,
+/// holding the image read-only as a CD. The same on every port, since the
+/// controller is a PCI function on each board.
+#[must_use]
+pub fn optical_disc_args(spec: &Spec) -> Vec<OsString> {
+    let Some(path) = spec.optical_disc.as_ref() else {
+        return Vec::new();
+    };
+    let mut drive = OsString::from(format!(
+        "if=none,id={OPTICAL_DRIVE},format=raw,media=cdrom,readonly=on,file="
+    ));
+    drive.push(path.as_os_str());
+    [
+        OsString::from("-device"),
+        OsString::from("qemu-xhci,id=opticalhc"),
+        OsString::from("-drive"),
+        drive,
+        OsString::from("-device"),
+        OsString::from("usb-bot,bus=opticalhc.0,id=opticalbot"),
+        OsString::from("-device"),
+        OsString::from(format!("scsi-cd,bus=opticalbot.0,drive={OPTICAL_DRIVE}")),
+    ]
+    .into()
+}
+
 /// The `-device` arguments for the virtio-input devices `spec` drives — or,
 /// for an interactive session, the ones the window forwards a human's
 /// keyboard, mouse and touchscreen to — each named `virtio-<kind><suffix>`
@@ -1342,6 +1372,9 @@ pub struct Spec {
     pub audio_wav_path: Option<PathBuf>,
     /// The sound card a capture records from.
     pub sound_card: SoundCard,
+    /// A disc image a USB optical drive holds ([`optical_disc_args`]),
+    /// read-only. `None` attaches no drive.
+    pub optical_disc: Option<PathBuf>,
     /// Extra arguments appended verbatim to the QEMU command line after the
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
@@ -1517,6 +1550,7 @@ impl Spec {
             interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            optical_disc: None,
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
@@ -1681,6 +1715,7 @@ impl Spec {
             interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            optical_disc: None,
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
@@ -1717,6 +1752,7 @@ impl Spec {
             interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            optical_disc: None,
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
@@ -1833,6 +1869,27 @@ impl Spec {
         self.audio_wav_path = Some(path.into());
         self.sound_card = card;
         self
+    }
+
+    /// Attach a USB optical drive holding the disc image at `path`
+    /// ([`optical_disc_args`]).
+    #[must_use]
+    pub fn with_optical_disc(mut self, path: impl Into<PathBuf>) -> Self {
+        self.optical_disc = Some(path.into());
+        self
+    }
+
+    /// Change the disc in the [`with_optical_disc`](Self::with_optical_disc)
+    /// drive for the image at `path` once `ready_marker` has appeared: the
+    /// eject and insert a person makes at the drive, which the guest reads
+    /// as a change of medium.
+    #[must_use]
+    pub fn with_optical_disc_change(self, ready_marker: impl Into<String>, path: &Path) -> Self {
+        let command = format!(
+            "change {OPTICAL_DRIVE} \"{}\" raw read-only",
+            path.display()
+        );
+        self.with_monitor_command(ready_marker, 1, command)
     }
 
     /// Attach a `virtio-crypto` device backed by QEMU's builtin cryptodev
@@ -4130,6 +4187,25 @@ mod tests {
         assert!(at(0).pointer_done(&empty));
     }
 
+    #[test]
+    fn a_change_of_disc_names_the_drive_the_disc_was_attached_as() {
+        let spec = Spec::for_aarch64_kernel("/kernel")
+            .with_optical_disc("/tmp/first.iso")
+            .with_optical_disc_change("checked", Path::new("/tmp/next.iso"));
+        let attached = optical_disc_args(&spec)
+            .iter()
+            .any(|arg| arg.to_string_lossy().starts_with("if=none,id=optical0,"));
+        assert!(attached);
+        assert_eq!(
+            spec.monitor_commands,
+            [MonitorCommand {
+                ready_marker: String::from("checked"),
+                ready_occurrences: 1,
+                command: String::from("change optical0 \"/tmp/next.iso\" raw read-only"),
+            }]
+        );
+    }
+
     /// A run cut short mid-choreography names every cursor that stopped and
     /// how far each one's gate had got, so the report alone says which
     /// witness never came; a finished run owes nothing.
@@ -5747,6 +5823,7 @@ mod tests {
             interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            optical_disc: None,
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,

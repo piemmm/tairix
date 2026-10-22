@@ -196,24 +196,118 @@ pub fn time64_to_centiseconds(time: Time64) -> Result<u64, MetadataError> {
     Ok(centiseconds)
 }
 
-/// `FileCore` attribute bits in canonical `acorn.attr` bit order:
-/// owner read (`R`), owner write (`W`), locked (`L`), directory (`D`),
-/// execute-only (`E`), public read (`r`), public write (`w`), public
-/// execute (`e`, 8-bit ADFS only), and private (`P`, 8-bit ADFS only).
+/// Canonical attribute bit: owner read (`R`).
+pub const ATTR_OWNER_READ: u16 = 1 << 0;
+/// Canonical attribute bit: owner write (`W`).
+pub const ATTR_OWNER_WRITE: u16 = 1 << 1;
+/// Canonical attribute bit: locked against deletion (`L`).
+pub const ATTR_LOCKED: u16 = 1 << 2;
+/// Canonical attribute bit: the object is a directory (`D`).
+pub const ATTR_DIRECTORY: u16 = 1 << 3;
+/// Canonical attribute bit: owner execute-only (`E`).
+pub const ATTR_EXECUTE_ONLY: u16 = 1 << 4;
+/// Canonical attribute bit: public read (`r`).
+pub const ATTR_PUBLIC_READ: u16 = 1 << 5;
+/// Canonical attribute bit: public write (`w`).
+pub const ATTR_PUBLIC_WRITE: u16 = 1 << 6;
+/// Canonical attribute bit: public execute (`e`, 8-bit ADFS only).
+pub const ATTR_PUBLIC_EXECUTE: u16 = 1 << 7;
+/// Canonical attribute bit: private (`P`, 8-bit ADFS only).
+pub const ATTR_PRIVATE: u16 = 1 << 8;
+
+/// Every canonical attribute bit: the 8-bit ADFS access bits, in their
+/// order there, which every later Acorn layout is a subset of.
 pub const ATTR_BITS: u16 = 0x01FF;
+
+/// The canonical bits `FileCore`'s on-disc attribute byte can hold.
+pub const FILECORE_ATTR_BITS: u16 = ATTR_OWNER_READ
+    | ATTR_OWNER_WRITE
+    | ATTR_LOCKED
+    | ATTR_DIRECTORY
+    | ATTR_PUBLIC_READ
+    | ATTR_PUBLIC_WRITE;
+
+/// `FileCore`'s on-disc attribute byte (`NewDirAtts`, RISC OS PRM vol. 2
+/// ch. 28) beside the canonical bit each holds: owner read, owner write,
+/// locked, directory, public read, public write. Bits 6 and 7 are reserved.
+const FILECORE_BITS: [(u8, u16); 6] = [
+    (1 << 0, ATTR_OWNER_READ),
+    (1 << 1, ATTR_OWNER_WRITE),
+    (1 << 2, ATTR_LOCKED),
+    (1 << 3, ATTR_DIRECTORY),
+    (1 << 4, ATTR_PUBLIC_READ),
+    (1 << 5, ATTR_PUBLIC_WRITE),
+];
+
+/// A `FileSwitch` attribute byte (`OS_File`, RISC OS PRM vol. 2 ch. 27)
+/// beside the canonical bit each holds: owner read, owner write, owner
+/// execute-only, locked, public read, public write. Bits 6 and 7 are
+/// reserved; `FileSwitch` has no directory bit, a directory being an
+/// object's kind.
+const FILESWITCH_BITS: [(u8, u16); 6] = [
+    (1 << 0, ATTR_OWNER_READ),
+    (1 << 1, ATTR_OWNER_WRITE),
+    (1 << 2, ATTR_EXECUTE_ONLY),
+    (1 << 3, ATTR_LOCKED),
+    (1 << 4, ATTR_PUBLIC_READ),
+    (1 << 5, ATTR_PUBLIC_WRITE),
+];
+
+/// The canonical bits `FileCore`'s on-disc attribute `byte` records; its
+/// reserved bits carry nothing.
+#[must_use]
+pub fn attr_from_filecore(byte: u8) -> u16 {
+    map_bits(u16::from(byte), &FILECORE_BITS, false)
+}
+
+/// `FileCore`'s on-disc attribute byte for canonical bits `attr`, of which
+/// only [`FILECORE_ATTR_BITS`] have a place; a caller that may not drop the
+/// others checks `attr` against that mask first.
+#[must_use]
+pub fn attr_to_filecore(attr: u16) -> u8 {
+    map_bits(attr, &FILECORE_BITS, true).to_le_bytes()[0]
+}
+
+/// The canonical bits a `FileSwitch` attribute `byte` records; its reserved
+/// bits carry nothing.
+#[must_use]
+pub fn attr_from_fileswitch(byte: u8) -> u16 {
+    map_bits(u16::from(byte), &FILESWITCH_BITS, false)
+}
+
+/// Translate `bits` through `table`, from its native side to the canonical
+/// one, or back when `to_native`.
+fn map_bits(bits: u16, table: &[(u8, u16)], to_native: bool) -> u16 {
+    table.iter().fold(0, |out, &(native, canonical)| {
+        let (from, to) = if to_native {
+            (canonical, u16::from(native))
+        } else {
+            (u16::from(native), canonical)
+        };
+        if bits & from != 0 {
+            out | to
+        } else {
+            out
+        }
+    })
+}
 
 /// Owner-part attribute letters and their bit positions.
 const ATTR_OWNER: [(u8, u16); 6] = [
-    (b'R', 1 << 0),
-    (b'W', 1 << 1),
-    (b'L', 1 << 2),
-    (b'D', 1 << 3),
-    (b'E', 1 << 4),
-    (b'P', 1 << 8),
+    (b'R', ATTR_OWNER_READ),
+    (b'W', ATTR_OWNER_WRITE),
+    (b'L', ATTR_LOCKED),
+    (b'D', ATTR_DIRECTORY),
+    (b'E', ATTR_EXECUTE_ONLY),
+    (b'P', ATTR_PRIVATE),
 ];
 
 /// Public-part attribute letters and their bit positions.
-const ATTR_PUBLIC: [(u8, u16); 3] = [(b'r', 1 << 5), (b'w', 1 << 6), (b'e', 1 << 7)];
+const ATTR_PUBLIC: [(u8, u16); 3] = [
+    (b'r', ATTR_PUBLIC_READ),
+    (b'w', ATTR_PUBLIC_WRITE),
+    (b'e', ATTR_PUBLIC_EXECUTE),
+];
 
 /// Longest canonical `acorn.attr` value (`RWLDEP/rwe`).
 pub const ATTR_VALUE_MAX: usize = 10;
@@ -288,6 +382,95 @@ pub fn attr_from_value(value: &[u8]) -> Result<u16, MetadataError> {
         attr |= bit;
     }
     Ok(attr)
+}
+
+/// The `acorn` keys an object's fields are surfaced as, in listing order.
+pub const KEYS: [&[u8]; 5] = [
+    b"acorn.loadaddr",
+    b"acorn.execaddr",
+    b"acorn.attr",
+    b"acorn.filetype",
+    b"acorn.datestamp",
+];
+
+/// What RISC OS records of one object: its load and execution words and its
+/// canonical attribute bits. The one reading every format that keeps these
+/// fields surfaces them through, so ADFS and a RISC OS CD present an object
+/// identically.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Object {
+    /// The raw load word.
+    pub load: u32,
+    /// The raw execution word.
+    pub exec: u32,
+    /// The canonical attribute bits ([`ATTR_BITS`]).
+    pub attr: u16,
+}
+
+impl Object {
+    fn typed(&self) -> bool {
+        matches!(
+            decode_load_exec(self.load, self.exec),
+            LoadExec::Typed { .. }
+        )
+    }
+
+    /// Whether the object carries `key`: the addresses and the attributes
+    /// always, the filetype and datestamp only when its load word types it.
+    #[must_use]
+    pub fn carries(&self, key: &[u8]) -> bool {
+        match key {
+            b"acorn.loadaddr" | b"acorn.execaddr" | b"acorn.attr" => true,
+            b"acorn.filetype" | b"acorn.datestamp" => self.typed(),
+            _ => false,
+        }
+    }
+
+    /// The `index`-th key the object carries, in [`KEYS`] order.
+    #[must_use]
+    pub fn key(&self, index: u64) -> Option<&'static [u8]> {
+        KEYS.into_iter()
+            .filter(|key| self.carries(key))
+            .nth(usize::try_from(index).ok()?)
+    }
+
+    /// The canonical value of `key`, written into `out`, or `None` when the
+    /// object does not carry it.
+    ///
+    /// # Errors
+    ///
+    /// [`MetadataError::NotRepresentable`] when the attribute bits carry a bit
+    /// outside [`ATTR_BITS`].
+    pub fn value(
+        &self,
+        key: &[u8],
+        out: &mut [u8; ATTR_VALUE_MAX],
+    ) -> Result<Option<usize>, MetadataError> {
+        let decoded = decode_load_exec(self.load, self.exec);
+        let len = match (key, decoded) {
+            (b"acorn.loadaddr", _) => put(out, &addr_to_value(self.load)),
+            (b"acorn.execaddr", _) => put(out, &addr_to_value(self.exec)),
+            (b"acorn.attr", _) => {
+                let (encoded, len) = attr_to_value(self.attr)?;
+                put(out, &encoded[..len])
+            }
+            (b"acorn.filetype", LoadExec::Typed { filetype, .. }) => {
+                put(out, &filetype_to_value(filetype)?)
+            }
+            (b"acorn.datestamp", LoadExec::Typed { centiseconds, .. }) => {
+                put(out, &datestamp_to_value(centiseconds)?)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(len))
+    }
+}
+
+/// `value` written to the head of `out`, answering its length; every
+/// canonical value fits [`ATTR_VALUE_MAX`].
+fn put(out: &mut [u8; ATTR_VALUE_MAX], value: &[u8]) -> usize {
+    out[..value.len()].copy_from_slice(value);
+    value.len()
 }
 
 /// Encode a 40-bit centisecond datestamp as the canonical

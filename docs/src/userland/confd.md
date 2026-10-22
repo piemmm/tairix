@@ -506,7 +506,8 @@ normalised.
 
 A publish renders the document and replaces the live one through
 `tairix_rt::replace_file`: written whole to a sibling temporary of its own,
-synced, renamed over the live document, and synced again. A crash therefore
+given the live document's attributes, owner and mode, synced, renamed over the
+live document, and synced again. A crash therefore
 leaves either the old document or the new one — never a torn one — and a
 refused replace leaves the old document live. The ownership pin a new store
 records is written the same way, so an interrupted create can never leave a

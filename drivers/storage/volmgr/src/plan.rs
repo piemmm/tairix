@@ -1,36 +1,40 @@
 //! The probe plan: which attachable volumes a block device carries
 //! (`plans/DEVICES.md` D3c).
 //!
-//! The engine reads only device *heads* — never whole volumes — and is
-//! pure policy over the [`Block`] seam, so it is host-tested against
+//! The engine reads only what recognition needs — never whole volumes — and
+//! is pure policy over the [`Block`] seam, so it is host-tested against
 //! in-memory images.
 //!
-//! At each extent (the whole device, then each partition) a **RAID array
-//! member** is recognised first ([`tairix_fsprobe::probe_raid_member`]): a
-//! member carries a RAID superblock at its block 0, belongs to an array
-//! awaiting assembly, and must never be mounted as a bare filesystem — one copy
-//! of a mirror mounted read-write diverges the array, and a member that missed
-//! writes serves stale data. Such an extent is counted
-//! ([`PlanSummary::raid_members`]) and skipped, never attached. Only when an
-//! extent is *not* a member is it probed for a filesystem, in the fixed and
-//! documented order:
+//! Each extent (the whole device, then each partition) is recognised by
+//! [`tairix_fsprobe::recognise`]. A **RAID array member** is counted
+//! ([`PlanSummary::raid_members`]) and skipped, never attached: it belongs to
+//! an array awaiting assembly, one copy of a mirror mounted read-write
+//! diverges the array, and a member that missed writes serves stale data.
+//! Volumes are planned in a fixed order:
 //!
-//! 1. **Whole-device filesystem first.** A supported signature at LBA 0
-//!    (`tairix_fsprobe::probe`) means an unpartitioned "superfloppy"
-//!    volume: the device is planned whole and the partition parse is
-//!    skipped (a real partition table's LBA 0 never carries a valid
-//!    filesystem head, and parsing a boot sector's code bytes as an MBR
-//!    would fabricate extents).
-//! 2. **Else the partition table** (`lib/partition`: GPT, then MBR,
-//!    fail-closed), probing each present partition's head. A partition
-//!    whose head matches no supported signature is skipped and counted —
-//!    never guessed at. The declared partition *type* is a routing hint
-//!    the probe deliberately ignores: the content signature decides.
+//! 1. **A whole-device volume first.** A format whose structures open the
+//!    device (`ARXFS`, ext4, FAT32, ADFS) leaves no room for a partition
+//!    table, so the device is planned whole and the partition parse skipped:
+//!    parsing a boot sector's code bytes as an MBR would fabricate extents.
+//!    An optical disc — a device that reports a disc layout
+//!    ([`Block::disc_layout`]) — is one volume too, whatever its system area
+//!    holds.
+//! 2. **A disc image on a partitioned device is weighed against its table.**
+//!    ISO 9660 and UDF begin 32 KiB in, behind a system area where a hybrid
+//!    image keeps a partition table of its own. The image is the device's
+//!    volume when that table lays it out (`hybrid_layout`); its partitions
+//!    inside it are then windows onto it and are not planned, while those
+//!    after it — an appended boot partition — are. A table that contradicts
+//!    the image was laid out over a stale one's remains, and wins.
+//! 3. **Else the partition table** (`lib/partition`: GPT, then MBR,
+//!    fail-closed), recognising each present partition. A partition
+//!    recognised as nothing is skipped and counted — never guessed at. The
+//!    declared partition *type* is a routing hint the probe deliberately
+//!    ignores: the content decides.
 //!
 //! Each recognised volume yields a [`VolumePlan`] carrying its extent,
 //! filesystem, stable identity, and what its catalog name is made from (its
-//! label, read where its format keeps it — for FAT32 the root directory's
-//! label entry, which a relabel rewrites — else the device's transport: the
+//! label, read where its format keeps it, else the device's transport: the
 //! [`crate::name`] policy), in stable device order. Collision handling
 //! happens at attach time ([`crate::name::candidates`]); the plan itself is
 //! one deterministic pass.
@@ -39,19 +43,13 @@ use tairix_abi::blkio::BlkTransport;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
-use tairix_fsprobe::{
-    fat32_root_dir_byte, probe, probe_raid_member, ProbedVolume, FAT32_LABEL_SCAN_LEN,
-    PROBE_HEAD_LEN,
+use tairix_bytedev::ByteDevice;
+use tairix_fsprobe::{recognise, ProbedVolume, Recognised, SYSTEM_AREA_LEN};
+use tairix_partition::{
+    parse_partition_table, Partition, PartitionBlock, PartitionError, PartitionTable,
 };
-use tairix_partition::{parse_partition_table, Partition, PartitionError};
 
 use crate::name::NameBase;
-
-/// Largest logical block the read buffer covers (matches the block-size
-/// bound the blkio client enforces at connect). It also covers the whole
-/// probe head and the FAT32 label scan, so one buffer serves every read.
-const HEAD_BUF_LEN: usize = 4096;
-const _: () = assert!(HEAD_BUF_LEN >= PROBE_HEAD_LEN && HEAD_BUF_LEN >= FAT32_LABEL_SCAN_LEN);
 
 /// One attachable volume the probe recognised.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -74,7 +72,7 @@ pub struct VolumePlan {
 pub struct PlanSummary {
     /// Volumes recognised and handed to the sink.
     pub planned: u32,
-    /// Present partitions whose head matched no supported filesystem.
+    /// Present partitions recognised as nothing.
     pub unrecognised: u32,
     /// Extents (the whole device, or a partition) recognised as a **RAID array
     /// member** and deliberately *not* attached: a member belongs to a RAID
@@ -83,7 +81,7 @@ pub struct PlanSummary {
     /// counted as blank/unrecognised.
     pub raid_members: u32,
     /// `true` when the device carried no partition table and no
-    /// whole-device filesystem (nothing attachable, not an error).
+    /// whole-device volume (nothing attachable, not an error).
     pub no_scheme: bool,
 }
 
@@ -92,48 +90,60 @@ pub struct PlanSummary {
 ///
 /// # Errors
 ///
-/// [`DriverError`] only for a *device* fault (a failed read); an
-/// unrecognised or absent layout is a normal [`PlanSummary`] outcome,
-/// never an error.
+/// [`DriverError`] only for a *device* fault (a failed read) or a refused
+/// allocation; an unrecognised or absent layout is a normal
+/// [`PlanSummary`] outcome, never an error.
 pub fn plan_volumes<B: Block>(
     dev: &mut B,
     mut sink: impl FnMut(&VolumePlan),
 ) -> Result<PlanSummary, DriverError> {
     let geometry = dev.geometry()?;
     let transport = dev.medium().map(|medium| medium.transport);
+    let disc = dev.disc_layout().is_some();
     let mut summary = PlanSummary::default();
-
-    // Whole-device: a RAID array member first, then a whole-device
-    // filesystem (see the module docs for the order and why).
     let whole = (0, geometry.block_count);
-    if let Some(read) = read_extent(dev, &geometry, whole, 0, PROBE_HEAD_LEN)? {
-        let head = read.bytes();
-        if probe_raid_member(head).is_some() {
-            // A member occupies the whole device: it belongs to a RAID array
-            // awaiting assembly, so it is not attachable as a standalone
-            // volume and is emphatically not blank. Fail closed rather than
-            // ever mounting one bare copy.
+    let mut plan = |volume: &ProbedVolume, extent, summary: &mut PlanSummary| {
+        sink(&plan_from(volume, extent, transport));
+        summary.planned += 1;
+    };
+
+    let image = match recognise_extent(dev, whole)? {
+        Some(Recognised::RaidMember(_)) => {
             summary.raid_members = 1;
             return Ok(summary);
         }
-        if let Some(probed) = probe(head) {
-            let probed = with_directory_label(dev, &geometry, whole, head, probed)?;
-            sink(&plan_from(&probed, whole, transport));
-            summary.planned = 1;
-            return Ok(summary);
-        }
-    }
+        Some(Recognised::Volume(volume)) => match volume.span {
+            Some(span) if !disc => Some((volume, span)),
+            _ => {
+                plan(&volume, whole, &mut summary);
+                return Ok(summary);
+            }
+        },
+        None => None,
+    };
 
     let table = match parse_partition_table(dev) {
         Ok(table) => table,
         Err(PartitionError::Device(err)) => return Err(err),
-        // No scheme, or a malformed table: nothing attachable. The device
-        // may be blank or foreign; refusing whole is the honest outcome.
-        Err(_) => {
-            summary.no_scheme = true;
+        // No scheme, or a malformed table: a disc image is the device's one
+        // volume, and anything else leaves nothing attachable. Only a device
+        // with no scheme at all is empty; a malformed table describes
+        // something this build cannot read.
+        Err(err) => {
+            match image {
+                Some((volume, _)) => plan(&volume, whole, &mut summary),
+                None => summary.no_scheme = err.is_absent(),
+            }
             return Ok(summary);
         }
     };
+    let mut image_end = None;
+    if let Some((volume, span)) = image {
+        if hybrid_layout(dev, &geometry, &table, volume.fstype, span)? {
+            plan(&volume, whole, &mut summary);
+            image_end = Some(span.div_ceil(u64::from(geometry.block_size)));
+        }
+    }
     for partition in table.partitions() {
         let Some(extent) = bounded_extent(partition, &geometry) else {
             // An extent the geometry cannot hold is a lying table entry;
@@ -141,25 +151,56 @@ pub fn plan_volumes<B: Block>(
             summary.unrecognised += 1;
             continue;
         };
-        match read_extent(dev, &geometry, extent, 0, PROBE_HEAD_LEN)? {
-            Some(read) => {
-                let head = read.bytes();
-                if probe_raid_member(head).is_some() {
-                    // A partition that is a RAID array member is skipped for
-                    // the same reason as a whole-device member above.
-                    summary.raid_members += 1;
-                } else if let Some(probed) = probe(head) {
-                    let probed = with_directory_label(dev, &geometry, extent, head, probed)?;
-                    sink(&plan_from(&probed, extent, transport));
-                    summary.planned += 1;
-                } else {
-                    summary.unrecognised += 1;
-                }
-            }
+        if image_end.is_some_and(|end| extent.0 < end) {
+            continue;
+        }
+        match recognise_extent(dev, extent)? {
+            Some(Recognised::RaidMember(_)) => summary.raid_members += 1,
+            Some(Recognised::Volume(volume)) => plan(&volume, extent, &mut summary),
             None => summary.unrecognised += 1,
         }
     }
     Ok(summary)
+}
+
+/// Whether `table` is the disc image's own — what a hybrid image carries so
+/// firmware that reads partitions can boot it — rather than one laid out over
+/// a stale image's remains. It is when it lays the image out from its start
+/// (a partition begins in the system area), none of its partitions that begin
+/// later straddles the image's end, and no partition covering the image's
+/// descriptors holds a filesystem of another kind.
+fn hybrid_layout<B: Block>(
+    dev: &mut B,
+    geometry: &BlockGeometry,
+    table: &PartitionTable,
+    fstype: VolumeFsType,
+    span: u64,
+) -> Result<bool, DriverError> {
+    let block_bytes = u64::from(geometry.block_size);
+    let image_end = span.div_ceil(block_bytes);
+    let descriptors = SYSTEM_AREA_LEN / block_bytes;
+    let mut lays_out = false;
+    for partition in table.partitions() {
+        let Some((first, blocks)) = bounded_extent(partition, geometry) else {
+            continue;
+        };
+        let end = first + blocks;
+        if first > descriptors {
+            if first < image_end && end > image_end {
+                return Ok(false);
+            }
+            continue;
+        }
+        lays_out = true;
+        if end > descriptors {
+            match recognise_extent(dev, (first, blocks))? {
+                Some(Recognised::Volume(inner)) if inner.fstype == fstype => {}
+                Some(_) => return Ok(false),
+                None => {}
+            }
+        }
+    }
+    Ok(lays_out)
 }
 
 /// Clamp a partition's declared extent against the live geometry, or
@@ -175,84 +216,23 @@ fn bounded_extent(partition: &Partition, geometry: &BlockGeometry) -> Option<(u6
     Some((partition.start_lba, partition.block_count))
 }
 
-/// Bytes read from an extent: whole blocks, of which [`Fetched::bytes`] are
-/// the ones asked for.
-struct Fetched {
-    buf: [u8; HEAD_BUF_LEN],
-    start: usize,
-    end: usize,
-}
-
-impl Fetched {
-    fn bytes(&self) -> &[u8] {
-        &self.buf[self.start..self.end]
-    }
-}
-
-/// Read up to `len` bytes of `extent` (first block, block count) from byte
-/// `offset` of it, or `None` when the geometry cannot be used (a zero or
-/// oversized block size, an empty extent) or `offset` lies outside the
-/// extent.
-///
-/// One read serves both classifiers at a head: the caller passes the bytes
-/// to [`probe_raid_member`] (is this a RAID array member?) and, failing that,
-/// to [`probe`] (is this a supported filesystem?), so a head is read once.
-fn read_extent<B: Block>(
+/// What the extent (first block, block count) of `dev` holds. A device whose
+/// geometry cannot be read through holds nothing recognisable.
+fn recognise_extent<B: Block>(
     dev: &mut B,
-    geometry: &BlockGeometry,
     (first_lba, blocks): (u64, u64),
-    offset: u64,
-    len: usize,
-) -> Result<Option<Fetched>, DriverError> {
-    let Ok(block_size) = usize::try_from(geometry.block_size) else {
-        return Ok(None);
+) -> Result<Option<Recognised>, DriverError> {
+    let window = match PartitionBlock::new(&mut *dev, first_lba, blocks) {
+        Ok(window) => window,
+        Err(DriverError::LengthOutOfRange) => return Ok(None),
+        Err(err) => return Err(err),
     };
-    if block_size == 0 || block_size > HEAD_BUF_LEN || blocks == 0 {
-        return Ok(None);
-    }
-    let block_bytes = u64::from(geometry.block_size);
-    let skipped = offset / block_bytes;
-    if skipped >= blocks {
-        return Ok(None);
-    }
-    // Less than one block, so it fits `usize`.
-    let skip = usize::try_from(offset % block_bytes).unwrap_or(0);
-    let wanted = (skip + len)
-        .div_ceil(block_size)
-        .min(HEAD_BUF_LEN / block_size);
-    let read_blocks = usize::try_from(blocks - skipped).map_or(wanted, |left| wanted.min(left));
-    let read_bytes = read_blocks * block_size;
-    let mut buf = [0u8; HEAD_BUF_LEN];
-    dev.read_blocks(first_lba + skipped, &mut buf[..read_bytes])?;
-    Ok(Some(Fetched {
-        buf,
-        start: skip,
-        end: (skip + len).min(read_bytes),
-    }))
-}
-
-/// `probed` labelled from its root directory when it is a FAT32 volume,
-/// whose label entry there outranks the boot sector's copy. A root the
-/// parameter block places outside the extent leaves the boot label standing.
-fn with_directory_label<B: Block>(
-    dev: &mut B,
-    geometry: &BlockGeometry,
-    extent: (u64, u64),
-    head: &[u8],
-    probed: ProbedVolume,
-) -> Result<ProbedVolume, DriverError> {
-    if probed.fstype != VolumeFsType::Fat32 {
-        return Ok(probed);
-    }
-    let Some(root) = fat32_root_dir_byte(head) else {
-        return Ok(probed);
+    let mut extent = match ByteDevice::new(window) {
+        Ok(extent) => extent,
+        Err(DriverError::Unsupported) => return Ok(None),
+        Err(err) => return Err(err),
     };
-    Ok(
-        match read_extent(dev, geometry, extent, root, FAT32_LABEL_SCAN_LEN)? {
-            Some(entries) => probed.with_fat32_directory_label(entries.bytes()),
-            None => probed,
-        },
-    )
+    recognise(&mut extent)
 }
 
 /// Build the plan record for one recognised volume on a device reached over
@@ -272,13 +252,19 @@ fn plan_from(
 }
 
 #[cfg(test)]
+#[path = "../../../../lib/fsprobe/tests/support/images.rs"]
+mod images;
+
+#[cfg(test)]
 mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use tairix_abi::driver::block::DiscLayout;
     use tairix_partition::{mbr, PartitionType};
 
     use super::*;
+    use crate::plan::images;
 
     const BS: usize = 512;
     const BS_U32: u32 = 512;
@@ -287,9 +273,14 @@ mod tests {
     struct MemBlock {
         image: Vec<u8>,
         faulty: bool,
+        layout: Option<DiscLayout>,
     }
 
     impl Block for MemBlock {
+        fn disc_layout(&self) -> Option<DiscLayout> {
+            self.layout
+        }
+
         fn geometry(&self) -> Result<BlockGeometry, DriverError> {
             Ok(BlockGeometry {
                 block_size: BS_U32,
@@ -368,6 +359,7 @@ mod tests {
         let mut dev = MemBlock {
             image,
             faulty: false,
+            layout: None,
         };
         let (plans, summary) = collect(&mut dev);
         assert_eq!(summary.planned, 1);
@@ -402,6 +394,7 @@ mod tests {
         let mut dev = MemBlock {
             image,
             faulty: false,
+            layout: None,
         };
         let (plans, _) = collect(&mut dev);
         assert_eq!(base_text(&plans[0]), b"camera-card");
@@ -440,6 +433,7 @@ mod tests {
         let mut dev = MemBlock {
             image,
             faulty: false,
+            layout: None,
         };
 
         let (plans, summary) = collect(&mut dev);
@@ -475,6 +469,7 @@ mod tests {
         let mut dev = MemBlock {
             image,
             faulty: false,
+            layout: None,
         };
         let (plans, summary) = collect(&mut dev);
         assert!(plans.is_empty());
@@ -486,6 +481,7 @@ mod tests {
         let mut dev = MemBlock {
             image: vec![0u8; 64 * BS],
             faulty: false,
+            layout: None,
         };
         let (plans, summary) = collect(&mut dev);
         assert!(plans.is_empty());
@@ -494,10 +490,29 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_table_is_not_an_empty_device() {
+        // Two overlapping partitions: the table describes something this
+        // build cannot read, so the device is never offered as empty.
+        let mut image = vec![0u8; 64 * BS];
+        for (index, start) in [8u32, 16].into_iter().enumerate() {
+            let entry = 446 + index * 16;
+            image[entry + 4] = 0x83;
+            image[entry + 8..entry + 12].copy_from_slice(&start.to_le_bytes());
+            image[entry + 12..entry + 16].copy_from_slice(&16u32.to_le_bytes());
+        }
+        image[510] = 0x55;
+        image[511] = 0xAA;
+        let (plans, summary) = collect(&mut device(image, None));
+        assert!(plans.is_empty());
+        assert!(!summary.no_scheme);
+    }
+
+    #[test]
     fn a_device_fault_is_an_error_not_an_empty_plan() {
         let mut dev = MemBlock {
             image: vec![0u8; 64 * BS],
             faulty: true,
+            layout: None,
         };
         assert_eq!(
             plan_volumes(&mut dev, |_| {}),
@@ -529,6 +544,7 @@ mod tests {
         let mut dev = MemBlock {
             image,
             faulty: false,
+            layout: None,
         };
         let (plans, _) = collect(&mut dev);
         let first = crate::name::candidates(plans[0].base, plans[0].identity).next();
@@ -568,6 +584,7 @@ mod tests {
         let mut dev = MemBlock {
             image,
             faulty: false,
+            layout: None,
         };
         let (plans, summary) = collect(&mut dev);
         assert!(plans.is_empty(), "a bare RAID member is never attached");
@@ -594,11 +611,158 @@ mod tests {
         let mut dev = MemBlock {
             image,
             faulty: false,
+            layout: None,
         };
         let (plans, summary) = collect(&mut dev);
         assert!(plans.is_empty());
         assert_eq!(summary.raid_members, 1);
         assert_eq!(summary.planned, 0);
         assert_eq!(summary.unrecognised, 0);
+    }
+
+    /// A disc image of 42 sectors (168 blocks): its descriptors at sector 16,
+    /// its roots at 40 and 41, and sectors 18..40 free for a partition a
+    /// hybrid image keeps inside it.
+    const IMAGE_BYTES: usize = 42 * 2048;
+    const IMAGE_BLOCKS: u64 = (IMAGE_BYTES / BS) as u64;
+
+    fn disc_image(blocks: usize) -> Vec<u8> {
+        let mut image = images::iso::image(&images::iso::Spec {
+            volume_id: b"INSTALLER",
+            root_sector: 40,
+            ..Default::default()
+        });
+        image.resize(blocks * BS, 0);
+        image
+    }
+
+    /// `image` with an MBR of `parts`, each of type `0x83`.
+    fn with_table(mut image: Vec<u8>, parts: &[Partition]) -> Vec<u8> {
+        let mut sector = mbr::encode(parts).expect("encodes");
+        for index in 0..parts.len() {
+            set_type_byte(&mut sector, index, 0x83);
+        }
+        image[..512].copy_from_slice(&sector);
+        image
+    }
+
+    fn part(start_lba: u64, block_count: u64) -> Partition {
+        Partition {
+            ty: PartitionType::FatBoot,
+            start_lba,
+            block_count,
+        }
+    }
+
+    fn device(image: Vec<u8>, layout: Option<DiscLayout>) -> MemBlock {
+        MemBlock {
+            image,
+            faulty: false,
+            layout,
+        }
+    }
+
+    #[test]
+    fn a_disc_image_with_no_table_is_planned_whole() {
+        let (plans, summary) = collect(&mut device(disc_image(256), None));
+        assert_eq!(summary.planned, 1);
+        assert_eq!(plans[0].fstype, VolumeFsType::Iso9660);
+        assert_eq!((plans[0].first_lba, plans[0].blocks), (0, 256));
+        assert_eq!(base_text(&plans[0]), b"installer");
+    }
+
+    #[test]
+    fn a_hybrid_images_own_table_leaves_it_whole() {
+        // Partition 1 begins at the image's descriptors, partition 2 is a
+        // boot image inside it, and partition 3 runs to the image's end.
+        let mut image = with_table(
+            disc_image(256),
+            &[part(64, 16), part(80, 40), part(120, IMAGE_BLOCKS - 120)],
+        );
+        write_fat32(&mut image, 80 * BS, *b"EFIB", b"EFI BOOT   ");
+        let (plans, summary) = collect(&mut device(image, None));
+        assert_eq!(plans.len(), 1, "the partitions are windows onto the image");
+        assert_eq!(plans[0].fstype, VolumeFsType::Iso9660);
+        assert_eq!((plans[0].first_lba, plans[0].blocks), (0, 256));
+        assert_eq!(summary.unrecognised, 0);
+    }
+
+    #[test]
+    fn a_classic_hybrid_whose_partition_covers_the_mbr_is_planned_whole() {
+        // The table's one partition starts at block 0, which no MBR may.
+        let mut image = disc_image(256);
+        image[446] = 0x80;
+        image[446 + 4] = 0x17;
+        let blocks = u32::try_from(IMAGE_BLOCKS).expect("a small image");
+        image[446 + 12..446 + 16].copy_from_slice(&blocks.to_le_bytes());
+        image[510] = 0x55;
+        image[511] = 0xAA;
+        let (plans, _) = collect(&mut device(image, None));
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].fstype, VolumeFsType::Iso9660);
+    }
+
+    #[test]
+    fn a_partition_appended_to_a_hybrid_image_is_planned_beside_it() {
+        // Partition 1 starts at the image's descriptors and ends with it;
+        // partition 2 follows the image.
+        let mut image = with_table(
+            disc_image(256),
+            &[part(64, IMAGE_BLOCKS - 64), part(IMAGE_BLOCKS, 64)],
+        );
+        write_fat32(&mut image, IMAGE_BYTES, *b"APND", b"APPENDED   ");
+        let (plans, _) = collect(&mut device(image, None));
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].fstype, VolumeFsType::Iso9660);
+        assert_eq!(plans[1].fstype, VolumeFsType::Fat32);
+        assert_eq!(plans[1].first_lba, IMAGE_BLOCKS);
+    }
+
+    #[test]
+    fn a_table_laid_out_over_a_stale_image_wins() {
+        // A partition begun after the system area runs past the image's end:
+        // the table was laid out without regard to the image.
+        let mut image = with_table(disc_image(256), &[part(100, 156)]);
+        write_ext4(&mut image, 100 * BS, [7u8; 16], b"data");
+        let (plans, _) = collect(&mut device(image, None));
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].fstype, VolumeFsType::Ext4);
+        assert_eq!(plans[0].first_lba, 100);
+    }
+
+    #[test]
+    fn a_stale_image_under_an_early_partition_of_another_kind_loses() {
+        // A cylinder-aligned partition covers the image's descriptors and
+        // holds a filesystem of its own.
+        let mut image = with_table(disc_image(256), &[part(63, 193)]);
+        write_fat32(&mut image, 63 * BS, *b"OLDP", b"OLD STYLE  ");
+        let (plans, _) = collect(&mut device(image, None));
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].fstype, VolumeFsType::Fat32);
+        assert_eq!(plans[0].first_lba, 63);
+    }
+
+    #[test]
+    fn a_table_that_never_lays_the_image_out_is_not_its_own() {
+        // Every partition begins after the image's descriptors.
+        let mut image = with_table(disc_image(256), &[part(IMAGE_BLOCKS, 64)]);
+        write_fat32(&mut image, IMAGE_BYTES, *b"LATE", b"LATE       ");
+        let (plans, _) = collect(&mut device(image, None));
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].fstype, VolumeFsType::Fat32);
+    }
+
+    #[test]
+    fn an_optical_disc_is_one_volume_whatever_its_system_area_holds() {
+        let mut image = with_table(disc_image(256), &[part(100, 156)]);
+        write_ext4(&mut image, 100 * BS, [7u8; 16], b"data");
+        let layout = DiscLayout {
+            last_session_start: 0,
+            last_recorded: None,
+        };
+        let (plans, _) = collect(&mut device(image, Some(layout)));
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].fstype, VolumeFsType::Iso9660);
+        assert_eq!((plans[0].first_lba, plans[0].blocks), (0, 256));
     }
 }

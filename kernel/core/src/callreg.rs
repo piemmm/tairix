@@ -186,10 +186,11 @@ fn report_link_service(id: EndpointId) {
     }
 }
 
-/// An observer of endpoint teardown: told, after the fact, that an owner's
-/// endpoints were destroyed. The runtime volume service listens here so a
-/// surprise-removed disk's volume reacts the moment its serving driver
-/// dies (`plans/DEVICES.md` D4).
+/// An observer of a device's endpoints going: told, after the fact, that an
+/// owner's endpoints were destroyed, or that the node declaring one was
+/// retracted while its driver lives on. The runtime volume service listens
+/// here so a surprise-removed disk's volume reacts the moment its serving
+/// driver dies, or its medium leaves (`plans/DEVICES.md` D4).
 pub trait EndpointVanishObserver: Sync {
     /// `id` was unbound and destroyed because its owning task ended. Runs
     /// in the tearing-down task's context after parked callers were woken:
@@ -197,6 +198,23 @@ pub trait EndpointVanishObserver: Sync {
     /// the endpoint has already been cancelled, so nothing it waits on can
     /// depend on the dead endpoint.
     fn endpoint_vanished(&self, id: EndpointId);
+
+    /// The hardware node declaring `id` was surprise-removed by the driver
+    /// serving it, which lives on: the medium the node published left its
+    /// unit. The endpoint stays bound for the next medium's publication, and
+    /// refuses every request made for this one as stale. Runs in the
+    /// removing driver's syscall, after the node's grants were revoked.
+    fn publication_retracted(&self, id: EndpointId);
+}
+
+/// Tell the vanish observer the node declaring each of `endpoints` was
+/// surprise-removed while its driver lives on.
+pub fn notify_publication_retracted(endpoints: &[u64]) {
+    if let Ok(Some(observer)) = VANISH_OBSERVER.get() {
+        for &id in endpoints {
+            observer.publication_retracted(EndpointId(id));
+        }
+    }
 }
 
 /// The set-once vanish observer, installed by the boot path. Fail-closed

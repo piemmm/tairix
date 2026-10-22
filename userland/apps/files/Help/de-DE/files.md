@@ -84,6 +84,10 @@ ein Plus, solange ein Ablegen kopieren würde, und einen Pfeil, solange es
 verschieben würde, und der Ordner, in dem ein Ablegen landen würde, ist
 hervorgehoben. Eine einzelne Datei, die auf den Platz einer Anwendung auf
 der Symbolleiste gezogen wird, wird dort geöffnet.
+Kopieren oder Verschieben behält die Lücken jeder Datei und ihre
+erweiterten Attribute, etwa einen RISC-OS-Dateityp; ein Attribut, das das
+Ziel nicht aufnehmen kann, wird nach Abschluss des Vorgangs in einer
+Warnung genannt.
 
 Das Rechtsklickmenü beginnt mit *Anzeige*. Darunter nennt ein Untermenü,
 worauf das Menü wirkt — *Datei ‚notes.txt‘*, ein langer Name in der Mitte

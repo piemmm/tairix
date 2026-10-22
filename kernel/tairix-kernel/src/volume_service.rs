@@ -94,10 +94,15 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
-use tairix_abi::{DriverError, DriverHandle, Errno};
+use tairix_abi::{DriverError, DriverHandle, Errno, SeekRegion};
+use tairix_bytedev::ByteDevice;
+use tairix_drv_fs_adfs::Adfs;
 use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
+use tairix_drv_fs_iso9660::Iso9660;
+use tairix_drv_fs_udf::Udf;
+use tairix_fsprobe::{Evidence, ProbedVolume, Recognised};
 use tairix_kernel_core::callreg::EndpointVanishObserver;
 use tairix_kernel_core::devres::installed_shared_mem_facility;
 use tairix_kernel_core::fs::blkclient::BlkClient;
@@ -311,6 +316,15 @@ impl FilesystemRead for UnavailableFs {
         Err(DriverError::DeviceFault)
     }
 
+    fn seek_region(
+        &mut self,
+        _file: NodeId,
+        _offset: u64,
+        _region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
     fn read_link(&mut self, _link: NodeId, _out: &mut [u8]) -> Result<usize, DriverError> {
         Err(DriverError::DeviceFault)
     }
@@ -353,6 +367,16 @@ impl FilesystemWrite for UnavailableFs {
         Err(DriverError::DeviceFault)
     }
 
+    fn punch(
+        &mut self,
+        _dir: NodeId,
+        _name: &[u8],
+        _offset: u64,
+        _len: u64,
+    ) -> Result<(), DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
     fn remove(&mut self, _dir: NodeId, _name: &[u8]) -> Result<(), DriverError> {
         Err(DriverError::DeviceFault)
     }
@@ -378,6 +402,14 @@ impl FilesystemSecurity for UnavailableFs {
     }
 
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
+    fn stamp_owner(&mut self, _node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
+    fn records_ownership(&mut self, _node: NodeId) -> Result<bool, DriverError> {
         Err(DriverError::DeviceFault)
     }
 }
@@ -447,7 +479,8 @@ pub struct RuntimeVolumeService {
     state: SpinLock<Vec<AttachedVolume>>,
     /// The served block devices operations reach, one entry per
     /// block-service endpoint and window ([`DeviceSlot`]). The guard is held
-    /// only for lookups and brief mutations, never across device I/O.
+    /// only for lookups and brief mutations, never across device I/O, and
+    /// is taken inside the registry guard, never around it.
     devices: SpinLock<Vec<DeviceSlot>>,
     /// The next mount handle to mint.
     next_handle: AtomicU64,
@@ -466,6 +499,11 @@ struct DeviceSlot {
     /// Operations holding the slot ([`DevicePin`]); a pinned slot is never
     /// retired, so its client cannot close under an operation using it.
     pins: usize,
+    /// The publication the slot's window was conferred through was
+    /// retracted: its medium left, though the endpoint lives on. Never
+    /// cleared, so a volume an operation enters over the slot later is
+    /// retracted however the two raced.
+    retracted: bool,
 }
 
 /// An operation's hold on a [`DeviceSlot`], released on drop.
@@ -503,17 +541,31 @@ impl Drop for VolumeClaim<'_> {
             let mut state = self.service.state.lock();
             state.iter_mut().find(|v| v.id == self.id).and_then(|v| {
                 v.claimed = false;
-                v.availability.device_present().then_some(v.endpoint)
+                v.availability
+                    .device_present()
+                    .then_some((v.endpoint, v.window))
             })
         };
         // Asked outside the registry guard: the endpoint registry calls the
         // vanish observer, which takes that guard, under its own.
-        if let Some(endpoint) = present_on {
+        if let Some((endpoint, window)) = present_on {
             if !tairix_kernel_core::callreg::contains(EndpointId(endpoint)) {
-                self.service.handle_vanished(endpoint);
+                self.service.handle_vanished(endpoint, Removal::Endpoint);
+            } else if self.service.retracted(endpoint, window) {
+                self.service.handle_vanished(endpoint, Removal::Publication);
             }
         }
     }
+}
+
+/// What a surprise removal took from the volumes attached over an endpoint.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Removal {
+    /// The serving driver died, and every publication it served with it.
+    Endpoint,
+    /// The driver retracted a publication and lives on: only the volumes
+    /// on a retracted [`DeviceSlot`] lost their medium.
+    Publication,
 }
 
 /// How a detach's claim on its volume went.
@@ -602,6 +654,7 @@ impl RuntimeVolumeService {
                 op: Arc::new(SleepLock::new(())),
                 connected: None,
                 pins: 0,
+                retracted: false,
             });
             devices.len() - 1
         };
@@ -646,6 +699,12 @@ impl RuntimeVolumeService {
             slot.connected = Some(device.clone());
         }
         Ok(device)
+    }
+
+    /// Whether the publication `window` was conferred through on `endpoint`
+    /// was retracted.
+    fn retracted(&self, endpoint: u64, window: u64) -> bool {
+        slot_retracted(&self.devices.lock(), endpoint, window)
     }
 
     /// The connected shared device serving `endpoint` over `window`, if any.
@@ -978,35 +1037,91 @@ fn open_filesystem(
         VolumeFsType::Fat32 => {
             let fs = Fat32::open(window).map_err(DriverError::as_errno)?;
             let identity = fs.volume_identity();
-            // FAT32 stores no owner model; mount it under the storage-group
-            // identity map when the group is provisioned, else keep the
-            // driver's own restrictive system-owned posture (fail closed).
-            let (driver, watch) = match map_gid {
-                Some(gid) => cached(
-                    GroupMappedFs::new(fs, gid),
-                    volume_handle,
-                    identity,
-                    wiring.pressure,
-                    wiring.audit,
-                    wiring.watches,
-                ),
-                None => cached(
-                    fs,
-                    volume_handle,
-                    identity,
-                    wiring.pressure,
-                    wiring.audit,
-                    wiring.watches,
-                ),
-            };
-            Ok(OpenedVolume {
-                driver,
-                watch,
+            Ok(ownerless(
+                fs,
                 identity,
-                fstype: "fat32",
-                write_refusal: None,
-            })
+                "fat32",
+                map_gid,
+                wiring,
+                volume_handle,
+            ))
         }
+        VolumeFsType::Adfs => {
+            let fs = Adfs::open(window).map_err(DriverError::as_errno)?;
+            let identity = fs.volume_identity();
+            Ok(ownerless(
+                fs,
+                identity,
+                "adfs",
+                map_gid,
+                wiring,
+                volume_handle,
+            ))
+        }
+        VolumeFsType::Iso9660 => {
+            let fs = Iso9660::open(window).map_err(DriverError::as_errno)?;
+            let identity = fs.volume_identity();
+            let mut opened = ownerless(fs, identity, "iso9660", map_gid, wiring, volume_handle);
+            opened.write_refusal = (!read_only).then_some("format_read_only");
+            Ok(opened)
+        }
+        VolumeFsType::Udf => {
+            let fs = Udf::open(window).map_err(DriverError::as_errno)?;
+            let identity = fs.volume_identity();
+            let write_refusal = if read_only { None } else { fs.write_refusal() };
+            let mut opened = ownerless(fs, identity, "udf", map_gid, wiring, volume_handle);
+            opened.write_refusal = write_refusal;
+            Ok(opened)
+        }
+    }
+}
+
+/// Serve a volume of a format that keeps no owner records, or whose records
+/// name no principal here, under the storage-group identity map when the
+/// group is provisioned; without it the driver's own restrictive
+/// system-owned posture stands (fail closed). A node whose record the format
+/// does keep is served as recorded.
+fn ownerless<F>(
+    fs: F,
+    identity: [u8; 16],
+    fstype: &'static str,
+    map_gid: Option<GroupId>,
+    wiring: &Wiring,
+    volume_handle: u64,
+) -> OpenedVolume
+where
+    F: FilesystemRead
+        + FilesystemWrite
+        + FilesystemSecurity
+        + FilesystemStats
+        + FilesystemAttrsProvider
+        + Send
+        + 'static,
+{
+    let (driver, watch) = match map_gid {
+        Some(gid) => cached(
+            GroupMappedFs::new(fs, gid),
+            volume_handle,
+            identity,
+            wiring.pressure,
+            wiring.audit,
+            wiring.watches,
+        ),
+        None => cached(
+            fs,
+            volume_handle,
+            identity,
+            wiring.pressure,
+            wiring.audit,
+            wiring.watches,
+        ),
+    };
+    OpenedVolume {
+        driver,
+        watch,
+        identity,
+        fstype,
+        write_refusal: None,
     }
 }
 
@@ -1236,26 +1351,12 @@ fn validate_extent(
     Ok(())
 }
 
-/// Read the first `len` bytes of the requested extent, rounded up to
-/// whole blocks (the trailing partial block is read too — the buffer
-/// length is the rounded figure). `None` when the geometry is degenerate,
-/// the extent is too short, the allocation is refused, or the device
-/// refuses the read — the caller fails closed, never guesses.
-fn read_extent_head<B: Block>(
-    client: &mut B,
-    request: &VolumeAttachRequest<'_>,
-    block_size: u32,
-    len: usize,
-) -> Option<Vec<u8>> {
-    let bs = usize::try_from(block_size).ok().filter(|&bs| bs > 0)?;
-    let blocks = len.div_ceil(bs).max(1);
-    if u64::try_from(blocks).ok()? > request.blocks {
-        return None;
-    }
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(blocks.checked_mul(bs)?).ok()?;
-    buf.resize(blocks * bs, 0);
-    client.read_blocks(request.first_lba, &mut buf).ok()?;
+/// Read `len` bytes of whole blocks from device-absolute `lba`. `None` when
+/// the allocation is refused or the device refuses the read — the caller
+/// fails closed, never guesses.
+fn read_blocks_at<B: Block>(client: &mut B, lba: u64, len: usize) -> Option<Vec<u8>> {
+    let mut buf = tairix_util::fallible::filled(len, 0u8)?;
+    client.read_blocks(lba, &mut buf).ok()?;
     Some(buf)
 }
 
@@ -1289,20 +1390,23 @@ fn mount_template(map_gid: Option<GroupId>) -> Metadata {
 /// their on-disk records.
 fn identity_map_gid(fstype: VolumeFsType) -> Option<GroupId> {
     match fstype {
-        VolumeFsType::Fat32 => LATE_STORAGE_GID.get(),
+        VolumeFsType::Fat32 | VolumeFsType::Adfs | VolumeFsType::Iso9660 | VolumeFsType::Udf => {
+            LATE_STORAGE_GID.get()
+        }
         VolumeFsType::ARXFS | VolumeFsType::Ext4 => None,
     }
 }
 
 /// A fresh uncommitted-write journal for the extent, its
-/// mutation-evidence shadow seeded from the probed extent `head` (D4c).
-/// A volume with no declared window (or an unreadable one) simply holds
-/// no evidence; a later re-insert then fails closed to the conflict path.
+/// mutation-evidence shadow seeded from the window the recognised volume
+/// declares (D4c). A volume with no declared window (or an unreadable one)
+/// simply holds no evidence; a later re-insert then fails closed to the
+/// conflict path.
 fn seeded_journal<B: Block>(
     client: &mut B,
     request: &VolumeAttachRequest<'_>,
     block_size: u32,
-    head: Option<&[u8]>,
+    evidence: Option<Evidence>,
 ) -> Arc<SpinLock<RetainedWrites>> {
     let journal = Arc::new(SpinLock::new(RetainedWrites::new(
         block_size,
@@ -1311,15 +1415,49 @@ fn seeded_journal<B: Block>(
         // falls back to the bootstrap size before RAM is published.
         CacheBudget::from_backing(tairix_kernel_core::memstats::cache_backing_bytes()),
     )));
-    if let Some(evidence_len) = head
-        .and_then(tairix_fsprobe::evidence_len)
-        .and_then(|len| usize::try_from(len).ok())
+    if let Some((lba, len)) =
+        evidence.and_then(|evidence| evidence_blocks(request, block_size, evidence))
     {
-        if let Some(evidence) = read_extent_head(client, request, block_size, evidence_len) {
-            journal.lock().set_evidence(request.first_lba, &evidence);
+        if let Some(bytes) = read_blocks_at(client, lba, len) {
+            journal.lock().set_evidence(lba, &bytes);
         }
     }
     journal
+}
+
+/// The device blocks covering `evidence` in the requested extent, as the
+/// first device-absolute LBA and the byte length: rounded out to whole
+/// blocks, since the shadow compares blocks. `None` for a window the extent
+/// cannot hold.
+pub(crate) fn evidence_blocks(
+    request: &VolumeAttachRequest<'_>,
+    block_size: u32,
+    evidence: Evidence,
+) -> Option<(u64, usize)> {
+    let bs = u64::from(block_size);
+    let first = evidence.offset.checked_div(bs)?;
+    let end = evidence.offset.checked_add(evidence.len)?.div_ceil(bs);
+    if end <= first || end > request.blocks {
+        return None;
+    }
+    let len = usize::try_from((end - first).checked_mul(bs)?).ok()?;
+    Some((request.first_lba.checked_add(first)?, len))
+}
+
+/// What the requested extent holds, recognised exactly as the volume manager
+/// recognised it. `None` for nothing attachable, a RAID member, or an extent
+/// that cannot be read — the caller then holds no evidence and claims no
+/// re-insert, failing closed.
+fn recognise_extent<B: Block>(
+    client: &mut B,
+    request: &VolumeAttachRequest<'_>,
+) -> Option<ProbedVolume> {
+    let window = PartitionBlock::new(client, request.first_lba, request.blocks).ok()?;
+    let mut extent = ByteDevice::new(window).ok()?;
+    match tairix_fsprobe::recognise(&mut extent).ok()?? {
+        Recognised::Volume(volume) => Some(volume),
+        Recognised::RaidMember(_) => None,
+    }
 }
 
 /// Audit how a re-insert resolved: the replayed recovery (with its byte
@@ -1401,6 +1539,11 @@ impl VolumeService for RuntimeVolumeService {
             .pin_device(request.endpoint, request.window)
             .map_err(|errno| refused("registry_full", errno))?;
         let _op = pin.op.lock();
+        // A window outlives its publication only while an operation holds
+        // it, and its client is answered nothing but stale.
+        if self.retracted(pin.endpoint, pin.window) {
+            return Err(refused("publication_retracted", Errno::Stale));
+        }
         let device = self
             .connected(&pin, request, wiring)
             .map_err(|(cause, errno)| refused(cause, errno))?;
@@ -1411,15 +1554,10 @@ impl VolumeService for RuntimeVolumeService {
         // A re-insert of a surprise-removed volume is recovered in place
         // — proven unmutated and replayed, or held read-only with its
         // retained set — never re-attached as a duplicate (D4c). The
-        // extent head names the volume's durable identity; a head that
-        // matches nothing simply attaches fresh.
-        let head = read_extent_head(
-            &mut disk,
-            request,
-            block_size,
-            tairix_fsprobe::PROBE_HEAD_LEN,
-        );
-        if let Some((target, _claim)) = self.claim_reinsert_target(head.as_deref()) {
+        // recognised volume names its durable identity; an extent
+        // recognised as nothing simply attaches fresh.
+        let recognised = recognise_extent(&mut disk, request);
+        if let Some((target, _claim)) = self.claim_reinsert_target(recognised.as_ref()) {
             return self.recover(request, wiring, &device, &target);
         }
 
@@ -1432,8 +1570,9 @@ impl VolumeService for RuntimeVolumeService {
         }
 
         // Thread the device through the uncommitted-write journal, its
-        // mutation-evidence shadow seeded from the extent head.
-        let journal = seeded_journal(&mut disk, request, block_size, head.as_deref());
+        // mutation-evidence shadow seeded from the window the volume declares.
+        let evidence = recognised.and_then(|volume| volume.evidence);
+        let journal = seeded_journal(&mut disk, request, block_size, evidence);
         // The device's reported-health overlay, shared by every volume on
         // it, for the mount snapshot.
         let health = device.health.clone();
@@ -1689,6 +1828,9 @@ fn commit_for_detach(
             journal.lock().commit();
             Ok(())
         }
+        // A stale refusal is the driver's word that the publication this
+        // volume was attached over is gone: its medium left.
+        Err(DriverError::Stale) => vanished_commit(journal),
         Err(err) => {
             if tairix_kernel_core::callreg::contains(EndpointId(device.endpoint)) {
                 Err(("device_flush_failed", err.as_errno()))
@@ -1770,16 +1912,16 @@ enum Pending {
 }
 
 impl RuntimeVolumeService {
-    /// Claim the volume an attach's probed extent `head` re-inserts, if
-    /// any: the head must carry a supported signature whose identity matches
-    /// an unavailable volume no other operation holds. Only a volume whose
-    /// serving driver is gone is a recovery target: a live volume with the
-    /// same identity is a duplicate, refused by the normal attach path.
+    /// Claim the volume an attach's `recognised` extent re-inserts, if
+    /// any: its identity must match an unavailable volume no other operation
+    /// holds. Only a volume whose serving driver is gone is a recovery
+    /// target: a live volume with the same identity is a duplicate, refused
+    /// by the normal attach path.
     fn claim_reinsert_target(
         &self,
-        head: Option<&[u8]>,
+        recognised: Option<&ProbedVolume>,
     ) -> Option<(RecoveryTarget, VolumeClaim<'_>)> {
-        let identity = head.and_then(tairix_fsprobe::probe)?.identity;
+        let identity = recognised?.identity;
         let mut state = self.state.lock();
         let volume = state.iter_mut().find(|v| {
             v.id == identity
@@ -1836,10 +1978,15 @@ impl RuntimeVolumeService {
         let Some((evidence_lba, evidence_len)) = target.journal.lock().evidence_window() else {
             return RecoveryOutcome::Conflict("no_evidence");
         };
-        if evidence_lba != request.first_lba {
+        let extent_end = request.first_lba.saturating_add(request.blocks);
+        let evidence_end = u64::try_from(evidence_len)
+            .ok()
+            .map(|len| len.div_ceil(u64::from(block_size.max(1))))
+            .and_then(|blocks| evidence_lba.checked_add(blocks));
+        if evidence_lba < request.first_lba || evidence_end.is_none_or(|end| end > extent_end) {
             return RecoveryOutcome::Conflict("no_evidence");
         }
-        let Some(current) = read_extent_head(client, request, block_size, evidence_len) else {
+        let Some(current) = read_blocks_at(client, evidence_lba, evidence_len) else {
             return RecoveryOutcome::Conflict("evidence_unreadable");
         };
         if !target.journal.lock().verify_evidence(&current) {
@@ -1970,20 +2117,27 @@ impl RuntimeVolumeService {
         Ok(())
     }
 
-    /// Decide and apply the state transition for the volume served over
-    /// the vanished `endpoint`, under the registry guard: a clean volume
-    /// leaves the registry, a dirty/lost one is marked unavailable.
-    /// `None` when no available volume matches (idempotency). A claimed
-    /// volume is left to the operation holding it, which applies the
-    /// transition as it releases the claim.
-    fn vanish_outcome(&self, endpoint: u64) -> Option<VanishOutcome> {
+    /// Decide and apply the state transition for a volume `removal` took
+    /// from `endpoint`, under the registry guard: a clean volume leaves the
+    /// registry, a dirty/lost one is marked unavailable. `None` when no
+    /// available volume matches (idempotency). A claimed volume is left to
+    /// the operation holding it, which applies the transition as it releases
+    /// the claim.
+    fn vanish_outcome(&self, endpoint: u64, removal: Removal) -> Option<VanishOutcome> {
         let mut state = self.state.lock();
         // A conflicted volume is served by a live driver too: when that
         // driver dies its cache-bearing stand-in must be replaced and the
         // (still-dirty) journal re-decides the unavailable state.
-        let index = state.iter().position(|v| {
-            v.endpoint == endpoint && v.availability.device_present() && !v.claimed
-        })?;
+        let index = {
+            let devices = self.devices.lock();
+            state.iter().position(|v| {
+                v.endpoint == endpoint
+                    && v.availability.device_present()
+                    && !v.claimed
+                    && (removal == Removal::Endpoint
+                        || slot_retracted(&devices, v.endpoint, v.window))
+            })?
+        };
         // Writes the driver acknowledged but never gave the device are in no
         // journal, and go with the driver: a removal holding some is a loss.
         let unpublished = LATE_FILESYSTEM.holds_unpublished(state[index].handle);
@@ -2015,33 +2169,35 @@ impl RuntimeVolumeService {
         })
     }
 
-    /// The surprise-removal transition for every volume attached over the
-    /// vanished block-service endpoint `endpoint` (`plans/DEVICES.md`
-    /// D4) — a partitioned stick carries several: clean volumes retract,
-    /// dirty ones become unavailable with their retained set held, lost
-    /// ones become unavailable with the loss on record. Idempotent — a
-    /// volume already transitioned (or detached) is left alone. Takes no
-    /// sleeping lock, so it is safe from the endpoint-teardown context.
-    fn handle_vanished(&self, endpoint: u64) {
+    /// The surprise-removal transition for every volume `removal` took from
+    /// the block-service endpoint `endpoint` (`plans/DEVICES.md` D4) — a
+    /// partitioned stick carries several: clean volumes retract, dirty ones
+    /// become unavailable with their retained set held, lost ones become
+    /// unavailable with the loss on record. Idempotent — a volume already
+    /// transitioned (or detached) is left alone. Takes no sleeping lock, so
+    /// it is safe from the endpoint-teardown context.
+    fn handle_vanished(&self, endpoint: u64, removal: Removal) {
         let Ok(wiring) = self.wiring() else {
             return;
         };
-        while let Some(outcome) = self.vanish_outcome(endpoint) {
+        while let Some(outcome) = self.vanish_outcome(endpoint, removal) {
             Self::apply_vanish(outcome, wiring.audit);
         }
-        self.release_vanished_cache(endpoint);
+        self.release_vanished_cache(endpoint, removal);
     }
 
-    /// Drop what the vanished device's cache holds, so a removed medium's
+    /// Drop what the vanished devices' caches hold, so a removed medium's
     /// blocks do not outlive it in kernel memory. Only a cache nothing is
     /// using this instant can be reached without waiting; one that is goes
     /// with its device at the next attach or detach.
-    fn release_vanished_cache(&self, endpoint: u64) {
+    fn release_vanished_cache(&self, endpoint: u64, removal: Removal) {
         let vanished: Vec<SharedDevice> = self
             .devices
             .lock()
             .iter()
-            .filter(|slot| slot.endpoint == endpoint)
+            .filter(|slot| {
+                slot.endpoint == endpoint && (removal == Removal::Endpoint || slot.retracted)
+            })
             .filter_map(|slot| slot.connected.clone())
             .collect();
         for device in &vanished {
@@ -2134,8 +2290,32 @@ impl RuntimeVolumeService {
 
 impl EndpointVanishObserver for RuntimeVolumeService {
     fn endpoint_vanished(&self, id: EndpointId) {
-        self.handle_vanished(id.0);
+        self.handle_vanished(id.0, Removal::Endpoint);
     }
+
+    /// The medium left: the endpoint's device slots are marked retracted,
+    /// so a volume an operation holds, or has yet to enter, is transitioned
+    /// as that operation lets go, and the rest are transitioned now. The
+    /// endpoint's current publication is the one retracting, so no slot of
+    /// a later one exists yet.
+    fn publication_retracted(&self, id: EndpointId) {
+        for slot in self
+            .devices
+            .lock()
+            .iter_mut()
+            .filter(|slot| slot.endpoint == id.0)
+        {
+            slot.retracted = true;
+        }
+        self.handle_vanished(id.0, Removal::Publication);
+    }
+}
+
+/// Whether the slot of `endpoint` and `window` among `devices` was retracted.
+fn slot_retracted(devices: &[DeviceSlot], endpoint: u64, window: u64) -> bool {
+    devices
+        .iter()
+        .any(|slot| slot.endpoint == endpoint && slot.window == window && slot.retracted)
 }
 
 #[cfg(test)]

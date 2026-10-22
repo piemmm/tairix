@@ -198,7 +198,7 @@ pub(crate) fn write_volume<B: Block>(
         return Err(DriverError::OutOfRange);
     }
     let mut dev = Device::new(block)?;
-    let total_bytes = dev.bytes().ok_or(DriverError::DeviceFault)?;
+    let total_bytes = dev.bytes();
     let plan = plan(total_bytes, inode_count)?;
     dev.set_fs_block(plan.block_size);
 

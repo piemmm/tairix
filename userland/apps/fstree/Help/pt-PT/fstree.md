@@ -100,6 +100,9 @@ falha a meio da cópia remove o destino meio escrito e mostra o erro do
 núcleo; nada se faz passar por uma cópia completa. Cada operação é
 autorizada pelo núcleo — uma recusa aparece tal e qual na linha de
 mensagens sem que nada mude.
+Uma cópia mantém os buracos de um ficheiro e os seus atributos
+estendidos; qualquer atributo que o destino não consiga guardar é
+indicado na linha de mensagens no fim da operação.
 
 A linha de estado mostra o caminho listado, o número de entradas
 visíveis, a ordem de ordenação, os bytes livres/totais do volume

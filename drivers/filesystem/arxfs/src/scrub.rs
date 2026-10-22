@@ -201,7 +201,7 @@ use crate::btree::{TreeWalk, MAX_TREE_LEVEL};
 use crate::header::{BlockHeader, BlockType, ReservedOwner, HEADER_LEN};
 use crate::integrity::DataFault;
 use crate::{
-    as_usize, extent_spec, inode_spec, rd_u64, wr_u64, Extent, Inode, ARXFS, MAX_BLOCK_SIZE,
+    as_usize, extent_spec, inode_spec, rd_u64, wr_u64, Extent, Inode, ARXFS, MAX_BLOCK_LEN,
     ROOT_INO,
 };
 
@@ -477,7 +477,7 @@ impl<B: Block> ARXFS<B> {
         }
         let spec = extent_spec(ino);
         let mirrored = inode.kind.content_is_metadata();
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         walk.restart();
         while self.btree_next_leaf(inode.extent_root, spec, walk)? {
             for (_, value) in walk.entries() {
@@ -530,7 +530,7 @@ impl<B: Block> ARXFS<B> {
         if root == 0 {
             return Ok(true);
         }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         // One frame per tree level, holding that level's not-yet-visited
         // children, so the walk costs the tree's depth rather than its node
         // count and cannot overrun a kernel stack on a deep tree. Levels must
@@ -576,7 +576,7 @@ impl<B: Block> ARXFS<B> {
         phys: u64,
         expect_type: BlockType,
     ) -> Result<MetaStatus, DriverError> {
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         self.scrub_meta_into(phys, expect_type, &mut buf)
     }
 
@@ -596,8 +596,8 @@ impl<B: Block> ARXFS<B> {
     ) -> Result<MetaStatus, DriverError> {
         let bs = self.block_size;
         let comp = Self::companion(phys);
-        let mut primary = [0u8; MAX_BLOCK_SIZE];
-        let mut companion = [0u8; MAX_BLOCK_SIZE];
+        let mut primary = [0u8; MAX_BLOCK_LEN];
+        let mut companion = [0u8; MAX_BLOCK_LEN];
         let primary_ok = self.read_block(phys, &mut primary).is_ok()
             && BlockHeader::decode_verify(
                 &primary[..bs],
@@ -664,7 +664,7 @@ impl<B: Block> ARXFS<B> {
     /// magic is wrong: the record is rebuildable, so a corrupt one simply
     /// restarts the scrub rather than failing the mount.
     fn load_scrub_progress(&mut self) -> Option<(ScrubReport, u64)> {
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         self.read_meta(self.scrub_progress_root, BlockType::ScrubProgress, &mut buf)
             .ok()?;
         if rd_u64(&buf, SP_MAGIC) != SCRUB_MAGIC {
@@ -707,7 +707,7 @@ impl<B: Block> ARXFS<B> {
         cursor: u64,
         report: &ScrubReport,
     ) -> Result<(), DriverError> {
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let bs = self.block_size;
         for byte in &mut buf[HEADER_LEN..bs] {
             *byte = 0;

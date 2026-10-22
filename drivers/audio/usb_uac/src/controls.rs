@@ -169,9 +169,7 @@ fn read_range<T: UacTransport>(
     let stated = u16::from_le_bytes(count);
     let fits = u16::try_from((CTRL_DATA_LEN - 2) / (3 * usize::from(width))).ok()?;
     let length = requests::range_len(stated.min(fits), width);
-    let mut block = Vec::new();
-    block.try_reserve_exact(usize::from(length)).ok()?;
-    block.resize(usize::from(length), 0);
+    let mut block = tairix_util::fallible::filled(usize::from(length), 0)?;
     let read = transport.control_in(request(length), &mut block).ok()?;
     block.truncate(read);
     // The count the block carries is the device's; read no further than the

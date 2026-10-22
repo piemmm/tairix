@@ -69,7 +69,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
-use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
+use tairix_abi::driver::block::{
+    Block, BlockGeometry, DeviceHealth, DiscLayout, DiscardCapability,
+};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
@@ -89,7 +91,8 @@ const COMMIT_DIVISOR: usize = 16;
 /// The dual-acceptance shadow of a volume's mutation-evidence window
 /// (`plans/DEVICES.md` D4c): the on-medium region any foreign mutation of
 /// the volume must rewrite (the format's superblock ring / superblock /
-/// boot+`FSInfo` head, sized by `tairix_fsprobe::evidence_len`), held as two
+/// boot+`FSInfo` head, UDF's integrity sequence, as the recognised volume's
+/// `tairix_fsprobe::Evidence` places it), held as two
 /// acceptable states — the content of the last **committed** device flush
 /// and the **latest** content this kernel wrote. At re-insert each
 /// evidence block on the medium must equal one of the two (the device may
@@ -502,6 +505,10 @@ impl<B: Block> Block for JournaledBlock<B> {
     /// survives this layer.
     fn medium(&self) -> Option<BlkMedium> {
         self.device.medium()
+    }
+
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        self.device.disc_layout()
     }
 
     fn device_name(&self) -> BlkDeviceName {

@@ -37,10 +37,7 @@ impl GridSource for HeapGrids {
     type Grid = Vec<Cell>;
 
     fn blank(cells: usize) -> Option<Vec<Cell>> {
-        let mut grid = Vec::new();
-        grid.try_reserve_exact(cells).ok()?;
-        grid.resize(cells, Cell::BLANK);
-        Some(grid)
+        tairix_util::fallible::filled(cells, Cell::BLANK)
     }
 }
 

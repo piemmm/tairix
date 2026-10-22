@@ -43,6 +43,12 @@ tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md §4, §6).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The one file copy: a file's bytes with its holes, its extended attributes,
+# and the report of what a destination could not keep.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
+# The one display form of an attribute key a volume wrote, escaped so its
+# control bytes never reach a terminal as an escape sequence.
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the `fs_*` file

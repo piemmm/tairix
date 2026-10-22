@@ -27,12 +27,13 @@ use tairix_abi::blkio::{BlkStatus, FaultDomainState};
 use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{
-    ancestor_imposed_status_by, HwDeviceClass, HwResource, HwResourceKind, HW_NODE_ROOT,
-    HW_NODE_ROOT_ID,
+    ancestor_imposed_status_by, HwDeviceClass, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID,
 };
 use tairix_abi::{Errno, HwNode, HwTreeHeader};
 use tairix_kernel_core::callreg::LinkServiceObserver;
-use tairix_kernel_core::{HwDriverTree, HwNodeLiveness, HwTreeSource};
+use tairix_kernel_core::{
+    node_endpoints_of, HwDriverTree, HwNodeLiveness, HwTreeSource, NodeEndpoints,
+};
 use tairix_kernel_ipc::EndpointId;
 use tairix_sync::SpinLock;
 
@@ -500,33 +501,21 @@ impl HwTreeStore {
     /// is still attached on one of them. The ownership gate is the same one
     /// [`Self::remove_child`] enforces, so a non-owner never learns whether a
     /// node exists or is busy (fail closed). Only
-    /// [`HwResourceKind::Endpoint`] resources are returned, by their base id;
-    /// a node with no endpoint resource yields an empty vector (it can never
-    /// be busy).
+    /// [`Endpoint`](tairix_abi::hwtree::HwResourceKind::Endpoint) resources are
+    /// returned, by their base id; a node with none yields an empty list (it
+    /// can never be busy).
     ///
     /// # Errors
     ///
     /// [`Errno::NotFound`] if no live node has id `node_id`, or its parent is
-    /// not `parent_id`; [`Errno::OutOfMemory`] when the list cannot be
-    /// allocated.
-    pub fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<Vec<u64>, Errno> {
-        let inner = self.inner.lock();
-        let node = inner
+    /// not `parent_id`.
+    pub fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<NodeEndpoints, Errno> {
+        self.inner
+            .lock()
             .node(node_id)
             .filter(|node| node.parent() == parent_id)
-            .ok_or(Errno::NotFound)?;
-        let endpoints = || {
-            node.resources()
-                .iter()
-                .filter(|resource| resource.kind() == Some(HwResourceKind::Endpoint))
-                .map(HwResource::base)
-        };
-        let mut bases = Vec::new();
-        bases
-            .try_reserve_exact(endpoints().count())
-            .map_err(|_| Errno::OutOfMemory)?;
-        bases.extend(endpoints());
-        Ok(bases)
+            .map(node_endpoints_of)
+            .ok_or(Errno::NotFound)
     }
 }
 
@@ -728,7 +717,7 @@ impl HwTreeSource for HwTreeStoreSource {
         Ok(())
     }
 
-    fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<Vec<u64>, Errno> {
+    fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<NodeEndpoints, Errno> {
         // Report the node's declared block-service endpoints from the one
         // authoritative inventory, ownership-gated on `parent_id` exactly as
         // `remove` is, so the orderly-removal busy check reasons about the

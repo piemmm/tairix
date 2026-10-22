@@ -69,6 +69,10 @@ attributes distinct from a generic FAT mapping so intent is not lost.
 ## Status
 
 The registry is **experimental** and evolves in place until ARXFS's first
-shipped release (`AGENTS.md` §2.13). The `cp`/`mv`/desktop/archive tooling and
-the per-family foreign-filesystem driver wiring that consume it are staged
-future work (arxfs-spec §18).
+shipped release (`AGENTS.md` §2.13). ADFS produces the `acorn` entries; the
+[ISO 9660 driver](./iso9660.md) produces `acorn`, `mac` and `amiga` from a
+disc's records, and the [UDF driver](./udf.md) `mac` from its Finder
+information. `cp`, `mv`, `fstree` and the desktop copy carry every entry
+through the one copy engine ([`tairix-fscopy`](../lib/fscopy.md)), reporting
+what a destination cannot keep. The archive tooling and the native Amiga,
+Atari and classic-Mac drivers are staged (arxfs-spec §18).

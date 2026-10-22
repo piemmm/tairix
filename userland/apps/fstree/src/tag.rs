@@ -17,6 +17,7 @@ use core::fmt::Write as _;
 use tairix_abi::time::Time64;
 use tairix_abi::time::{civil_from_days, days_from_civil};
 use tairix_abi::FileKind;
+use tairix_fscopy::Omissions;
 
 use crate::fs::Fs;
 use crate::ops::{plan_target, Conflict, Decision, FileOp, OpError, OpKind, OpProgress};
@@ -145,6 +146,8 @@ pub struct Batch {
     /// Files the user chose to skip at overwrite questions, summed across
     /// entries.
     skipped: usize,
+    /// What every entry's copies could not keep, gathered for one report.
+    omissions: Omissions,
     /// Whether the user cancelled the remaining entries.
     cancelled: bool,
 }
@@ -179,6 +182,7 @@ impl Batch {
             failures: Vec::new(),
             succeeded: Vec::new(),
             skipped: 0,
+            omissions: Omissions::default(),
             cancelled: false,
         }
     }
@@ -233,6 +237,7 @@ impl Batch {
                         self.failures.push(failure_line(&src, &error));
                     }
                 }
+                self.omissions.merge(op.omissions());
                 continue;
             }
             let Some(item) = self.pending.pop() else {
@@ -280,6 +285,12 @@ impl Batch {
     #[must_use]
     pub fn succeeded(&self) -> &[String] {
         &self.succeeded
+    }
+
+    /// The extended attributes every entry's copies could not carry.
+    #[must_use]
+    pub fn omissions(&self) -> &Omissions {
+        &self.omissions
     }
 
     /// The one-line completion report for the message line; the failure
@@ -461,7 +472,7 @@ fn parse_date(text: &str) -> Result<i64, String> {
 /// exactly one subject, never the same path twice.
 fn failure_line(src: &str, error: &OpError) -> String {
     match error {
-        OpError::Fs(..) | OpError::KindMismatch(_) => error.describe(),
+        OpError::Fs(..) | OpError::KindMismatch(_) | OpError::Attribute { .. } => error.describe(),
         _ => format!("{src}: {}", error.describe()),
     }
 }

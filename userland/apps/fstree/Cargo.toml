@@ -63,6 +63,9 @@ tairix-complete = { path = "../../../lib/complete", version = "=0.0.0" }
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The classic hex dump's shape the hex view shares with every other.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The one file copy: a file's bytes with its holes, its extended attributes,
+# and the report of what a destination could not keep.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
 # The parser-sandbox seam: the disassembly viewer's container summaries,
 # manifest summaries, and instruction windows are decoded only by the
 # sandboxed decode service, never in this process.

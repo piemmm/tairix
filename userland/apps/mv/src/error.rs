@@ -9,7 +9,7 @@ use tairix_abi::Errno;
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
 /// set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MvError {
     /// The command line carried an unrecognised option, named fewer than two
     /// operands (`mv` needs at least one source and a destination), or aimed
@@ -44,6 +44,17 @@ pub enum MvError {
     /// underlying [`Errno`]. Failing closed: an unanswerable prompt never
     /// counts as consent.
     Prompt(Errno),
+    /// During a cross-device relocation, the destination failed an extended
+    /// attribute outright, for a reason that is no attribute's: its key, the
+    /// destination, and the refusal. The source is kept.
+    Attribute {
+        /// The attribute refused.
+        key: alloc::string::String,
+        /// The destination it was refused on.
+        target: alloc::string::String,
+        /// The refusal.
+        error: Errno,
+    },
 }
 
 impl fmt::Display for MvError {
@@ -58,6 +69,11 @@ impl fmt::Display for MvError {
             Self::Remove(errno) => write!(f, "cannot remove source: {errno}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
             Self::Prompt(errno) => write!(f, "cannot read confirmation: {errno}"),
+            Self::Attribute { key, target, error } => write!(
+                f,
+                "setting attribute '{}' for '{target}': {error}",
+                tairix_fsmeta::attr::display_value(key.as_bytes())
+            ),
         }
     }
 }

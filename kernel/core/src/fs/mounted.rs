@@ -53,7 +53,7 @@ use tairix_abi::sysinfo::{
 use tairix_abi::time::{is_plausible_wall_time, Time64};
 use tairix_abi::{
     CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
-    RenameFlags, UnlinkFlags, FS_MODE_MASK,
+    RenameFlags, SeekRegion, UnlinkFlags, FS_MODE_MASK,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
@@ -1765,6 +1765,34 @@ where
     ) -> Result<(), Errno> {
         self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
             vfs.truncate_via_secured(cred, path, fs, size)
+        })
+    }
+
+    fn seek_region(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<u64, Errno> {
+        let intent = Intent::Read(VfsError::IsADirectory);
+        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
+            vfs.seek_region_via_secured(cred, path, fs, offset, region)?
+                .ok_or(VfsError::NoData)
+        })
+    }
+
+    fn punch(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<(), Errno> {
+        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
+            vfs.punch_via_secured(cred, path, fs, offset, len)
         })
     }
 

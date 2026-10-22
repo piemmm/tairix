@@ -4,10 +4,13 @@
 use super::{run as engine_run, USAGE};
 use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::MvError;
-use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt, RenameOutcome};
+use crate::io::{
+    AttributeStore, Entry, EntryKind, FileSystem, Output, PathFiles, Prompt, RenameOutcome,
+};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use tairix_abi::fs::SeekRegion;
 use tairix_abi::{Errno, RenameFlags};
 use tairix_help::{HelpSource, SourceError};
 
@@ -88,7 +91,7 @@ impl HelpSource for OneDoc {
 /// The engine under a prompt that must never be reached — the shape every
 /// pre-existing non-interactive test uses.
 fn run(command: Command, fs: &dyn FileSystem, out: &Recorder) -> Result<(), MvError> {
-    engine_run(command, None, fs, &NeverAsked, &NoHelp, out)
+    engine_run(command, None, fs, &NeverAsked, &NoHelp, out, out)
 }
 
 /// An in-memory tree. Regular files carry their bytes; directories are named
@@ -119,6 +122,17 @@ struct State {
     /// A file another program creates at its path just before the next
     /// rename reaches it — after any look the client took.
     appears_at_rename: Option<(String, Vec<u8>)>,
+    /// Symbolic links: `(path, stored target)`, the target verbatim.
+    symlinks: Vec<(String, String)>,
+    /// The stored runs `(start, end)` of a sparse file; a file not listed
+    /// is stored throughout.
+    runs: Vec<(String, Vec<(u64, u64)>)>,
+    /// Every write's `(path, length)`, in order.
+    writes: Vec<(String, usize)>,
+    /// Extended attributes: `(path, key, value)`.
+    attrs: Vec<(String, String, Vec<u8>)>,
+    /// Setting this key anywhere is refused with the errno.
+    attr_refusal: Option<(String, Errno)>,
 }
 
 impl MemFs {
@@ -134,8 +148,79 @@ impl MemFs {
                 write_fail: None,
                 remove_fail: None,
                 appears_at_rename: None,
+                symlinks: Vec::new(),
+                runs: Vec::new(),
+                writes: Vec::new(),
+                attrs: Vec::new(),
+                attr_refusal: None,
             }),
         }
+    }
+
+    /// A symbolic link at `path` storing `target` verbatim.
+    fn symlink_at(self, path: &str, target: &str) -> Self {
+        self.state
+            .borrow_mut()
+            .symlinks
+            .push((path.to_string(), target.to_string()));
+        self
+    }
+
+    /// A sparse file at `path`, `len` bytes long, storing `runs`.
+    fn sparse(self, path: &str, len: usize, runs: &[(u64, &[u8])]) -> Self {
+        let mut contents = alloc::vec![0u8; len];
+        let mut stored = Vec::new();
+        for (at, bytes) in runs {
+            let at_usize = usize::try_from(*at).expect("fixture offset");
+            contents[at_usize..at_usize + bytes.len()].copy_from_slice(bytes);
+            stored.push((*at, *at + bytes.len() as u64));
+        }
+        self.state
+            .borrow_mut()
+            .runs
+            .push((path.to_string(), stored));
+        self.file(path, &contents)
+    }
+
+    fn attr(self, path: &str, key: &str, value: &[u8]) -> Self {
+        self.state
+            .borrow_mut()
+            .attrs
+            .push((path.to_string(), key.to_string(), value.to_vec()));
+        self
+    }
+
+    fn refuses_attr(self, key: &str, errno: Errno) -> Self {
+        self.state.borrow_mut().attr_refusal = Some((key.to_string(), errno));
+        self
+    }
+
+    fn attr_of(&self, path: &str, key: &str) -> Option<Vec<u8>> {
+        self.state
+            .borrow()
+            .attrs
+            .iter()
+            .find(|(p, k, _)| p == canon(path) && k == key)
+            .map(|(_, _, value)| value.clone())
+    }
+
+    fn link_target(&self, path: &str) -> Option<String> {
+        self.state
+            .borrow()
+            .symlinks
+            .iter()
+            .find(|(p, _)| p == canon(path))
+            .map(|(_, target)| target.clone())
+    }
+
+    fn written_to(&self, path: &str) -> usize {
+        self.state
+            .borrow()
+            .writes
+            .iter()
+            .filter(|(p, _)| p == canon(path))
+            .map(|(_, len)| len)
+            .sum()
     }
 
     fn file(self, path: &str, contents: &[u8]) -> Self {
@@ -200,7 +285,7 @@ impl MemFs {
     }
 
     fn exists(&self, path: &str) -> bool {
-        self.contents(path).is_some() || self.has_dir(path)
+        self.contents(path).is_some() || self.has_dir(path) || self.link_target(path).is_some()
     }
 }
 
@@ -233,6 +318,96 @@ fn name_of(path: &str) -> &str {
     }
 }
 
+impl PathFiles for MemFs {
+    fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        let path = canon(path);
+        let state = self.state.borrow();
+        if let Some((p, errno)) = &state.read_fail {
+            if p == path {
+                return Err(*errno);
+            }
+        }
+        let (_, bytes) = state
+            .files
+            .iter()
+            .find(|(p, _)| p == path)
+            .ok_or(Errno::NotFound)?;
+        let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
+        if start >= bytes.len() {
+            return Ok(0);
+        }
+        let take = (bytes.len() - start).min(buf.len());
+        buf[..take].copy_from_slice(&bytes[start..start + take]);
+        Ok(take)
+    }
+    fn size(&self, path: &str) -> Result<u64, Errno> {
+        self.contents(path)
+            .map(|bytes| bytes.len() as u64)
+            .ok_or(Errno::NotFound)
+    }
+    fn next_region(
+        &self,
+        path: &str,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, Errno> {
+        let len = self.size(path)?;
+        let state = self.state.borrow();
+        let Some((_, runs)) = state.runs.iter().find(|(p, _)| p == canon(path)) else {
+            return Ok(region.in_solid_file(offset, len));
+        };
+        if offset >= len {
+            return Ok(None);
+        }
+        let inside = runs
+            .iter()
+            .find(|(start, end)| (*start..*end).contains(&offset));
+        Ok(match (region, inside) {
+            (SeekRegion::Data, Some(_)) | (SeekRegion::Hole, None) => Some(offset),
+            (SeekRegion::Hole, Some((_, end))) => Some(*end),
+            (SeekRegion::Data, None) => runs
+                .iter()
+                .map(|(start, _)| *start)
+                .find(|&start| start > offset),
+        })
+    }
+    fn set_len(&self, path: &str, len: u64) -> Result<(), Errno> {
+        let mut state = self.state.borrow_mut();
+        let (_, file) = state
+            .files
+            .iter_mut()
+            .find(|(p, _)| p == canon(path))
+            .ok_or(Errno::NotFound)?;
+        file.resize(
+            usize::try_from(len).map_err(|_| Errno::LengthOutOfRange)?,
+            0,
+        );
+        Ok(())
+    }
+    fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+        let path = canon(path);
+        let mut state = self.state.borrow_mut();
+        if let Some((p, errno)) = &state.write_fail {
+            if p == path {
+                return Err(*errno);
+            }
+        }
+        let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
+        let (_, file) = state
+            .files
+            .iter_mut()
+            .find(|(p, _)| p == path)
+            .ok_or(Errno::NotFound)?;
+        let end = start + bytes.len();
+        if file.len() < end {
+            file.resize(end, 0);
+        }
+        file[start..end].copy_from_slice(bytes);
+        state.writes.push((path.to_string(), bytes.len()));
+        Ok(())
+    }
+}
+
 impl FileSystem for MemFs {
     fn kind(&self, path: &str) -> Result<EntryKind, Errno> {
         let path = canon(path);
@@ -243,7 +418,36 @@ impl FileSystem for MemFs {
         if state.files.iter().any(|(p, _)| p == path) {
             return Ok(EntryKind::File);
         }
+        if state.symlinks.iter().any(|(p, _)| p == path) {
+            return Ok(EntryKind::Symlink);
+        }
         Err(Errno::NotFound)
+    }
+
+    fn resolved_kind(&self, path: &str) -> Result<EntryKind, Errno> {
+        let mut name = canon(path).to_string();
+        for _ in 0..8 {
+            match self.kind(&name)? {
+                EntryKind::Symlink => name = self.link_target(&name).ok_or(Errno::NotFound)?,
+                kind => return Ok(kind),
+            }
+        }
+        Err(Errno::NotFound)
+    }
+
+    fn read_link(&self, path: &str) -> Result<String, Errno> {
+        self.link_target(path).ok_or(Errno::OutOfRange)
+    }
+
+    fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {
+        if self.exists(link) {
+            return Err(Errno::AlreadyExists);
+        }
+        self.state
+            .borrow_mut()
+            .symlinks
+            .push((canon(link).to_string(), target.to_string()));
+        Ok(())
     }
 
     fn rename(&self, source: &str, dest: &str, flags: RenameFlags) -> Result<RenameOutcome, Errno> {
@@ -298,28 +502,6 @@ impl FileSystem for MemFs {
         Ok(RenameOutcome::Renamed)
     }
 
-    fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-        let path = canon(path);
-        let state = self.state.borrow();
-        if let Some((p, errno)) = &state.read_fail {
-            if p == path {
-                return Err(*errno);
-            }
-        }
-        let (_, bytes) = state
-            .files
-            .iter()
-            .find(|(p, _)| p == path)
-            .ok_or(Errno::NotFound)?;
-        let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
-        if start >= bytes.len() {
-            return Ok(0);
-        }
-        let take = (bytes.len() - start).min(buf.len());
-        buf[..take].copy_from_slice(&bytes[start..start + take]);
-        Ok(take)
-    }
-
     fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno> {
         let path = canon(path);
         let state = self.state.borrow();
@@ -343,6 +525,14 @@ impl FileSystem for MemFs {
                 });
             }
         }
+        for (p, _) in &state.symlinks {
+            if parent_of(p) == path {
+                entries.push(Entry {
+                    name: name_of(p).to_string(),
+                    kind: EntryKind::Symlink,
+                });
+            }
+        }
         let idx = usize::try_from(index).map_err(|_| Errno::LengthOutOfRange)?;
         Ok(entries.into_iter().nth(idx))
     }
@@ -363,28 +553,6 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-        let path = canon(path);
-        let mut state = self.state.borrow_mut();
-        if let Some((p, errno)) = &state.write_fail {
-            if p == path {
-                return Err(*errno);
-            }
-        }
-        let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
-        let (_, file) = state
-            .files
-            .iter_mut()
-            .find(|(p, _)| p == path)
-            .ok_or(Errno::NotFound)?;
-        let end = start + bytes.len();
-        if file.len() < end {
-            file.resize(end, 0);
-        }
-        file[start..end].copy_from_slice(bytes);
-        Ok(())
-    }
-
     fn remove_file(&self, path: &str) -> Result<(), Errno> {
         let path = canon(path);
         let mut state = self.state.borrow_mut();
@@ -393,7 +561,13 @@ impl FileSystem for MemFs {
                 return Err(*errno);
             }
         }
+        // A directory is not a file: unlinking one is refused, as the
+        // kernel refuses it.
+        if state.dirs.iter().any(|p| p == path) {
+            return Err(Errno::IsADirectory);
+        }
         state.files.retain(|(p, _)| p != path);
+        state.symlinks.retain(|(p, _)| p != path);
         Ok(())
     }
 
@@ -406,6 +580,36 @@ impl FileSystem for MemFs {
             }
         }
         state.dirs.retain(|p| p != path);
+        Ok(())
+    }
+}
+
+impl AttributeStore for MemFs {
+    fn attr_keys(&self, path: &str) -> Result<Vec<String>, Errno> {
+        Ok(self
+            .state
+            .borrow()
+            .attrs
+            .iter()
+            .filter(|(p, _, _)| p == canon(path))
+            .map(|(_, key, _)| key.clone())
+            .collect())
+    }
+
+    fn attr_value(&self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+        self.attr_of(path, key).ok_or(Errno::NoData)
+    }
+
+    fn attr_set(&self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+        let mut state = self.state.borrow_mut();
+        if let Some((refused, errno)) = &state.attr_refusal {
+            if refused == key {
+                return Err(*errno);
+            }
+        }
+        state
+            .attrs
+            .push((canon(path).to_string(), key.to_string(), value.to_vec()));
         Ok(())
     }
 }
@@ -483,7 +687,7 @@ fn help_renders_the_short_help_from_the_document() {
     let fs = MemFs::new();
     let out = Recorder::new();
     assert_eq!(
-        engine_run(Command::Help, None, &fs, &NeverAsked, &OneDoc, &out),
+        engine_run(Command::Help, None, &fs, &NeverAsked, &OneDoc, &out, &out),
         Ok(())
     );
     let text = out.text();
@@ -619,7 +823,7 @@ fn interactive_asks_about_a_destination_created_after_its_look() {
             "/b",
         );
         assert_eq!(
-            engine_run(command, None, &fs, &prompt, &NoHelp, &out),
+            engine_run(command, None, &fs, &prompt, &NoHelp, &out, &out),
             Ok(())
         );
         assert_eq!(fs.contents("/b").as_deref(), Some(kept));
@@ -692,7 +896,7 @@ fn cross_device_file_is_copied_then_removed() {
 
 #[test]
 fn cross_device_large_file_streams_across_the_chunk_boundary() {
-    let payload: Vec<u8> = (0..(super::READ_CHUNK * 2 + 7))
+    let payload: Vec<u8> = (0..(tairix_fscopy::CHUNK_LEN * 2 + 7))
         .map(|i| u8::try_from(i % 251).unwrap_or_default())
         .collect();
     let fs = MemFs::new().file("/src/big", &payload).cross_device("/src");
@@ -739,6 +943,10 @@ fn cross_device_read_failure_surfaces_the_errno() {
     );
     // The source remains, because the copy failed before removal.
     assert!(fs.exists("/src/a"));
+    assert!(
+        !fs.exists("/dst"),
+        "a failed move leaves no file made for it"
+    );
 }
 
 #[test]
@@ -751,6 +959,24 @@ fn cross_device_write_failure_surfaces_the_errno() {
     assert_eq!(
         run(mv(false, false, &["/src/a"], "/dst"), &fs, &out),
         Err(MvError::Write(Errno::PermissionDenied))
+    );
+    assert!(fs.exists("/src/a"));
+    assert!(!fs.exists("/dst"), "a failed move leaves no partial file");
+}
+
+#[test]
+fn an_attribute_key_holding_control_bytes_is_reported_escaped() {
+    let refused = MvError::Attribute {
+        key: String::from("user.\u{1b}[2J"),
+        target: String::from("/dst"),
+        error: Errno::Busy,
+    };
+    assert_eq!(
+        refused.to_string(),
+        alloc::format!(
+            "setting attribute 'user.\\x1b[2J' for '/dst': {}",
+            Errno::Busy
+        )
     );
 }
 
@@ -836,6 +1062,7 @@ fn interactive_asks_before_overwriting() {
             &prompt,
             &NoHelp,
             &out,
+            &out,
         ),
         Ok(())
     );
@@ -869,6 +1096,7 @@ fn an_unanswerable_prompt_fails_closed() {
             &fs,
             &prompt,
             &NoHelp,
+            &out,
             &out,
         ),
         Err(MvError::Prompt(Errno::NotFound))
@@ -979,4 +1207,91 @@ fn no_target_directory_refuses_several_sources() {
         ),
         Err(MvError::Usage)
     );
+}
+
+/// Run `command` with its diagnostics apart from its output.
+fn run_apart(command: Command, fs: &dyn FileSystem) -> (Result<(), MvError>, Recorder, Recorder) {
+    let (out, diagnostics) = (Recorder::new(), Recorder::new());
+    let result = engine_run(command, None, fs, &NeverAsked, &NoHelp, &out, &diagnostics);
+    (result, out, diagnostics)
+}
+
+#[test]
+fn a_link_to_a_directory_moves_across_volumes_as_a_link_and_spares_its_target() {
+    // The link is the object moved: what it names is neither copied nor, as
+    // the source is removed, emptied.
+    let fs = MemFs::new()
+        .dir("/keep")
+        .file("/keep/precious", b"do not lose")
+        .dir("/src")
+        .symlink_at("/src/shortcut", "/keep")
+        .cross_device("/src");
+    let (result, _, _) = run_apart(mv(false, false, &["/src/shortcut"], "/dst"), &fs);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        fs.link_target("/dst").as_deref(),
+        Some("/keep"),
+        "the link itself arrives"
+    );
+    assert!(!fs.exists("/src/shortcut"), "the source link is gone");
+    assert_eq!(
+        fs.contents("/keep/precious").as_deref(),
+        Some(&b"do not lose"[..])
+    );
+    assert!(fs.has_dir("/keep"));
+}
+
+#[test]
+fn links_inside_a_moved_directory_stay_links() {
+    let fs = MemFs::new()
+        .file("/elsewhere", b"target bytes")
+        .dir("/src")
+        .dir("/src/tree")
+        .file("/src/tree/file", b"own bytes")
+        .symlink_at("/src/tree/alias", "../elsewhere")
+        .cross_device("/src");
+    let (result, _, _) = run_apart(mv(false, false, &["/src/tree"], "/moved"), &fs);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        fs.contents("/moved/file").as_deref(),
+        Some(&b"own bytes"[..])
+    );
+    assert_eq!(
+        fs.link_target("/moved/alias").as_deref(),
+        Some("../elsewhere"),
+        "stored verbatim"
+    );
+    assert!(!fs.exists("/src/tree"));
+    assert_eq!(
+        fs.contents("/elsewhere").as_deref(),
+        Some(&b"target bytes"[..])
+    );
+}
+
+#[test]
+fn a_move_across_volumes_carries_attributes_and_holes_and_reports_what_it_lost() {
+    let fs = MemFs::new()
+        .dir("/src")
+        .sparse("/src/image", 256 * 1024, &[(4096, b"data")])
+        .attr("/src/image", "acorn.filetype", b"fce")
+        .attr("/src/image", "mac.type", b"BINA")
+        .refuses_attr("mac.type", Errno::NotSupported)
+        .cross_device("/src");
+    let (result, out, diagnostics) = run_apart(mv(false, false, &["/src/image"], "/dst"), &fs);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        fs.contents("/dst").map(|bytes| bytes.len()),
+        Some(256 * 1024)
+    );
+    assert_eq!(fs.written_to("/dst"), 4, "the holes stay holes");
+    assert_eq!(
+        fs.attr_of("/dst", "acorn.filetype").as_deref(),
+        Some(&b"fce"[..])
+    );
+    assert_eq!(
+        diagnostics.text(),
+        "mv: warning: extended attributes not kept on 1 file (the destination cannot store them): mac.type\n"
+    );
+    assert_eq!(out.text(), "");
+    assert!(!fs.exists("/src/image"));
 }

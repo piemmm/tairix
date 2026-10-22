@@ -1753,15 +1753,17 @@ A foreign-filesystem driver exposes its native per-file metadata as normalised
 preset attributes; a copy engine sets those on the destination inode; the
 destination stores them natively if it understands them, else keeps them
 verbatim as ARXFS extended attributes (a lossless round-trip). An
-exact-preservation copy to a target that cannot represent an attribute reports
-`MetadataNotRepresentable` and fails closed; a best-effort copy drops it only
-under an explicit, documented lossy policy. The `lib/fsmeta` preset registry is
+exact-preservation copy to a target that cannot represent an attribute fails
+closed; the default copy carries every attribute the target can keep and
+reports each it left, never dropping one silently (`lib/fscopy`). The `lib/fsmeta` preset registry is
 the single source of truth for the value encodings (see the registry reference
 page). Indicative v1 entries: `acorn.filetype`/`loadaddr`/`execaddr`/
 `datestamp`, `amiga.protection`/`comment`, `atari.attributes`/`gemdos_date`,
 `mac.type`/`creator`/`finderflags`/`resourcefork`, `tairix.origin`/`mime`.
-*(The `cp`/`mv`/desktop/archive tooling and the per-family driver wiring are
-staged future work; see §18.)*
+*(`cp`, `mv`, `fstree` and the desktop copy carry the attributes through
+`lib/fscopy`; ADFS, ISO 9660 and UDF produce the `acorn`, `mac` and `amiga`
+entries. The archive tooling and the remaining per-family drivers are staged;
+see §18.)*
 
 ---
 

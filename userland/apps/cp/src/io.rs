@@ -9,6 +9,7 @@
 
 use alloc::string::String;
 use tairix_abi::{Errno, FileId};
+pub use tairix_fscopy::{AttributeStore, PathFiles};
 
 /// What kind of object a path or directory entry is, as far as `cp` cares.
 ///
@@ -77,9 +78,9 @@ pub struct Entry {
 /// Inspects paths, reads sources, and creates destinations.
 ///
 /// The client first asks [`probe`](FileSystem::probe) what a source is. A
-/// non-directory source is streamed through [`read`](FileSystem::read) into a
-/// destination created with [`create`](FileSystem::create) and filled with
-/// [`write`](FileSystem::write) — unless a switch replaces the byte copy with
+/// non-directory source is copied, through the files it reaches by path
+/// ([`PathFiles`]), into a destination created with
+/// [`create`](FileSystem::create) — unless a switch replaces the byte copy with
 /// a link: `-l` calls [`link`](FileSystem::link), `-s` calls
 /// [`symlink`](FileSystem::symlink), and `-P`/`-d` reproduce a link source
 /// through [`read_link`](FileSystem::read_link) plus
@@ -91,7 +92,7 @@ pub struct Entry {
 /// [`remove_file`](FileSystem::remove_file)
 /// backs `-f`: a destination that cannot be created is removed and the create
 /// retried once.
-pub trait FileSystem {
+pub trait FileSystem: AttributeStore + PathFiles {
     /// Describe `path` under the given follow posture.
     ///
     /// Under [`Follow::Target`] a final symbolic link is resolved, so a link
@@ -147,17 +148,6 @@ pub trait FileSystem {
     /// one name per node.
     fn link(&self, existing: &str, new: &str) -> Result<(), Errno>;
 
-    /// Read up to `buf.len()` bytes of `path` starting at `offset`, returning
-    /// the number of bytes written into `buf` (`0` at end-of-file).
-    ///
-    /// An implementation must return at most `buf.len()` bytes and must report
-    /// a short read (fewer than requested) only at end-of-file.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises while reading the file.
-    fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
-
     /// Return the entry at position `index` in the directory `path`, or
     /// [`None`] once `index` is past the last entry.
     ///
@@ -188,13 +178,6 @@ pub trait FileSystem {
     /// for an unwritable destination (which `-f` recovers from by removing it
     /// and retrying).
     fn create(&self, path: &str) -> Result<(), Errno>;
-
-    /// Write every byte of `bytes` to `path` starting at `offset`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises while writing.
-    fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno>;
 
     /// Remove the non-directory object at `path` (unlink one link).
     ///

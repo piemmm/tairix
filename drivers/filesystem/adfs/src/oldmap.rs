@@ -14,33 +14,16 @@
 //! so the disc name, boot option, disc id, and the Level 3 fileserver
 //! partition pointers round-trip byte-exact.
 
-use crate::volume::{get_u24, put_u24, Volume};
+use crate::bytes::{get_u24, put_u24};
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
+use tairix_bytedev::ByteDevice;
+use tairix_fsprobe::adfs::{
+    old_map_checksum, validate_old_map, DISC_SECTORS, END_POINTER, MAX_FREE_AREAS, OLD_DISC_ID,
+    OLD_MAP_SIZE,
+};
 
-/// Old-map logical sector size in bytes, fixed by the format (`u32`
-/// form first so the wide form derives from it losslessly).
-pub const OLD_SECTOR_SIZE_U32: u32 = 256;
-
-/// Old-map logical sector size in bytes, fixed by the format.
-pub const OLD_SECTOR_SIZE: u64 = OLD_SECTOR_SIZE_U32 as u64;
-
-/// Size of the raw two-sector map image.
-pub const OLD_MAP_SIZE: usize = 512;
-
-/// Maximum number of free-area entries the map can hold (82 three-byte
-/// entries fill bytes `0x00..0xF6`).
-pub const MAX_FREE_AREAS: usize = 82;
-
-/// Byte offset of the free-space end pointer within the map image.
-const END_POINTER: usize = 0x1FE;
-
-/// Byte offset of the total-sector count within the map image.
-const DISC_SECTORS: usize = 0x0FC;
-
-/// Bits 29–31 of a start or length entry must be zero; the top three
-/// bits of the 8-bit API's sector addresses selected the drive.
-const ENTRY_LIMIT: u32 = 1 << 29;
+pub use tairix_fsprobe::adfs::{OLD_SECTOR_SIZE, OLD_SECTOR_SIZE_U32};
 
 /// The old-map free-space engine.
 pub struct OldMap {
@@ -57,43 +40,14 @@ impl OldMap {
     ///   pointer or an entry is structurally invalid, or the recorded
     ///   disc size does not fit the device.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
-    pub fn load<B: Block>(volume: &mut Volume<B>) -> Result<Self, DriverError> {
+    pub fn load<B: Block>(volume: &mut ByteDevice<B>) -> Result<Self, DriverError> {
         let mut raw = [0u8; OLD_MAP_SIZE];
-        volume.read_bytes(0, &mut raw)?;
-        let map = Self {
+        volume.read(0, &mut raw)?;
+        validate_old_map(&raw, volume.capacity())?;
+        Ok(Self {
             disc_sectors: get_u24(&raw, DISC_SECTORS),
             raw,
-        };
-        map.validate(volume.device_bytes())?;
-        Ok(map)
-    }
-
-    /// Validate the raw map image (checksums, end pointer, entries).
-    fn validate(&self, device_bytes: u64) -> Result<(), DriverError> {
-        let (sector0, sector1) = self.raw.split_at(256);
-        if old_map_checksum(sector0) != sector0[255] || old_map_checksum(sector1) != sector1[255] {
-            return Err(DriverError::BadMagic);
-        }
-        if self.disc_sectors == 0
-            || u64::from(self.disc_sectors) * OLD_SECTOR_SIZE > device_bytes
-            || self.disc_sectors >= ENTRY_LIMIT
-        {
-            return Err(DriverError::BadMagic);
-        }
-        let end = usize::from(self.raw[END_POINTER]);
-        if end % 3 != 0 || end > MAX_FREE_AREAS * 3 {
-            return Err(DriverError::BadMagic);
-        }
-        for index in 0..end / 3 {
-            let (start, len) = self.entry(index);
-            if start >= ENTRY_LIMIT || len >= ENTRY_LIMIT {
-                return Err(DriverError::BadMagic);
-            }
-            if len == 0 || start.checked_add(len).is_none_or(|e| e > self.disc_sectors) {
-                return Err(DriverError::BadMagic);
-            }
-        }
-        Ok(())
+        })
     }
 
     /// Write the map back to sectors 0–1 of `volume`, refreshing both
@@ -102,13 +56,13 @@ impl OldMap {
     /// # Errors
     ///
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
-    pub fn store<B: Block>(&mut self, volume: &mut Volume<B>) -> Result<(), DriverError> {
+    pub fn store<B: Block>(&mut self, volume: &mut ByteDevice<B>) -> Result<(), DriverError> {
         {
             let (sector0, sector1) = self.raw.split_at_mut(256);
             sector0[255] = old_map_checksum(sector0);
             sector1[255] = old_map_checksum(sector1);
         }
-        volume.write_bytes(0, &self.raw)
+        volume.write(0, &self.raw)
     }
 
     /// Total sectors on the volume.
@@ -290,22 +244,8 @@ impl OldMap {
         put_u24(&mut map.raw[..256], 0, first_free);
         put_u24(&mut map.raw[256..512], 0, disc_sectors - first_free);
         put_u24(&mut map.raw, DISC_SECTORS, disc_sectors);
-        map.raw[0x1FB] = disc_id.to_le_bytes()[0];
-        map.raw[0x1FC] = disc_id.to_le_bytes()[1];
+        map.raw[OLD_DISC_ID..OLD_DISC_ID + 2].copy_from_slice(&disc_id.to_le_bytes());
         map.raw[END_POINTER] = 3;
         map
     }
-}
-
-/// The old-map sector checksum: start from 255 and add each byte from
-/// offset 254 down to 0, folding the carry in *before* each addition.
-fn old_map_checksum(sector: &[u8]) -> u8 {
-    let mut sum: u32 = 255;
-    for &byte in sector[..255].iter().rev() {
-        if sum > 255 {
-            sum = (sum + 1) & 0xFF;
-        }
-        sum += u32::from(byte);
-    }
-    (sum & 0xFF) as u8
 }

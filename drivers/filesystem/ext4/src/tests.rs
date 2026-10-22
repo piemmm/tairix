@@ -2870,3 +2870,58 @@ fn a_volume_whose_groups_outgrow_their_bitmaps_is_refused() {
         );
     }
 }
+
+#[test]
+fn a_seek_finds_the_holes_of_a_block_mapped_file() {
+    let mut fs = mount();
+    let file = fs.lookup(fs.root(), b"classic.bin").expect("found");
+    let bs = FS_BLOCK as u64;
+    // Data in blocks 0, 1 and 12; holes between.
+    assert_eq!(fs.seek_region(file, 0, SeekRegion::Data), Ok(Some(0)));
+    assert_eq!(fs.seek_region(file, 0, SeekRegion::Hole), Ok(Some(2 * bs)));
+    assert_eq!(
+        fs.seek_region(file, 2 * bs, SeekRegion::Data),
+        Ok(Some(12 * bs))
+    );
+    assert_eq!(
+        fs.seek_region(file, 3 * bs + 7, SeekRegion::Hole),
+        Ok(Some(3 * bs + 7))
+    );
+    // The end of the file begins the last hole; past it nothing is left.
+    assert_eq!(
+        fs.seek_region(file, 12 * bs, SeekRegion::Hole),
+        Ok(Some(CLASSIC_LEN as u64))
+    );
+    assert_eq!(
+        fs.seek_region(file, CLASSIC_LEN as u64, SeekRegion::Data),
+        Ok(None)
+    );
+    let root = fs.root();
+    assert_eq!(
+        fs.seek_region(root, 0, SeekRegion::Data),
+        Err(DriverError::Unsupported)
+    );
+}
+
+#[test]
+fn a_seek_finds_a_hole_left_by_writing_past_the_end() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"gap", NodeKind::RegularFile)
+        .expect("create");
+    let bs = FS_BLOCK as u64;
+    fs.write_all(root, b"gap", 0, &[7u8; FS_BLOCK])
+        .expect("write head");
+    fs.write_all(root, b"gap", 4 * bs, &[9u8; FS_BLOCK])
+        .expect("write past a gap");
+    let file = fs.lookup(root, b"gap").expect("found");
+    assert_eq!(fs.seek_region(file, 0, SeekRegion::Hole), Ok(Some(bs)));
+    assert_eq!(fs.seek_region(file, bs, SeekRegion::Data), Ok(Some(4 * bs)));
+    assert_eq!(
+        fs.seek_region(file, 4 * bs, SeekRegion::Hole),
+        Ok(Some(5 * bs))
+    );
+    // ext4 keeps holes but this driver does not release a range mid-file, and
+    // says so rather than writing zeros in its place.
+    assert_eq!(fs.punch(root, b"gap", 0, bs), Err(DriverError::Unsupported));
+}

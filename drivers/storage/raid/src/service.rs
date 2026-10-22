@@ -59,7 +59,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::block::Block;
+use tairix_abi::driver::block::{Block, MAX_BLOCK_LEN};
 use tairix_abi::raid::{RaidLevel, SlotDisposition};
 use tairix_abi::time::Time64;
 use tairix_abi::DriverError;
@@ -73,13 +73,6 @@ use tairix_raid::{
 use tairix_raidmeta::{
     ArrayProgress, MaintenanceRecord, MAINTENANCE_BLOCK, RESERVED_METADATA_BLOCKS, SUPERBLOCK_BLOCK,
 };
-
-/// The largest logical block size a sane member reports, bounding the stack
-/// buffer superblock I/O stages one block through. Every member the composer
-/// serves comes through the blkio client, which already refuses a block size
-/// outside `512..=4096`; a member reporting a larger one is refused here too
-/// rather than staging it through an undersized buffer.
-const MAX_BLOCK_SIZE: usize = 4096;
 
 /// The smallest logical block size a member may have: enough to hold either
 /// metadata record whole, since each occupies a block of its own. Deriving it
@@ -160,7 +153,7 @@ pub enum ServiceError {
 ///   superblock.
 pub fn read_superblock<B: Block>(device: &mut B) -> Result<ArraySuperblock, ServiceError> {
     let block_size = metadata_block_size(device)?;
-    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let mut buf = [0u8; MAX_BLOCK_LEN];
     device
         .read_blocks(SUPERBLOCK_BLOCK, &mut buf[..block_size])
         .map_err(ServiceError::Device)?;
@@ -180,7 +173,7 @@ pub fn read_superblock<B: Block>(device: &mut B) -> Result<ArraySuperblock, Serv
 /// [`MaintenanceRecord::progress_for`].
 pub fn read_maintenance_record<B: Block>(device: &mut B) -> Option<MaintenanceRecord> {
     let block_size = metadata_block_size(device).ok()?;
-    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let mut buf = [0u8; MAX_BLOCK_LEN];
     device
         .read_blocks(MAINTENANCE_BLOCK, &mut buf[..block_size])
         .ok()?;
@@ -204,7 +197,7 @@ pub fn write_maintenance_record<B: Block>(
     record: &MaintenanceRecord,
 ) -> Result<(), ServiceError> {
     let block_size = metadata_block_size(device)?;
-    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let mut buf = [0u8; MAX_BLOCK_LEN];
     buf[..MaintenanceRecord::WIRE_LEN].copy_from_slice(&record.encode());
     device
         .write_blocks(MAINTENANCE_BLOCK, &buf[..block_size])
@@ -228,7 +221,7 @@ pub fn write_superblock<B: Block>(
     superblock: &ArraySuperblock,
 ) -> Result<(), ServiceError> {
     let block_size = metadata_block_size(device)?;
-    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    let mut buf = [0u8; MAX_BLOCK_LEN];
     buf[..SUPERBLOCK_WIRE_LEN].copy_from_slice(&superblock.encode());
     device
         .write_blocks(SUPERBLOCK_BLOCK, &buf[..block_size])
@@ -239,7 +232,7 @@ pub fn write_superblock<B: Block>(
 /// array's metadata records or is larger than the staging buffer.
 fn metadata_block_size<B: Block>(device: &B) -> Result<usize, ServiceError> {
     let block_size = device.geometry().map_err(ServiceError::Device)?.block_size as usize;
-    if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size) {
+    if !(MIN_BLOCK_SIZE..=MAX_BLOCK_LEN).contains(&block_size) {
         return Err(ServiceError::BlockSize);
     }
     Ok(block_size)

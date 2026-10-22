@@ -156,8 +156,8 @@ mod program {
         manager_opening, paste_strategy, plan_paste, quick_applications, trash_dest_path,
         trash_dir, trash_strategy, validate_new_name, win_floor_width, Activation, AppAssociation,
         Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard, ClipboardOp,
-        ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor,
-        CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteTarget, DeleteWalk,
+        ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyKind,
+        CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteTarget, DeleteWalk,
         DirectorySource, Drive, DriveChange, DriveSample, Entry, EntryKind, HiddenEndings, Listing,
         ListingDesk, ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NewEntry,
         OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, PendingEntry,
@@ -208,8 +208,8 @@ mod program {
     use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::notice::{self, next_alert, NextAlert, NoticeSource, Notices};
     use crate::operation::{
-        change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
-        empty_confirmation_may_open, item_refusal, mode_flip_allowed, move_refusal,
+        attribute_refusal, change_refusal, completion_closes_at, confirmation_may_open,
+        create_refusal, empty_confirmation_may_open, item_refusal, mode_flip_allowed, move_refusal,
         progress_control, progress_due, read_refusal, remove_refusal, trash_read_refusal, BarPace,
         ProgressControl,
     };
@@ -219,6 +219,10 @@ mod program {
     use crate::settings::{SettingsRequest, SettingsWindow, TITLE as SETTINGS_TITLE};
     use crate::sidebar::{self, press_point};
     use tairix_appdata::{Publication, PublishWorker};
+    use tairix_fscopy::{
+        copy_attributes, DataCopy, DataError, Omissions, Refusal as Unkept, Sparse,
+    };
+    use tairix_rt::copy::{RtAttributes, RtFile};
 
     /// Exit code when the initial directory listing was refused (no
     /// filesystem reach, or a corrupt stream). A reserved, fail-closed
@@ -2092,6 +2096,7 @@ mod program {
                                 ending: Ending::Stopped(String::from(
                                     "too many operations are already waiting; try again once one finishes",
                                 )),
+                                omissions: Omissions::default(),
                             }),
                         )),
                     }
@@ -2207,7 +2212,7 @@ mod program {
         };
         let (owner, stopped) = (progress.owner, progress.operation.progress.stopped_title());
         close_window(windows, index, client, reads);
-        reread_owner(windows, owner, stopped, finished.ending);
+        reread_owner(windows, owner, stopped, finished);
     }
 
     /// End the operation the progress window at `index` shows, on its answer
@@ -2238,13 +2243,21 @@ mod program {
         progress.operation.observe(whole, "", now_ns);
         progress.operation.closing_ns = Some(completion_closes_at(now_ns, motion));
         windows[index].owed.owe_whole();
-        reread_owner(windows, owner, stopped, finished.ending);
+        reread_owner(windows, owner, stopped, finished);
     }
 
     /// Read the folder window `owner` again once an operation it started has
     /// ended, so a partial run shows what actually remains, and state a
-    /// refusal that stopped it there and on `stderr` for the record.
-    fn reread_owner(windows: &mut [OpenWindow], owner: u64, stopped: &str, ending: Ending) {
+    /// refusal that stopped it, and what its copies could not keep, there and
+    /// on `stderr` for the record.
+    fn reread_owner(windows: &mut [OpenWindow], owner: u64, stopped: &str, finished: Finished) {
+        let Finished {
+            ending, omissions, ..
+        } = finished;
+        let unkept = omissions.report(APP_NAME).map(|report| report.summary);
+        if let Some(summary) = &unkept {
+            report_error(&alloc::format!("warning: {summary}"));
+        }
         let Some(win) = windows.iter_mut().find(|win| win.pane.id() == owner) else {
             if let Ending::Stopped(reason) = &ending {
                 report_error(reason);
@@ -2266,8 +2279,18 @@ mod program {
                 .notices
                 .refuse(NoticeSource::Operation, stopped, &reason);
         }
+        if let Some(summary) = unkept {
+            state
+                .overlays
+                .notices
+                .warn(NoticeSource::Omission, NOT_ALL_KEPT, &summary);
+        }
         win.owed.owe_whole();
     }
+
+    /// The title of the notice a copy that left extended attributes behind is
+    /// stated in.
+    const NOT_ALL_KEPT: &str = "Not every attribute was kept";
 
     /// Give each operation a folder window asked for this round a progress
     /// window of its own — modeless, a dialog of that folder's window — and
@@ -2448,6 +2471,7 @@ mod program {
                 let cancelled = Finished {
                     done: Tally::default(),
                     ending: Ending::Cancelled,
+                    omissions: Omissions::default(),
                 };
                 end_operation(windows, index, client, reads, cancelled);
             }
@@ -5107,8 +5131,9 @@ mod program {
                 let owed = {
                     let mut work = self.work.lock();
                     let released = job.release_hold(&mut work.artwork);
+                    let omissions = job.omissions();
                     drop(job);
-                    work.operations.finish(ending) | released
+                    work.operations.finish(ending, omissions) | released
                 };
                 if owed {
                     self.wake.nudge();
@@ -7674,6 +7699,26 @@ mod program {
                 paste.abandon();
             }
         }
+
+        /// The extended attributes its copies could not keep.
+        fn omissions(&self) -> Omissions {
+            match &self.walk {
+                Walk::Paste(paste) => paste.omissions.clone(),
+                Walk::Delete(_) | Walk::Trash(_) => Omissions::default(),
+            }
+        }
+    }
+
+    /// Carry the extended attributes of `source` to its new copy `dest`,
+    /// answering those `dest`'s volume could not keep.
+    fn carry_attributes(source: &str, dest: &str) -> Result<Vec<(String, Unkept)>, &'static str> {
+        copy_attributes(
+            &RtAttributes,
+            source,
+            dest,
+            tairix_fscopy::Attributes::Carry,
+        )
+        .map_err(|error| attribute_refusal(&error))
     }
 
     impl Walk {
@@ -7819,6 +7864,7 @@ mod program {
                     Finished {
                         done: reading.done,
                         ending,
+                        omissions: job.omissions(),
                     },
                 ));
             } else {
@@ -8174,6 +8220,8 @@ mod program {
         /// Where the item being copied is landing, spelled, until it is copied
         /// whole ([`Job::sync_hold`]).
         writing: Option<String>,
+        /// The extended attributes its copies' destinations could not keep.
+        omissions: Omissions,
     }
 
     /// The stage of the item a [`Paste`] is currently carrying out.
@@ -8200,7 +8248,7 @@ mod program {
     }
 
     /// One leaf-file transfer in flight: the open source and destination
-    /// handles plus the resumable [`CopyCursor`] over them, stepped one bounded
+    /// handles and the copy engine's place in the file, stepped one bounded
     /// chunk at a time so a large file never blocks the event loop.
     struct Transfer {
         /// The source file opened read-only.
@@ -8208,10 +8256,14 @@ mod program {
         /// The destination file, created exclusively (a pre-existing name is
         /// refused, never clobbered).
         writer: tairix_rt::File,
+        /// Where the source is, for its attributes.
+        source: String,
         /// Where the destination was created.
         dest: String,
-        /// The bounded, resumable copy cursor over the two handles.
-        cursor: CopyCursor,
+        /// The file's bytes and holes, a chunk at a time.
+        copy: DataCopy,
+        /// The bytes accounted for so far: copied, or a hole passed over.
+        moved: u64,
     }
 
     impl Transfer {
@@ -8230,8 +8282,10 @@ mod program {
             Ok(Self {
                 reader,
                 writer,
+                source: source_spelled,
                 dest: dest_spelled,
-                cursor: CopyCursor::new(stat.size),
+                copy: DataCopy::new(stat.size, Sparse::Auto),
+                moved: 0,
             })
         }
 
@@ -8260,32 +8314,27 @@ mod program {
 
         /// Carry one bounded chunk of the transfer through `buf`, returning
         /// `Ok(true)` once the whole file has been copied and `Ok(false)` when
-        /// more remains. A source that ends before, or grows past, its stat'd
-        /// length fails closed rather than looping or wrapping.
+        /// more remains. A source that shrinks under the copy ends it where it
+        /// ended.
         fn step(&mut self, buf: &mut [u8]) -> Result<bool, &'static str> {
-            let Some(chunk) = self.cursor.next_chunk() else {
-                return Ok(true);
-            };
-            let want = usize::try_from(chunk.len()).map_err(|_| "a copy chunk was too large")?;
-            let read = self
-                .reader
-                .read_at(chunk.offset(), &mut buf[..want])
-                .map_err(|_| "a source file could not be read")?;
-            if read == 0 {
-                return Err("a source file ended early");
+            match self
+                .copy
+                .step(&mut RtFile(&self.reader), &mut RtFile(&self.writer), buf)
+            {
+                Ok(tairix_fscopy::Step::Moved(count)) => {
+                    self.moved = self.moved.saturating_add(count);
+                    Ok(false)
+                }
+                Ok(tairix_fscopy::Step::Done) => Ok(true),
+                Err(DataError::Read(_)) => Err("a source file could not be read"),
+                Err(DataError::Write(_)) => Err("a destination file could not be written"),
             }
-            let wrote = self
-                .writer
-                .write_at(chunk.offset(), &buf[..read])
-                .map_err(|_| "a destination file could not be written")?;
-            if wrote != read {
-                return Err("a destination file could not be fully written");
-            }
-            let carried = u64::try_from(read).map_err(|_| "a copy transfer was too large")?;
-            self.cursor
-                .advance(carried)
-                .map_err(|_| "a source file changed during the copy")?;
-            Ok(self.cursor.is_complete())
+        }
+
+        /// Carry the source's extended attributes to the copy, answering those
+        /// its volume could not keep.
+        fn carry_attributes(&self) -> Result<Vec<(String, Unkept)>, &'static str> {
+            carry_attributes(&self.source, &self.dest)
         }
     }
 
@@ -8293,8 +8342,9 @@ mod program {
     /// [`CopyAction`] so the walk is free to be mutated by the report call that
     /// follows it.
     enum CopyStep {
-        /// Create this destination directory (`fs_mkdir`).
-        MakeDir(alloc::vec::Vec<String>),
+        /// Create this destination directory (`fs_mkdir`), giving it this
+        /// source directory's attributes.
+        MakeDir(alloc::vec::Vec<String>, alloc::vec::Vec<String>),
         /// List this source directory's children (`fs_readdir`).
         List(alloc::vec::Vec<String>),
         /// Stream this leaf file's bytes from source to destination.
@@ -8337,6 +8387,7 @@ mod program {
                 leaf: String::new(),
                 buf: alloc::vec::Vec::new(),
                 writing: None,
+                omissions: Omissions::default(),
             }
         }
 
@@ -8393,7 +8444,7 @@ mod program {
                 PasteStage::Copying {
                     transfer: Some(transfer),
                     ..
-                } => transfer.cursor.copied(),
+                } => transfer.moved,
                 _ => 0,
             };
             self.bytes.saturating_add(flight)
@@ -8523,7 +8574,9 @@ mod program {
             // Copy the current step out so the walk is free to be mutated.
             let next = match walk.next_action() {
                 None => None,
-                Some(CopyAction::MakeDir { dest }) => Some(CopyStep::MakeDir(dest.to_vec())),
+                Some(CopyAction::MakeDir { source, dest }) => {
+                    Some(CopyStep::MakeDir(source.to_vec(), dest.to_vec()))
+                }
                 Some(CopyAction::List { source }) => Some(CopyStep::List(source.to_vec())),
                 Some(CopyAction::CopyFile { source, dest }) => {
                     Some(CopyStep::CopyFile(source.to_vec(), dest.to_vec()))
@@ -8546,7 +8599,7 @@ mod program {
                 return StepOutcome::Working;
             };
             match &step {
-                CopyStep::MakeDir(named)
+                CopyStep::MakeDir(named, _)
                 | CopyStep::CopyFile(named, _)
                 | CopyStep::CopyLink(named, _) => {
                     name_into(&mut self.leaf, named);
@@ -8554,14 +8607,18 @@ mod program {
                 CopyStep::List(_) => {}
             }
             match step {
-                CopyStep::MakeDir(dest) => {
-                    let spelled = match spell_path(&dest) {
-                        Ok(spelled) => spelled,
-                        Err(reason) => return StepOutcome::Failed(reason),
+                CopyStep::MakeDir(source, dest) => {
+                    let (spelled, from) = match (spell_path(&dest), spell_path(&source)) {
+                        (Ok(spelled), Ok(from)) => (spelled, from),
+                        (Err(reason), _) | (_, Err(reason)) => return StepOutcome::Failed(reason),
                     };
                     let made = tairix_rt::fs_mkdir(spelled.as_bytes());
                     if made != 0 {
                         return StepOutcome::Failed(create_refusal(Errno::from_syscall(made)));
+                    }
+                    match carry_attributes(&from, &spelled) {
+                        Ok(left) => self.omissions.note(&left),
+                        Err(reason) => return StepOutcome::Failed(reason),
                     }
                     if walk.created().is_err() {
                         return StepOutcome::Failed(LOST_TRACK);
@@ -8623,11 +8680,18 @@ mod program {
             }
             match transfer.step(&mut self.buf) {
                 Ok(true) => {
+                    match transfer.carry_attributes() {
+                        Ok(left) => self.omissions.note(&left),
+                        Err(reason) => {
+                            transfer.abandon();
+                            return StepOutcome::Failed(reason);
+                        }
+                    }
                     if walk.copied_file().is_err() {
                         return StepOutcome::Failed(LOST_TRACK);
                     }
                     self.done += 1;
-                    self.bytes = self.bytes.saturating_add(transfer.cursor.copied());
+                    self.bytes = self.bytes.saturating_add(transfer.moved);
                     self.stage = PasteStage::Copying {
                         walk,
                         transfer: None,

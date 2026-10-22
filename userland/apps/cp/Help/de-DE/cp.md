@@ -4,7 +4,7 @@ cp — Dateien und Verzeichnisse kopieren
 
 ## SYNOPSIS
 
-`cp [-finrRvT] [-t dir] [--] source... dest`
+`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -20,10 +20,21 @@ Eine bestehende Zieldatei wird standardmäßig überschrieben, mit `-n`
 übersprungen und mit `-i` über die Standardfehlerausgabe erfragt (eine
 abgelehnte Frage überspringt diese Kopie ohne Fehler; eine unlesbare
 Antwort gilt nie als Zustimmung).
+Ein Ziel, das die Datei der Quelle selbst ist — derselbe Name, ein
+weiterer Name für sie oder ein Link auf sie —, wird als dieselbe Datei
+abgelehnt und bleibt, wie es war.
 
 Der erste Fehlschlag beendet den Lauf vor jedem späteren Operanden.
 `--` beendet die Optionsauswertung: jedes spätere Argument ist ein
 Pfad.
+
+Jede Kopie überträgt die erweiterten Attribute der Quelle — einen
+RISC-OS-Dateityp, Typ und Ersteller eines Mac — überall dort, wo das Ziel
+sie speichern kann, und bewahrt die Lücken einer dünn besetzten Datei als
+Lücken. Attribute, die ein Ziel nicht speichern kann, werden am Ende des
+Laufs in einer einzigen Warnung gemeldet und in einem `omission`-Datensatz
+auf dem Standard-Informationsstrom; mit `--preserve=xattr` schlägt eine
+solche Kopie stattdessen fehl.
 
 ## OPTIONS
 
@@ -48,6 +59,15 @@ Pfad.
 - `--preserve=links` — zwei Quellen, die einen Knoten benennen, erhalten
   am Ziel zwei Namen statt zweier Kopien, sodass die Kopie den Speicher
   nicht stillschweigend verdoppelt.
+- `--preserve=xattr` — jedes erweiterte Attribut muss übertragen werden:
+  eine Kopie, deren Ziel eines davon nicht speichern kann, schlägt fehl und
+  nennt es. `--preserve=links,xattr` verlangt beides.
+- `--no-preserve=xattr` — keine erweiterten Attribute kopieren. `mode`,
+  `ownership` und `timestamps` werden ebenfalls angenommen und ohnehin nicht
+  bewahrt.
+- `--sparse=WHEN` — wie eine dünn besetzte Datei kopiert wird: `auto`, die
+  Voreinstellung, bewahrt ihre Lücken; `always` lässt zusätzlich jeden
+  gespeicherten Block aus Nullen ungeschrieben; `never` schreibt jedes Byte.
 - `-d` — `-P` und `--preserve=links` zusammen, wie im GNU-Werkzeug.
 - `-v, --verbose` — jede Kopie als `'source' -> 'dest'` melden.
 - `-t dir, --target-directory=dir` — jede Quelle nach `dir` kopieren,

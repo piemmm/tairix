@@ -274,13 +274,15 @@ server and every app's client can never drift apart.
   writes every chained save at once. A save that lands renames the document
   after the file a Save As made, makes it writable and says so, through the
   `SavedDocument` the application's engine implements.
-- **A window's refusals** (`notices`): `Notices` states them one alert at a
-  time, in the order they arose, each source keeping at most one waiting, so
-  the queue is bounded by a window's sources rather than by how often one
-  refuses. On the bare-metal targets `app::refuse` states a refusal on
-  `stderr` and in an error alert, holding no window when the refusal is that
-  one could not be opened. Both build the alert with one `refusal_alert`, the
-  reason stated as a sentence.
+- **A window's refusals and warnings** (`notices`): `Notices` states them one
+  alert at a time, in the order they arose, each source keeping at most one
+  waiting, so the queue is bounded by a window's sources rather than by how
+  often one speaks. `refuse` raises an error alert (what was not done, and
+  why), `warn` a warning alert (what was done short of the whole). On the
+  bare-metal targets `app::refuse` states a refusal on `stderr` and in an
+  error alert, holding no window when the refusal is that one could not be
+  opened. All build the alert with one `notice_alert`, the reason stated as a
+  sentence.
 - **An application's own menu** (`menu`): `MenuBuilder` builds the bounded
   `AppMenu` a row at a time, onto the root plate or a submenu, leaving out a
   row the menu cannot hold rather than the whole menu.

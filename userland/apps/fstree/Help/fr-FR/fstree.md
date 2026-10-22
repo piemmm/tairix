@@ -108,6 +108,9 @@ passé. Un échec en cours de copie supprime la cible à moitié écrite et
 affiche l'erreur du noyau ; rien ne se fait jamais passer pour une
 copie complète. Chaque opération est autorisée par le noyau — un refus
 apparaît tel quel sur la ligne de message, sans que rien ne change.
+Une copie conserve les trous d'un fichier et ses attributs étendus ;
+tout attribut que la destination ne peut conserver est nommé sur la
+ligne de message à la fin de l'opération.
 
 La ligne d'état montre le chemin listé, le nombre d'entrées visibles,
 l'ordre de tri, les octets libres/totaux du volume sous-jacent (quand le

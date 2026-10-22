@@ -25,6 +25,8 @@ const CREATOR: Security = Security {
 struct Node {
     data: Vec<u8>,
     security: Security,
+    /// Kept as data is: on the medium only once synced.
+    attrs: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 #[derive(Clone, Default)]
@@ -40,6 +42,18 @@ impl State {
             .get(path)
             .map(|&node| self.nodes[node].data.as_slice())
     }
+
+    fn attrs(&self, path: &[u8]) -> Option<&BTreeMap<Vec<u8>, Vec<u8>>> {
+        self.names.get(path).map(|&node| &self.nodes[node].attrs)
+    }
+}
+
+/// The attributes the document carries before it is replaced.
+fn riscos_attrs() -> BTreeMap<Vec<u8>, Vec<u8>> {
+    BTreeMap::from([
+        (b"acorn.filetype".to_vec(), b"fff".to_vec()),
+        (b"user.origin".to_vec(), b"disc".to_vec()),
+    ])
 }
 
 /// A name or security change, which a crash may keep without the data the
@@ -63,6 +77,7 @@ impl Change {
                         Node {
                             data: Vec::new(),
                             security: CREATOR,
+                            attrs: BTreeMap::new(),
                         },
                     );
                 }
@@ -93,6 +108,7 @@ struct Medium {
     since: Vec<Change>,
     calls_left: usize,
     refuse_write: bool,
+    refuse_attrs: bool,
 }
 
 impl Medium {
@@ -103,6 +119,7 @@ impl Medium {
             state.nodes.push(Node {
                 data: bytes.to_vec(),
                 security: OWNER,
+                attrs: riscos_attrs(),
             });
             state.names.insert(DOC.to_vec(), 0);
         }
@@ -112,6 +129,7 @@ impl Medium {
             since: Vec::new(),
             calls_left: usize::MAX,
             refuse_write: false,
+            refuse_attrs: false,
         }
     }
 
@@ -171,6 +189,21 @@ impl ReplaceFs for Medium {
     fn security_of(&mut self, file: &usize) -> Result<Security, Errno> {
         self.call()?;
         Ok(self.now.nodes[*file].security)
+    }
+
+    fn carry_attributes(&mut self, from: &[u8], to: &[u8]) -> Result<(), Errno> {
+        self.call()?;
+        if self.refuse_attrs {
+            return Err(Errno::PermissionDenied);
+        }
+        // Set by a writer the temporary's eventual owner may not be.
+        if self.now.nodes[self.node(to)?].security != CREATOR {
+            return Err(Errno::PermissionDenied);
+        }
+        let attrs = self.now.nodes[self.node(from)?].attrs.clone();
+        let to = self.node(to)?;
+        self.now.nodes[to].attrs = attrs;
+        Ok(())
     }
 
     fn set_owner(&mut self, path: &[u8], uid: u32, gid: u32) -> Result<(), Errno> {
@@ -239,7 +272,15 @@ fn after_every_interruption(document: Option<&[u8]>) -> Vec<Option<Vec<u8>>> {
         let mut medium = Medium::new(document);
         medium.calls_left = calls;
         let finished = replace(&mut medium, DOC, NEW, ParentDir::Existing, TAG).is_ok();
-        seen.push(medium.after_crash().read(DOC).map(<[u8]>::to_vec));
+        let crashed = medium.after_crash();
+        if crashed.read(DOC).is_some() && document.is_some() {
+            assert_eq!(
+                crashed.attrs(DOC),
+                Some(&riscos_attrs()),
+                "whichever document survives carries its attributes"
+            );
+        }
+        seen.push(crashed.read(DOC).map(<[u8]>::to_vec));
         if finished {
             break;
         }
@@ -278,6 +319,25 @@ fn the_replacement_keeps_the_originals_owner_group_and_mode() {
     let node = medium.now.names[DOC];
     assert_eq!(medium.now.nodes[node].security, OWNER);
     assert_eq!(medium.now.read(DOC), Some(NEW));
+}
+
+#[test]
+fn the_replacement_keeps_the_originals_extended_attributes() {
+    let mut medium = Medium::new(Some(OLD));
+    replace(&mut medium, DOC, NEW, ParentDir::Existing, TAG).expect("replace");
+    assert_eq!(medium.now.attrs(DOC), Some(&riscos_attrs()));
+}
+
+#[test]
+fn attributes_the_replacement_cannot_take_leave_the_original_and_no_temporary() {
+    let mut medium = Medium::new(Some(OLD));
+    medium.refuse_attrs = true;
+    assert_eq!(
+        replace(&mut medium, DOC, NEW, ParentDir::Existing, TAG),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(medium.now.read(DOC), Some(OLD));
+    assert_eq!(medium.now.names.len(), 1, "the temporary is gone");
 }
 
 #[test]

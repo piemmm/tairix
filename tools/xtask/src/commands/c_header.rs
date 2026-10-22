@@ -61,9 +61,9 @@ use tairix_abi::{
     NeededLibrary, NoticeTopic, OpenFlags, PageRequest, PeerWatchOp, PointerButtonCode,
     PointerInput, PortName, PowerAction, ProcessRecord, ProcessStartHeader, ProcessState,
     RandomFlags, ReaddirFrom, RealpathMode, RenameFlags, ResourceLimit, ResourceLimitRecord,
-    RxePermission, SchedPriority, Segment, SelfAccountRecord, Severity, Signal, SignalIntakeOp,
-    StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64,
-    UnlinkFlags, Uptime, UserDirectoryRecord, ViewBindingRecord, WaitFlags, WaitSetOp,
+    RxePermission, SchedPriority, SeekRegion, Segment, SelfAccountRecord, Severity, Signal,
+    SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
+    Time64, UnlinkFlags, Uptime, UserDirectoryRecord, ViewBindingRecord, WaitFlags, WaitSetOp,
     WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES,
     APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
     BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CALL_DEADLINE_NONE,
@@ -3435,6 +3435,20 @@ fn emit_fs_contract(out: &mut String) {
     out.push('\n');
 
     out.push_str(
+        "/* fs_seek_region() region kind (uint32_t): DATA finds the next byte the volume\n\
+         * stores, HOLE the next byte of a hole; a file's end always begins one. Any\n\
+         * other value is rejected with TAIRIX_E_OUT_OF_RANGE. */\n",
+    );
+    for (name, region) in [("DATA", SeekRegion::Data), ("HOLE", SeekRegion::Hole)] {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_SEEK_REGION_{name} {}u",
+            region.as_u32()
+        );
+    }
+    out.push('\n');
+
+    out.push_str(
         "/* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the\n\
          * owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode\n\
          * carrying any higher bit (a file-type bit, say) is rejected with\n\
@@ -4189,6 +4203,25 @@ mod tests {
                 "uint64_t tairix_sys_fs_realpath(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);"
             ),
             "fs_realpath prototype carries the mode argument: {h}"
+        );
+        for (name, region) in [("DATA", SeekRegion::Data), ("HOLE", SeekRegion::Hole)] {
+            assert!(
+                h.contains(&format!(
+                    "#define TAIRIX_SEEK_REGION_{name} {}u",
+                    region.as_u32()
+                )),
+                "fs_seek_region {name} region: {h}"
+            );
+        }
+        assert!(
+            h.contains(
+                "uint64_t tairix_sys_fs_seek_region(uint32_t a0, uint64_t a1, uint32_t a2);"
+            ),
+            "fs_seek_region prototype: {h}"
+        );
+        assert!(
+            h.contains("int32_t tairix_sys_fs_punch(uint32_t a0, uint64_t a1, uint64_t a2);"),
+            "fs_punch prototype: {h}"
         );
     }
 

@@ -83,6 +83,9 @@ montre un plus tant qu'un dépôt copierait et une flèche tant qu'il
 déplacerait, et le dossier où un dépôt aboutirait est mis en évidence. Un
 fichier seul déposé sur l'emplacement d'une application dans la barre
 d'icônes y est ouvert.
+Copier ou déplacer conserve les trous de chaque fichier et ses attributs
+étendus, tel un type de fichier RISC OS ; tout attribut que la destination
+ne peut conserver est nommé dans un avertissement à la fin de l'opération.
 
 Le menu contextuel commence par *Affichage*. En dessous, un sous-menu nomme
 ce sur quoi le menu agit — *Fichier « notes.txt »*, un nom long raccourci en

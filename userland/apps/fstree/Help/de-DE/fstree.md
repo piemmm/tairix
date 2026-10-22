@@ -109,6 +109,9 @@ mitten im Kopieren entfernt das halb geschriebene Ziel und zeigt den
 Fehler des Kernels; nichts gibt sich je als vollständige Kopie aus.
 Jede Operation wird vom Kernel autorisiert — eine Verweigerung
 erscheint wörtlich in der Meldungszeile, ohne dass sich etwas ändert.
+Eine Kopie behält die Lücken einer Datei und ihre erweiterten
+Attribute; ein Attribut, das das Ziel nicht aufnehmen kann, wird nach
+Abschluss des Vorgangs in der Meldungszeile genannt.
 
 Die Statuszeile zeigt den aufgelisteten Pfad, die Zahl der sichtbaren
 Einträge, die Sortierordnung, die freien/gesamten Bytes des tragenden

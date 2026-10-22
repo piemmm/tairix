@@ -1173,6 +1173,15 @@ name = "tairix-buildcfg"
 version = "0.0.0"
 
 [[package]]
+name = "tairix-bytedev"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-util",
+ "tairix-writeback",
+]
+
+[[package]]
 name = "tairix-caps"
 version = "0.0.0"
 dependencies = [
@@ -1398,6 +1407,8 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
+ "tairix-fscopy",
+ "tairix-fsmeta",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -1786,6 +1797,7 @@ dependencies = [
  "tairix-log",
  "tairix-rt",
  "tairix-usb",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2014,7 +2026,9 @@ name = "tairix-drv-fs-adfs"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-bytedev",
  "tairix-fsmeta",
+ "tairix-fsprobe",
  "tairix-fuzzseed",
  "tairix-hash",
 ]
@@ -2034,6 +2048,7 @@ dependencies = [
  "tairix-hash",
  "tairix-log",
  "tairix-reclaim",
+ "tairix-util",
  "tairix-writeback",
  "zeroize",
 ]
@@ -2043,6 +2058,7 @@ name = "tairix-drv-fs-ext4"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-bytedev",
  "tairix-crc32c",
  "tairix-fsprobe",
  "tairix-fuzzseed",
@@ -2057,7 +2073,36 @@ name = "tairix-drv-fs-fat32"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-bytedev",
  "tairix-fsprobe",
+]
+
+[[package]]
+name = "tairix-drv-fs-iso9660"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-bytedev",
+ "tairix-compress",
+ "tairix-crc32",
+ "tairix-fsmeta",
+ "tairix-fsprobe",
+ "tairix-fuzzseed",
+ "tairix-test-iso9660-image",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-drv-fs-udf"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-bytedev",
+ "tairix-fsmeta",
+ "tairix-fsprobe",
+ "tairix-fuzzseed",
+ "tairix-util",
+ "tairix-writeback",
 ]
 
 [[package]]
@@ -2239,6 +2284,7 @@ dependencies = [
  "tairix-abi",
  "tairix-blkclient",
  "tairix-buildcfg",
+ "tairix-bytedev",
  "tairix-caps",
  "tairix-drvrt",
  "tairix-fsprobe",
@@ -2247,6 +2293,7 @@ dependencies = [
  "tairix-raid",
  "tairix-raidmeta",
  "tairix-rt",
+ "tairix-test-iso9660-image",
  "tairix-util",
 ]
 
@@ -2292,6 +2339,7 @@ dependencies = [
  "tairix-abi",
  "tairix-blkclient",
  "tairix-buildcfg",
+ "tairix-bytedev",
  "tairix-drvrt",
  "tairix-fsprobe",
  "tairix-log",
@@ -2300,6 +2348,7 @@ dependencies = [
  "tairix-raidmeta",
  "tairix-resref",
  "tairix-rt",
+ "tairix-test-iso9660-image",
  "tairix-util",
 ]
 
@@ -2438,6 +2487,7 @@ dependencies = [
  "tairix-controls",
  "tairix-display",
  "tairix-font",
+ "tairix-fscopy",
  "tairix-fsmeta",
  "tairix-geometry",
  "tairix-help",
@@ -2516,6 +2566,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-fscopy"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fsmeta",
+]
+
+[[package]]
 name = "tairix-fsmeta"
 version = "0.0.0"
 dependencies = [
@@ -2528,8 +2586,12 @@ name = "tairix-fsprobe"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-bytedev",
+ "tairix-crypto",
  "tairix-fuzzseed",
  "tairix-raidmeta",
+ "tairix-test-iso9660-image",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2543,6 +2605,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-complete",
  "tairix-curses",
+ "tairix-fscopy",
  "tairix-fsmeta",
  "tairix-glob",
  "tairix-help",
@@ -2891,6 +2954,7 @@ dependencies = [
  "tairix-arch-riscv64",
  "tairix-arch-x86_64",
  "tairix-buildcfg",
+ "tairix-bytedev",
  "tairix-caps",
  "tairix-crypto",
  "tairix-devmatch",
@@ -2898,9 +2962,12 @@ dependencies = [
  "tairix-drv-audio-virtio-snd",
  "tairix-drv-bus-mmio",
  "tairix-drv-bus-virtio",
+ "tairix-drv-fs-adfs",
  "tairix-drv-fs-arxfs",
  "tairix-drv-fs-ext4",
  "tairix-drv-fs-fat32",
+ "tairix-drv-fs-iso9660",
+ "tairix-drv-fs-udf",
  "tairix-drv-storage-emmc2",
  "tairix-drv-storage-virtio-blk",
  "tairix-drvhost",
@@ -3480,6 +3547,8 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
+ "tairix-fscopy",
+ "tairix-fsmeta",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -3945,6 +4014,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-caps",
  "tairix-cpuops",
+ "tairix-fscopy",
  "tairix-hash",
  "tairix-log",
  "tairix-reclaim",
@@ -4246,6 +4316,7 @@ dependencies = [
  "tairix-netconfig",
  "tairix-rt",
  "tairix-sysconfig",
+ "tairix-util",
 ]
 
 [[package]]
@@ -5790,6 +5861,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-iso9660-image"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-drv-fs-iso9660",
+]
+
+[[package]]
 name = "tairix-test-kernel-arch-boot"
 version = "0.0.0"
 dependencies = [
@@ -6443,6 +6522,29 @@ dependencies = [
  "tairix-net",
  "tairix-netconfig",
  "tairix-sysconfig",
+]
+
+[[package]]
+name = "tairix-test-optical"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-rt",
+ "tairix-test-iso9660-image",
+]
+
+[[package]]
+name = "tairix-test-optical-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-optical",
 ]
 
 [[package]]
@@ -8680,6 +8782,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-reclaim",
+ "tairix-util",
  "zeroize",
 ]
 
@@ -8804,10 +8907,12 @@ dependencies = [
  "tairix-test-filepick-qemu-aarch64",
  "tairix-test-framestats",
  "tairix-test-handover-qemu-aarch64",
+ "tairix-test-iso9660-image",
  "tairix-test-memsoak",
  "tairix-test-menu-qemu-aarch64",
  "tairix-test-netmap-qemu-aarch64",
  "tairix-test-netstack-wire",
+ "tairix-test-optical",
  "tairix-test-rng-soak",
  "tairix-test-rtc-fixture",
  "tairix-test-screensaver-qemu-aarch64",

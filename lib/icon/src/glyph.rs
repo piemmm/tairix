@@ -21,7 +21,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkTransport};
+use tairix_abi::blkio::{BlkForm, BlkMedium, BlkRotation, BlkTransport};
 use tairix_raster::{Affine, Color};
 use tairix_svg::geom::{place, SubPath};
 
@@ -182,6 +182,8 @@ pub enum IconKind {
     /// An external USB drive that reported no rotation: the enclosure
     /// picture claims no medium; shares the disk glyph.
     DiskExternal,
+    /// An optical disc in its drive; shares the disk glyph.
+    DiskOptical,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
     /// Two upright bars, for pausing what is playing.
@@ -670,6 +672,7 @@ impl IconKind {
             "disk-nvme" => Self::DiskNvme,
             "disk-sd" => Self::DiskSdCard,
             "disk-external" => Self::DiskExternal,
+            "disk-optical" => Self::DiskOptical,
             "pause" => Self::Pause,
             "resume" => Self::Resume,
             "zoom-in" => Self::ZoomIn,
@@ -1153,6 +1156,7 @@ impl IconKind {
             Self::CommandProgram => 257,
             Self::ElfExecutable => 258,
             Self::WasmModule => 259,
+            Self::DiskOptical => 260,
         }
     }
 
@@ -1212,6 +1216,7 @@ impl IconKind {
             Self::DiskNvme => "disk-nvme",
             Self::DiskSdCard => "disk-sd",
             Self::DiskExternal => "disk-external",
+            Self::DiskOptical => "disk-optical",
             Self::Pause => "pause",
             Self::Resume => "resume",
             Self::FolderFilled => "folder-filled",
@@ -1436,16 +1441,20 @@ impl IconKind {
 
 /// The icon that represents a mounted volume's storage medium.
 ///
-/// A picture claims only what the device reported: a medium reported
-/// rotating is the hard disk on an ATA bus or behind a USB bridge alike, a
-/// USB unit is a stick once it reported a non-rotating medium, and one that
-/// reported neither is the external drive, which shows no medium. An
-/// undeclared or paravirtual device is the generic drive.
+/// A picture claims only what the device reported: an optical disc is a
+/// disc on any bus, a medium reported rotating is the hard disk on an ATA bus
+/// or behind a USB bridge alike, a USB unit is a stick once it reported a
+/// non-rotating medium, and one that reported neither is the external drive,
+/// which shows no medium. An undeclared or paravirtual device is the generic
+/// drive.
 #[must_use]
 pub const fn disk_icon(medium: Option<BlkMedium>) -> IconKind {
     let Some(medium) = medium else {
         return IconKind::Disk;
     };
+    if matches!(medium.form, BlkForm::OpticalDisc) {
+        return IconKind::DiskOptical;
+    }
     match (medium.transport, medium.rotation) {
         (BlkTransport::Virtual, _) | (BlkTransport::Ata, BlkRotation::Unknown) => IconKind::Disk,
         (BlkTransport::Nvme, _) => IconKind::DiskNvme,
@@ -1589,7 +1598,8 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::DiskUsb
         | IconKind::DiskNvme
         | IconKind::DiskSdCard
-        | IconKind::DiskExternal => disk(color),
+        | IconKind::DiskExternal
+        | IconKind::DiskOptical => disk(color),
         IconKind::Generic => generic(color),
         IconKind::Pause => pause(color),
         IconKind::Resume => resume(color),
@@ -2232,8 +2242,8 @@ fn user(color: Color) -> alloc::vec::Vec<IconLayer> {
 /// A storage drive: a cylinder — a top platter disc over a drum body — the
 /// classic disk/storage silhouette, so it reads at 16px and stays distinct
 /// from the document and folder shapes. Shared by every fine-grained disk
-/// medium (hard, solid-state, floppy, USB), which differ only in their
-/// shipped raster artwork, not this fallback.
+/// medium (hard, solid-state, floppy, USB, optical), which differ only in
+/// their shipped raster artwork, not this fallback.
 fn disk(color: Color) -> alloc::vec::Vec<IconLayer> {
     const PLATTER: &[(i32, i32)] = &[
         (4, 7),

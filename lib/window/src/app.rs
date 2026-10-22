@@ -33,7 +33,8 @@ use alloc::sync::Arc;
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::window_ipc::{
-    DialogModality, LayerDepth, WindowEvent, WindowSizing, WindowTitle, WINDOW_ENDPOINT,
+    AlertSeverity, DialogModality, LayerDepth, WindowEvent, WindowSizing, WindowTitle,
+    WINDOW_ENDPOINT,
 };
 use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, CALL_DEADLINE_NONE};
 use tairix_display::{winframe, SERIAL};
@@ -42,7 +43,7 @@ use tairix_rt::work::{Desk, Worker};
 use tairix_theme::{Accessibility, ThemeRegistry};
 
 use crate::client::{
-    presented_damage, refusal_alert, retained_damage, WindowClient, WindowTransport,
+    notice_alert, presented_damage, retained_damage, WindowClient, WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::frames::WindowFrames;
@@ -155,7 +156,7 @@ pub fn refuse<T: WindowTransport>(
     detail: &str,
 ) -> Option<u64> {
     report(name, format_args!("{headline}: {detail}"));
-    let raised = refusal_alert(headline, detail)
+    let raised = notice_alert(AlertSeverity::Error, headline, detail)
         .and_then(|alert| client.open_alert(event_endpoint, owner, &alert));
     if let Err(err) = raised {
         report(

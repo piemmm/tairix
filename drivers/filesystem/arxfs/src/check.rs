@@ -41,7 +41,7 @@ use crate::superblock;
 use crate::transaction::TxnRoot;
 use crate::{
     as_usize, extent_spec, inode_spec, DirScan, Extent, Inode, InodeKind, Pin, ARXFS,
-    MAX_BLOCK_SIZE, ROOT_INO,
+    MAX_BLOCK_LEN, ROOT_INO,
 };
 
 /// An offline `check` finished and the structure validated clean.
@@ -789,7 +789,7 @@ impl<B: Block> ARXFS<B> {
     /// decode and is skipped.
     fn rescue_find_best_root(&mut self, report: &mut RescueReport) -> Option<TxnRoot> {
         let bs = self.block_size;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let mut best: Option<TxnRoot> = None;
         for phys in 0..self.total_blocks {
             if self.read_block(phys, &mut buf).is_err() {
@@ -829,7 +829,7 @@ impl<B: Block> ARXFS<B> {
         let spec = inode_spec();
         let mut walk = TreeWalk::new(self.block_size)?;
         let mut extent_walk = TreeWalk::new(self.block_size)?;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         loop {
             match self.btree_next_leaf(self.inode_tree_root, spec, &mut walk) {
                 Ok(true) => {}

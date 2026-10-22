@@ -1799,21 +1799,17 @@ Given a `plan_paste` result, `execute::paste_strategy(op, source, dest)` decides
 `execute::VolumeId`s (the 16-byte `fs_stat` volume identity): a `Copy` always
 streams, a `Cut` within one volume is a single `Rename`, and a `Cut` across
 volumes is a `CopyThenDelete` — the same `st_dev` decision `mv` makes, in one
-place (`AGENTS.md` §2.2). A streamed copy runs through an `execute::CopyCursor`:
-it walks a known-length source in fixed `execute::COPY_CHUNK_LEN` steps,
-yielding the next `execute::CopyChunk` for the app to read and write, then
-`advance`s by the bytes actually carried — so a large copy holds no unbounded
-buffer and never spins (`AGENTS.md` §2.23), stays cancellable between chunks,
-and `resume`s from a persisted offset after a cancel or a preemption. It is
-fail closed: advancing or resuming past the source length is
-`execute::CopyError::Overrun` rather than a silent wrap (`AGENTS.md` §5.4), and
-the source of a cross-volume move is removed only once its copy has fully
-succeeded, so a failed copy loses no data. The engine does no I/O; the app
+place (`AGENTS.md` §2.2). One file is copied by the shared copy engine
+([`tairix-fscopy`](../lib/fscopy.md)) a bounded chunk at a time, so a large copy
+holds no unbounded buffer, never spins (`AGENTS.md` §2.23) and stays cancellable
+between chunks: its bytes with its holes, then its extended attributes. The
+source of a cross-volume move is removed only once its copy has fully
+succeeded, so a failed copy loses no data. The model does no I/O; the app
 performs every `fs_rename` / `fs_read` / `fs_write` / `fs_unlink` under the
 launching user's own identity, so the read-only picker never runs it.
 
-Where an `execute::CopyCursor` streams one *file*, an `execute::CopyWalk` copies
-a whole *tree* — the copy-side analogue of the delete-side `delete::DeleteWalk`.
+An `execute::CopyWalk` copies a whole *tree* — the copy-side analogue of the
+delete-side `delete::DeleteWalk`.
 Where a delete removes a directory's contents *before* the directory, a copy
 *creates* the destination directory *before* streaming its contents into it, so
 a child always has a parent to land in. `CopyWalk::from_items` begins the walk
@@ -1821,11 +1817,11 @@ from the resolved `(source, dest, is_directory)` items — the app supplies each
 item's kind, which the path-only clipboard does not carry — and is fail closed:
 an empty set, or a source or destination naming the root, yields no walk
 (`AGENTS.md` §5.4). `CopyWalk::next_action` yields the next `execute::CopyAction`
-— `MakeDir { dest }` (the app `fs_mkdir`s the destination directory and reports
-`CopyWalk::created`), `List { source }` (the app reads the source with
-`fs_readdir` and reports its children with `CopyWalk::expand`), or
-`CopyFile { source, dest }` (the app streams the bytes with a `CopyCursor` and
-reports `CopyWalk::copied_file`). It keeps its own explicit stack rather than
+— `MakeDir { source, dest }` (the app `fs_mkdir`s the destination directory,
+gives it the source's extended attributes and reports `CopyWalk::created`),
+`List { source }` (the app reads the source with `fs_readdir` and reports its
+children with `CopyWalk::expand`), or `CopyFile { source, dest }` (the app copies
+the file through the copy engine and reports `CopyWalk::copied_file`). It keeps its own explicit stack rather than
 recursing on the call stack, so a deeply nested tree cannot overflow it, and it
 is bounded by `execute::MAX_COPY_DEPTH` — the same `MAX_WALK_DEPTH` fail-closed
 recursion bound `DeleteWalk` obeys, held in one place so the two walks cannot
@@ -1866,7 +1862,7 @@ never builds a delete plan.
 Where the `DeletePlan` names *what* would be removed, `delete::DeleteWalk`
 models *how* — the depth-first recursive removal that clears a directory's
 contents before the directory itself. It is the delete-side analogue of the
-paste-side `execute::CopyCursor`: a pure, host-provable driven cursor that
+paste-side `execute::CopyWalk`: a pure, host-provable driven cursor that
 touches no filesystem. `DeleteWalk::from_plan` begins the walk and
 `DeleteWalk::next_action` yields the next `delete::DeleteAction` — `List(path)`
 (the app reads that directory with `fs_readdir` and reports its children with
@@ -2105,11 +2101,15 @@ user could perform themselves. `execute::paste_strategy` chooses the mechanism
 per item from the two nodes' volume ids: a same-volume move is one `fs_rename`,
 a cross-volume move is copy-then-delete (the source removed through the shared
 delete walk, as a `Deleting` stage of the same `Paste`, only once
-its copy has fully succeeded), and a copy streams — a single file through an
-`execute::CopyCursor` and a directory (or sealed `.app` bundle) through an
+its copy has fully succeeded), and a copy streams — a single file through the
+shared copy engine and a directory (or sealed `.app` bundle) through an
 `execute::CopyWalk`, both driven over `fs_read`/`fs_write`/`fs_mkdir`/`fs_readdir`
 with one reused, fixed-size (`FS_IO_MAX`) buffer so a copy of any size holds no
-unbounded buffer and never spins (`AGENTS.md` §2.23, §26.6). It is bounded and
+unbounded buffer and never spins (`AGENTS.md` §2.23, §26.6). Every file and
+directory the paste makes carries its source's extended attributes; those a
+destination cannot keep are gathered across the paste and, once it ends,
+stated in one warning alert over the folder window ("Not every attribute was
+kept") and on `stderr`, the paste itself still complete. It is bounded and
 fail closed: the first refused operation stops the paste, states the reason in
 the window naming the item (fail loud, `AGENTS.md` §2.24), and leaves whatever
 already landed in place rather than a fabricated success (`AGENTS.md` §5.4); the

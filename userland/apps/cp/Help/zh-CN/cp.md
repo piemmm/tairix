@@ -4,7 +4,7 @@ cp — 复制文件和目录
 
 ## SYNOPSIS
 
-`cp [-finrRvT] [-t dir] [--] source... dest`
+`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -16,9 +16,15 @@ cp — 复制文件和目录
 绝。已存在的目标文件默认被覆盖，带 `-n` 时被跳过，带 `-i` 时在标准错误流
 上询问（被拒绝的询问无错误地跳过该次复制；无法读取的回答绝不被当作同
 意）。
+目标若就是来源文件本身——同一个名字、它的另一个名字或指向它的链接——就作为同一文件被拒绝，并保持原样。
 
 第一个失败会在任何后续操作数之前停止运行。`--` 结束选项解析：之后的每个
 参数都是路径。
+
+每次复制都会在目标能够保存的地方带上源的扩展属性(RISC OS 文件类型、
+Mac 的类型和创建者),并将稀疏文件的空洞保留为空洞。目标无法保存的属性会在
+运行结束时以一条警告报告,并在标准信息流上以一条 `omission` 记录报告;使用
+`--preserve=xattr` 时,这样的复制会改为失败。
 
 ## OPTIONS
 
@@ -35,6 +41,12 @@ cp — 复制文件和目录
   留）。不给此选项时，来源链接会被跟随。
 - `--preserve=links` — 命名同一个节点的两个来源在目标处得到两个名称，而
   不是两份副本，因此复制不会悄悄把占用翻倍。
+- `--preserve=xattr` — 必须带上每一个扩展属性:如果目标无法保存其中某一个,
+  该复制将失败并指出它。`--preserve=links,xattr` 同时要求两者。
+- `--no-preserve=xattr` — 不复制任何扩展属性。也接受 `mode`、`ownership`
+  和 `timestamps`,它们本来就不会被保留。
+- `--sparse=WHEN` — 稀疏文件的复制方式:默认的 `auto` 保留其空洞;`always`
+  还会让其存储的每个全零块保持未写入;`never` 写入每一个字节。
 - `-d` — 等同于 `-P` 与 `--preserve=links` 一起，与 GNU 工具相同。
 - `-v, --verbose` — 以 `'source' -> 'dest'` 报告每次复制。
 - `-t dir, --target-directory=dir` — 把每个来源复制进 `dir`，它必须是已存

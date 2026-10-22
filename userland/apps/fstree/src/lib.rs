@@ -73,7 +73,7 @@
 //! `tairix-sandbox` (with `tairix-binfmt` solely for magic-prefix routing)
 //! — never a kernel or driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
 //! production paths; a refused listing fails closed onto the message
-//! line. Nothing writes to fd 3 (`stdinfo`).
+//! line.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -109,3 +109,9 @@ pub use view_disasm::{Decode, DisasmView};
 pub use view_hex::{HexPattern, HexView};
 pub use view_text::{JobOutcome, TextView};
 pub use walk::{FlatEntry, Sieve, WalkPurpose, WalkState, Walker};
+
+/// The command word the bundle is installed under: the one spelling the help
+/// lookup, the app-data defaults layer and the advisory records' producer
+/// share. The app-data store itself is keyed on the bundle identity the
+/// kernel attests, never on this.
+pub const OWN_WORD: &str = "fstree";

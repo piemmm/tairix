@@ -35,7 +35,7 @@ use core::alloc::{GlobalAlloc, Layout};
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
+use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, SeekRegion};
 use tairix_drv_fs_arxfs::{
     EntropySource, Keying, PassVerdict, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
 };
@@ -286,6 +286,7 @@ fn every_measured_walk_stays_bounded() {
     a_whole_volume_verification_holds_no_per_record_state();
     a_delete_holds_its_runs_not_its_blocks();
     a_fragmented_delete_holds_its_ceiling_not_its_extents();
+    a_fragmented_punch_holds_its_ceiling_not_its_extents();
 }
 
 /// A volume holding one file of `blocks` sequentially written, incompressible,
@@ -633,6 +634,38 @@ fn bounded_fragmented_volume(extents: u64) -> ARXFS<SparseBlock> {
     }
     fs.flush().expect("publish the fixture");
     fs
+}
+
+/// Punching every extent out of a maximally fragmented file holds the
+/// write-back ceiling, not its extent count, exactly as deleting it does: the
+/// punch releases over as many bounded transactions as the file needs.
+fn a_fragmented_punch_holds_its_ceiling_not_its_extents() {
+    const SMALL: u64 = 1_200;
+    // The same budget the delete is held to, for the same reason.
+    const PEAK_BUDGET: usize = 4 * RUN_BYTES;
+
+    let mut peaks = Vec::new();
+    for extents in [SMALL, SMALL * 4] {
+        let mut fs = bounded_fragmented_volume(extents);
+        let root = fs.root();
+        let span = extents * 2 * u64::from(BLOCK_SIZE);
+        let (punched, peak, allocs) = measure(|| fs.punch(root, b"frag", 0, span));
+        assert_eq!(punched, Ok(()));
+        assert!(
+            peak <= PEAK_BUDGET,
+            "punching a {extents}-extent file held {peak} bytes over {allocs} \
+             allocations, past the {PEAK_BUDGET} budget"
+        );
+        let file = fs.lookup(root, b"frag").expect("lookup");
+        assert_eq!(fs.seek_region(file, 0, SeekRegion::Data), Ok(None));
+        peaks.push(peak);
+    }
+    let (small, large) = (peaks[0], peaks[1]);
+    assert!(
+        large <= small + RUN_BYTES,
+        "punching four times the extents held {large} bytes against {small}: \
+         the transaction is tracking the file, not its ceiling"
+    );
 }
 
 /// Deleting a maximally fragmented file holds the write-back ceiling, not its

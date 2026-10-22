@@ -197,7 +197,11 @@ impl FilesystemRead for MockFs {
 /// A driver whose root holds one file `x`, but which faults every byte read
 /// and reports a non-UTF-8 directory entry — to exercise the [`VfsError::Io`]
 /// paths.
-struct BadFs;
+/// A volume whose reads fault and whose root lists one entry named
+/// `listed`.
+struct BadFs {
+    listed: &'static [u8],
+}
 
 impl FilesystemRead for BadFs {
     fn root(&self) -> NodeId {
@@ -273,8 +277,7 @@ impl FilesystemRead for BadFs {
             },
             next_cursor: 1,
         };
-        // A name that is not valid UTF-8.
-        visit(&entry, &[0xff, 0xff]);
+        visit(&entry, self.listed);
         Ok(())
     }
 }
@@ -607,7 +610,7 @@ fn device_fault_surfaces_as_io() {
     let vfs = backed_vfs(0o755);
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
-    let mut fs = BadFs;
+    let mut fs = BadFs { listed: b"x" };
     let mut buf = [0u8; 8];
     assert_eq!(
         vfs.read_via(
@@ -622,21 +625,32 @@ fn device_fault_surfaces_as_io() {
 }
 
 #[test]
-fn non_utf8_directory_name_surfaces_as_io() {
+fn a_listed_name_no_path_could_hold_surfaces_as_io() {
     let vfs = backed_vfs(0o755);
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
-    let mut fs = BadFs;
-    assert_eq!(
-        vfs.list_all_via(
-            &admin,
-            &vfs.cover(&p("/Storage/usb0")),
-            &mut fs,
-            FinalLink::Follow,
-            usize::MAX
-        ),
-        Err(VfsError::Io)
-    );
+    for listed in [
+        &[0xff, 0xff][..],
+        b"",
+        b".",
+        b"..",
+        b"../escape",
+        b"a/b",
+        b"nul\0",
+    ] {
+        let mut fs = BadFs { listed };
+        assert_eq!(
+            vfs.list_all_via(
+                &admin,
+                &vfs.cover(&p("/Storage/usb0")),
+                &mut fs,
+                FinalLink::Follow,
+                usize::MAX
+            ),
+            Err(VfsError::Io),
+            "{listed:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -3019,6 +3033,23 @@ fn a_driver_that_stopped_writing_is_reported_read_only() {
         "an attribute write it refuses reads the same"
     );
     assert_eq!(VfsError::ReadOnly.to_errno(), Errno::ReadOnly);
+}
+
+/// An attribute namespace the format has nowhere to keep — ADFS asked to
+/// store a `user.*` key — is the format's limit, never a device fault: a copy
+/// must be able to report it as not carried and go on.
+#[test]
+fn an_attribute_the_format_cannot_keep_is_not_supported_not_a_fault() {
+    assert_eq!(
+        super::map_attr_driver_error(DriverError::Unsupported),
+        VfsError::NotSupported
+    );
+    assert_eq!(VfsError::NotSupported.to_errno(), Errno::NotSupported);
+    assert_eq!(
+        super::map_attr_driver_error(DriverError::DeviceFault),
+        VfsError::Io,
+        "a real fault still reads as one"
+    );
 }
 
 /// A change the volume's own record forbids — a node `chattr` holds fixed —

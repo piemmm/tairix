@@ -105,7 +105,7 @@ mod kernel {
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_kernel::hwtree_store::{HW_TREE, HW_TREE_SOURCE};
     use tairix_kernel_core::waitq::HW_TREE_WAITQ;
-    use tairix_kernel_core::{HwNodeLiveness, HwTreeSource};
+    use tairix_kernel_core::{HwNodeLiveness, HwTreeSource, NodeEndpoints};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -207,7 +207,7 @@ mod kernel {
             HW_TREE_SOURCE.publish(parent_id, node)
         }
 
-        fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<Vec<u64>, Errno> {
+        fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<NodeEndpoints, Errno> {
             HW_TREE_SOURCE.node_endpoints(parent_id, node_id)
         }
 

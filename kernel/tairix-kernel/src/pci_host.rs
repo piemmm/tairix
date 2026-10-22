@@ -255,9 +255,7 @@ impl PciHost {
         let mut owned = Vec::new();
         owned.try_reserve_exact(segments.len()).ok()?;
         for segment in segments {
-            let mut changed_by = Vec::new();
-            changed_by.try_reserve_exact(segment.functions.len()).ok()?;
-            changed_by.resize(segment.functions.len(), 0);
+            let changed_by = tairix_util::fallible::filled(segment.functions.len(), 0)?;
             owned.push(Segment {
                 number: segment.number,
                 state: SpinLock::new(HostState {

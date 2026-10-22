@@ -15,6 +15,8 @@ test-util = []
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The fallible buffer fill (`fallible::filled`).
+tairix-util = { path = "../util", version = "=0.0.0" }
 # The RAM-derived budget, the pressure bands, and the pinned-pool ledger the
 # bound is expressed in.
 tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }

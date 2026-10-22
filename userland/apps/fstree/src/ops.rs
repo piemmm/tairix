@@ -3,12 +3,13 @@
 //! Every mutation the panes trigger — copy, move, rename, delete, mkdir —
 //! is planned and validated here before any I/O, then driven by the
 //! resumable [`FileOp`] executor so a per-file overwrite question can pause
-//! the work, hand the decision to the key loop, and continue. The executor
-//! streams file bytes through a bounded buffer (never a whole-file slurp),
-//! reads directories incrementally as it reaches them, and fails closed:
-//! the first refused step aborts the operation with the kernel's own
-//! [`Errno`], and a partially written file is removed rather than left
-//! looking complete.
+//! the work, hand the decision to the key loop, and continue. A file is
+//! copied by the shared copy engine (`lib/fscopy`): its bytes through a
+//! bounded buffer with its holes kept, then its extended attributes, those
+//! the destination cannot keep gathered for one report. The executor reads
+//! directories incrementally as it reaches them and fails closed: the first
+//! refused step aborts the operation with the kernel's own [`Errno`], and a
+//! partially made file is removed rather than left looking complete.
 //!
 //! # A symbolic link is a name, not the thing it names
 //!
@@ -24,16 +25,18 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::fmt::Write as _;
 
+use tairix_abi::fs::SeekRegion;
 use tairix_abi::{Errno, FileKind, RenameFlags};
+use tairix_fscopy::{
+    copy_attributes, AttrError, AttributeStore, Attributes, DataCopy, DataError, Omissions,
+    Refusal, Source, Sparse, Target, CHUNK_LEN,
+};
 use tairix_path::{join, leaf_name};
 
 use crate::fs::{Fs, RenameOutcome};
-
-/// The fixed-size chunk used to stream a regular file, matching the
-/// granularity the other userland tools share.
-const READ_CHUNK: usize = 4096;
 
 /// Why a planned operation was refused before any I/O, or how it failed
 /// mid-flight. Rendered on the message line; nothing was changed unless
@@ -52,6 +55,16 @@ pub enum OpError {
     /// A filesystem step was refused; carries the path and the kernel's
     /// [`Errno`]. When mid-copy, the partial target has been removed.
     Fs(String, Errno),
+    /// Setting the extended attribute `key` on `path` failed for a reason
+    /// that is no attribute's; the partial target has been removed.
+    Attribute {
+        /// The copy's target.
+        path: String,
+        /// The attribute refused.
+        key: String,
+        /// The refusal.
+        errno: Errno,
+    },
 }
 
 impl OpError {
@@ -64,6 +77,10 @@ impl OpError {
             Self::IntoItself => String::from("cannot copy or move a directory into itself"),
             Self::KindMismatch(path) => format!("{path}: exists with a different kind"),
             Self::Fs(path, errno) => format!("{path}: {errno:?}"),
+            Self::Attribute { path, key, errno } => format!(
+                "{path}: attribute {}: {errno:?}",
+                tairix_fsmeta::attr::display_value(key.as_bytes())
+            ),
         }
     }
 }
@@ -251,6 +268,9 @@ pub struct FileOp {
     done: usize,
     /// Conflicts the user skipped, for the completion report.
     skipped: usize,
+    /// What the copies' destinations could not keep, for the completion
+    /// report.
+    omissions: Omissions,
     /// Whether the user cancelled the remaining steps.
     cancelled: bool,
 }
@@ -307,6 +327,7 @@ impl FileOp {
             skipped_srcs: Vec::new(),
             done: 0,
             skipped: 0,
+            omissions: Omissions::default(),
             cancelled: false,
         }
     }
@@ -330,6 +351,12 @@ impl FileOp {
     #[must_use]
     pub fn cancelled(&self) -> bool {
         self.cancelled
+    }
+
+    /// The extended attributes the copies so far could not carry, and why.
+    #[must_use]
+    pub fn omissions(&self) -> &Omissions {
+        &self.omissions
     }
 
     /// Answer the paused question: overwrite re-queues the approved step,
@@ -501,13 +528,11 @@ impl FileOp {
                         }
                     }
                 };
-                // An approved link occupant is unlinked before the new object
-                // is created: a create or truncate *follows* a final link, so
-                // leaving one in place would act on whatever it names.
-                if approved == Some(FileKind::Symlink) {
-                    fs.remove_file(&dst)
-                        .map_err(|errno| StepEnd::Failed(OpError::Fs(dst.clone(), errno)))?;
-                }
+                // An approved occupant goes once the source has answered, before
+                // the new object is made: a create follows a final link, a new
+                // link never replaces a name, and a file emptied in place would
+                // be the source itself were the two names one node.
+                let replacing = approved.is_some();
                 match kind {
                     // A link is *recreated* with the target it stores. Copying
                     // its bytes would leave a regular file holding the
@@ -518,9 +543,7 @@ impl FileOp {
                             .read_link(&src)
                             .map_err(|errno| OpError::Fs(String::from(&src), errno))
                             .map_err(StepEnd::Failed)?;
-                        // A new link never replaces a name, so an approved
-                        // file occupant is removed here too.
-                        if approved == Some(FileKind::Regular) {
+                        if replacing {
                             fs.remove_file(&dst).map_err(|errno| {
                                 StepEnd::Failed(OpError::Fs(dst.clone(), errno))
                             })?;
@@ -529,7 +552,8 @@ impl FileOp {
                             .map_err(|errno| StepEnd::Failed(OpError::Fs(dst.clone(), errno)))?;
                     }
                     FileKind::Regular | FileKind::Directory => {
-                        copy_file(fs, &src, &dst).map_err(StepEnd::Failed)?;
+                        let left = copy_file(fs, &src, &dst, replacing).map_err(StepEnd::Failed)?;
+                        self.omissions.note(&left);
                     }
                 }
                 if self.kind == OpKind::Move {
@@ -553,6 +577,9 @@ impl FileOp {
                     None => {
                         fs.mkdir(&dst)
                             .map_err(|errno| StepEnd::Failed(OpError::Fs(dst.clone(), errno)))?;
+                        let left = carry_attributes(&Shared(RefCell::new(&mut *fs)), &src, &dst)
+                            .map_err(StepEnd::Failed)?;
+                        self.omissions.note(&left);
                     }
                 }
                 let entries = fs
@@ -653,35 +680,119 @@ enum StepEnd {
     Failed(OpError),
 }
 
-/// Stream a regular file from `src` to `dst` through a bounded buffer. A
-/// failure mid-stream removes the partial target (best-effort) so a
-/// half-written file never masquerades as the source's copy.
-fn copy_file(fs: &mut dyn Fs, src: &str, dst: &str) -> Result<(), OpError> {
+/// Copy the regular file `src` to `dst` — its bytes with its holes, then the
+/// extended attributes `dst`'s volume keeps — answering those it could not
+/// carry, first removing the occupant of `dst` the user agreed to replace
+/// when `replacing`. A failure part-way removes the partial target
+/// (best-effort) so a half-made file never masquerades as the source's copy.
+fn copy_file(
+    fs: &mut dyn Fs,
+    src: &str,
+    dst: &str,
+    replacing: bool,
+) -> Result<Vec<(String, Refusal)>, OpError> {
+    let len = fs
+        .size(src)
+        .map_err(|errno| OpError::Fs(String::from(src), errno))?;
+    // Sized to the file, so a tree of small files is no run of chunk-sized
+    // allocations.
+    let want = usize::try_from(len).map_or(CHUNK_LEN, |len| len.clamp(1, CHUNK_LEN));
+    let mut buf = Vec::new();
+    if !tairix_util::fallible::grow_to(&mut buf, want, 0) {
+        return Err(OpError::Fs(String::from(src), Errno::OutOfMemory));
+    }
+    if replacing {
+        fs.remove_file(dst)
+            .map_err(|errno| OpError::Fs(String::from(dst), errno))?;
+    }
     fs.create(dst)
         .map_err(|errno| OpError::Fs(String::from(dst), errno))?;
-    let mut buf = [0_u8; READ_CHUNK];
-    let mut offset: u64 = 0;
-    loop {
-        let read = match fs.read(src, offset, &mut buf) {
-            Ok(read) => read,
-            Err(errno) => {
-                let _ = fs.remove_file(dst);
-                return Err(OpError::Fs(String::from(src), errno));
-            }
-        };
-        if read == 0 {
-            return Ok(());
-        }
-        // A seam reporting more than the buffer holds would index out of
-        // bounds; refuse it rather than trust the count.
-        if read > buf.len() {
-            let _ = fs.remove_file(dst);
-            return Err(OpError::Fs(String::from(src), Errno::LengthOutOfRange));
-        }
-        if let Err(errno) = fs.write(dst, offset, &buf[..read]) {
-            let _ = fs.remove_file(dst);
-            return Err(OpError::Fs(String::from(dst), errno));
-        }
-        offset = offset.saturating_add(read as u64);
+    let copied = {
+        let shared = Shared(RefCell::new(&mut *fs));
+        DataCopy::new(len, Sparse::Auto)
+            .run(&mut shared.file(src), &mut shared.file(dst), &mut buf)
+            .map_err(|failure| match failure {
+                DataError::Read(errno) => OpError::Fs(String::from(src), errno),
+                DataError::Write(errno) => OpError::Fs(String::from(dst), errno),
+            })
+            .and_then(|()| carry_attributes(&shared, src, dst))
+    };
+    if copied.is_err() {
+        let _ = fs.remove_file(dst);
+    }
+    copied
+}
+
+/// Carry `src`'s extended attributes to the new `dst`, answering those its
+/// volume could not keep.
+fn carry_attributes(
+    store: &Shared<'_, '_>,
+    src: &str,
+    dst: &str,
+) -> Result<Vec<(String, Refusal)>, OpError> {
+    copy_attributes(store, src, dst, Attributes::Carry).map_err(|err| match err {
+        AttrError::Read(errno) => OpError::Fs(String::from(src), errno),
+        AttrError::Write { key, error } => OpError::Attribute {
+            path: String::from(dst),
+            key,
+            errno: error,
+        },
+    })
+}
+
+/// The filesystem a copy's two ends and its attributes share, each call
+/// borrowing it for that call alone.
+struct Shared<'a, 'f>(RefCell<&'a mut (dyn Fs + 'f)>);
+
+impl<'a, 'f> Shared<'a, 'f> {
+    fn file<'s>(&'s self, path: &'s str) -> SharedFile<'s, 'a, 'f> {
+        SharedFile { fs: self, path }
+    }
+}
+
+/// One file of a copy, read or written through the [`Shared`] filesystem.
+struct SharedFile<'s, 'a, 'f> {
+    fs: &'s Shared<'a, 'f>,
+    path: &'s str,
+}
+
+impl Source for SharedFile<'_, '_, '_> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.fs.0.borrow_mut().read(self.path, offset, buf)
+    }
+
+    fn next_region(&mut self, offset: u64, region: SeekRegion) -> Result<Option<u64>, Errno> {
+        self.fs
+            .0
+            .borrow_mut()
+            .next_region(self.path, offset, region)
+    }
+
+    fn size(&mut self) -> Result<u64, Errno> {
+        self.fs.0.borrow_mut().size(self.path)
+    }
+}
+
+impl Target for SharedFile<'_, '_, '_> {
+    fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+        self.fs.0.borrow_mut().write(self.path, offset, bytes)
+    }
+
+    fn set_len(&mut self, len: u64) -> Result<(), Errno> {
+        self.fs.0.borrow_mut().set_len(self.path, len)
+    }
+}
+
+impl AttributeStore for Shared<'_, '_> {
+    fn attr_keys(&self, path: &str) -> Result<Vec<String>, Errno> {
+        self.0.borrow_mut().attr_list(path)
+    }
+
+    fn attr_value(&self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+        self.0.borrow_mut().attr_get(path, key)
+    }
+
+    fn attr_set(&self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+        self.0.borrow_mut().attr_set(path, key, value)
     }
 }

@@ -55,6 +55,16 @@ impl<F: FilesystemRead> FilesystemRead for Counting<F> {
         self.inner.node_info(node)
     }
 
+    fn seek_region(
+        &mut self,
+        file: NodeId,
+        offset: u64,
+        region: tairix_abi::SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        self.calls += 1;
+        self.inner.seek_region(file, offset, region)
+    }
+
     fn read_link(&mut self, node: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
         self.calls += 1;
         self.inner.read_link(node, out)
@@ -119,6 +129,17 @@ impl<F: FilesystemWrite> FilesystemWrite for Counting<F> {
         self.inner.truncate(dir, name, size)
     }
 
+    fn punch(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        len: u64,
+    ) -> Result<(), DriverError> {
+        self.calls += 1;
+        self.inner.punch(dir, name, offset, len)
+    }
+
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         self.calls += 1;
         self.inner.remove(dir, name)
@@ -163,6 +184,16 @@ impl<F: FilesystemSecurity> FilesystemSecurity for Counting<F> {
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
         self.calls += 1;
         self.inner.set_security(node, security)
+    }
+
+    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
+        self.calls += 1;
+        self.inner.stamp_owner(node, uid, gid)
+    }
+
+    fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
+        self.calls += 1;
+        self.inner.records_ownership(node)
     }
 }
 

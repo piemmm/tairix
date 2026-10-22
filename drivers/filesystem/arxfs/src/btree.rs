@@ -49,7 +49,7 @@ use alloc::vec::Vec;
 use tairix_abi::DriverError;
 
 use crate::header::{BlockType, HEADER_LEN};
-use crate::{as_u32, rd_u32, rd_u64, wr_u32, Block, ARXFS, MAX_BLOCK_SIZE};
+use crate::{as_u32, rd_u32, rd_u64, wr_u32, Block, ARXFS, MAX_BLOCK_LEN};
 
 /// Node payload byte offsets, relative to the start of the block buffer
 /// (the node payload begins right after the [`HEADER_LEN`] block header).
@@ -100,11 +100,7 @@ impl TreeSpec {
 /// mutation degrades to an error rather than aborting the system on a refused
 /// allocation.
 fn node_buf(len: usize) -> Result<Vec<u8>, DriverError> {
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(len)
-        .map_err(|_| DriverError::NoSpace)?;
-    buf.resize(len, 0);
-    Ok(buf)
+    tairix_util::fallible::filled(len, 0).ok_or(DriverError::NoSpace)
 }
 
 fn node_count(buf: &[u8]) -> usize {
@@ -566,7 +562,7 @@ impl<B: Block> ARXFS<B> {
         if root == 0 {
             return Ok(None);
         }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let count = self.btree_descend(root, key, spec, &mut buf, None)?;
         let stride = spec.leaf_stride();
         for i in 0..count {
@@ -590,7 +586,7 @@ impl<B: Block> ARXFS<B> {
         if root == 0 {
             return Ok(None);
         }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let count = self.btree_descend(root, key, spec, &mut buf, None)?;
         let stride = spec.leaf_stride();
         let mut found: Option<(u64, Vec<u8>)> = None;
@@ -623,7 +619,7 @@ impl<B: Block> ARXFS<B> {
         if root == 0 {
             return Ok(None);
         }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut buf = [0u8; MAX_BLOCK_LEN];
         let mut trace = Descent::new();
         let count = self.btree_descend(root, key, spec, &mut buf, Some(&mut trace))?;
         if let Some(found) = leaf_ceil(&buf, count, key, spec) {

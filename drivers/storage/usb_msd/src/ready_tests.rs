@@ -185,3 +185,18 @@ fn a_unit_ready_to_a_test_but_not_servable_is_given_up_at_its_budget() {
     assert_eq!(end, NotReady::Unusable(failed));
     assert_eq!(tests, 4, "tested at 0, 1, 2 and 3 seconds");
 }
+
+#[test]
+fn a_held_request_ends_its_wait_when_the_medium_changes_under_it() {
+    // A published unit's request, held while the unit comes ready.
+    let mut held = ReadyWait::refused(0, 60 * SECOND, false);
+    assert_eq!(held.answer(Readiness::Attention, SECOND), None);
+    assert_eq!(
+        held.answer(Readiness::MediumChanged, SECOND),
+        Some(WaitEnd::Changed)
+    );
+    // A unit coming up has published nothing: the attention is retested.
+    let mut arriving = ReadyWait::new(0, 60 * SECOND);
+    assert_eq!(arriving.answer(Readiness::MediumChanged, 0), None);
+    assert_eq!(arriving.answer(Readiness::Ready, 0), Some(WaitEnd::Ready));
+}

@@ -39,10 +39,14 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags};
+    use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion};
     use tairix_abi::{Errno, FileKind};
-    use tairix_cp::{parse, run, Entry, EntryKind, FileSystem, Follow, Probe, Prompt, USAGE};
+    use tairix_cp::{
+        parse, run, AttributeStore, CpError, Entry, EntryKind, FileSystem, Follow, PathFiles,
+        Probe, Prompt, USAGE,
+    };
     use tairix_help::BundleHelp;
+    use tairix_rt::copy::{OpenFiles, RtAttributes};
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_rt::File;
 
@@ -103,16 +107,14 @@ mod program {
     /// mutation under the snapshotted directory drops the snapshot, so a
     /// stale listing is never served.
     struct RtFileSystem {
-        reader: RefCell<Option<(String, File)>>,
-        writer: RefCell<Option<(String, File)>>,
+        files: OpenFiles,
         listing: RefCell<Option<(String, Vec<Entry>)>>,
     }
 
     impl RtFileSystem {
         fn new() -> Self {
             Self {
-                reader: RefCell::new(None),
-                writer: RefCell::new(None),
+                files: OpenFiles::default(),
                 listing: RefCell::new(None),
             }
         }
@@ -121,14 +123,7 @@ mod program {
         /// open handles on that exact path and the directory snapshot of
         /// its parent (or of the path itself, for a removed directory).
         fn forget(&self, path: &str) {
-            let mut reader = self.reader.borrow_mut();
-            if matches!(&*reader, Some((name, _)) if name == path) {
-                *reader = None;
-            }
-            let mut writer = self.writer.borrow_mut();
-            if matches!(&*writer, Some((name, _)) if name == path) {
-                *writer = None;
-            }
+            self.files.forget(path);
             let mut listing = self.listing.borrow_mut();
             if matches!(&*listing, Some((dir, _)) if dir.trim_end_matches('/') == parent_of(path)
                 || dir.trim_end_matches('/') == path.trim_end_matches('/'))
@@ -138,12 +133,54 @@ mod program {
         }
     }
 
+    /// The extended attributes, through the shared runtime-backed store.
+    impl AttributeStore for RtFileSystem {
+        fn attr_keys(&self, path: &str) -> Result<Vec<String>, Errno> {
+            RtAttributes.attr_keys(path)
+        }
+
+        fn attr_value(&self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+            RtAttributes.attr_value(path, key)
+        }
+
+        fn attr_set(&self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+            RtAttributes.attr_set(path, key, value)
+        }
+    }
+
     /// Map a reported [`FileKind`] onto the distinction `cp` acts on.
     fn entry_kind(kind: FileKind) -> EntryKind {
         match kind {
             FileKind::Directory => EntryKind::Directory,
             FileKind::Symlink => EntryKind::Symlink,
             FileKind::Regular => EntryKind::File,
+        }
+    }
+
+    impl PathFiles for RtFileSystem {
+        fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+            self.files.read(path, offset, buf)
+        }
+
+        fn size(&self, path: &str) -> Result<u64, Errno> {
+            self.files.size(path)
+        }
+
+        fn next_region(
+            &self,
+            path: &str,
+            offset: u64,
+            region: SeekRegion,
+        ) -> Result<Option<u64>, Errno> {
+            self.files.next_region(path, offset, region)
+        }
+
+        fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
+            self.files.write(path, offset, bytes)
+        }
+
+        fn set_len(&self, path: &str, len: u64) -> Result<(), Errno> {
+            self.files.set_len(path, len)
         }
     }
 
@@ -205,22 +242,6 @@ mod program {
             Ok(())
         }
 
-        fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-            let mut open = self.reader.borrow_mut();
-            let cached = matches!(&*open, Some((name, _)) if name == path);
-            if !cached {
-                let file =
-                    File::open(path.as_bytes(), OpenFlags::READ).map_err(Errno::from_syscall)?;
-                *open = Some((String::from(path), file));
-            }
-            match &*open {
-                Some((_, file)) => file.read_at(offset, buf).map_err(Errno::from_syscall),
-                // Unreachable by construction (the handle was just
-                // installed), but fail closed rather than panic.
-                None => Err(Errno::NotFound),
-            }
-        }
-
         fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno> {
             let mut listing = self.listing.borrow_mut();
             let cached = matches!(&*listing, Some((dir, _)) if dir == path);
@@ -251,35 +272,6 @@ mod program {
             let file = tairix_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
             drop(file);
             self.forget(path);
-            Ok(())
-        }
-
-        fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-            let mut open = self.writer.borrow_mut();
-            let cached = matches!(&*open, Some((name, _)) if name == path);
-            if !cached {
-                let file =
-                    File::open(path.as_bytes(), OpenFlags::WRITE).map_err(Errno::from_syscall)?;
-                *open = Some((String::from(path), file));
-            }
-            let Some((_, file)) = &*open else {
-                // Unreachable by construction (the handle was just
-                // installed), but fail closed rather than panic.
-                return Err(Errno::NotFound);
-            };
-            // The kernel may accept a short write; every byte is the seam's
-            // contract, so loop until the chunk is on disk or refused.
-            let mut written = 0usize;
-            while written < bytes.len() {
-                let n = file
-                    .write_at(offset + written as u64, &bytes[written..])
-                    .map_err(Errno::from_syscall)?;
-                if n == 0 {
-                    // A zero-byte accept would spin forever; fail closed.
-                    return Err(Errno::LengthOutOfRange);
-                }
-                written += n;
-            }
             Ok(())
         }
 
@@ -344,9 +336,16 @@ mod program {
             report_usage();
             return 2;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err @ CpError::Unsupported(_)) => {
+                write_stderr_line(&format!("cp: {err}"));
+                return 2;
+            }
+            Err(_) => {
+                report_usage();
+                return 2;
+            }
         };
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
@@ -358,6 +357,7 @@ mod program {
             &RtPrompt,
             &BundleHelp::new("cp"),
             &Stdout,
+            &Stderr,
         ) {
             Ok(()) => 0,
             Err(err) => {

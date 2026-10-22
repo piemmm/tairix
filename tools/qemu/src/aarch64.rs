@@ -218,6 +218,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // what the emulated card received to a host file the vertical then checks
     // sample for sample.
     argv.extend(crate::audio_wav_args(spec, "virtio-sound-device"));
+    argv.extend(crate::optical_disc_args(spec));
 
     // Attach a virtio-mmio crypto accelerator behind QEMU's builtin
     // cryptodev backend, for a vertical that drives a real offload engine.
@@ -265,6 +266,7 @@ mod tests {
             interrupts: crate::InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            optical_disc: None,
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
@@ -284,6 +286,35 @@ mod tests {
         argv.iter()
             .map(|s| s.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn a_usb_optical_drive_holds_its_disc_read_only_behind_its_own_controller() {
+        let spec = fixture_spec(1).with_optical_disc("/tmp/riscos.iso");
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let controller = argv
+            .iter()
+            .position(|a| a == "qemu-xhci,id=opticalhc")
+            .expect("a controller of its own");
+        assert_eq!(argv[controller - 1], "-device");
+        assert_eq!(argv[controller + 1], "-drive");
+        assert_eq!(
+            argv[controller + 2],
+            "if=none,id=optical0,format=raw,media=cdrom,readonly=on,file=/tmp/riscos.iso"
+        );
+        assert_eq!(
+            argv[controller + 4],
+            "usb-bot,bus=opticalhc.0,id=opticalbot"
+        );
+        assert_eq!(
+            argv[controller + 6],
+            "scsi-cd,bus=opticalbot.0,drive=optical0"
+        );
+        let bare = render(&build_argv(&fixture_spec(1), Path::new("/tmp/k.elf")));
+        assert!(
+            !bare.iter().any(|a| a.contains("optical")),
+            "no disc, no drive"
+        );
     }
 
     #[test]

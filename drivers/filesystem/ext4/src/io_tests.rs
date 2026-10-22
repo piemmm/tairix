@@ -4,6 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_writeback::RUN_BYTES;
 
 use crate::tests::{SizedBlock, ONE_GROUP_SECTORS, TEST_UUID};
 
@@ -74,25 +75,15 @@ fn whole_blocks_move_in_requests_of_at_most_one_coalesced_transfer() {
     dev.set_fs_block(4096);
     let mut buf = vec![0u8; 200 * 1024];
     dev.read_blocks(3, &mut buf).expect("read");
-    assert_eq!(&buf[..], &dev.block.data[3 * 4096..3 * 4096 + buf.len()]);
-    assert!(dev.block.reads.iter().all(|&len| len <= RUN_BYTES));
-    assert_eq!(dev.block.reads.len(), (buf.len()).div_ceil(RUN_BYTES));
+    let disk = dev.bytes.device();
+    assert_eq!(&buf[..], &disk.data[3 * 4096..3 * 4096 + buf.len()]);
+    assert!(disk.reads.iter().all(|&len| len <= RUN_BYTES));
+    assert_eq!(disk.reads.len(), buf.len().div_ceil(RUN_BYTES));
     dev.write_blocks(10, &buf).expect("write");
-    assert_eq!(dev.block.writes.len(), buf.len().div_ceil(RUN_BYTES));
-}
-
-#[test]
-fn a_byte_span_inside_sectors_keeps_its_neighbours() {
-    let mut dev = Device::new(Recording::new(64 * 1024, 4096)).expect("device");
-    let before = dev.block.data.clone();
-    let patch = [0xEEu8; 5000];
-    dev.write_bytes(1000, &patch).expect("write");
-    assert_eq!(&dev.block.data[1000..6000], &patch[..]);
-    assert_eq!(&dev.block.data[..1000], &before[..1000], "before the span");
-    assert_eq!(&dev.block.data[6000..], &before[6000..], "after it");
-    let mut back = [0u8; 5000];
-    dev.read_bytes(1000, &mut back).expect("read");
-    assert_eq!(back, patch);
+    assert_eq!(
+        dev.bytes.device().writes.len(),
+        buf.len().div_ceil(RUN_BYTES)
+    );
 }
 
 #[test]
@@ -101,41 +92,35 @@ fn a_filesystem_block_smaller_than_a_sector_is_read_through_its_sector() {
     dev.set_fs_block(1024);
     let mut block = [0u8; 1024];
     dev.read_blocks(5, &mut block).expect("read");
-    assert_eq!(&block[..], &dev.block.data[5 * 1024..6 * 1024]);
+    assert_eq!(&block[..], &dev.bytes.device().data[5 * 1024..6 * 1024]);
     let fresh = [7u8; 1024];
     dev.write_blocks(5, &fresh).expect("write");
-    assert_eq!(&dev.block.data[5 * 1024..6 * 1024], &fresh[..]);
+    let data = &dev.bytes.device().data;
+    assert_eq!(&data[5 * 1024..6 * 1024], &fresh[..]);
     assert_eq!(
-        dev.block.data[4 * 1024],
+        data[4 * 1024],
         (4 * 1024 % 251) as u8,
         "its sector-mate kept"
     );
 }
 
 #[test]
-fn a_span_past_the_end_of_the_device_is_refused() {
+fn a_block_whose_place_overflows_or_leaves_the_device_is_refused() {
     let mut dev = Device::new(Recording::new(8192, 512)).expect("device");
-    let mut buf = [0u8; 512];
+    dev.set_fs_block(4096);
+    let mut buf = [0u8; 4096];
     assert_eq!(
-        dev.read_bytes(8192 - 100, &mut buf),
-        Err(DriverError::DeviceFault)
+        dev.read_blocks(2, &mut buf),
+        Err(DriverError::LengthOutOfRange)
     );
     assert_eq!(
-        dev.write_bytes(u64::MAX - 10, &buf),
+        dev.write_blocks(u64::MAX / 1024, &buf),
         Err(DriverError::DeviceFault)
     );
-    assert!(dev.block.writes.is_empty(), "nothing reached the device");
-}
-
-#[test]
-fn a_device_of_unusable_geometry_is_refused() {
-    for sector in [768, 8192] {
-        assert_eq!(
-            Device::new(Recording::new(1 << 16, sector)).err(),
-            Some(DriverError::DeviceFault),
-            "{sector}-byte sectors"
-        );
-    }
+    assert!(
+        dev.bytes.device().writes.is_empty(),
+        "nothing reached the device"
+    );
 }
 
 #[test]

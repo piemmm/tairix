@@ -19,8 +19,34 @@ use alloc::vec::Vec;
 
 use tairix_abi::blkio::{BlkStatus, FaultDomainState};
 use tairix_abi::driver::DriverEnding;
-use tairix_abi::hwtree::{ancestor_imposed_status_by, HwResourceKind};
+use tairix_abi::hwtree::{
+    ancestor_imposed_status_by, HwResource, HwResourceKind, HW_NODE_MAX_RESOURCES,
+};
 use tairix_abi::{Errno, HwNode};
+use tairix_inline::ArrayVec;
+
+/// The block-service endpoints one node declares: never more than a node has
+/// resources, so collecting them allocates nothing and cannot fail for want
+/// of memory — a surprise removal always proceeds.
+pub type NodeEndpoints = ArrayVec<u64, HW_NODE_MAX_RESOURCES>;
+
+/// The block-service endpoint base ids `node` declares.
+#[must_use]
+pub fn node_endpoints_of(node: &HwNode) -> NodeEndpoints {
+    let mut bases = NodeEndpoints::new();
+    let declared = node
+        .resources()
+        .iter()
+        .filter(|resource| resource.kind() == Some(HwResourceKind::Endpoint))
+        .map(HwResource::base);
+    for base in declared {
+        // Never full: it holds as many endpoints as a node holds resources.
+        if bases.try_push(base).is_err() {
+            break;
+        }
+    }
+    bases
+}
 
 /// Whether a hardware-tree node is still in the live tree.
 ///
@@ -193,8 +219,8 @@ pub trait HwTreeSource: HwNodeLiveness {
     ///
     /// Only [`tairix_abi::hwtree::HwResourceKind::Endpoint`] resources are
     /// returned, by their [`base`](tairix_abi::hwtree::HwResource::base) id;
-    /// a node with no endpoint resource yields an empty vector (it can never
-    /// be busy).
+    /// a node with no endpoint resource yields an empty list (it can never be
+    /// busy).
     ///
     /// # Errors
     ///
@@ -203,7 +229,7 @@ pub trait HwTreeSource: HwNodeLiveness {
     /// * [`Errno::NotFound`] if no live node has id `node_id`, or its parent
     ///   is not `parent_id` (the caller does not own it) — fail closed,
     ///   never a hint that distinguishes the two.
-    fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<Vec<u64>, Errno>;
+    fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<NodeEndpoints, Errno>;
 
     /// Record the fault-domain `health` of the live node `node_id` and bump
     /// the generation so every parked `hw_tree_wait` caller (the device
@@ -354,7 +380,7 @@ impl HwTreeSource for NullHwTreeSource {
         Err(Errno::NotImplemented)
     }
 
-    fn node_endpoints(&self, _parent_id: u32, _node_id: u32) -> Result<Vec<u64>, Errno> {
+    fn node_endpoints(&self, _parent_id: u32, _node_id: u32) -> Result<NodeEndpoints, Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -387,8 +413,27 @@ pub static NULL_HW_TREE: NullHwTreeSource = NullHwTreeSource;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tairix_abi::hwtree::{DmaCoherence, HwResource};
+    use tairix_abi::hwtree::DmaCoherence;
     use tairix_abi::HwDeviceClass;
+
+    #[test]
+    fn a_nodes_endpoints_are_collected_whatever_the_heap_can_give() {
+        let mut node = HwNode::new(7, 1, HwDeviceClass::Storage);
+        node.push_resource(HwResource::shared(9)).expect("room");
+        for base in 1..HW_NODE_MAX_RESOURCES as u64 {
+            node.push_resource(HwResource::endpoint(base))
+                .expect("room");
+        }
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let endpoints = node_endpoints_of(&node);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(
+            endpoints.as_slice(),
+            (1..HW_NODE_MAX_RESOURCES as u64)
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+    }
 
     /// A tree of fixed nodes that answers only the whole-tree visit.
     struct Fixed(Vec<HwNode>);
@@ -412,7 +457,7 @@ mod tests {
         fn remove(&self, _: u32, _: u32) -> Result<Vec<u32>, Errno> {
             Err(Errno::NotImplemented)
         }
-        fn node_endpoints(&self, _: u32, _: u32) -> Result<Vec<u64>, Errno> {
+        fn node_endpoints(&self, _: u32, _: u32) -> Result<NodeEndpoints, Errno> {
             Err(Errno::NotImplemented)
         }
         fn set_health(&self, _: u32, _: FaultDomainState) -> Result<(), Errno> {

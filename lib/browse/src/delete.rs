@@ -29,7 +29,7 @@
 //! models *how* the removal is carried out: the depth-first traversal that
 //! removes a directory's contents before the directory itself. It is the
 //! delete-side analogue of the paste-side
-//! [`CopyCursor`](crate::execute::CopyCursor) — a pure, host-provable, driven
+//! [`CopyWalk`](crate::execute::CopyWalk) — a pure, host-provable, driven
 //! cursor that touches no filesystem: the `files.app` `Run` binary reads each
 //! directory (`fs_readdir`) and unlinks each node (`fs_unlink`) with its own
 //! capability-checked syscalls under the user's own identity, feeding the

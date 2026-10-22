@@ -29,8 +29,8 @@ use crate::delete::{DeleteAction, DeleteError, DeletePlan, DeleteWalk, MAX_DELET
 use crate::entry::Entry;
 use crate::error::BrowseError;
 use crate::execute::{
-    paste_strategy, CopyAction, CopyCursor, CopyError, CopyKind, CopyWalk, CopyWalkError,
-    PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
+    paste_strategy, CopyAction, CopyKind, CopyWalk, CopyWalkError, PasteStrategy, VolumeId,
+    MAX_COPY_DEPTH,
 };
 use crate::media::MediaType;
 use crate::places::{PlaceKind, Places, Volume, VolumeFacts};
@@ -5994,99 +5994,6 @@ fn a_cut_across_volumes_copies_then_deletes() {
     );
 }
 
-#[test]
-fn an_empty_source_needs_no_chunk_and_is_complete() {
-    let cursor = CopyCursor::new(0);
-    assert!(cursor.is_complete());
-    assert_eq!(cursor.remaining(), 0);
-    assert_eq!(cursor.next_chunk(), None);
-}
-
-#[test]
-fn a_small_source_is_one_short_chunk() {
-    let cursor = CopyCursor::new(10);
-    let chunk = cursor.next_chunk().expect("a chunk");
-    assert_eq!(chunk.offset(), 0);
-    assert_eq!(chunk.len(), 10);
-    assert!(!chunk.is_empty());
-}
-
-#[test]
-fn a_large_source_is_walked_in_bounded_chunks_to_completion() {
-    let total = COPY_CHUNK_LEN * 2 + 5;
-    let mut cursor = CopyCursor::new(total);
-
-    let first = cursor.next_chunk().expect("first");
-    assert_eq!(first.offset(), 0);
-    assert_eq!(first.len(), COPY_CHUNK_LEN);
-    cursor.advance(first.len()).expect("advance first");
-
-    let second = cursor.next_chunk().expect("second");
-    assert_eq!(second.offset(), COPY_CHUNK_LEN);
-    assert_eq!(second.len(), COPY_CHUNK_LEN);
-    cursor.advance(second.len()).expect("advance second");
-
-    let third = cursor.next_chunk().expect("third");
-    assert_eq!(third.offset(), COPY_CHUNK_LEN * 2);
-    assert_eq!(third.len(), 5);
-    cursor.advance(third.len()).expect("advance third");
-
-    assert!(cursor.is_complete());
-    assert_eq!(cursor.copied(), total);
-    assert_eq!(cursor.next_chunk(), None);
-}
-
-#[test]
-fn a_short_transfer_advances_only_by_what_moved() {
-    let mut cursor = CopyCursor::new(10);
-    // The read carried 4 of the 10 bytes it was asked for.
-    cursor.advance(4).expect("short advance");
-    assert_eq!(cursor.copied(), 4);
-    let next = cursor.next_chunk().expect("remainder");
-    assert_eq!(next.offset(), 4);
-    assert_eq!(next.len(), 6);
-    cursor.advance(6).expect("finish");
-    assert!(cursor.is_complete());
-}
-
-#[test]
-fn a_cursor_resumes_from_a_persisted_offset() {
-    let mut cursor = CopyCursor::resume(100, 40).expect("resume");
-    assert_eq!(cursor.copied(), 40);
-    assert_eq!(cursor.remaining(), 60);
-    let chunk = cursor.next_chunk().expect("chunk");
-    assert_eq!(chunk.offset(), 40);
-    assert_eq!(chunk.len(), 60);
-    cursor.advance(60).expect("finish");
-    assert!(cursor.is_complete());
-}
-
-#[test]
-fn resuming_past_the_total_is_overrun() {
-    assert_eq!(CopyCursor::resume(10, 11), Err(CopyError::Overrun));
-    // Resuming exactly at the end is a complete, valid cursor.
-    let done = CopyCursor::resume(10, 10).expect("at end");
-    assert!(done.is_complete());
-    assert_eq!(done.next_chunk(), None);
-}
-
-#[test]
-fn advancing_past_the_source_length_fails_closed() {
-    let mut cursor = CopyCursor::new(10);
-    assert_eq!(cursor.advance(11), Err(CopyError::Overrun));
-    // The cursor is left untouched by the refused advance.
-    assert_eq!(cursor.copied(), 0);
-    // A valid advance to the exact end still works afterwards.
-    cursor.advance(10).expect("advance to end");
-    assert!(cursor.is_complete());
-    assert_eq!(cursor.advance(1), Err(CopyError::Overrun));
-}
-
-#[test]
-fn copy_error_message_is_non_empty() {
-    assert!(!CopyError::Overrun.to_string().is_empty());
-}
-
 // ---- FM7b: the recursive-copy execution model (`CopyWalk`) ----
 
 /// Drive a [`CopyWalk`] to completion against an in-memory *source* tree keyed
@@ -6107,7 +6014,7 @@ fn drive_copy(
     for _ in 0..10_000 {
         match walk.next_action() {
             None => return order,
-            Some(CopyAction::MakeDir { dest }) => {
+            Some(CopyAction::MakeDir { dest, .. }) => {
                 order.push(key(dest));
                 walk.created().expect("created in step");
             }
@@ -6161,9 +6068,11 @@ fn copy_walk_makes_the_destination_directory_before_listing_an_empty_one() {
     )])
     .expect("walk");
 
-    // The destination directory is created first, before its contents are read.
+    // The destination directory is created first, before its contents are
+    // read, naming the source whose attributes it takes.
     match walk.next_action() {
-        Some(CopyAction::MakeDir { dest }) => {
+        Some(CopyAction::MakeDir { source, dest }) => {
+            assert_eq!(source, comps(&["Users", "empty"]).as_slice());
             assert_eq!(dest, comps(&["Storage", "empty"]).as_slice());
         }
         other => panic!("expected a MakeDir, got {other:?}"),

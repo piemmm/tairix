@@ -104,6 +104,9 @@ successo. Un errore a metà copia rimuove la destinazione scritta a
 metà e mostra l'errore del kernel; nulla si spaccia mai per una copia
 completa. Ogni operazione è autorizzata dal kernel — un rifiuto
 compare tale e quale sulla riga dei messaggi senza che nulla cambi.
+Una copia conserva i buchi di un file e i suoi attributi estesi; ogni
+attributo che la destinazione non può conservare viene indicato nella
+riga dei messaggi al termine dell'operazione.
 
 La riga di stato mostra il percorso elencato, il numero di voci visibili,
 l'ordinamento, i byte liberi/totali del volume sottostante (quando il

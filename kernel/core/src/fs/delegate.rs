@@ -33,8 +33,8 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverError;
 use tairix_abi::fs::{
-    OpenFlags, RealpathMode, RenameFlags, FS_GROUP_EXEC_BIT, FS_OWNER_UNCHANGED, FS_SETGID_BIT,
-    FS_SETUID_BIT, FS_SYMLINK_MAX,
+    OpenFlags, RealpathMode, RenameFlags, SeekRegion, FS_GROUP_EXEC_BIT, FS_OWNER_UNCHANGED,
+    FS_SETGID_BIT, FS_SETUID_BIT, FS_SYMLINK_MAX,
 };
 use tairix_abi::CapabilityId;
 use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
@@ -42,7 +42,7 @@ use tairix_kernel_sec::{GroupId, UserId};
 use zeroize::Zeroize;
 
 use super::listing::{DirPosition, ListEnd};
-use super::path::{parse_link_target, TargetStep, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
+use super::path::{parse_link_target, TargetStep, MAX_PATH_COMPONENTS};
 use super::perm::{Access, Credentials, Metadata};
 use super::{BoundedReadError, VfsError};
 
@@ -175,11 +175,14 @@ impl DelegatedRef<'_> {
     }
 }
 
-/// The name a driver listed, if it is a single valid component.
+/// The name a driver listed, if it is a component a path could name: a
+/// driver translates what its format records into one, so a `..` or a `/`
+/// reaching here is a driver's defect, refused before any caller joins it
+/// into a path.
 fn component_name(name: &[u8]) -> Option<&str> {
     core::str::from_utf8(name)
         .ok()
-        .filter(|name| !name.is_empty() && name.len() <= MAX_COMPONENT_LEN)
+        .filter(|name| super::path::is_component(name))
 }
 
 /// A name is decrypted user data: wiped before its allocation is released, as
@@ -696,6 +699,8 @@ impl<R: FilesystemRead + FilesystemSecurity + FilesystemAttrs + FilesystemWrite 
     ///   bounds syscall inputs first).
     /// * [`VfsError::NoSpace`] at the per-inode attribute bounds or a full
     ///   volume.
+    /// * [`VfsError::NotSupported`] if the format has nowhere to keep the
+    ///   key's namespace.
     /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`],
     ///   [`VfsError::PermissionDenied`], or [`VfsError::Io`].
     pub fn set_attr(
@@ -775,9 +780,12 @@ fn parse_unprivileged_key(key: &[u8]) -> Result<AttrKey, VfsError> {
 /// path-resolution mapping ([`map_driver_error`]) would misreport — a
 /// too-small *value* buffer is the caller's to grow, not an invalid path,
 /// and an exhausted attribute bound is a space refusal — so they map here.
+/// A namespace the format has nowhere to keep is what the format cannot do,
+/// which a copy reports as not carried rather than as a failed device.
 const fn map_attr_driver_error(error: DriverError) -> VfsError {
     match error {
         DriverError::NotFound => VfsError::NotFound,
+        DriverError::Unsupported => VfsError::NotSupported,
         DriverError::BufferTooSmall => VfsError::BufferTooSmall,
         DriverError::NoSpace => VfsError::NoSpace,
         DriverError::OutOfMemory => VfsError::OutOfMemory,
@@ -1270,6 +1278,32 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         self.fs.read_at(node, offset, buf).map_err(map_driver_error)
     }
 
+    /// Where the next region of `region`'s kind begins at or after `offset`
+    /// of the regular file at `components`, or `None` when none does.
+    ///
+    /// Needs read permission on the file: where its holes lie is part of
+    /// what reading it reveals.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::IsADirectory`] for a directory, else as [`Self::read`].
+    pub fn seek_region(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, VfsError> {
+        let (node, info, meta) = self.resolve(cred, components)?;
+        if info.kind == NodeKind::Directory {
+            return Err(VfsError::IsADirectory);
+        }
+        meta.authorize(cred, Access::Read)?;
+        self.fs
+            .seek_region(node, offset, region)
+            .map_err(map_driver_error)
+    }
+
     /// Append up to `len` of the leading bytes of the regular file at
     /// `components` to `buf`, resolving the path once.
     ///
@@ -1708,6 +1742,27 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     ) -> Result<(), VfsError> {
         let place = self.writable_file(cred, components)?;
         self.mutate(|fs| fs.truncate(place.parent, place.name.as_bytes(), size))
+            .map_err(map_driver_error)
+    }
+
+    /// Punch a hole of `len` bytes at `offset` in the regular file at
+    /// `components`: the range reads as zeros and its storage is released.
+    ///
+    /// Gated as a write of the same bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::NotSupported`] where the format keeps no holes, else as
+    /// [`Self::truncate`].
+    pub fn punch(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        offset: u64,
+        len: u64,
+    ) -> Result<(), VfsError> {
+        let place = self.writable_file(cred, components)?;
+        self.mutate(|fs| fs.punch(place.parent, place.name.as_bytes(), offset, len))
             .map_err(map_driver_error)
     }
 

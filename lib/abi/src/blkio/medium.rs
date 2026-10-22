@@ -1,7 +1,7 @@
 //! What a block device is (`docs/src/drivers/block.md`): the bus it is
-//! reached over and, as separate facts, whether its medium rotates and
-//! whether the medium can leave the unit, each with the evidence that
-//! established it.
+//! reached over and, as separate facts, whether its medium rotates, whether
+//! the medium can leave the unit, each with the evidence that established it,
+//! and what form the medium takes where the unit names one.
 //!
 //! A fact nothing established is `Unknown`, and each consumer reads it in its
 //! own conservative direction: a time budget as the slowest medium
@@ -38,7 +38,7 @@ const ROTATION_OFF: usize = 1;
 const ROTATION_EVIDENCE_OFF: usize = 2;
 const REMOVABILITY_OFF: usize = 3;
 const REMOVABILITY_EVIDENCE_OFF: usize = 4;
-const RESERVED_OFF: usize = 5;
+const FORM_OFF: usize = 5;
 const RPM_OFF: usize = 6;
 
 /// The lowest and highest nominal rates the shared MEDIUM ROTATION RATE
@@ -84,6 +84,38 @@ impl BlkTransport {
             2 => Some(Self::Usb),
             3 => Some(Self::Sd),
             4 => Some(Self::Virtual),
+            _ => None,
+        }
+    }
+}
+
+/// What form a unit's medium takes, where the unit names one.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BlkForm {
+    /// The unit names none: a disk, a stick, a card.
+    Unspecified = 0,
+    /// An optical disc: the unit is a multimedia drive (INQUIRY peripheral
+    /// device type 05h, MMC-6).
+    OpticalDisc = 1,
+}
+
+impl BlkForm {
+    /// Every form, so the C view is generated from the ABI.
+    pub const ALL: [Self; 2] = [Self::Unspecified, Self::OpticalDisc];
+
+    /// The record byte for this form.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// The form a record byte names, or `None` for any other byte.
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Unspecified),
+            1 => Some(Self::OpticalDisc),
             _ => None,
         }
     }
@@ -287,6 +319,8 @@ pub struct BlkMedium {
     pub rotation: BlkRotation,
     /// Whether the medium can leave the unit.
     pub removability: BlkRemovability,
+    /// What form the medium takes.
+    pub form: BlkForm,
 }
 
 impl BlkMedium {
@@ -312,6 +346,7 @@ impl BlkMedium {
             transport,
             rotation,
             removability,
+            form: BlkForm::Unspecified,
         }
     }
 
@@ -328,6 +363,12 @@ impl BlkMedium {
             removability,
             ..self
         }
+    }
+
+    /// This medium with its form established as `form`.
+    #[must_use]
+    pub const fn with_form(self, form: BlkForm) -> Self {
+        Self { form, ..self }
     }
 
     /// The patience a device of this medium is served with.
@@ -393,6 +434,7 @@ impl BlkMedium {
         };
         record[REMOVABILITY_OFF] = kind;
         record[REMOVABILITY_EVIDENCE_OFF] = evidence;
+        record[FORM_OFF] = medium.form.as_u8();
         record
     }
 
@@ -407,9 +449,7 @@ impl BlkMedium {
     #[must_use]
     pub fn decode(record: &[u8; BLK_MEDIUM_LEN]) -> Option<Self> {
         let transport = BlkTransport::from_u8(record[TRANSPORT_OFF])?;
-        if record[RESERVED_OFF] != 0 {
-            return None;
-        }
+        let form = BlkForm::from_u8(record[FORM_OFF])?;
         let rpm = read_u16(record, RPM_OFF);
         let rotation = match (record[ROTATION_OFF], record[ROTATION_EVIDENCE_OFF], rpm) {
             (BLK_FACT_UNKNOWN, BLK_EVIDENCE_NONE, 0) => BlkRotation::Unknown,
@@ -436,6 +476,7 @@ impl BlkMedium {
             transport,
             rotation,
             removability,
+            form,
         })
     }
 
@@ -518,11 +559,14 @@ mod tests {
         for transport in BlkTransport::ALL {
             for rotation in rotations() {
                 for removability in removabilities() {
-                    every.push(BlkMedium {
-                        transport,
-                        rotation,
-                        removability,
-                    });
+                    for form in BlkForm::ALL {
+                        every.push(BlkMedium {
+                            transport,
+                            rotation,
+                            removability,
+                            form,
+                        });
+                    }
                 }
             }
         }
@@ -576,12 +620,14 @@ mod tests {
                     evidence: BlkRotationEvidence::Transport,
                 },
                 removability: BlkRemovability::Unknown,
+                form: BlkForm::Unspecified,
             },
             // A fixed medium an absent one established.
             BlkMedium {
                 transport: BlkTransport::Usb,
                 rotation: BlkRotation::Unknown,
                 removability: BlkRemovability::Fixed(BlkRemovabilityEvidence::MediumAbsent),
+                form: BlkForm::Unspecified,
             },
             // A rate below what the field can state.
             BlkMedium {
@@ -591,6 +637,7 @@ mod tests {
                     evidence: BlkRotationEvidence::AtaIdentify,
                 },
                 removability: BlkRemovability::Unknown,
+                form: BlkForm::OpticalDisc,
             },
         ];
         for medium in inconsistent {
@@ -600,9 +647,13 @@ mod tests {
                 "{medium:?}"
             );
         }
-        let mut reserved = valid;
-        reserved[RESERVED_OFF] = 1;
-        assert_eq!(BlkMedium::decode(&reserved), None);
+        let mut unknown_form = valid;
+        unknown_form[FORM_OFF] = 2;
+        assert_eq!(
+            BlkMedium::decode(&unknown_form),
+            None,
+            "a form this ABI does not define"
+        );
     }
 
     #[test]

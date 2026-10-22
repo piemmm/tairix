@@ -21,6 +21,7 @@ cui destinazione stanno su volumi diversi non può essere atomico:
 ripiega sulla copia della sorgente verso la destinazione seguita
 dalla rimozione della sorgente (le directory sono riprodotte
 ricorsivamente).
+Un file la cui copia non riesce viene rimosso, e la sorgente resta.
 
 Una destinazione esistente è sovrascritta per impostazione
 predefinita, saltata con `-n` e richiesta sul flusso di errore
@@ -29,6 +30,13 @@ senza errore; una risposta illeggibile non vale mai come consenso).
 Il primo fallimento ferma l'esecuzione prima di ogni operando
 successivo. `--` termina l'analisi delle opzioni: ogni argomento
 successivo è un percorso.
+
+La copia porta con sé i buchi e gli attributi estesi di ogni file — un tipo
+di file RISC OS, il tipo e il creatore di un Mac — ovunque la destinazione
+possa conservarli, e sposta un collegamento simbolico come un collegamento con
+la stessa destinazione, mai ciò a cui punta. Gli attributi che la destinazione
+non può conservare vengono segnalati in un unico avviso al termine
+dell'esecuzione, e in un record `omission` sul flusso di informazioni standard.
 
 ## OPTIONS
 

@@ -26,6 +26,7 @@ use tairix_abi::driver::filesystem::{
     VolumeStats,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
+use tairix_abi::SeekRegion;
 use tairix_fsmeta::{AttrFlags, AttrSet};
 
 /// Default owner uid baked into a freshly created node's security record.
@@ -83,6 +84,78 @@ pub struct RwMockFs {
     stats_probe: Option<Box<dyn Fn() + Send>>,
     /// The class the kernel set for the operations that follow.
     class: AllocationClass,
+    /// Nodes whose ownership the format stands in for rather than records,
+    /// as an ownerless format's are.
+    unrecorded: BTreeSet<usize>,
+    /// Each file's holes, parallel to `nodes`, so a seek reports real holes
+    /// and a wrapper that answers "all data" itself is caught.
+    holes: Vec<Holes>,
+}
+
+/// A file's holes as `start → end` byte ranges: disjoint, never adjacent.
+type Holes = BTreeMap<u64, u64>;
+
+/// Add `[start, end)` to `holes`, merging what it touches.
+fn hole_insert(holes: &mut Holes, mut start: u64, mut end: u64) {
+    if start >= end {
+        return;
+    }
+    let touching: Vec<(u64, u64)> = holes
+        .range(..=end)
+        .filter(|&(_, &e)| e >= start)
+        .map(|(&s, &e)| (s, e))
+        .collect();
+    for (s, e) in touching {
+        holes.remove(&s);
+        start = start.min(s);
+        end = end.max(e);
+    }
+    holes.insert(start, end);
+}
+
+/// Take `[start, end)` out of `holes`, splitting a hole it lands inside.
+fn hole_remove(holes: &mut Holes, start: u64, end: u64) {
+    if start >= end {
+        return;
+    }
+    let overlapping: Vec<(u64, u64)> = holes
+        .range(..end)
+        .filter(|&(_, &e)| e > start)
+        .map(|(&s, &e)| (s, e))
+        .collect();
+    for (s, e) in overlapping {
+        holes.remove(&s);
+        if s < start {
+            holes.insert(s, start);
+        }
+        if e > end {
+            holes.insert(end, e);
+        }
+    }
+}
+
+/// Where the next region of `region`'s kind begins at or after `offset` of a
+/// `size`-byte file with `holes`.
+fn hole_seek(holes: &Holes, offset: u64, size: u64, region: SeekRegion) -> Option<u64> {
+    if offset >= size {
+        return None;
+    }
+    let inside = holes
+        .range(..=offset)
+        .next_back()
+        .filter(|&(_, &e)| e > offset)
+        .map(|(_, &e)| e);
+    match (region, inside) {
+        // Already in a region of the kind asked for.
+        (SeekRegion::Hole, Some(_)) | (SeekRegion::Data, None) => Some(offset),
+        (SeekRegion::Hole, None) => Some(
+            holes
+                .range(offset..)
+                .next()
+                .map_or(size, |(&s, _)| s.min(size)),
+        ),
+        (SeekRegion::Data, Some(end)) => (end < size).then_some(end),
+    }
 }
 
 /// The one name this mock keeps for the system, as a volume keeps its
@@ -120,6 +193,16 @@ impl RwMockFs {
             node_identity: NodeIdentity::Stable,
             stats_probe: None,
             class: AllocationClass::Ordinary,
+            unrecorded: BTreeSet::new(),
+            holes: alloc::vec![Holes::new()],
+        }
+    }
+
+    /// Stand `node`'s record in for one the format does not keep, so
+    /// [`FilesystemSecurity::records_ownership`] answers `false` for it.
+    pub fn forget_ownership(&mut self, node: NodeId) {
+        if let Ok(idx) = Self::index(node) {
+            self.unrecorded.insert(idx);
         }
     }
 
@@ -177,12 +260,15 @@ impl RwMockFs {
         if let Some(index) = self.free.as_mut().and_then(BTreeSet::pop_first) {
             self.nodes[index] = node;
             self.sec[index] = sec;
+            self.unrecorded.remove(&index);
+            self.holes[index] = Holes::new();
             self.attrs[index] = AttrSet::new();
             self.nlink[index] = 1;
             return index;
         }
         self.nodes.push(node);
         self.sec.push(sec);
+        self.holes.push(Holes::new());
         self.attrs.push(AttrSet::new());
         self.nlink.push(1);
         self.nodes.len() - 1
@@ -350,6 +436,24 @@ impl FilesystemRead for RwMockFs {
             Some(i) => Ok(NodeId::from_raw(i as u64 + 1)),
             None => Err(DriverError::NotFound),
         }
+    }
+
+    fn seek_region(
+        &mut self,
+        file: NodeId,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        let idx = Self::index(file)?;
+        let RwNode::File(data) = self.nodes.get(idx).ok_or(DriverError::NotFound)? else {
+            return Err(DriverError::Unsupported);
+        };
+        Ok(hole_seek(
+            &self.holes[idx],
+            offset,
+            data.len() as u64,
+            region,
+        ))
     }
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
@@ -522,10 +626,15 @@ impl FilesystemWrite for RwMockFs {
         let end = start
             .checked_add(data.len())
             .ok_or(DriverError::LengthOutOfRange)?;
+        let old = body.len() as u64;
         if body.len() < end {
             body.resize(end, 0);
         }
         body[start..end].copy_from_slice(data);
+        // A gap a write leaves past the old end stores nothing, as a
+        // hole-keeping format's does.
+        hole_insert(&mut self.holes[child], old, offset);
+        hole_remove(&mut self.holes[child], offset, end as u64);
         Ok(data.len())
     }
 
@@ -535,7 +644,35 @@ impl FilesystemWrite for RwMockFs {
             return Err(DriverError::Unsupported);
         };
         let new = usize::try_from(size).map_err(|_| DriverError::LengthOutOfRange)?;
+        let old = body.len() as u64;
         body.resize(new, 0);
+        let holes = &mut self.holes[child];
+        if size > old {
+            hole_insert(holes, old, size);
+        } else {
+            hole_remove(holes, size, u64::MAX);
+        }
+        Ok(())
+    }
+
+    fn punch(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        len: u64,
+    ) -> Result<(), DriverError> {
+        let child = self.child_index(dir, name)?.ok_or(DriverError::NotFound)?;
+        let RwNode::File(body) = &mut self.nodes[child] else {
+            return Err(DriverError::Unsupported);
+        };
+        let end = offset.checked_add(len).ok_or(DriverError::OutOfRange)?;
+        let size = body.len() as u64;
+        let (start, end) = (offset.min(size), end.min(size));
+        let span = usize::try_from(start).map_err(|_| DriverError::LengthOutOfRange)?
+            ..usize::try_from(end).map_err(|_| DriverError::LengthOutOfRange)?;
+        body[span].fill(0);
+        hole_insert(&mut self.holes[child], start, end);
         Ok(())
     }
 
@@ -717,6 +854,12 @@ impl FilesystemSecurity for RwMockFs {
             }
             None => Err(DriverError::NotFound),
         }
+    }
+
+    fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
+        let idx = Self::index(node)?;
+        self.nodes.get(idx).ok_or(DriverError::NotFound)?;
+        Ok(!self.unrecorded.contains(&idx))
     }
 }
 

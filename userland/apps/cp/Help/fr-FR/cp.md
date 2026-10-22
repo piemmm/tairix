@@ -4,7 +4,7 @@ cp — copier des fichiers et des répertoires
 
 ## SYNOPSIS
 
-`cp [-finrRvT] [-t dir] [--] source... dest`
+`cp [-dfilnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -21,10 +21,21 @@ de destination existant est écrasé par défaut, ignoré avec `-n`, et
 fait l'objet d'une question sur la sortie d'erreur avec `-i` (une
 question déclinée ignore cette copie sans erreur ; une réponse
 illisible ne vaut jamais consentement).
+Une destination qui est le fichier source lui-même — le même nom, un
+autre nom de ce fichier ou un lien vers lui — est refusée comme étant
+le même fichier et reste telle qu'elle était.
 
 Le premier échec arrête l'exécution avant tout opérande ultérieur.
 `--` termine l'analyse des options : chaque argument ultérieur est un
 chemin.
+
+Chaque copie emporte les attributs étendus de la source — un type de
+fichier RISC OS, le type et le créateur d'un Mac — partout où la destination
+peut les conserver, et garde comme trous les trous d'un fichier creux. Les
+attributs qu'une destination ne peut pas conserver sont signalés par un seul
+avertissement à la fin de l'exécution, et par un enregistrement `omission`
+sur le flux d'information standard ; avec `--preserve=xattr`, une telle
+copie échoue à la place.
 
 ## OPTIONS
 
@@ -48,6 +59,14 @@ chemin.
 - `--preserve=links` — deux sources désignant un même nœud obtiennent
   deux noms à la destination plutôt que deux copies, de sorte que la
   copie ne double pas silencieusement le stockage.
+- `--preserve=xattr` — chaque attribut étendu doit être emporté : une copie
+  dont la destination ne peut en conserver un échoue en le nommant.
+  `--preserve=links,xattr` demande les deux.
+- `--no-preserve=xattr` — ne copier aucun attribut étendu. `mode`,
+  `ownership` et `timestamps` sont aussi acceptés, et déjà non préservés.
+- `--sparse=WHEN` — la manière de copier un fichier creux : `auto`, la
+  valeur par défaut, garde ses trous ; `always` laisse aussi non écrit chaque
+  bloc de zéros qu'il stocke ; `never` écrit chaque octet.
 - `-d` — `-P` et `--preserve=links` ensemble, comme dans l'outil GNU.
 - `-v, --verbose` — signaler chaque copie sous la forme
   `'source' -> 'dest'`.

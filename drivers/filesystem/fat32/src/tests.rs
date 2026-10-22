@@ -496,11 +496,12 @@ fn a_listing_reads_each_directory_block_once() {
     })
     .expect("valid volume");
     let sub = fs.lookup(fs.root(), b"sub").expect("subdir");
-    fs.block.read_at.clear();
+    fs.dev.device_mut().read_at.clear();
     assert_eq!(listed(&mut fs, sub, 0, &[]).expect("lists").len(), 2);
     let sub_block = u64::from(CLUSTER_SUB);
     let reads = fs
-        .block
+        .dev
+        .device()
         .read_at
         .iter()
         .filter(|at| **at == sub_block)
@@ -515,7 +516,7 @@ fn aliases<B: Block>(fs: &mut Fat32<B>, cluster: u32) -> Vec<[u8; 11]> {
     let mut out = Vec::new();
     while let Some(entry) = fs.next_entry(&mut walk).expect("walks") {
         let mut raw = [0u8; DIR_ENTRY_LEN];
-        fs.read_bytes(entry.short_offset, &mut raw).expect("reads");
+        fs.dev.read(entry.short_offset, &mut raw).expect("reads");
         out.push(raw[..11].try_into().expect("eleven bytes"));
     }
     out
@@ -538,12 +539,13 @@ fn an_alias_takes_the_lowest_free_tail_in_one_pass() {
             .expect("create");
     }
     fs.remove(root, b"Report 2.txt").expect("remove");
-    fs.block.read_at.clear();
+    fs.dev.device_mut().read_at.clear();
     fs.create(root, b"Report 4.txt", NodeKind::RegularFile)
         .expect("create");
     let root_block = u64::from(CLUSTER_ROOT);
     let reads = fs
-        .block
+        .dev
+        .device()
         .read_at
         .iter()
         .filter(|at| **at == root_block)
@@ -623,8 +625,8 @@ fn a_broken_parent_chain_fails_a_directory_move_closed() {
     let root = fs.root();
     let a = fs.create(root, b"A", NodeKind::Directory).expect("mkdir");
     let b = fs.create(root, b"B", NodeKind::Directory).expect("mkdir");
-    set_le16(&mut fs.block.data, dotdot(a) + 26, small(b));
-    set_le16(&mut fs.block.data, dotdot(b) + 26, small(a));
+    set_le16(&mut fs.dev.device_mut().data, dotdot(a) + 26, small(b));
+    set_le16(&mut fs.dev.device_mut().data, dotdot(b) + 26, small(a));
     assert_eq!(
         fs.rename(root, b"SUB", a, b"SUB"),
         Err(DriverError::DeviceFault)
@@ -634,7 +636,7 @@ fn a_broken_parent_chain_fails_a_directory_move_closed() {
     let mut fs = mount();
     let root = fs.root();
     let a = fs.create(root, b"A", NodeKind::Directory).expect("mkdir");
-    set_le16(&mut fs.block.data, dotdot(a) + 26, 0xFFFF);
+    set_le16(&mut fs.dev.device_mut().data, dotdot(a) + 26, 0xFFFF);
     assert_eq!(
         fs.rename(root, b"SUB", a, b"SUB"),
         Err(DriverError::DeviceFault)
@@ -644,7 +646,7 @@ fn a_broken_parent_chain_fails_a_directory_move_closed() {
     let root = fs.root();
     let a = fs.create(root, b"A", NodeKind::Directory).expect("mkdir");
     let at = dotdot(a);
-    fs.block.data[at..at + 11].copy_from_slice(&short_name(b"OTHER", b""));
+    fs.dev.device_mut().data[at..at + 11].copy_from_slice(&short_name(b"OTHER", b""));
     assert_eq!(
         fs.rename(root, b"SUB", a, b"SUB"),
         Err(DriverError::DeviceFault)
@@ -1212,7 +1214,10 @@ mod format {
         // mutation-evidence window the verified re-insert path compares
         // (`plans/DEVICES.md` D4c).
         let fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
-        let image = fs.into_block();
+        let mut image = fs.into_block();
+        let recognised = tairix_fsprobe::recognise(
+            &mut tairix_bytedev::ByteDevice::new(&mut image).expect("geometry"),
+        );
         let boot = &image.store[..512];
         let fsinfo_sector = u16::from_le_bytes([boot[48], boot[49]]) as usize;
         let backup_sector = u16::from_le_bytes([boot[50], boot[51]]) as usize;
@@ -1235,11 +1240,17 @@ mod format {
             &image.store[backup_sector * 512..backup_sector * 512 + 512],
             boot
         );
-        // The formatted head now declares an evidence window covering the
-        // boot sector through FSInfo.
+        // The formatted volume declares an evidence window covering the boot
+        // sector through FSInfo.
+        let Ok(Some(tairix_fsprobe::Recognised::Volume(volume))) = recognised else {
+            panic!("a formatted volume is recognised");
+        };
         assert_eq!(
-            tairix_fsprobe::evidence_len(&image.store[..tairix_fsprobe::PROBE_HEAD_LEN]),
-            Some(((fsinfo_sector as u64) + 1) * 512)
+            volume.evidence,
+            Some(tairix_fsprobe::Evidence {
+                offset: 0,
+                len: ((fsinfo_sector as u64) + 1) * 512
+            })
         );
     }
 
@@ -1333,6 +1344,15 @@ mod format {
         assert_eq!(
             fs.set_security(file, NodeSecurity::new(0o600, 1000, 100)),
             Err(DriverError::Unsupported)
+        );
+
+        // The record stands in for one the format does not keep, so the
+        // mount policy may map it; a missing node still refuses.
+        assert_eq!(fs.records_ownership(root), Ok(false));
+        assert_eq!(fs.records_ownership(file), Ok(false));
+        assert_eq!(
+            fs.records_ownership(NodeId::NONE),
+            Err(DriverError::NotFound)
         );
     }
 
@@ -1533,8 +1553,8 @@ mod format {
         // 2024-03-15 10:20:30 created, accessed 2024-03-16, written 2025-01-02 03:04:06.
         let created = [0x64, 0x8F, 0x52, 0x6F, 0x58, 0x70, 0x58];
         let written = [0x83, 0x18, 0x22, 0x5A];
-        fs.write_bytes(entry.short_offset + 13, &created).unwrap();
-        fs.write_bytes(entry.short_offset + 22, &written).unwrap();
+        fs.dev.write(entry.short_offset + 13, &created).unwrap();
+        fs.dev.write(entry.short_offset + 22, &written).unwrap();
 
         fs.rename(root, b"old.txt", root, b"new.txt")
             .expect("rename");
@@ -1762,7 +1782,8 @@ mod format {
             .expect("read")
             .expect("found");
         let mut raw = [0u8; 32];
-        fs.read_bytes(fs.cluster_byte(node_cluster(dir)), &mut raw)
+        fs.dev
+            .read(fs.cluster_byte(node_cluster(dir)), &mut raw)
             .expect("read");
         assert_eq!(
             crate::EntryStamps::of(&raw),
@@ -1965,12 +1986,18 @@ fn a_listing_read_a_batch_at_a_time_walks_its_chain_once() {
         )
         .expect("file");
     }
-    let fat_reads =
-        |fs: &Fat32<CountingBlock>| fs.block.read_at.iter().filter(|at| **at == FAT_LBA).count();
-    fs.block.read_at.clear();
+    let fat_reads = |fs: &Fat32<CountingBlock>| {
+        fs.dev
+            .device()
+            .read_at
+            .iter()
+            .filter(|at| **at == FAT_LBA)
+            .count()
+    };
+    fs.dev.device_mut().read_at.clear();
     assert_eq!(listed(&mut fs, big, 0, &[]).expect("lists").len(), 40);
     let whole = fat_reads(&fs);
-    fs.block.read_at.clear();
+    fs.dev.device_mut().read_at.clear();
     let mut cursor = 0;
     let mut batches = 0;
     while let Some((entry, _)) = first_listed(&mut fs, big, cursor, &[]).expect("lists") {

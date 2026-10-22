@@ -96,4 +96,6 @@ pub mod io;
 pub use client::{run, USAGE};
 pub use command::{parse, Clobber, Command, Contents, Options, TargetMode};
 pub use error::CpError;
-pub use io::{Entry, EntryKind, FileSystem, Follow, Output, Probe, Prompt};
+pub use io::{
+    AttributeStore, Entry, EntryKind, FileSystem, Follow, Output, PathFiles, Probe, Prompt,
+};

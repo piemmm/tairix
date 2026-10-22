@@ -3,6 +3,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+pub use tairix_fscopy::{Attributes, Sparse};
+
 use crate::error::CpError;
 
 /// What happens when a destination file already exists.
@@ -57,6 +59,12 @@ pub struct Options {
     /// Give two sources naming one node two names at the destination rather
     /// than two copies (`--preserve=links`; `-d` sets this too).
     pub preserve_links: bool,
+    /// How a sparse file's holes are copied (`--sparse=WHEN`).
+    pub sparse: Sparse,
+    /// How each copy's extended attributes are carried: as far as the
+    /// destination keeps them by default, every one (`--preserve=xattr`), or
+    /// none (`--no-preserve=xattr`).
+    pub attributes: Attributes,
 }
 
 /// What a non-directory source becomes at the destination.
@@ -86,6 +94,8 @@ impl Options {
         contents: Contents::Bytes,
         no_dereference: false,
         preserve_links: false,
+        sparse: Sparse::Auto,
+        attributes: Attributes::Carry,
     };
 }
 
@@ -128,9 +138,10 @@ enum Long {
 ///
 /// # Errors
 ///
-/// [`CpError::Usage`] for an unrecognised option or an empty `-t` value, and
-/// [`CpError::Unsupported`] for `-a`/`--archive` and the `--preserve` members
-/// this system cannot honour completely.
+/// [`CpError::Usage`] for an unrecognised option, an empty `-t` value or an
+/// unknown `--sparse`/`--no-preserve` value, and [`CpError::Unsupported`]
+/// for `-a`/`--archive` and the `--preserve` members this system cannot
+/// honour completely.
 fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
     let name = &arg[2..];
     if let Some(dir) = name.strip_prefix("target-directory=") {
@@ -138,6 +149,43 @@ fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
             return Err(CpError::Usage);
         }
         return Ok(Long::TargetDirectory(String::from(dir)));
+    }
+    if let Some(when) = name.strip_prefix("sparse=") {
+        options.sparse = match when {
+            "auto" => Sparse::Auto,
+            "always" => Sparse::Always,
+            "never" => Sparse::Never,
+            _ => return Err(CpError::Usage),
+        };
+        return Ok(Long::Recorded);
+    }
+    if let Some(list) = name.strip_prefix("preserve=") {
+        for member in list.split(',') {
+            match member {
+                "links" => options.preserve_links = true,
+                "xattr" => options.attributes = Attributes::Require,
+                // Every other member includes a node's mode, owner or
+                // timestamps, which this tool does not set.
+                _ => return Err(CpError::Unsupported(String::from(arg))),
+            }
+        }
+        return Ok(Long::Recorded);
+    }
+    if let Some(list) = name.strip_prefix("no-preserve=") {
+        for member in list.split(',') {
+            match member {
+                "links" => options.preserve_links = false,
+                "xattr" => options.attributes = Attributes::Skip,
+                "all" => {
+                    options.preserve_links = false;
+                    options.attributes = Attributes::Skip;
+                }
+                // Already never preserved, so already as asked.
+                "mode" | "ownership" | "timestamps" | "context" => {}
+                _ => return Err(CpError::Usage),
+            }
+        }
+        return Ok(Long::Recorded);
     }
     match name {
         "recursive" => options.recursive = true,
@@ -149,14 +197,11 @@ fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
         "link" => options.contents = Contents::HardLink,
         "symbolic-link" => options.contents = Contents::SymbolicLink,
         "no-dereference" => options.no_dereference = true,
-        "preserve=links" => options.preserve_links = true,
         // `-a` is `-dR --preserve=all`, and `--preserve=all` includes the
         // timestamps no call can set yet, so it is refused rather than
-        // delivered as a silently narrower `-dR`. `--preserve=links` is the
-        // one member of the set this tool can honour.
+        // delivered as a silently narrower `-dR`.
         "archive" | "preserve" => return Err(CpError::Unsupported(String::from(arg))),
         "help" => return Ok(Long::Help),
-        _ if name.starts_with("preserve=") => return Err(CpError::Unsupported(String::from(arg))),
         _ => return Err(CpError::Usage),
     }
     Ok(Long::Recorded)
@@ -175,7 +220,14 @@ fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
 /// * `-l` / `--link` — a second name for the source's node, not a copy.
 /// * `-s` / `--symbolic-link` — a symbolic link naming the source.
 /// * `-P` / `--no-dereference` — reproduce a link source as a link.
-/// * `--preserve=links` — keep two sources' shared node shared.
+/// * `--preserve=LIST` — `links` keeps two sources' shared node shared, and
+///   `xattr` makes every extended attribute a copy must carry, failing one
+///   the destination cannot keep.
+/// * `--no-preserve=LIST` — `xattr` carries no extended attribute, `links`
+///   copies a shared node twice; `mode`, `ownership` and `timestamps` are
+///   already not preserved.
+/// * `--sparse=WHEN` — `auto` keeps a sparse file's holes, `always` also
+///   leaves its stored zeros unwritten, `never` writes every byte.
 /// * `-d` — `-P` and `--preserve=links` together.
 /// * `-a` / `--archive` and the other `--preserve` members — a
 ///   [`CpError::Unsupported`] refusal: `--preserve=all` includes the
@@ -302,7 +354,7 @@ pub fn parse(args: &[&str]) -> Result<Command, CpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Clobber, Command, Contents, Options, TargetMode};
+    use super::{parse, Attributes, Clobber, Command, Contents, Options, Sparse, TargetMode};
     use crate::error::CpError;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -507,6 +559,9 @@ mod tests {
                 "`-s, --symbolic-link`",
                 "`-P, --no-dereference`",
                 "`--preserve=links`",
+                "`--preserve=xattr`",
+                "`--no-preserve=xattr`",
+                "`--sparse=WHEN`",
                 "`-d`",
                 "`-v, --verbose`",
                 "`-t dir, --target-directory=dir`",
@@ -575,8 +630,66 @@ mod tests {
                 "{arg}"
             );
         }
-        // The one member this tool can honour is accepted.
+        // The members this tool can honour are accepted, alone or listed.
         assert!(parse(&["--preserve=links", "a", "b"]).is_ok());
+        assert_eq!(
+            parse(&["--preserve=links,mode", "a", "b"]),
+            Err(CpError::Unsupported(String::from("--preserve=links,mode")))
+        );
+        let Ok(Command::Copy { options, .. }) = parse(&["--preserve=links,xattr", "a", "b"]) else {
+            panic!("expected a copy");
+        };
+        assert!(options.preserve_links);
+        assert_eq!(options.attributes, Attributes::Require);
+    }
+
+    #[test]
+    fn attributes_are_carried_unless_preserve_or_no_preserve_says_otherwise() {
+        let attributes = |args: &[&str]| match parse(args) {
+            Ok(Command::Copy { options, .. }) => options.attributes,
+            other => panic!("expected a copy: {other:?}"),
+        };
+        assert_eq!(attributes(&["a", "b"]), Attributes::Carry);
+        assert_eq!(
+            attributes(&["--preserve=xattr", "a", "b"]),
+            Attributes::Require
+        );
+        assert_eq!(
+            attributes(&["--no-preserve=xattr", "a", "b"]),
+            Attributes::Skip
+        );
+        assert_eq!(
+            attributes(&["--no-preserve=all", "a", "b"]),
+            Attributes::Skip
+        );
+        assert_eq!(
+            attributes(&["--no-preserve=mode,timestamps", "a", "b"]),
+            Attributes::Carry
+        );
+        assert_eq!(
+            parse(&["--no-preserve=bogus", "a", "b"]),
+            Err(CpError::Usage)
+        );
+    }
+
+    #[test]
+    fn sparse_takes_auto_always_or_never() {
+        let sparse = |args: &[&str]| match parse(args) {
+            Ok(Command::Copy { options, .. }) => options.sparse,
+            other => panic!("expected a copy: {other:?}"),
+        };
+        assert_eq!(sparse(&["a", "b"]), Sparse::Auto);
+        assert_eq!(sparse(&["--sparse=always", "a", "b"]), Sparse::Always);
+        assert_eq!(sparse(&["--sparse=never", "a", "b"]), Sparse::Never);
+        assert_eq!(
+            sparse(&["--sparse=never", "--sparse=auto", "a", "b"]),
+            Sparse::Auto
+        );
+        assert_eq!(
+            parse(&["--sparse=sometimes", "a", "b"]),
+            Err(CpError::Usage)
+        );
+        assert_eq!(parse(&["--sparse", "a", "b"]), Err(CpError::Usage));
     }
 
     #[test]

@@ -180,9 +180,7 @@ impl ShadowMask {
         let width = u32::try_from(across.end - across.start).ok()?;
         let height = u32::try_from(down.end - down.start).ok()?;
         let count = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
-        let mut levels = Vec::new();
-        levels.try_reserve_exact(count).ok()?;
-        levels.resize(count, 0);
+        let levels = tairix_util::fallible::filled(count, 0)?;
         Some(Self {
             x: across.start,
             y: down.start,

@@ -8,6 +8,7 @@ fn ended(items: u64, ending: Ending) -> Finished {
     Finished {
         done: Tally { items, bytes: 0 },
         ending,
+        omissions: Omissions::default(),
     }
 }
 
@@ -34,8 +35,24 @@ fn operations_run_one_at_a_time_in_the_order_asked() {
         }),
         "the second waits"
     );
-    desk.finish(Ending::Completed);
+    desk.finish(Ending::Completed, Omissions::default());
     assert_eq!(desk.next_job(), Some((2, "delete")));
+}
+
+#[test]
+fn an_answer_carries_back_what_its_copies_could_not_keep() {
+    let mut desk = desk();
+    desk.submit(1, "copy").expect("taken");
+    let _ = desk.next_job();
+    let mut omissions = Omissions::default();
+    omissions.note(&[(
+        String::from("acorn.filetype"),
+        tairix_fscopy::Refusal::Unsupported,
+    )]);
+    desk.finish(Ending::Completed, omissions.clone());
+    let answer = desk.take(1).expect("landed");
+    assert_eq!(answer.ending, Ending::Completed);
+    assert_eq!(answer.omissions, omissions);
 }
 
 #[test]
@@ -45,7 +62,10 @@ fn an_answer_reaches_only_the_operation_it_belongs_to() {
     desk.submit(2, "delete").expect("taken");
     let _ = desk.next_job();
     assert!(desk.report(items(4), ""));
-    desk.finish(Ending::Stopped(String::from("the destination is full")));
+    desk.finish(
+        Ending::Stopped(String::from("the destination is full")),
+        Omissions::default(),
+    );
     assert_eq!(desk.take(2), None);
     assert_eq!(
         desk.take(1),
@@ -72,7 +92,7 @@ fn a_cancel_stops_a_running_operation_before_its_next_step() {
             ..Standing::default()
         })
     );
-    desk.finish(Ending::Cancelled);
+    desk.finish(Ending::Cancelled, Omissions::default());
     assert_eq!(desk.take(1), Some(ended(0, Ending::Cancelled)));
 }
 
@@ -84,7 +104,7 @@ fn a_cancelled_waiting_operation_ends_at_once_having_done_nothing() {
     let _ = desk.next_job();
     desk.cancel(2);
     assert_eq!(desk.take(2), Some(ended(0, Ending::Cancelled)));
-    desk.finish(Ending::Completed);
+    desk.finish(Ending::Completed, Omissions::default());
     assert_eq!(desk.next_job(), None, "the cancelled one never runs");
 }
 
@@ -99,7 +119,7 @@ fn a_forgotten_operation_stops_and_its_answer_is_dropped() {
     assert!(desk.cancelled(), "the running one is told to stop");
     assert_eq!(desk.standing(1), None);
     assert!(!desk.report(items(3), ""), "nobody is owed a wake for it");
-    assert!(!desk.finish(Ending::Cancelled));
+    assert!(!desk.finish(Ending::Cancelled, Omissions::default()));
     assert_eq!(desk.take(1), None);
     assert_eq!(desk.next_job(), None, "a forgotten waiting job never runs");
     assert!(!desk.holds(1) && !desk.holds(2));
@@ -122,7 +142,7 @@ fn an_answer_waiting_uncollected_still_holds_its_id() {
     let mut desk = desk();
     desk.submit(1, "copy").expect("taken");
     let _ = desk.next_job();
-    desk.finish(Ending::Completed);
+    desk.finish(Ending::Completed, Omissions::default());
     assert_eq!(desk.submit(1, "again"), Err(("again", Refusal::Busy)));
     let _ = desk.take(1);
     desk.submit(1, "again")
@@ -136,7 +156,10 @@ fn a_run_of_reports_owes_one_wake_until_the_loop_looks() {
     let _ = desk.next_job();
     assert!(desk.report(items(1), ""));
     assert!(!desk.report(items(2), ""));
-    assert!(!desk.finish(Ending::Completed), "already owed one");
+    assert!(
+        !desk.finish(Ending::Completed, Omissions::default()),
+        "already owed one"
+    );
     desk.acknowledge();
     desk.submit(2, "next").expect("taken");
     let _ = desk.next_job();
@@ -153,7 +176,7 @@ fn a_held_desk_owes_no_wake_until_the_loop_looks_again() {
     let _ = desk.next_job();
     desk.hold();
     assert!(!desk.report(items(1), ""));
-    assert!(!desk.finish(Ending::Completed));
+    assert!(!desk.finish(Ending::Completed, Omissions::default()));
     desk.acknowledge();
     desk.submit(2, "next").expect("taken");
     let _ = desk.next_job();
@@ -237,7 +260,7 @@ fn a_report_carries_the_reading_and_the_item_in_hand() {
     let standing = desk.standing(1).expect("running");
     assert_eq!(standing.reading, reading);
     assert_eq!(standing.current, "two.jpg");
-    desk.finish(Ending::Completed);
+    desk.finish(Ending::Completed, Omissions::default());
     assert_eq!(
         desk.take(1).map(|finished| finished.done),
         Some(Tally {

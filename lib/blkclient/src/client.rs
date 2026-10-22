@@ -12,15 +12,9 @@ use tairix_abi::blkio::{
     decode_outcome, BlkCompletion, BlkDeviceClass, BlkDeviceName, BlkMedium, BlkOp, BlkOutcome,
     BlkRequest, IoBudget, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DiscLayout, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{DriverError, Errno};
-
-/// Smallest logical block size a sane device reports.
-const MIN_BLOCK_SIZE: u32 = 512;
-
-/// Largest logical block size the shared data window is sized for.
-const MAX_BLOCK_SIZE: u32 = 4096;
 
 /// One synchronous request/reply exchange with the serving block driver.
 ///
@@ -107,6 +101,9 @@ pub struct RemoteBlock<'w, C: BlkCall> {
     /// volumes on it. Validated on decode, so an untrusted driver cannot
     /// reach a reader's screen through it.
     device_name: BlkDeviceName,
+    /// Where the disc the device held at connect keeps its newest
+    /// structures, as its driver reported them.
+    disc_layout: Option<DiscLayout>,
     /// The binding of the publication this client connected to, repeated on
     /// every request so none reaches a medium that has since replaced it.
     binding: u64,
@@ -168,6 +165,7 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             // envelope; the device's own medium is adopted below.
             declared_medium: None,
             device_name: BlkDeviceName::UNNAMED,
+            disc_layout: None,
             binding: 0,
             budget: BlkDeviceClass::of(None).budget(),
             // Nothing has been served yet, so there is nothing to stand
@@ -203,6 +201,7 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
         client.read_only = completion.flags & BLK_FLAG_READ_ONLY != 0;
         client.declared_medium = completion.medium;
         client.device_name = completion.name;
+        client.disc_layout = completion.disc_layout;
         client.binding = completion.binding;
         client.budget = BlkDeviceClass::of(completion.medium).budget();
         Ok(client)
@@ -305,6 +304,12 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
     /// composition layered over this one names the real hardware.
     fn device_name(&self) -> BlkDeviceName {
         self.device_name
+    }
+
+    /// The layout of the disc the device held at connect; a later disc is a
+    /// later publication, which a client of this one never reaches.
+    fn disc_layout(&self) -> Option<DiscLayout> {
+        self.disc_layout
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

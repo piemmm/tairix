@@ -1,10 +1,10 @@
-//! The sources a window's refusals come from, each keeping at most one notice
+//! The sources a window's notices come from, each keeping at most one
 //! waiting in the window's shared [`tairix_window::notices::Notices`] queue.
 
 use alloc::format;
 use alloc::string::String;
 
-/// What a refusal came from.
+/// What a notice came from.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum NoticeSource {
     /// Reading the folder the window shows.
@@ -19,6 +19,8 @@ pub enum NoticeSource {
     Rename,
     /// Opening an item in an application, or starting one.
     Open,
+    /// What a finished operation's copies could not keep.
+    Omission,
 }
 
 /// A window's refusal notices, by where each came from.

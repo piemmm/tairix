@@ -10,6 +10,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
 use tairix_abi::{Errno, FileKind, RenameFlags};
 use tairix_procinfo::VolumeBytes;
@@ -49,9 +50,9 @@ pub struct VolumeInfo {
 
 /// The filesystem operations the landed stages perform: listings, the
 /// volume list, the mode editor's stat/set pair, and the mutating
-/// operations the file commands drive (probe, streamed read/write,
-/// create, mkdir, unlink, rename). Later stages extend this trait in
-/// place together with the callers they introduce.
+/// operations the file commands drive (probe, streamed read/write with the
+/// hole-aware seek, create, mkdir, unlink, rename). Later stages extend this
+/// trait in place together with the callers they introduce.
 pub trait Fs {
     /// List every entry of the directory `path`, in any order (the model
     /// sorts them).
@@ -189,6 +190,27 @@ pub trait Fs {
     /// Any [`Errno`] the filesystem raises while reading.
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
 
+    /// The length in bytes of the file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises.
+    fn size(&mut self, path: &str) -> Result<u64, Errno>;
+
+    /// Where the next region of `region`'s kind begins at or after `offset`
+    /// in the file at `path`, `None` when none does before its end.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises; [`Errno::NotSupported`] where the
+    /// backing keeps no word on its holes.
+    fn next_region(
+        &mut self,
+        path: &str,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, Errno>;
+
     /// Create (or truncate to empty) the regular file at `path`, ready to
     /// be written from offset `0`.
     ///
@@ -204,6 +226,14 @@ pub trait Fs {
     /// Any [`Errno`] the filesystem raises while writing; a partial write
     /// is an error.
     fn write(&mut self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno>;
+
+    /// Set the length of the file at `path` to `len`: bytes past what was
+    /// written read as zeros.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises.
+    fn set_len(&mut self, path: &str, len: u64) -> Result<(), Errno>;
 
     /// Create the directory at `path`.
     ///

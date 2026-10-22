@@ -39,9 +39,11 @@ const DESC_TYPE_PIPE_USAGE: u8 = 0x24;
 const PIPE_USAGE_DESC_LEN: usize = 4;
 
 /// Mass-storage interface class (USB 2.0 §9.6.5 `bInterfaceClass`).
-const CLASS_MASS_STORAGE: u8 = 0x08;
+pub const CLASS_MASS_STORAGE: u8 = 0x08;
 /// Sub-class: SCSI transparent command set.
 pub const SUBCLASS_SCSI: u8 = 0x06;
+/// Sub-class: MMC-5 over ATAPI packets (an optical drive's bridge).
+pub const SUBCLASS_ATAPI: u8 = 0x02;
 /// Sub-class: UFI (the USB floppy command set).
 pub const SUBCLASS_UFI: u8 = 0x04;
 /// Protocol: Bulk-Only Transport.
@@ -110,13 +112,14 @@ pub struct StorageInterface {
 
 /// The `(sub-class, protocol)` pairs this driver serves, mapped to the
 /// command set the sub-class declares. Anything else — vendor-specific
-/// sets, the interrupt-less CB variant (protocol `0x01`), ATAPI sub-classes
-/// — is left for a driver that actually implements it (fail closed, never
-/// half-served).
+/// sets, the interrupt-less CB variant (protocol `0x01`), the SFF-8070i
+/// floppy sub-class — is left for a driver that actually implements it
+/// (fail closed, never half-served).
 fn accepted_command_set(sub_class: u8, protocol: u8) -> Option<CommandSet> {
     match (sub_class, protocol) {
         (SUBCLASS_SCSI, PROTOCOL_BOT | PROTOCOL_UAS) => Some(CommandSet::Transparent),
         (SUBCLASS_UFI, PROTOCOL_BOT | PROTOCOL_CBI) => Some(CommandSet::Ufi),
+        (SUBCLASS_ATAPI, PROTOCOL_BOT) => Some(CommandSet::Atapi),
         _ => None,
     }
 }

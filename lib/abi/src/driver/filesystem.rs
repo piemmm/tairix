@@ -11,6 +11,7 @@
 //! does not duplicate it.
 
 use super::{DriverError, DriverHandle};
+use crate::fs::SeekRegion;
 use crate::time::Time64;
 use crate::CapabilityId;
 
@@ -419,6 +420,33 @@ pub trait FilesystemRead {
         Err(DriverError::Unsupported)
     }
 
+    /// Where the next region of `region`'s kind begins at or after byte
+    /// `offset` of the regular file `file`, or `None` when none does: the
+    /// offset is at or past the end, or only holes follow it.
+    ///
+    /// A format that keeps no holes leaves this defaulted, and its files are
+    /// data throughout ([`SeekRegion::in_solid_file`]). A wrapper forwards
+    /// it, since in a wrapper the default would hide the holes of the driver
+    /// beneath.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `file` is not a regular file.
+    /// * [`DriverError::NotFound`] if `file` does not name a live node.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn seek_region(
+        &mut self,
+        file: NodeId,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<Option<u64>, DriverError> {
+        let info = self.node_info(file)?;
+        if info.kind != NodeKind::RegularFile {
+            return Err(DriverError::Unsupported);
+        }
+        Ok(region.in_solid_file(offset, info.size))
+    }
+
     /// Hand `visit` the children of directory `dir` in order, from `cursor`
     /// on, each with its name, until it answers [`DirVisit::Stop`] or the
     /// directory ends.
@@ -732,6 +760,37 @@ pub trait FilesystemWrite {
     /// * [`DriverError::DeviceFault`] if a block write fails.
     fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError>;
 
+    /// Make bytes `[offset, offset + len)` of the regular file `name` in
+    /// directory `dir` read as zeros and release the storage they occupied,
+    /// leaving the file's length unchanged: a punched hole.
+    ///
+    /// The range is clipped to the file's length — past the end there is
+    /// nothing stored to release — and an empty range changes nothing. Part
+    /// of a range the format cannot release, such as the partial ends of an
+    /// allocation unit, is zeroed in place. A format that keeps no holes
+    /// leaves this defaulted and refuses, never substituting a write of zeros
+    /// that would keep the storage.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the format keeps no holes, or
+    ///   `name` resolves to a directory.
+    /// * [`DriverError::NotFound`] if no child named `name` exists.
+    /// * [`DriverError::OutOfRange`] if `offset + len` overflows.
+    /// * [`DriverError::NoSpace`] if releasing the range needs metadata the
+    ///   volume cannot allocate (an extent split).
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block access.
+    fn punch(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        len: u64,
+    ) -> Result<(), DriverError> {
+        let _ = (dir, name, offset, len);
+        Err(DriverError::Unsupported)
+    }
+
     /// Unlink the child `name` from directory `dir`, freeing its backing
     /// storage.
     ///
@@ -943,6 +1002,19 @@ impl NodeSecurity {
         }
     }
 
+    /// The record a format that stores no ownership reports for a node of
+    /// `kind`: owned by the system user and group and writable by that owner
+    /// alone. A removable volume's mount policy maps it for the volume's
+    /// users ([`FilesystemSecurity::records_ownership`]).
+    #[must_use]
+    pub const fn unrecorded(kind: NodeKind) -> Self {
+        let mode = match kind {
+            NodeKind::Directory => 0o755,
+            NodeKind::RegularFile | NodeKind::Symlink => 0o644,
+        };
+        Self::new(mode, 0, 0)
+    }
+
     /// The node's ACL entries.
     #[must_use]
     pub fn acl(&self) -> &[SecurityAcl] {
@@ -1025,6 +1097,22 @@ pub trait FilesystemSecurity {
         security.uid = uid;
         security.gid = gid;
         self.set_security(node, security)
+    }
+
+    /// Whether the format records an owner and mode for `node`, rather than
+    /// [`security`](Self::security) reporting the fixed record a format
+    /// that keeps none stands in with.
+    ///
+    /// A removable volume's mount policy grants its users access to the nodes
+    /// whose ownership is not recorded, and leaves a recorded owner's rules
+    /// alone — so one volume may hold both, as a UDF disc written by two
+    /// systems does.
+    ///
+    /// # Errors
+    ///
+    /// As [`security`](Self::security).
+    fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
+        self.security(node).map(|_| true)
     }
 }
 

@@ -43,13 +43,17 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags, FS_MODE_MASK, FS_SYMLINK_MAX};
+    use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion, FS_MODE_MASK, FS_SYMLINK_MAX};
     use tairix_abi::{Errno, FileKind, InputMode, RenameFlags, UnlinkFlags, STDOUT};
     use tairix_appdata::{RtHost, Settings as SettingsStore};
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
-    use tairix_fstree::{run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo};
+    use tairix_fscopy::PathFiles;
+    use tairix_fstree::{
+        run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo, OWN_WORD,
+    };
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_procinfo::{for_each_mount, IpcTransport, Namespace, VolumeBytes, WalkStep};
+    use tairix_rt::copy::OpenFiles;
     use tairix_rt::io::{write_stderr_line, StdInfo, Write};
     use tairix_rt::File;
     use tairix_sandbox::decode::DecodeService;
@@ -67,29 +71,18 @@ mod program {
     /// The usage banner printed when the arguments cannot be understood.
     const USAGE: &str = "usage: fstree [-h | -?] [directory]";
 
-    /// The command word this application's bundle is installed under.
-    ///
-    /// One spelling serves the help engine's own-bundle lookup and the
-    /// app-data client's bundle-defaults layer, so a program's shipped
-    /// defaults and its `man` page can never come from different bundles.
-    /// It selects nothing else: the store itself is keyed on the bundle
-    /// identity the kernel attests.
-    const OWN_WORD: &str = "fstree";
-
     /// The production [`Fs`]: directory listings and every file mutation
     /// through the kernel-authorised `fs_*` syscalls (each entry's kind,
     /// sizes, and modification stamp ride the one `fs_readdir` stream),
     /// and volume free space through the System Information API's shared
     /// mount walk.
     ///
-    /// The copy engine streams a file chunk-by-chunk through path-based
-    /// seam calls, so two one-slot handle caches (the open source and the
-    /// open destination — the `cp` host's pattern) hoist the per-chunk
-    /// open off the copy path; a mutation of a cached path drops its
-    /// handle so a stale one is never written through.
+    /// A copy streams a file a chunk at a time through path-based seam
+    /// calls, so the copying tools' shared open-file cache keeps the source
+    /// and the destination open between chunks; a mutation of a cached path
+    /// drops its handle so a stale one is never written through.
     struct RtFs {
-        reader: Option<(String, File)>,
-        writer: Option<(String, File)>,
+        files: OpenFiles,
         mapped: Option<MappedFile>,
     }
 
@@ -165,8 +158,7 @@ mod program {
     impl RtFs {
         fn new() -> Self {
             Self {
-                reader: None,
-                writer: None,
+                files: OpenFiles::default(),
                 mapped: None,
             }
         }
@@ -174,12 +166,7 @@ mod program {
         /// Drop any cached handle or mapping on `path` after a mutation of
         /// it, so stale bytes are never served or written through.
         fn forget(&mut self, path: &str) {
-            if matches!(&self.reader, Some((name, _)) if name == path) {
-                self.reader = None;
-            }
-            if matches!(&self.writer, Some((name, _)) if name == path) {
-                self.writer = None;
-            }
+            self.files.forget(path);
             self.forget_mapping(path);
         }
 
@@ -321,17 +308,20 @@ mod program {
             // Streamed fallback — the same bytes through `fs_read` — for a
             // file the kernel declined to map (an empty file, or a port
             // with no file-mapping window yet).
-            if !matches!(&self.reader, Some((name, _)) if name == path) {
-                let file =
-                    File::open(path.as_bytes(), OpenFlags::READ).map_err(Errno::from_syscall)?;
-                self.reader = Some((String::from(path), file));
-            }
-            match &self.reader {
-                Some((_, file)) => file.read_at(offset, buf).map_err(Errno::from_syscall),
-                // Unreachable by construction (the handle was just
-                // installed), but fail closed rather than panic.
-                None => Err(Errno::NotFound),
-            }
+            self.files.read(path, offset, buf)
+        }
+
+        fn size(&mut self, path: &str) -> Result<u64, Errno> {
+            self.files.size(path)
+        }
+
+        fn next_region(
+            &mut self,
+            path: &str,
+            offset: u64,
+            region: SeekRegion,
+        ) -> Result<Option<u64>, Errno> {
+            self.files.next_region(path, offset, region)
         }
 
         fn create(&mut self, path: &str) -> Result<(), Errno> {
@@ -347,31 +337,12 @@ mod program {
             // A write invalidates any mapping of the same file: resident
             // pages are a map-time snapshot and must not be served stale.
             self.forget_mapping(path);
-            if !matches!(&self.writer, Some((name, _)) if name == path) {
-                let file =
-                    File::open(path.as_bytes(), OpenFlags::WRITE).map_err(Errno::from_syscall)?;
-                self.writer = Some((String::from(path), file));
-            }
-            let Some((_, file)) = &self.writer else {
-                // Unreachable by construction (the handle was just
-                // installed), but fail closed rather than panic.
-                return Err(Errno::NotFound);
-            };
-            // The kernel may accept a short write; every byte is the
-            // seam's contract, so loop until the chunk is on disk or
-            // refused.
-            let mut written = 0usize;
-            while written < bytes.len() {
-                let n = file
-                    .write_at(offset + written as u64, &bytes[written..])
-                    .map_err(Errno::from_syscall)?;
-                if n == 0 {
-                    // A zero-byte accept would spin forever; fail closed.
-                    return Err(Errno::LengthOutOfRange);
-                }
-                written += n;
-            }
-            Ok(())
+            self.files.write(path, offset, bytes)
+        }
+
+        fn set_len(&mut self, path: &str, len: u64) -> Result<(), Errno> {
+            self.forget_mapping(path);
+            self.files.set_len(path, len)
         }
 
         fn mkdir(&mut self, path: &str) -> Result<(), Errno> {

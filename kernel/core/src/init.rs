@@ -4746,7 +4746,7 @@ mod tests {
             &self,
             _: u32,
             _: u32,
-        ) -> Result<alloc::vec::Vec<u64>, tairix_abi::Errno> {
+        ) -> Result<crate::hwtree::NodeEndpoints, tairix_abi::Errno> {
             Err(tairix_abi::Errno::Busy)
         }
         fn set_health(

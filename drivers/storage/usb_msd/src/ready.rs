@@ -19,6 +19,8 @@ pub const READY_POLL_NS: u64 = 1_000_000_000;
 /// promptly, long enough that an empty slot costs one command in two seconds.
 pub const MEDIA_POLL_NS: u64 = 2_000_000_000;
 
+/// Sense key RECOVERED ERROR.
+const RECOVERED_ERROR: u8 = 0x01;
 /// Sense key NOT READY.
 const NOT_READY: u8 = 0x02;
 /// Sense key UNIT ATTENTION.
@@ -33,6 +35,8 @@ const ASCQ_INTERVENTION: u8 = 0x03;
 const ASC_NO_MEDIUM: u8 = 0x3A;
 /// ASC NOT READY TO READY CHANGE, MEDIUM MAY HAVE CHANGED.
 const ASC_MEDIUM_CHANGED: u8 = 0x28;
+/// ASC POWER ON, RESET, OR BUS DEVICE RESET OCCURRED.
+const ASC_RESET: u8 = 0x29;
 
 /// How many unit attentions in a row are answered with an immediate retest
 /// before the next waits out [`READY_POLL_NS`]: a unit reports a pending
@@ -43,7 +47,7 @@ const IMMEDIATE_RETESTS: u8 = 3;
 /// assignments in its Annex F).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Readiness {
-    /// It can serve.
+    /// It can serve: a command it answered RECOVERED ERROR was carried out.
     Ready,
     /// It is coming ready by itself: a disk spinning up (02/04/01, and any
     /// other "not ready" whose cause is not one below).
@@ -64,10 +68,19 @@ pub enum Readiness {
 }
 
 impl Readiness {
+    /// Whether `sense` reports the unit reset (06/29): an attention that
+    /// replaces any lower one pending, a change of medium's among them
+    /// (SPC-5 §5.14).
+    #[must_use]
+    pub const fn is_reset(sense: Sense) -> bool {
+        sense.key == UNIT_ATTENTION && sense.asc == ASC_RESET
+    }
+
     /// Classify the sense of a command a unit failed.
     #[must_use]
     pub const fn of_sense(sense: Sense) -> Self {
         match (sense.key, sense.asc, sense.ascq) {
+            (RECOVERED_ERROR, _, _) => Self::Ready,
             (NOT_READY, ASC_NO_MEDIUM, _) => Self::NoMedium,
             (NOT_READY, ASC_NOT_READY, ASCQ_START_REQUIRED) => Self::NeedsStart,
             (NOT_READY, ASC_NOT_READY, ASCQ_INTERVENTION) => Self::NeedsIntervention,
@@ -101,6 +114,9 @@ pub enum WaitEnd {
     Ready,
     /// It has no medium.
     NoMedium,
+    /// The medium a published unit's held request was made of may have
+    /// changed: the request is never served from what replaced it.
+    Changed,
     /// It was given up on.
     GiveUp(NotReady),
 }
@@ -114,6 +130,9 @@ pub struct ReadyWait {
     start_owed: bool,
     started: bool,
     attentions: u8,
+    /// The wait holds a request of a published unit, made of the medium it
+    /// published.
+    published: bool,
 }
 
 impl ReadyWait {
@@ -127,12 +146,13 @@ impl ReadyWait {
             start_owed: false,
             started: false,
             attentions: 0,
+            published: false,
         }
     }
 
-    /// The wait for a unit that refused a command at `now_ns` as coming
-    /// ready: started at once when it asked for an initializing command
-    /// (`start`), else tested after the poll interval.
+    /// The wait of a published unit that refused a request at `now_ns` as
+    /// coming ready: started at once when it asked for an initializing
+    /// command (`start`), else tested after the poll interval.
     #[must_use]
     pub const fn refused(now_ns: u64, ready_ns: u64, start: bool) -> Self {
         let wait = Self::new(now_ns, ready_ns);
@@ -140,6 +160,7 @@ impl ReadyWait {
             due_ns: if start { now_ns } else { wait.paced(now_ns) },
             start_owed: start,
             started: start,
+            published: true,
             ..wait
         }
     }
@@ -180,6 +201,7 @@ impl ReadyWait {
         let end = match readiness {
             Readiness::Ready => WaitEnd::Ready,
             Readiness::NoMedium => WaitEnd::NoMedium,
+            Readiness::MediumChanged if self.published => WaitEnd::Changed,
             Readiness::NeedsIntervention => WaitEnd::GiveUp(NotReady::Intervention),
             Readiness::Refused(sense) => WaitEnd::GiveUp(NotReady::Refused(sense)),
             _ if now_ns >= self.deadline_ns => WaitEnd::GiveUp(NotReady::Budget),

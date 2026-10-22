@@ -410,7 +410,7 @@ kernel primitive, FM8b's drawn ownership control + its click-to-edit/commit app
 wiring,
 FM4b's pure context-menu chrome model,
 FM7b's app-side move/copy verbs (`Ctrl+X`/`Ctrl+C`/`Ctrl+V` cut/copy/paste
-driving `plan_paste`→`paste_strategy`→`fs_rename` / `CopyCursor`+`CopyWalk` /
+driving `plan_paste`→`paste_strategy`→`fs_rename` / `lib/fscopy`+`CopyWalk` /
 copy-then-delete over the user's own VFS seams, fail-closed and fail-loud),
 and FM7b's app-side Delete verb (the `Delete`-key confirmation alert
 + the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`),
@@ -1324,17 +1324,13 @@ app verbs, exactly as FM6a/FM6b/FM7a's pure models landed): the
 move-vs-copy decision from the clipboard op and the two items' `VolumeId`s (the
 16-byte `fs_stat` volume identity) — `Copy` streams, a same-volume `Cut` is one
 `Rename`, a cross-volume `Cut` is `CopyThenDelete` — the one `mv`/`st_dev`
-definition (§2.2). `CopyCursor`/`CopyChunk` model the bounded, resumable,
-interruptible streamed copy: a known-length source is walked in fixed
-`COPY_CHUNK_LEN` steps, `advance`d by the bytes actually carried (so short reads
-and cancellation between chunks both work), `resume`d from a persisted offset,
-and fail closed — advancing/resuming past the source length is
-`CopyError::Overrun`, never a silent wrap (§2.23, §5.4). The engine does no I/O
-and the cross-volume source is deleted only after its copy fully succeeds, so
-composing it grants nothing and the read-only picker never runs it. Host-tested
-(strategy per op × volume, `VolumeId` round-trip, empty/small/large chunking to
-completion, short-transfer advance, resume, resume/advance overrun, error
-message). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+definition (§2.2). A file's bytes, holes and extended attributes are copied by
+the shared copy engine (`lib/fscopy`), a bounded chunk at a time between two
+cancellable steps. The model does no I/O and the cross-volume source is deleted
+only after its copy fully succeeds, so composing it grants nothing and the
+read-only picker never runs it. Host-tested (strategy per op × volume,
+`VolumeId` round-trip). Docs: `docs/src/desktop/apps.md`,
+`lib/browse/README.md` + rustdoc.
 
 **The pure new-folder model** (§2.19 — host-proven ahead of the drawn
 New Folder tool, exactly as the paste-execution model landed ahead of the app
@@ -1380,7 +1376,7 @@ fail-closed `DeletePlan::new` empty/root refusals). Docs:
 
 **The pure recursive-delete *execution* model** (§2.19 — host-proven
 ahead of the app verb, the delete-side analogue of the paste-side
-`execute::CopyCursor`): the `lib/browse::delete::DeleteWalk` driven cursor.
+`execute::CopyWalk`): the `lib/browse::delete::DeleteWalk` driven cursor.
 `DeleteWalk::from_plan` begins a removal of a `DeletePlan`; `next_action` yields
 the next `DeleteAction` — `List(path)` (the app reads that directory and reports
 its children with `expand`, so contents are removed before their container) or
@@ -1423,16 +1419,17 @@ the read-only picker never deletes. Host-tested in `lib/browse`
 
 **The pure recursive-copy *walk* model** (§2.19 — host-proven ahead of
 the app move/copy verbs, the copy-side analogue of the delete-side
-`delete::DeleteWalk`): the `lib/browse::execute::CopyWalk` driven cursor. Where
-`execute::CopyCursor` streams a single *file*, `CopyWalk` copies a whole *tree*:
+`delete::DeleteWalk`): the `lib/browse::execute::CopyWalk` driven cursor, which
+copies a whole *tree*:
 `from_items` begins a copy of resolved `(source, dest, is_directory)` items (the
 app supplies each item's kind, which the path-only `Clipboard` does not carry)
 and is fail closed — an empty set, or a source/dest naming the root, yields no
-walk (§5.4). `next_action` yields the next `CopyAction` — `MakeDir { dest }` (the
-app `fs_mkdir`s the destination *before* its contents, so a child always has a
-parent, reported with `created`), `List { source }` (the app reads it and
-reports children with `expand`), or `CopyFile { source, dest }` (the app streams
-the bytes with a `CopyCursor`, reported with `copied_file`), depth-first. It
+walk (§5.4). `next_action` yields the next `CopyAction` — `MakeDir { source,
+dest }` (the app `fs_mkdir`s the destination *before* its contents, so a child
+always has a parent, gives it the source's attributes, and reports it with
+`created`), `List { source }` (the app reads it and reports children with
+`expand`), or `CopyFile { source, dest }` (the app copies it through the copy
+engine, reported with `copied_file`), depth-first. It
 does no I/O, keeps its own explicit stack (so a deep tree cannot overflow the
 call stack), is bounded by `MAX_COPY_DEPTH` — the one shared `MAX_WALK_DEPTH`
 recursion bound `DeleteWalk` also obeys, hoisted so the two walks cannot drift
@@ -1459,10 +1456,10 @@ each item under the user's own identity — **no new capability**:
 `execute::paste_strategy` picks `fs_rename` for a same-volume move,
 copy-then-delete for a cross-volume move (the source removed through the shared
 delete path only after its copy fully succeeds), and a stream for a copy — a
-file through an `execute::CopyCursor` and a directory (or sealed `.app` bundle)
-through an `execute::CopyWalk`, over `fs_read`/`fs_write`/`fs_mkdir`/`fs_readdir`
-with one reused, fixed-size (`FS_IO_MAX`) buffer, so a copy of any size holds no
-unbounded buffer and never spins (§2.23, §26.6). It is bounded and fail closed:
+file through `lib/fscopy`'s `DataCopy`, its bytes with their holes and then its
+extended attributes, and a directory (or sealed `.app` bundle) through an
+`execute::CopyWalk` — with one reused, fixed-size (`FS_IO_MAX`) buffer, so a
+copy of any size holds no unbounded buffer and never spins (§2.23, §26.6). It is bounded and fail closed:
 the first refused operation stops the paste, states the reason in the window
 naming the item (fail loud, §2.24), and leaves what already landed in place
 (§5.4); the view is re-listed so a partial paste is shown honestly. A completed

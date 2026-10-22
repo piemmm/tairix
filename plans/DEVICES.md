@@ -455,11 +455,28 @@ names a sibling crate.
   enforcement before the wire, chunk sequencing, sensitive-window scrub,
   multi-LUN CBW addressing; hostile descriptor streams; the whole
   blkio request surface over an in-memory device. The live path is Pi 4
-  metal acceptance. The QEMU ports now carry the USB stack — the generic
-  xHCI driver on the kernel-owned PCI host publishes interface nodes
-  there (`plans/SOUND.md` SND7) — so the `qemu-xhci` + `usb-storage`
-  vertical is unblocked and owed. The bundle ships in the Pi image
+  metal acceptance. The QEMU ports carry the USB stack — the generic xHCI
+  driver on the kernel-owned PCI host publishes interface nodes there
+  (`plans/SOUND.md` SND7) — and the USB optical vertical
+  (`tairix-test-optical-qemu-aarch64`, `tools/qemu`'s `with_optical_disc`)
+  drives a `usb-bot` + `scsi-cd` drive through this driver, the volume
+  manager and the ISO 9660 driver to a copy onto ARXFS, then changes the disc
+  (`with_optical_disc_change`) and reads the second back through the unit's
+  fresh publication. A `usb-storage`
+  *disk* vertical, on the same QEMU device path with a `scsi-hd`, is still
+  owed. The bundle ships in the Pi image
   (`Drivers/storage/usb_msd/Run`, signed, least-privilege manifest).
+- **Optical drives.** A multimedia unit (peripheral type `05h`, over BOT or
+  UAS, and ATAPI drives' 12-byte packets over BOT, `08:02:50`) is served as
+  an `OpticalDisc`: `GET CONFIGURATION`'s Random Writable feature decides
+  whether it is written, `READ TOC` format 1 gives the last session's start
+  and `READ DISC INFORMATION` with `READ TRACK INFORMATION` its last recorded
+  block — the `DiscLayout` the ISO 9660 and UDF readers start from. A query
+  refused, or whose exchange breaks, leaves the pressed-disc default; a disc
+  not ready or changed fails the bring-up so it is read again. A
+  serving removable unit is tested every two seconds, so an ejected disc is
+  retracted and its volume withdrawn. Software eject, tray locking and
+  MMC's media-event notification are staged in `plans/FOREIGN-MEDIA.md`.
 
 ### 2.4 D3 — the volume forest and automount
 
@@ -895,7 +912,7 @@ first, then the force-unmount exit, then the verified re-insert replay.
   existing force-discard scenario. Live path: Pi 4 metal acceptance,
   and the `usb-storage` detach/re-attach vertical, unblocked now the QEMU
   ports carry the USB stack (`plans/SOUND.md` SND7) and owed with the
-  D2 vertical above.
+  `usb-storage` disk vertical above.
 
 ### 2.6 DEVICE2 increment order
 
@@ -1009,16 +1026,16 @@ nodes by their own compatible keys, which is data, not bus coupling
     service; a protocol violation fails the exchange closed rather than
     aborting via TMF. Queueing and streams arrive together with a
     queued block consumer and xHCI stream-context support.
-  - The interrupt-less CB variant (protocol `0x01`) and ATAPI
-    sub-classes stay out of scope (§3).
+  - The interrupt-less CB variant (protocol `0x01`) stays out of scope
+    (§3).
 
 ---
 
 ## 3. Out of scope (explicitly)
 
 - The CB mass-storage transport (protocol `0x01` — CBI without the
-  completion interrupt), ATAPI/SFF sub-classes, and non-disk SCSI types
-  (tape, optical) — later class-driver extensions on the same seams.
+  completion interrupt), the SFF sub-classes, and tape — later
+  class-driver extensions on the same seams.
 - UAS command queueing, task-management IUs, SuperSpeed bulk streams,
   and the BOT→UAS alternate-setting switch — staged in §2.7.
 - Multi-tier USB hubs (unchanged from `plans/USB.md` §4).

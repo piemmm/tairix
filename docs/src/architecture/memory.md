@@ -1922,7 +1922,10 @@ calling task across a completion interrupt.
   random access disarms the ramp (scattered reads never over-read), a
   coalesced read that faults falls back to the exact
   requested span (a speculative over-read never widens a caller's
-  fault), and a scratch reservation refused under pressure falls back
+  fault) and restarts the ramp, no later window reaching into the blocks
+  it speculated across until a stream has read past them — so a stream
+  nearing a bad block reads it once ahead of time, not once per request —
+  and a scratch reservation refused under pressure falls back
   to the exact read. Prefetched blocks still pass the pressure/budget
   admission gate.
 - **Secret hygiene.** `BufferClass::Sensitive` reads and writes (key
@@ -1945,8 +1948,9 @@ against a request the budget cannot hold streaming through),
 sequential readahead (a streaming read collapsing to a handful of device
 round-trips at 512-byte and 4 KiB sectors alike, byte-correctness,
 prefetch-served-from-cache, no-speculation-on-random-access,
-bypass-resets-the-run, a window clamped to what the budget retains, and
-coalesced-fault fallback), LRU eviction with
+bypass-resets-the-run, a window clamped to what the budget retains,
+coalesced-fault fallback, and a bad block read once ahead of a stream
+rather than once per request), LRU eviction with
 hysteresis, per-band growth/shrink/drain enforcement with recovery,
 zero-backing refusal, uncacheable-geometry poisoning with the device
 still serving, the closed audit field shape, and wipe-in-place.

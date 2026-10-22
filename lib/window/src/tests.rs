@@ -7017,9 +7017,10 @@ fn an_alert_takes_the_keyboard_only_when_its_application_has_earned_it() {
 
 #[test]
 fn a_refusal_is_an_error_alert_stating_its_reason_as_a_sentence() {
-    use crate::client::refusal_alert;
+    use crate::client::notice_alert;
     let stated = |reason: &str| {
-        let alert = refusal_alert("No window opened", reason).expect("an alert");
+        let alert =
+            notice_alert(AlertSeverity::Error, "No window opened", reason).expect("an alert");
         assert_eq!(alert.severity(), AlertSeverity::Error);
         assert_eq!(alert.headline(), "No window opened");
         let buttons: Vec<_> = alert.buttons().map(AlertButton::role).collect();
@@ -7044,11 +7045,15 @@ fn a_refusal_is_an_error_alert_stating_its_reason_as_a_sentence() {
 
 #[test]
 fn a_window_that_could_not_be_opened_is_stated_in_an_alert_holding_none() {
-    use crate::client::refusal_alert;
+    use crate::client::notice_alert;
     let loopback = Loopback::with_regions(&[]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let refusal =
-        refusal_alert("No window opened", "there is not enough memory to draw it").expect("fits");
+    let refusal = notice_alert(
+        AlertSeverity::Error,
+        "No window opened",
+        "there is not enough memory to draw it",
+    )
+    .expect("fits");
     let alert = client
         .open_alert(EVENTS_A, None, &refusal)
         .expect("an application with no window is still answered");
@@ -7111,6 +7116,33 @@ fn a_refusal_while_another_is_up_waits_its_turn() {
     assert_eq!(noticed(&loopback, 2).0, "Copy stopped");
     assert!(notices.answered(2));
     assert!(!notices.is_showing());
+}
+
+#[test]
+fn a_warning_is_a_warning_alert_waiting_its_turn_like_a_refusal() {
+    use crate::notices::{Notices, Raised};
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut notices = Notices::default();
+    notices.refuse(From::Operation, "Copy stopped", "the destination is full");
+    notices.warn(From::Paste, "Copied", "two attributes were not kept");
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Up
+    );
+    assert!(notices.answered(1));
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Up
+    );
+    let looped = loopback.borrow();
+    let (_, _, _, spec) = &looped.host.alerts[1];
+    assert_eq!(spec.severity(), AlertSeverity::Warning);
+    assert_eq!(
+        (spec.headline(), spec.detail()),
+        ("Copied", "Two attributes were not kept.")
+    );
 }
 
 #[test]

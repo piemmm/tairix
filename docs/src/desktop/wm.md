@@ -2488,9 +2488,11 @@ focused button, `Escape` the cancel one or the only one, and `Tab`,
 An application states a refusal through `lib/window`: `app::refuse` writes it
 to `stderr` and raises an error alert holding the window it concerns, or none
 when the refusal is that a window could not be opened, and a window's refusals
-from several sources wait one alert at a time behind each other
-(`notices::Notices`). Both build the alert with one `refusal_alert`, which
-states the reason as a sentence.
+and warnings from several sources wait one alert at a time behind each other
+(`notices::Notices`, whose `refuse` raises an error alert and `warn` a warning
+one — the file manager's, for a paste whose destination could not keep every
+attribute). All build the alert with one `notice_alert`, which states the
+reason as a sentence.
 
 The desktop states refusals of its own the same way: a gesture it refuses —
 a dropped file no application claims, a shortcut naming nothing — is a notice

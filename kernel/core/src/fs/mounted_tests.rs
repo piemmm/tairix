@@ -24,7 +24,7 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{
-    CapabilityId, Errno, FileKind, OpenFlags, RealpathMode, RenameFlags, UnlinkFlags,
+    CapabilityId, Errno, FileKind, OpenFlags, RealpathMode, RenameFlags, SeekRegion, UnlinkFlags,
     FS_OWNER_UNCHANGED,
 };
 use tairix_caps::CapabilitySet;
@@ -3275,4 +3275,87 @@ fn a_program_is_read_only_from_a_mount_that_runs_programs() {
     assert_eq!(program("/onto"), Err(Errno::NotFound));
     assert_eq!(program("/Storage/stick/hop"), Err(Errno::PermissionDenied));
     assert_eq!(data("/Storage/stick/hop"), Ok(b'S'));
+}
+
+/// A hole-aware seek answers through the secured VFS: it reports the file's
+/// real holes, `NoData` once only holes follow, and needs read permission.
+#[test]
+fn a_seek_reports_holes_through_the_secured_path() {
+    let svc = ready();
+    let caps = caps();
+    let file = path("sparse");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &file,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    assert_eq!(
+        svc.write(TEST_UID, &caps, &file, 100, false, b"data"),
+        Ok(4)
+    );
+    assert_eq!(
+        svc.seek_region(TEST_UID, &caps, &file, 0, SeekRegion::Data),
+        Ok(100)
+    );
+    assert_eq!(
+        svc.seek_region(TEST_UID, &caps, &file, 100, SeekRegion::Hole),
+        Ok(104)
+    );
+    assert_eq!(
+        svc.seek_region(TEST_UID, &caps, &file, 104, SeekRegion::Data),
+        Err(Errno::NoData)
+    );
+    assert_eq!(
+        svc.seek_region(TEST_UID, &caps, MOUNT, 0, SeekRegion::Data),
+        Err(Errno::IsADirectory)
+    );
+    svc.set_mode(TEST_UID, &caps, &file, 0o200)
+        .expect("write-only");
+    assert_eq!(
+        svc.seek_region(TEST_UID, &caps, &file, 0, SeekRegion::Data),
+        Err(Errno::PermissionDenied),
+        "where the holes lie is what reading the file reveals"
+    );
+}
+
+/// A punch is gated as a write of the same bytes: it releases the range on a
+/// writable file and is refused on a read-only mount.
+#[test]
+fn a_punch_is_gated_as_a_write() {
+    let svc = ready();
+    let caps = caps();
+    let file = path("punched");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &file,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    assert_eq!(
+        svc.write(TEST_UID, &caps, &file, 0, false, b"0123456789"),
+        Ok(10)
+    );
+    assert_eq!(svc.punch(TEST_UID, &caps, &file, 2, 4), Ok(()));
+    let mut buf = [0xFFu8; 10];
+    assert_eq!(svc.read(TEST_UID, &caps, &file, 0, &mut buf), Ok(10));
+    assert_eq!(&buf, b"01\0\0\0\x006789");
+    assert_eq!(
+        svc.seek_region(TEST_UID, &caps, &file, 0, SeekRegion::Hole),
+        Ok(2)
+    );
+    svc.set_mode(TEST_UID, &caps, &file, 0o400)
+        .expect("read-only file");
+    assert_eq!(
+        svc.punch(TEST_UID, &caps, &file, 0, 1),
+        Err(Errno::PermissionDenied)
+    );
+
+    let read_only = service(true, true, true);
+    assert_eq!(
+        read_only.punch(TEST_UID, &caps, &path("x"), 0, 1),
+        Err(Errno::ReadOnly)
+    );
 }

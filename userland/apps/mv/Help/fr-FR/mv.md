@@ -21,6 +21,8 @@ destination se trouvent sur des volumes différents ne peut pas être
 atomique : il se rabat sur une copie de la source vers la
 destination, suivie de la suppression de la source (les répertoires
 sont reproduits récursivement).
+Un fichier dont la copie échoue est supprimé, et sa source est
+conservée.
 
 Une destination existante est écrasée par défaut, ignorée avec `-n`,
 et fait l'objet d'une question sur la sortie d'erreur avec `-i` (une
@@ -28,6 +30,14 @@ question déclinée ignore ce déplacement sans erreur ; une réponse
 illisible ne vaut jamais consentement). Le premier échec arrête
 l'exécution avant tout opérande ultérieur. `--` termine l'analyse des
 options : chaque argument ultérieur est un chemin.
+
+La copie emporte les trous et les attributs étendus de chaque fichier — un
+type de fichier RISC OS, le type et le créateur d'un Mac — partout où la
+destination peut les conserver, et déplace un lien symbolique comme un lien
+stockant la même cible, jamais ce qu'il désigne. Les attributs que la
+destination ne peut pas conserver sont signalés par un seul avertissement à la
+fin de l'exécution, et par un enregistrement `omission` sur le flux
+d'information standard.
 
 ## OPTIONS
 

@@ -396,6 +396,9 @@ struct LunServe {
     ladder: RecoveryLadder,
     /// The request held while the unit comes ready.
     hold: Option<Hold>,
+    /// When a unit whose medium can leave is next asked whether it has: its
+    /// drive raises nothing on its own when it does.
+    poll_ns: Option<u64>,
 }
 
 /// A request held while its unit comes ready.
@@ -406,15 +409,49 @@ struct Hold {
     wait: ReadyWait,
 }
 
-/// A unit's endpoint and data window: bound at its first publication and
-/// kept for the life of the driver, so a request made for an earlier
-/// publication is still answered, refused stale.
+/// A unit's endpoint, bound at its first publication and kept for the life
+/// of the driver, so a request made for an earlier publication is still
+/// answered, refused stale; and the data window of its current publication.
 struct Channel {
     endpoint: u64,
-    window: &'static mut [u8],
-    shm_id: u64,
+    window: Window,
     /// Whether the endpoint is a member of the serve wait-set.
     joined: bool,
+}
+
+/// A publication's shared data window: the kernel retires a region once the
+/// node it was conferred through leaves the tree, so each publication takes
+/// a fresh one. Unmapped when dropped.
+struct Window {
+    base: usize,
+    shm_id: u64,
+}
+
+impl Window {
+    fn create() -> Option<Self> {
+        let mut shm_id = 0u64;
+        // A negative return is the errno and a base this pointer width cannot
+        // hold is equally unusable: either way there is no window.
+        let base = usize::try_from(tairix_rt::shm_create(BLK_DATA_LEN, &mut shm_id)).ok()?;
+        Some(Self { base, shm_id })
+    }
+
+    fn bytes(&mut self) -> &mut [u8] {
+        // SAFETY: `shm_create` mapped `BLK_DATA_LEN` bytes of zeroed,
+        // cacheable, RW (non-executable) memory into this process at `base`,
+        // and it stays mapped until this window is dropped. `&mut self` makes
+        // the slice the one reference into it in this address space; the
+        // consumer maps the same frames through its own grant.
+        unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, BLK_DATA_LEN) }
+    }
+}
+
+impl Drop for Window {
+    fn drop(&mut self) {
+        // A refused unmap leaves the region mapped until the driver exits;
+        // nothing else can be done with it.
+        let _ = tairix_rt::shm_unmap(self.base as u64, BLK_DATA_LEN);
+    }
 }
 
 /// Where a unit is in its life.
@@ -448,7 +485,10 @@ impl Lun {
         match &self.phase {
             Phase::Arriving { wait, .. } => Some(wait.due_ns()),
             Phase::Empty { due_ns, .. } | Phase::Rejected { due_ns, .. } => Some(*due_ns),
-            Phase::Serving(serve) => serve.hold.as_ref().map(|hold| hold.wait.due_ns()),
+            Phase::Serving(serve) => match &serve.hold {
+                Some(hold) => Some(hold.wait.due_ns()),
+                None => serve.poll_ns,
+            },
             Phase::Refused => None,
         }
     }
@@ -486,24 +526,6 @@ fn bind_blk_endpoint(block_base: u64, lun: u8) -> Option<u64> {
     }
 }
 
-/// Create a LUN's shared data window, returning this driver's mapping and
-/// the shm id forwarded as the node's grant.
-fn create_window() -> Option<(&'static mut [u8], u64)> {
-    let mut shm_id = 0u64;
-    // A negative return is the errno and a base this pointer width cannot hold
-    // is equally unusable: either way there is no window.
-    let base = usize::try_from(tairix_rt::shm_create(BLK_DATA_LEN, &mut shm_id)).ok()?;
-    // SAFETY: `shm_create` mapped `BLK_DATA_LEN` bytes of zeroed,
-    // cacheable, RW (non-executable) memory into this process at `base`
-    // and returned that base. The region is owned by this process for the
-    // rest of its life (never unmapped here), and no other reference in
-    // this address space aliases it, so a single exclusive `&mut [u8]`
-    // over exactly the requested length is sound. The consumer maps the
-    // same frames through its own inherited grant.
-    let window = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, BLK_DATA_LEN) };
-    Some((window, shm_id))
-}
-
 /// Publish one unit's storage node: class `Storage`, a `tairix,usb-msd-lun`
 /// compatible key the volume layer selects on, the two transport grants
 /// (the block-service endpoint and the shared data window), and what the
@@ -514,7 +536,7 @@ fn emit_lun_node(channel: &Channel, medium: BlkMedium) -> Option<u32> {
     node.push_match_key(key).ok()?;
     node.push_resource(HwResource::endpoint(channel.endpoint))
         .ok()?;
-    node.push_resource(HwResource::shared(channel.shm_id))
+    node.push_resource(HwResource::shared(channel.window.shm_id))
         .ok()?;
     node.push_resource(HwResource::block_medium(medium)).ok()?;
     // A negative return is the errno; anything else is the assigned node id.
@@ -522,7 +544,7 @@ fn emit_lun_node(channel: &Channel, medium: BlkMedium) -> Option<u32> {
 }
 
 /// Bring a ready unit up: what it reports of itself, its geometry, and its
-/// write policy.
+/// write policy — for an optical drive, what it reports of its disc.
 fn bring_up<T: ScsiTransport>(
     scsi: &mut ScsiDevice<T>,
     lun: u8,
@@ -531,11 +553,21 @@ fn bring_up<T: ScsiTransport>(
     let report = scsi.probe(lun, inquiry)?;
     scsi.set_medium(lun, report.medium);
     let geometry = scsi.read_capacity(lun)?;
+    if inquiry.is_optical() {
+        let disc = scsi.disc(lun, geometry)?;
+        return Ok(LunState {
+            geometry: disc.geometry,
+            write_protected: !disc.random_writable,
+            report,
+            disc_layout: Some(disc.layout),
+        });
+    }
     let write_protected = scsi.write_protected(lun)?;
     Ok(LunState {
         geometry,
         write_protected,
         report,
+        disc_layout: None,
     })
 }
 
@@ -818,7 +850,7 @@ fn main() -> i32 {
             // completion block carries ASC/ASCQ.
             let status = match interface.command_set {
                 CommandSet::Ufi => CbiStatus::UfiSense,
-                CommandSet::Transparent => CbiStatus::CommandStatus,
+                CommandSet::Transparent | CommandSet::Atapi => CbiStatus::CommandStatus,
             };
             let scsi = ScsiDevice::new(
                 Cbi::new(transport, interface.interface_number, status),
@@ -922,18 +954,18 @@ where
     serve(&mut scsi, &mut luns, &mut shared, &disconnected)
 }
 
-/// Meet unit `number` for the first time: a direct-access unit starts
-/// coming up, anything else is skipped.
+/// Meet unit `number` for the first time: a direct-access unit or an
+/// optical drive starts coming up, anything else is skipped.
 fn arrive<T: ScsiTransport>(scsi: &mut ScsiDevice<T>, number: u8, now_ns: u64) -> Phase {
     match scsi.inquiry(number) {
-        Ok(inquiry) if inquiry.device_type == DEVICE_TYPE_DIRECT_ACCESS => {
+        Ok(inquiry) if inquiry.device_type == DEVICE_TYPE_DIRECT_ACCESS || inquiry.is_optical() => {
             arriving(scsi, number, inquiry, now_ns)
         }
         Ok(inquiry) => {
             log_hex_event(
                 MSD_LUN_SKIPPED,
                 Level::Info,
-                "usb-msd: LUN skipped (not a direct-access unit)",
+                "usb-msd: LUN skipped (neither a disk nor an optical drive)",
                 "type_hex",
                 u64::from(inquiry.device_type),
             );
@@ -1119,12 +1151,15 @@ fn step<T: ScsiTransport>(
                         state,
                         &mut lun.channel,
                         shared,
+                        now_ns,
                     )?)),
                     Err(err) => wait
                         .retry(NotReady::Unusable(err), now_ns)
                         .map(|why| given_up(number, inquiry, why, now_ns)),
                 },
                 Some(WaitEnd::NoMedium) => Some(empty(number, inquiry, now_ns)),
+                // An arriving unit publishes nothing a change could stale.
+                Some(WaitEnd::Changed) => Some(arriving(scsi, number, inquiry, now_ns)),
                 Some(WaitEnd::GiveUp(why)) => Some(given_up(number, inquiry, why, now_ns)),
             }
         }
@@ -1146,6 +1181,7 @@ fn step<T: ScsiTransport>(
                 None
             }
         },
+        Phase::Serving(serve) if serve.hold.is_none() => poll(scsi, serve, number, now_ns),
         Phase::Serving(serve) => {
             let Some(channel) = lun.channel.as_mut() else {
                 return Ok(());
@@ -1160,9 +1196,28 @@ fn step<T: ScsiTransport>(
     Ok(())
 }
 
-/// Publish unit `number`, brought up as `state`: bind its endpoint and window
-/// the first time, join the endpoint to the serve set, and emit its node
-/// under a fresh binding.
+/// Ask a published unit whose medium can leave whether it has, at `now_ns`:
+/// a medium gone or changed retracts its node, as a failed request would.
+/// Answers the unit's next phase when it changes.
+fn poll<T: ScsiTransport>(
+    scsi: &mut ScsiDevice<T>,
+    serve: &mut LunServe,
+    number: u8,
+    now_ns: u64,
+) -> Option<Phase> {
+    let readiness = test(scsi, number, false);
+    if matches!(readiness, Readiness::NoMedium | Readiness::MediumChanged) {
+        return Some(medium_left(scsi, serve, number, readiness, now_ns));
+    }
+    // A spin-down, a reset, a refusal: the next request finds out what it
+    // meant, through the unit's health.
+    serve.poll_ns = Some(now_ns.saturating_add(MEDIA_POLL_NS));
+    None
+}
+
+/// Publish unit `number`, brought up as `state`: bind its endpoint the first
+/// time, take a fresh window, join the endpoint to the serve set, and emit
+/// its node under a fresh binding.
 ///
 /// `Err` is the exit code: the reserved range was squatted on or the kernel
 /// refused the node, and the device fails closed.
@@ -1172,19 +1227,22 @@ fn publish(
     state: LunState,
     channel: &mut Option<Channel>,
     shared: &mut Shared,
+    now_ns: u64,
 ) -> Result<LunServe, i32> {
     let no_service = || end(DriverExit::NoService, &[]);
-    if channel.is_none() {
+    let window = Window::create().ok_or_else(no_service)?;
+    let channel = if let Some(channel) = channel {
+        // The last publication's window goes: its node has left the tree.
+        channel.window = window;
+        channel
+    } else {
         let endpoint = bind_blk_endpoint(shared.blk_block, number).ok_or_else(no_service)?;
-        let (window, shm_id) = create_window().ok_or_else(no_service)?;
-        *channel = Some(Channel {
+        channel.insert(Channel {
             endpoint,
             window,
-            shm_id,
             joined: false,
-        });
-    }
-    let channel = channel.as_mut().ok_or_else(no_service)?;
+        })
+    };
     if !join(shared.set, channel, number) {
         return Err(no_service());
     }
@@ -1213,6 +1271,9 @@ fn publish(
         health: BlkHealth::new(class),
         ladder: RecoveryLadder::new(class),
         hold: None,
+        poll_ns: inquiry
+            .removable
+            .then_some(now_ns.saturating_add(MEDIA_POLL_NS)),
     })
 }
 
@@ -1293,6 +1354,19 @@ fn step_hold<T: ScsiTransport>(
     let readiness = test(scsi, number, hold.wait.owes_start());
     match hold.wait.answer(readiness, now_ns) {
         None => None,
+        Some(WaitEnd::Changed) => {
+            if let Some(hold) = serve.hold.take() {
+                reply_stale(channel.endpoint, hold.ticket);
+            }
+            rejoin(shared.set, channel, number);
+            Some(medium_left(
+                scsi,
+                serve,
+                number,
+                Readiness::MediumChanged,
+                now_ns,
+            ))
+        }
         Some(WaitEnd::Ready) => serve_held(scsi, serve, channel, number, shared, now_ns),
         Some(WaitEnd::NoMedium) => {
             answer_held(serve, channel, BlkStatus::Offline, now_ns);
@@ -1328,7 +1402,7 @@ fn serve_held<T: ScsiTransport>(
     let mut reply = [0u8; BLK_COMPLETION_LEN];
     let bufs = ServeBuffers {
         request: &request[..len],
-        window: &mut *channel.window,
+        window: channel.window.bytes(),
         reply: &mut reply,
     };
     match run_request(scsi, number, serve, bufs, shared, now_ns) {
@@ -1372,6 +1446,14 @@ fn give_up_held(
     rejoin(shared.set, channel, number);
 }
 
+/// Answer call `ticket` on `endpoint` stale: the publication it was made for
+/// is gone.
+fn reply_stale(endpoint: u64, ticket: u64) {
+    let mut reply = [0u8; BLK_COMPLETION_LEN];
+    let len = encode_error_completion(&mut reply, Errno::Stale).unwrap_or(0);
+    let _ = tairix_rt::call_reply(endpoint, ticket, &reply[..len]);
+}
+
 /// Answer the held request with `raw` folded through the unit's health, and
 /// release it.
 fn answer_held(serve: &mut LunServe, channel: &Channel, raw: BlkStatus, now_ns: u64) {
@@ -1410,13 +1492,12 @@ fn answer<T: ScsiTransport>(
     let mut reply = [0u8; BLK_COMPLETION_LEN];
     let Phase::Serving(serve) = &mut lun.phase else {
         // A request for a publication that is gone: the medium left.
-        let len = encode_error_completion(&mut reply, Errno::Stale).unwrap_or(0);
-        let _ = tairix_rt::call_reply(channel.endpoint, ticket, &reply[..len]);
+        reply_stale(channel.endpoint, ticket);
         return;
     };
     let bufs = ServeBuffers {
         request: &request[..len],
-        window: &mut *channel.window,
+        window: channel.window.bytes(),
         reply: &mut reply,
     };
     let next = match run_request(scsi, number, serve, bufs, shared, now_ns) {
@@ -1526,6 +1607,10 @@ fn after_reply<T: ScsiTransport>(
         scsi.take_readiness(number)
     {
         return Some(medium_left(scsi, serve, number, readiness, now_ns));
+    }
+    // An answered request showed the medium there.
+    if let Some(due) = serve.poll_ns.as_mut() {
+        *due = now_ns.saturating_add(MEDIA_POLL_NS);
     }
     // A unit that answered re-arms the ladder; a recovering one escalates —
     // a retry, then a transport reset — bounded, and only for a unit

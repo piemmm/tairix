@@ -61,33 +61,30 @@
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, DirVisit, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeTimes, VolumeHost, VolumeStats,
+    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
+    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeHost, VolumeStats,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use tairix_bytedev::ByteDevice;
 use tairix_fsmeta::preset::acorn;
+use tairix_fsprobe::adfs::Layout;
 
 mod bigdir;
+mod bytes;
 mod dir;
-mod disc;
 mod mkfs;
 mod newmap;
 mod oldmap;
-mod volume;
 
 #[cfg(test)]
 mod tests;
 
 use bigdir::{BigDir, BigHeader, DirStore};
 use dir::{FixedDir, FixedFormat, Object};
-use disc::{
-    boot_block_checksum, DiscRecord, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE, DISC_RECORD_IN_BOOT_BLOCK,
-    DISC_RECORD_SIZE,
-};
 use newmap::NewMap;
 use oldmap::{OldMap, OLD_SECTOR_SIZE, OLD_SECTOR_SIZE_U32};
-use volume::Volume;
 
 pub use mkfs::AdfsVariant;
 
@@ -302,8 +299,10 @@ const RESOLVED_LEN: usize = 8;
 
 /// An ADFS volume attached to a block device.
 pub struct Adfs<B: Block> {
-    volume: Volume<B>,
+    volume: ByteDevice<B>,
     backing: Backing,
+    /// The volume's stable identity, as the probe derives it.
+    identity: [u8; 16],
     /// Bumped by every insertion and removal, which shift a sorted
     /// directory's entries: a listing cursor carries the generation it was
     /// minted in, so its index is trusted only while nothing has moved.
@@ -340,25 +339,31 @@ impl<B: Block> Adfs<B> {
     ///   staged.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     pub fn open(device: B) -> Result<Self, DriverError> {
-        let mut volume = Volume::new(device)?;
-        // A boot block at 0xC00 (F-class floppies, hard discs) wins;
-        // then a bare disc record at byte 4 (E-class); then the old map.
-        let backing = match Self::probe_boot_block(&mut volume)? {
-            Some(record) => Backing::New {
+        let mut volume = ByteDevice::new(device)?;
+        let layout = tairix_fsprobe::adfs::identify(&mut volume)?.ok_or(DriverError::BadMagic)?;
+        let identity = layout.identity();
+        let backing = match layout {
+            Layout::NewMap { record, boot_block } => Backing::New {
                 map: NewMap::open(&mut volume, record)?,
-                boot_block: true,
+                boot_block,
             },
-            None => match Self::probe_bare_record(&mut volume)? {
-                Some(record) => Backing::New {
-                    map: NewMap::open(&mut volume, record)?,
-                    boot_block: false,
+            Layout::OldMap {
+                large_directories,
+                root_sector,
+                ..
+            } => Backing::Old {
+                format: if large_directories {
+                    FixedFormat::New
+                } else {
+                    FixedFormat::Old
                 },
-                None => Self::probe_old_map(&mut volume)?,
+                root_sector,
             },
         };
         let mut adfs = Self {
             volume,
             backing,
+            identity,
             generation: 0,
             resolved: [None; RESOLVED_LEN],
             next_resolved: 0,
@@ -380,78 +385,20 @@ impl<B: Block> Adfs<B> {
     ///   variant.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block access.
     pub fn format(device: B, variant: AdfsVariant) -> Result<Self, DriverError> {
-        let mut volume = Volume::new(device)?;
+        let mut volume = ByteDevice::new(device)?;
         mkfs::format_volume(&mut volume, variant)?;
-        let device = volume.into_device();
-        Self::open(device)
+        Self::open(volume.into_inner())
     }
 
     /// Detach from the volume, returning the underlying device.
     pub fn into_device(self) -> B {
-        self.volume.into_device()
+        self.volume.into_inner()
     }
 
-    /// Probe the checksummed boot block, returning its disc record.
-    fn probe_boot_block(volume: &mut Volume<B>) -> Result<Option<DiscRecord>, DriverError> {
-        if BOOT_BLOCK_OFFSET + BOOT_BLOCK_SIZE as u64 > volume.device_bytes() {
-            return Ok(None);
-        }
-        let mut block = [0u8; BOOT_BLOCK_SIZE];
-        volume.read_bytes(BOOT_BLOCK_OFFSET, &mut block)?;
-        if boot_block_checksum(&block) != block[BOOT_BLOCK_SIZE - 1] {
-            return Ok(None);
-        }
-        let mut raw = [0u8; DISC_RECORD_SIZE];
-        raw.copy_from_slice(
-            &block[DISC_RECORD_IN_BOOT_BLOCK..DISC_RECORD_IN_BOOT_BLOCK + DISC_RECORD_SIZE],
-        );
-        let record = DiscRecord::parse(&raw);
-        // An all-zero block would checksum; a real record cannot be
-        // all-zero (the disc size is non-zero) and its reserved tail
-        // must be zero.
-        if record.validate().is_err() || raw[0x34..0x3C].iter().any(|&b| b != 0) {
-            return Ok(None);
-        }
-        Ok(Some(record))
-    }
-
-    /// Probe the bare zone-0 disc record of an E-class volume.
-    fn probe_bare_record(volume: &mut Volume<B>) -> Result<Option<DiscRecord>, DriverError> {
-        if (DISC_RECORD_SIZE as u64) + 4 > volume.device_bytes() {
-            return Ok(None);
-        }
-        let mut raw = [0u8; DISC_RECORD_SIZE];
-        volume.read_bytes(4, &mut raw)?;
-        let record = DiscRecord::parse(&raw);
-        // A bare record identifies a single-zone volume only; the zone
-        // check performed by `NewMap::open` is the integrity gate.
-        if record.validate().is_err()
-            || record.nzones != 1
-            || raw[0x34..0x3C].iter().any(|&b| b != 0)
-        {
-            return Ok(None);
-        }
-        Ok(Some(record))
-    }
-
-    /// Probe the old free-space map and root directory marker.
-    fn probe_old_map(volume: &mut Volume<B>) -> Result<Backing, DriverError> {
-        // Loading validates both map checksums and every free area.
-        OldMap::load(volume)?;
-        // Five zero bytes at sector 2 identify a large-sector (D)
-        // volume whose root sits at sector 4; otherwise the root is the
-        // 1280-byte directory at sector 2.
-        let mut lead = [0u8; 5];
-        volume.read_bytes(2 * OLD_SECTOR_SIZE, &mut lead)?;
-        let (format, root_sector) = if lead == [0u8; 5] {
-            (FixedFormat::New, 4)
-        } else {
-            (FixedFormat::Old, 2)
-        };
-        Ok(Backing::Old {
-            format,
-            root_sector,
-        })
+    /// The volume's stable identity, exactly as the volume probe derives it.
+    #[must_use]
+    pub fn volume_identity(&self) -> [u8; 16] {
+        self.identity
     }
 
     /// The root directory's node.
@@ -488,7 +435,7 @@ impl<B: Block> Adfs<B> {
         match &self.backing {
             Backing::Old { .. } => {
                 let at = u64::from(indaddr) * OLD_SECTOR_SIZE + offset;
-                self.volume.read_bytes(at, buf)
+                self.volume.read(at, buf)
             }
             Backing::New { map, .. } => {
                 let mut done = 0usize;
@@ -499,7 +446,7 @@ impl<B: Block> Adfs<B> {
                     if take == 0 {
                         return Err(DriverError::BadMagic);
                     }
-                    self.volume.read_bytes(at, &mut buf[done..done + take])?;
+                    self.volume.read(at, &mut buf[done..done + take])?;
                     done += take;
                 }
                 Ok(())
@@ -513,7 +460,7 @@ impl<B: Block> Adfs<B> {
         match &self.backing {
             Backing::Old { .. } => {
                 let at = u64::from(indaddr) * OLD_SECTOR_SIZE + offset;
-                self.volume.write_bytes(at, data)
+                self.volume.write(at, data)
             }
             Backing::New { map, .. } => {
                 let mut done = 0usize;
@@ -524,7 +471,7 @@ impl<B: Block> Adfs<B> {
                     if take == 0 {
                         return Err(DriverError::BadMagic);
                     }
-                    self.volume.write_bytes(at, &data[done..done + take])?;
+                    self.volume.write(at, &data[done..done + take])?;
                     done += take;
                 }
                 Ok(())
@@ -923,7 +870,7 @@ impl<B: Block> Adfs<B> {
 
 /// Bytes reserved in front of a shared-fragment object by its share
 /// offset (the object sits `(N - 1)` granules into its fragment).
-fn share_base_bytes(record: &DiscRecord, indaddr: u32) -> u64 {
+fn share_base_bytes(record: &tairix_fsprobe::adfs::DiscRecord, indaddr: u32) -> u64 {
     let share = u64::from(indaddr & 0xFF);
     if share == 0 {
         0
@@ -1340,7 +1287,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         match kind {
             NodeKind::RegularFile => {
                 // Created with owner read/write, no data allocation.
-                object.attr = dir::ATTR_OWNER_READ | dir::ATTR_OWNER_WRITE;
+                object.attr = acorn::ATTR_OWNER_READ | acorn::ATTR_OWNER_WRITE;
                 self.dir_insert(dir_addr, &object)?;
             }
             // Acorn ADFS / FileCore has no symbolic-link object type, so the
@@ -1348,11 +1295,11 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             // contents merely look like a path.
             NodeKind::Symlink => return Err(DriverError::Unsupported),
             NodeKind::Directory => {
-                object.attr = dir::ATTR_DIRECTORY | dir::ATTR_OWNER_READ;
+                object.attr = acorn::ATTR_DIRECTORY | acorn::ATTR_OWNER_READ;
                 // 8-bit ADFS (the 1280-byte directory format) creates
                 // directories locked; 32-bit `FileCore` does not.
                 if !self.is_big_dir() && self.fixed_format() == FixedFormat::Old {
-                    object.attr |= dir::ATTR_LOCKED;
+                    object.attr |= acorn::ATTR_LOCKED;
                 }
                 let (bytes, big) = if self.is_big_dir() {
                     (bigdir::BIG_DIR_GRAIN, true)
@@ -1584,15 +1531,14 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
     }
 }
 
-/// The canonical `acorn.*` attribute keys this format stores, in the
-/// stable order [`FilesystemAttrs::list_attr`] enumerates them.
-const ACORN_KEYS: [&[u8]; 5] = [
-    b"acorn.loadaddr",
-    b"acorn.execaddr",
-    b"acorn.attr",
-    b"acorn.filetype",
-    b"acorn.datestamp",
-];
+/// `object` as the RISC OS fields every format that keeps them surfaces.
+fn acorn_object(object: &Object) -> acorn::Object {
+    acorn::Object {
+        load: object.load,
+        exec: object.exec,
+        attr: object.attr & acorn::ATTR_BITS,
+    }
+}
 
 impl<B: Block> Adfs<B> {
     /// The entry non-root `node` names, as `(parent, index, object)`, read
@@ -1632,25 +1578,10 @@ impl<B: Block> Adfs<B> {
 
     /// The attribute bits this volume's directory format can store.
     fn storable_attr_bits(&self) -> u16 {
-        if self.is_big_dir() {
-            0xFF
-        } else {
-            match self.fixed_format() {
-                FixedFormat::Old => acorn::ATTR_BITS,
-                FixedFormat::New => 0x7F,
-            }
+        match (self.is_big_dir(), self.fixed_format()) {
+            (false, FixedFormat::Old) => acorn::ATTR_BITS,
+            _ => acorn::FILECORE_ATTR_BITS,
         }
-    }
-
-    /// The `acorn.*` keys present on `object`, in enumeration order.
-    fn present_keys(object: &Object) -> ([bool; ACORN_KEYS.len()], usize) {
-        let typed = matches!(
-            acorn::decode_load_exec(object.load, object.exec),
-            acorn::LoadExec::Typed { .. }
-        );
-        let present = [true, true, true, typed, typed];
-        let count = present.iter().filter(|&&p| p).count();
-        (present, count)
     }
 }
 
@@ -1670,49 +1601,18 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             return Ok(None);
         }
         let object = self.resolve(node)?;
-        let decoded = acorn::decode_load_exec(object.load, object.exec);
         let mut staging = [0u8; acorn::ATTR_VALUE_MAX];
-        let value: &[u8] = match key.as_bytes() {
-            b"acorn.loadaddr" => {
-                staging[..8].copy_from_slice(&acorn::addr_to_value(object.load));
-                &staging[..8]
-            }
-            b"acorn.execaddr" => {
-                staging[..8].copy_from_slice(&acorn::addr_to_value(object.exec));
-                &staging[..8]
-            }
-            b"acorn.attr" => {
-                let (encoded, len) = acorn::attr_to_value(object.attr & acorn::ATTR_BITS)
-                    .map_err(|_| DriverError::OutOfRange)?;
-                staging[..len].copy_from_slice(&encoded[..len]);
-                &staging[..len]
-            }
-            b"acorn.filetype" => match decoded {
-                acorn::LoadExec::Typed { filetype, .. } => {
-                    let encoded =
-                        acorn::filetype_to_value(filetype).map_err(|_| DriverError::OutOfRange)?;
-                    staging[..3].copy_from_slice(&encoded);
-                    &staging[..3]
-                }
-                acorn::LoadExec::Untyped { .. } => return Ok(None),
-            },
-            b"acorn.datestamp" => match decoded {
-                acorn::LoadExec::Typed { centiseconds, .. } => {
-                    let encoded = acorn::datestamp_to_value(centiseconds)
-                        .map_err(|_| DriverError::OutOfRange)?;
-                    staging[..10].copy_from_slice(&encoded);
-                    &staging[..10]
-                }
-                acorn::LoadExec::Untyped { .. } => return Ok(None),
-            },
-            // Any other valid key is simply not present on this format.
-            _ => return Ok(None),
+        let Some(len) = acorn_object(&object)
+            .value(key.as_bytes(), &mut staging)
+            .map_err(|_| DriverError::OutOfRange)?
+        else {
+            return Ok(None);
         };
-        if value.len() > value_out.len() {
-            return Err(DriverError::BufferTooSmall);
-        }
-        value_out[..value.len()].copy_from_slice(value);
-        Ok(Some(value.len()))
+        let out = value_out
+            .get_mut(..len)
+            .ok_or(DriverError::BufferTooSmall)?;
+        out.copy_from_slice(&staging[..len]);
+        Ok(Some(len))
     }
 
     fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError> {
@@ -1741,7 +1641,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
                 // The directory bit is the object's kind, not a free
                 // attribute, and the volume's directory format bounds
                 // the storable bits.
-                if (attr & dir::ATTR_DIRECTORY != 0) != object.is_dir()
+                if (attr & acorn::ATTR_DIRECTORY != 0) != object.is_dir()
                     || attr & !self.storable_attr_bits() != 0
                 {
                     return Err(DriverError::OutOfRange);
@@ -1793,22 +1693,14 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             return Ok(None);
         }
         let object = self.resolve(node)?;
-        let (present, _) = Self::present_keys(&object);
-        let mut seen = 0u64;
-        for (key, &here) in ACORN_KEYS.iter().zip(present.iter()) {
-            if !here {
-                continue;
-            }
-            if seen == index {
-                if key.len() > key_out.len() {
-                    return Err(DriverError::BufferTooSmall);
-                }
-                key_out[..key.len()].copy_from_slice(key);
-                return Ok(Some(key.len()));
-            }
-            seen += 1;
-        }
-        Ok(None)
+        let Some(key) = acorn_object(&object).key(index) else {
+            return Ok(None);
+        };
+        let out = key_out
+            .get_mut(..key.len())
+            .ok_or(DriverError::BufferTooSmall)?;
+        out.copy_from_slice(key);
+        Ok(Some(key.len()))
     }
 
     fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
@@ -1884,6 +1776,36 @@ impl<B: Block> FilesystemStats for Adfs<B> {
                 })
             }
         }
+    }
+}
+
+/// ADFS records no owner, mode or ACL: every node reports the one record an
+/// ownerless format stands in with, and the mount policy grants a removable
+/// volume's users access. The `FileCore` attribute bits are data, surfaced
+/// through `acorn.attr`, never a permission decision here.
+impl<B: Block> FilesystemSecurity for Adfs<B> {
+    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
+        Ok(NodeSecurity::unrecorded(self.node_info(node)?.kind))
+    }
+
+    fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
+        // The format has nowhere to keep any part of the record; storing a
+        // silently lossy one is refused whole.
+        Err(DriverError::Unsupported)
+    }
+
+    fn stamp_owner(&mut self, node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
+        self.node_info(node).map(|_| ())
+    }
+
+    fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
+        self.node_info(node).map(|_| false)
+    }
+}
+
+impl<B: Block> FilesystemAttrsProvider for Adfs<B> {
+    fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
+        Some(self)
     }
 }
 
