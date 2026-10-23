@@ -100,21 +100,29 @@ matches, sorted bytewise and deduplicated:
   path grammar (`tairix_path::root_len`) and kept as written; a `:` inside a
   wildcard component (`[[:digit:]]`) is pattern syntax. A word that names no
   path at all — a resource reference such as `sys:*` — matches nothing.
-- A wildcard component lists its directory; a literal one is appended and
+- A wildcard component reads its directory a batch at a time, keeping only
+  what it matches, so no listing is held whole; a literal one is appended and
   checked only at the end, by a resolve-only probe (`lstat`'s posture), or by
   a later listing. A component before a `/` needs a directory or a link
   resolving to one, so `*/` lists directories with their slash and `*/x`
   reaches through a link.
 - A leading `.` is matched only by a `.`; `.` and `..` never match.
+- A listed name holding a `:` that leads a relative path — a directory named
+  `Home:` on a volume written elsewhere — is written from `./` (`./Home:/x`),
+  so the path grammar never reads it as a root; matches sort, and
+  `GLOBIGNORE` compares them, as bash spells them.
 - A pattern matching nothing stays as written, or is removed (`nullglob`),
   or aborts the line (`failglob`, `$?` 1).
 - A redirection target expands the same way but must yield one word:
   otherwise `ambiguous redirect`, which — like a `failglob` miss there —
   fails only that command (`$?` 1), as bash's does; in a pipeline nothing of
   it is launched, as for a target that cannot be opened.
-- A directory that is absent, not a directory, or not the session's to list
-  contributes nothing; any other failure aborts the line naming the
-  directory, so a result is never silently partial.
+- A directory that is absent, is no directory that can be listed (a link
+  that resolves nowhere, a node that lists nothing), lies past what a path can
+  reach (too deep or too long for the kernel to resolve), or is not the
+  session's to list contributes nothing. Any other failure — a volume gone, a
+  device failing — aborts the line naming the directory, as does any failure
+  once a listing has begun, so a result is never silently partial.
 
 The options are bash's, under bash's names, all off by default, and set by
 the `shopt` builtin: `dotglob`, `failglob`, `nullglob`, `nocaseglob`
@@ -134,10 +142,13 @@ clears a `dotglob` the session chose, as bash's does. An entry that is no
 valid pattern fails a line whose pattern matched anything, rather than hiding
 nothing as bash's does, so a typo never exposes what it was meant to hide.
 
-An expansion is bounded by the largest argument block a program can be handed
-(`PROCESS_START_MAX_TOTAL_LEN`, each word charged its bookkeeping too):
-`{1..100000000}` fails with `expansion exceeds the argument size limit`
-rather than exhausting memory. A command whose words all expand away runs
+A line's expansions together — every pipeline member's words, redirection
+targets, here-strings, here-documents and assignment values — are bounded by
+the largest argument block a program can be handed
+(`PROCESS_START_MAX_TOTAL_LEN`, each word charged its bookkeeping too), and a
+word stops growing before a value would carry it past what the line has left:
+`{1..100000000}` or a line of `x=$x$x` doublings fails with `expansion
+exceeds the argument size limit` rather than exhausting memory. A command whose words all expand away runs
 nothing, its assignments binding in the shell; with redirections, or inside a
 pipeline, it is refused (`command expanded to nothing`), since there is no
 program to apply them to.

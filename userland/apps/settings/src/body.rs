@@ -24,6 +24,7 @@ use crate::effects::EffectsReading;
 use crate::facts::{Facts, MachineFacts};
 use crate::form::{Documents, Form, FormPlace, TextChoices};
 use crate::network::{IfaceSetting, NetworkFacts};
+use crate::pi::Cooling;
 use crate::registry::{PaneContent, PaneRow};
 use crate::saver::SaverEntry;
 use crate::sound::SoundReading;
@@ -76,6 +77,8 @@ pub(crate) struct Answered<'a> {
     pub(crate) notify_sources: Option<&'a [BundleId]>,
     /// The sound devices and captures, or `None` while not read.
     pub(crate) sound: Option<&'a SoundReading>,
+    /// What the cooling service has answered.
+    pub(crate) cooling: &'a Cooling,
     /// The user's sound choices, or `None` while not read.
     pub(crate) effects: Option<&'a EffectsReading>,
     /// Why the desktop last would not lock the screen, if it would not.
@@ -101,6 +104,7 @@ impl Answered<'_> {
             staged: self.staged,
             resolvers: self.network.resolvers_slice(),
             sound: self.sound,
+            cooling: self.cooling,
             effects: self.effects,
             accounts: self.accounts,
             staged_accounts: self.staged_accounts,

@@ -53,6 +53,21 @@ seines Themas, eine von Ihnen gewählte Datei oder nichts abspielt. Die Klänge
 beim Starten, An- und Abmelden gehören dem Rechner und werden von seinem
 Administrator festgelegt.
 
+**Raspberry Pi** erscheint nur, wenn der Rechner einer ist. Dort wird der Lüfter
+des Prozessors eingestellt, der über eine Leitung der 40-poligen Stiftleiste
+geschaltet wird: *Off*, ständig *On* oder *Automatic*, das den Lüfter
+einschaltet, sobald der Prozessor die eingestellte Temperatur erreicht, und erst
+wieder aus, wenn er um den eingestellten Abstand abgekühlt ist, damit er nicht
+um ein Grad herum hin- und herschaltet. Die Steuerleitung wählen Sie über ihre
+GPIO-Nummer und ihren Stift, dazu, ob der Lüfter bei hohem oder niedrigem Pegel
+läuft; eine Leitung, die schon anderweitig belegt ist, wird genannt statt
+angeboten. Eine Leitung der Stiftleiste kann einen Lüfter nicht selbst
+versorgen, schließen Sie ihn also über einen Transistor an. Der Bereich zeigt
+außerdem die Temperatur des Prozessors und ob der Lüfter läuft. Kann *Automatic*
+die Temperatur nicht lesen, läuft der Lüfter, bis es wieder gelingt. Wie die
+übrigen Einstellungen des Rechners wartet eine Änderung auf *Apply*, das nach
+einem Konto fragt, das sie ändern darf.
+
 ## EXIT STATUS
 
 Null nach einem saubereren Schließen; ungleich null, wenn der Fensterkanal oder

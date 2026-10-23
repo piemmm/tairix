@@ -34,13 +34,14 @@
 
 use crate::fdt::{gic_intid_from_cells, Fdt};
 use tairix_abi::driver::encoder::ENCODER_ENDPOINTS;
+use tairix_abi::driver::gpio::HeaderLines;
 use tairix_abi::hwlink::{LinkDuty, LinkRequest};
-use tairix_abi::{DmaCoherence, HwNode, HwResource};
+use tairix_abi::{DmaCoherence, HwNode, HwProperty, HwResource};
 use tairix_arch_api::fdtwalk::push_dma_windows;
 use tairix_arch_api::fdtwalk::{emitted, FdtPlatform};
 use tairix_fdt::{
     bus_level, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window, read_cells,
-    scan_translated, translated_reg, BusLevel, Node,
+    scan_translated, translated_reg, BusLevel, Node, MAX_WALK_DEPTH,
 };
 // The single source of the mailbox `compatible` match identity lives in the
 // device's own client crate (`lib/vcmailbox`) so the discovery key here and
@@ -102,6 +103,26 @@ pub const EMMC2_COMPATIBLE: &[u8] = b"brcm,bcm2711-emmc2";
 
 /// The Broadcom DMA binding's channel mask, which numbers channels across the
 /// whole DMA block rather than from the node's own first channel.
+/// The BCM2835's GPIO controller, the Pi 3's.
+const BCM2835_GPIO_COMPATIBLE: &[u8] = b"brcm,bcm2835-gpio";
+
+/// The `compatible` vendor prefix of every Raspberry Pi board's root.
+const RASPBERRY_PI_VENDOR: &[u8] = b"raspberrypi,";
+
+/// The lines of the chip's GPIO block a Raspberry Pi's 40-pin header lends to
+/// system services: GPIO 2–27, every header line but the HAT identification
+/// EEPROM's bus on GPIO 0 and 1, which the firmware owns.
+const PI_HEADER_FIRST: u8 = 2;
+const PI_HEADER_LAST: u8 = 27;
+
+/// The BCM2711 AVS monitor, whose register block holds the temperature
+/// sensor's.
+const AVS_MONITOR_COMPATIBLE: &[u8] = b"brcm,bcm2711-avs-monitor";
+
+/// The temperature sensor inside the AVS monitor, a node with no window of
+/// its own.
+const AVS_THERMAL_COMPATIBLE: &[u8] = b"brcm,bcm2711-thermal";
+
 const BRCM_DMA_CHANNEL_MASK: &str = "brcm,dma-channel-mask";
 
 /// The Broadcom DMA block's channel register stride, and the page its
@@ -115,6 +136,12 @@ const BRCM_DMA_PAGE: u64 = 0x1000;
 pub struct Aarch64Fdt {
     /// The GIC's phandle, when the tree gives it one.
     gic: Option<u32>,
+    /// Whether the tree describes a Raspberry Pi, whose header the chip's GPIO
+    /// block leads.
+    raspberry_pi: bool,
+    /// The translated window of the AVS monitor holding an enabled
+    /// temperature sensor, which the sensor takes from it.
+    avs_sensor_window: Option<(u64, u64)>,
     /// Each display engine output the tree describes, in
     /// [`ENGINE_OUTPUTS`]' order.
     outputs: [Option<OutputWiring>; ENGINE_OUTPUTS.len()],
@@ -157,6 +184,39 @@ fn engine_outputs(fdt: &Fdt<'_>) -> [Option<OutputWiring>; ENGINE_OUTPUTS.len()]
             .map(|(window, encoder)| OutputWiring { window, encoder });
     }
     outputs
+}
+
+/// Whether the tree's root names a Raspberry Pi board.
+fn is_raspberry_pi(fdt: &Fdt<'_>) -> bool {
+    let Some(Ok(root)) = fdt.nodes().next() else {
+        return false;
+    };
+    root.property("compatible").is_some_and(|names| {
+        names
+            .iter_strings()
+            .any(|name| name.starts_with(RASPBERRY_PI_VENDOR))
+    })
+}
+
+/// The translated window of the AVS monitor directly above an enabled
+/// temperature sensor.
+fn avs_sensor_window(fdt: &Fdt<'_>) -> Option<(u64, u64)> {
+    let mut monitors = [None; MAX_WALK_DEPTH];
+    scan_translated(fdt, |node, levels, depth| {
+        if node.is_compatible(AVS_THERMAL_COMPATIBLE) && node.is_operational() {
+            return depth
+                .checked_sub(1)
+                .and_then(|parent| monitors.get(parent).copied().flatten());
+        }
+        if let Some(slot) = monitors.get_mut(depth) {
+            *slot = if node.is_compatible(AVS_MONITOR_COMPATIBLE) && node.is_operational() {
+                translated_reg(node, depth, levels, 0)
+            } else {
+                None
+            };
+        }
+        None
+    })
 }
 
 /// Whether `node` is one of the encoders the display engine feeds.
@@ -225,6 +285,8 @@ impl FdtPlatform for Aarch64Fdt {
     fn from_tree(fdt: &Fdt<'_>) -> Self {
         Self {
             gic: crate::gic::find_gic(fdt).and_then(|gic| gic.phandle),
+            raspberry_pi: is_raspberry_pi(fdt),
+            avs_sensor_window: avs_sensor_window(fdt),
             outputs: engine_outputs(fdt),
         }
     }
@@ -291,7 +353,10 @@ impl FdtPlatform for Aarch64Fdt {
     const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Unsnooped;
 
     fn grants_window(&self, node: &Node<'_>, name: Option<&[u8]>) -> bool {
-        name != Some(HDMI_INTERRUPT_WINDOW) || !is_engine_encoder(node)
+        let engine_owned = name == Some(HDMI_INTERRUPT_WINDOW) && is_engine_encoder(node);
+        let sensor_owned =
+            self.avs_sensor_window.is_some() && node.is_compatible(AVS_MONITOR_COMPATIBLE);
+        !engine_owned && !sensor_owned
     }
 
     fn augment(
@@ -332,6 +397,22 @@ impl FdtPlatform for Aarch64Fdt {
         }
         if names_compatible(EMMC2_COMPATIBLE) {
             push_dma_windows(depth, levels, coherence, hw);
+        }
+        if self.raspberry_pi
+            && (names_compatible(crate::uart_init::GPIO_COMPATIBLE)
+                || names_compatible(BCM2835_GPIO_COMPATIBLE))
+        {
+            let lines = HeaderLines::span(PI_HEADER_FIRST, PI_HEADER_LAST);
+            let _ = hw.push_resource(HwResource::property(
+                HwProperty::GpioHeaderLines,
+                lines.mask(),
+            ));
+        }
+        if let Some((base, len)) = self
+            .avs_sensor_window
+            .filter(|_| names_compatible(AVS_THERMAL_COMPATIBLE))
+        {
+            let _ = hw.push_resource(HwResource::mmio(base, len));
         }
         if names_compatible(DISPLAY_ENGINE_COMPATIBLE) {
             self.describe_engine(depth, levels, coherence, hw);
@@ -559,6 +640,84 @@ mod tests {
             .filter(|r| r.kind() == Some(HwResourceKind::Mmio))
             .map(|r| (r.base(), r.length()))
             .collect()
+    }
+
+    /// A Pi-shaped tree: the board named at the root, the GPIO block, and the
+    /// AVS monitor holding the temperature sensor its thermal zone reads.
+    fn pi_cooling_tree(root_compatible: &[u8]) -> Vec<u8> {
+        let cells =
+            |values: &[i32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop("compatible", root_compatible);
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("soc");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop("ranges", &cells(&[0x7c00_0000, -0x0400_0000, 0x0400_0000]));
+        b.begin_node("gpio@7e200000");
+        b.prop_str("compatible", "brcm,bcm2711-gpio");
+        b.prop("reg", &cells(&[0x7e20_0000, 0xb4]));
+        b.end_node();
+        b.begin_node("avs-monitor@7d5d2000");
+        b.prop(
+            "compatible",
+            b"brcm,bcm2711-avs-monitor\0syscon\0simple-mfd\0",
+        );
+        b.prop("reg", &cells(&[0x7d5d_2000, 0xf00]));
+        b.begin_node("thermal");
+        b.prop_str("compatible", "brcm,bcm2711-thermal");
+        b.prop_u32("#thermal-sensor-cells", 0);
+        b.prop_u32("phandle", 9);
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.begin_node("thermal-zones");
+        b.begin_node("cpu-thermal");
+        b.prop("thermal-sensors", &cells(&[9]));
+        b.prop("coefficients", &cells(&[-487, 410_040]));
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    #[test]
+    fn a_pi_s_gpio_block_lends_its_header_lines_and_another_board_s_lends_none() {
+        use tairix_abi::driver::gpio::HeaderLines;
+        use tairix_abi::HwProperty;
+
+        let pi = discover_all(&pi_cooling_tree(b"raspberrypi,4-model-b\0brcm,bcm2711\0"));
+        let lines = by_key(&pi, b"brcm,bcm2711-gpio").property(HwProperty::GpioHeaderLines);
+        assert_eq!(lines, Some(HeaderLines::span(2, 27).mask()));
+        let other = discover_all(&pi_cooling_tree(b"acme,board\0brcm,bcm2711\0"));
+        assert_eq!(
+            by_key(&other, b"brcm,bcm2711-gpio").property(HwProperty::GpioHeaderLines),
+            None
+        );
+    }
+
+    #[test]
+    fn the_avs_sensor_takes_its_monitor_s_window_and_its_zone_s_calibration() {
+        use tairix_abi::driver::thermal::ThermalCalibration;
+
+        let nodes = discover_all(&pi_cooling_tree(b"raspberrypi,4-model-b\0"));
+        let sensor = by_key(&nodes, b"brcm,bcm2711-thermal");
+        assert_eq!(mmio_windows(sensor), [(0xfd5d_2000, 0xf00)]);
+        assert_eq!(
+            sensor.thermal_calibration(),
+            Some(ThermalCalibration {
+                slope: -487,
+                offset: 410_040
+            })
+        );
+        let monitor = by_key(&nodes, b"brcm,bcm2711-avs-monitor");
+        assert!(
+            mmio_windows(monitor).is_empty(),
+            "one node holds the registers"
+        );
     }
 
     #[test]

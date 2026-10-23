@@ -16,9 +16,9 @@ use tairix_abi::sysinfo::{
     fold_cache_ledgers, spec_for, CacheLedgerRecord, CacheReportRequest, CpuInfoRecord,
     CpuLoadRecord, CpuTimeRecord, CrashRecord, DesktopFrameRecord, DesktopFrameTotals,
     DmaGroupRecord, DmaNodeRecord, DmaUnitRecord, GroupDirectoryRecord, IrqRecord, MountRecord,
-    NetInterfaceRatesRequest, PageRequest, ProcessRecord, ReclaimClassRecord, ResourceLimitRecord,
-    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, ViewBindingRecord,
-    VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    NetInterfaceRatesRequest, PageRequest, PlatformCompatible, ProcessRecord, ReclaimClassRecord,
+    ResourceLimitRecord, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
+    ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -241,6 +241,10 @@ fn scalar(
         write_bytes(&source.memory_total(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::SYSTEM_CONFIG {
         write_bytes(&source.system_config(caller)?, response)
+    } else if query == SysinfoQueryId::PLATFORM_COMPATIBLE {
+        let mut board = [0u8; PlatformCompatible::WIRE_MAX];
+        let len = source.platform_compatible(caller)?.encode(&mut board)?;
+        write_bytes(&board[..len], response)
     } else if query == SysinfoQueryId::CACHE_REPORT {
         cache_report(source, caller, reports, payload)
     } else if query == SysinfoQueryId::DESKTOP_FRAME_REPORT {
@@ -472,6 +476,29 @@ fn resource_limits(
 /// blob is validated before a byte is served: a snapshot whose header and
 /// body disagree fails closed with [`Errno::BadMagic`] rather than paging
 /// bytes a client would mis-frame.
+/// The board's `compatible` strings in `tree`, a `hw_tree_read` snapshot: its
+/// root node's keys.
+///
+/// # Errors
+///
+/// [`Errno::BadMagic`] for a snapshot whose header disagrees with its body,
+/// or [`Errno::NotFound`] for one with no root.
+pub fn root_platform(tree: &[u8]) -> Result<PlatformCompatible, Errno> {
+    HwTreeHeader::from_bytes(tree)?;
+    let body = tree.get(HwTreeHeader::WIRE_LEN..).ok_or(Errno::BadMagic)?;
+    let (nodes, trailing) = body.as_chunks::<{ HwNode::WIRE_LEN }>();
+    if !trailing.is_empty() {
+        return Err(Errno::BadMagic);
+    }
+    for record in nodes {
+        let node = HwNode::from_bytes(record)?;
+        if node.is_root() {
+            return Ok(PlatformCompatible::of(&node));
+        }
+    }
+    Err(Errno::NotFound)
+}
+
 fn hardware_tree(
     source: &dyn SysinfoSource,
     caller: &Caller,
@@ -1213,6 +1240,12 @@ mod tests {
         fn hardware_tree(&self, _caller: &Caller) -> Result<alloc::vec::Vec<u8>, Errno> {
             self.note_list_read();
             Ok(self.hwtree.clone())
+        }
+        fn platform_compatible(
+            &self,
+            _caller: &Caller,
+        ) -> Result<super::PlatformCompatible, Errno> {
+            super::root_platform(&self.hwtree)
         }
         fn user_directory(
             &self,
@@ -2117,6 +2150,41 @@ mod tests {
         assert_eq!(id.hostname_bytes(), b"tairix-box");
         // Neither query is audited.
         assert!(sink.events.borrow().as_slice().is_empty());
+    }
+
+    #[test]
+    fn the_board_is_answered_ungated_from_the_tree_root_alone() {
+        use tairix_abi::hwtree::HwMatchKey;
+        use tairix_abi::sysinfo::PlatformCompatible;
+
+        let mut source = FixtureSource::new();
+        let mut nodes = tree_nodes();
+        nodes[0]
+            .push_match_key(HwMatchKey::compatible(b"raspberrypi,4-model-b").unwrap())
+            .unwrap();
+        source.hwtree = tree_blob(3, &nodes);
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let req = request_bytes(SysinfoQueryId::PLATFORM_COMPATIBLE, &[]);
+        let mut resp = [0u8; 512];
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let board = PlatformCompatible::decode(&resp[..n]).unwrap();
+        assert!(board.strings().eq([&b"raspberrypi,4-model-b"[..]]));
+        assert!(sink.events.borrow().as_slice().is_empty(), "not audited");
+    }
+
+    #[test]
+    fn a_tree_with_no_root_or_a_torn_body_names_no_board() {
+        let devices: alloc::vec::Vec<HwNode> = tree_nodes().into_iter().skip(1).collect();
+        assert_eq!(
+            super::root_platform(&tree_blob(1, &devices)),
+            Err(Errno::NotFound)
+        );
+        let whole = tree_blob(1, &tree_nodes());
+        assert_eq!(
+            super::root_platform(&whole[..whole.len() - 1]),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]

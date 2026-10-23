@@ -219,9 +219,9 @@ too: `system_accounts()` — the no-login `system` record (uid 0, group
 resolves to) plus one no-login account per system service (`devmgr` 10,
 `sysinfod` 11, `seatmgr` 12, `login` 13, `netstack` 14, `fontd` 15,
 `greeter` 16, `confd` 17, `timed` 18, `audiod` 19, `discoveryd` 20,
-`soundd` 21, `settingsd` 22, primary group `services` gid 101), each carrying
-exactly its own service's grant ceiling (`DEVMGR_CEILING` …
-`SETTINGSD_CEILING`) so the ceiling∩manifest intersection does real work. The uids a protocol
+`soundd` 21, `settingsd` 22, `thermald` 23, primary group `services` gid
+101), each carrying exactly its own service's grant ceiling (`DEVMGR_CEILING`
+… `THERMALD_CEILING`) so the ceiling∩manifest intersection does real work. The uids a protocol
 authenticates its peer by — the network stack's, the discovery service's,
 the cue authority's, and the login service's and device manager's the cue
 authority admits lifecycle sounds by — are defined in that protocol's

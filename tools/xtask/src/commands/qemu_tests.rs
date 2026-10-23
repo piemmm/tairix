@@ -15341,8 +15341,11 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
 
     let (capsule, settings_row) = system_menu_aim(SystemAction::Settings)?;
 
-    let mut shell = Shell::new(tairix_wallpaper::DesktopSettings::default())
-        .ok_or_else(|| "settings script: the registry holds no category".to_string())?;
+    let mut shell = Shell::new(
+        tairix_wallpaper::DesktopSettings::default(),
+        tairix_settings::Board::default(),
+    )
+    .ok_or_else(|| "settings script: the registry holds no category".to_string())?;
     shell.adopt_output(output);
     shell.lay_out(viewport, scale, &theme);
     let general = settings_frame(&shell, viewport, &theme, origin)?;
@@ -15824,8 +15827,11 @@ fn reconstruct_saver_walk() -> Result<SaverWalk, String> {
     let chosen = format!("screensaver.saver = {GOOD_SAVER}");
 
     let (capsule, settings_row) = system_menu_aim(SystemAction::Settings)?;
-    let mut shell = Shell::new(tairix_wallpaper::DesktopSettings::default())
-        .ok_or_else(|| "screensaver script: the registry holds no category".to_string())?;
+    let mut shell = Shell::new(
+        tairix_wallpaper::DesktopSettings::default(),
+        tairix_settings::Board::default(),
+    )
+    .ok_or_else(|| "screensaver script: the registry holds no category".to_string())?;
     shell.adopt_output(ramfb_screen());
     shell.lay_out(viewport, scale, &theme);
     let screensaver_row = settings_walk_to(&mut shell, Category::Screensaver, viewport, &theme)?;

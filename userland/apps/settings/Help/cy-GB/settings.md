@@ -44,6 +44,20 @@ ond tra bo'ch sesiwn yn dal yr ystafell y mae'n ei gwasanaethu; dangosir
 dyfais yn ystafell sesiwn arall, ond ni ellir ei newid yma. Mae'ch bwrdd
 gwaith yn cofio'r hyn a osodwch.
 
+Dim ond pan fo'r peiriant yn un y caiff **Raspberry Pi** ei restru. Mae'n gosod
+ffan oeri'r prosesydd, a gaiff ei droi drwy un o linellau'r pennawd 40 pin:
+*Off*, *On* drwy'r amser, neu *Automatic*, sy'n troi'r ffan ymlaen pan fydd y
+prosesydd yn cyrraedd y tymheredd a osodwch a'i ddiffodd dim ond ar ôl iddo oeri
+gan yr ymyl a osodwch, fel nad yw'n troi ymlaen ac i ffwrdd o gwmpas un radd.
+Dewiswch y llinell reoli yn ôl ei rhif GPIO a'i phin, a pha un a yw'r ffan yn
+rhedeg pan fo'r llinell yn uchel neu'n isel; caiff llinell sy'n cael ei
+defnyddio gan rywbeth arall ei henwi yn hytrach na'i chynnig. Ni all llinell o'r
+pennawd bweru ffan ar ei phen ei hun, felly cysylltwch y ffan drwy dransistor.
+Mae'r paen hefyd yn dangos tymheredd y prosesydd ac a yw'r ffan yn rhedeg. Pan
+na all *Automatic* ddarllen y tymheredd, mae'r ffan yn rhedeg nes y gall. Fel
+gosodiadau eraill y peiriant, mae newid yn aros am *Apply*, sy'n gofyn am gyfrif
+a gaiff eu newid.
+
 ## EXIT STATUS
 
 Sero ar ôl cau glân; nid sero pan wrthodwyd sianel y ffenestr neu'r rhanbarth

@@ -45,6 +45,7 @@ use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
 use tairix_abi::driver::i2c::{I2cAddress, I2C_CONTROLLER_ENDPOINTS};
 use tairix_abi::driver::irqline::INTERRUPT_LINE_ENDPOINTS;
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
+use tairix_abi::driver::thermal::ThermalCalibration;
 use tairix_abi::hwlink::{LinkDuty, LinkRequest, LinkRole, LINK_NAME_MAX, LINK_SELECTOR_MAX_CELLS};
 use tairix_abi::{
     DmaCoherence, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource, IommuStreams,
@@ -63,6 +64,35 @@ const CELL_BYTES: usize = 4;
 
 /// The id the walk gives the first node it emits after the root.
 const FIRST_EMITTED_ID: u32 = HW_NODE_ROOT_ID + 1;
+
+/// The calibration the thermal zone reading only `node` states for it, when
+/// `node` is a sensor (`#thermal-sensor-cells`) one zone reads alone.
+fn sensor_calibration(fdt: &Fdt<'_>, node: &Node<'_>) -> Option<ThermalCalibration> {
+    node.property("#thermal-sensor-cells")?;
+    let (slope, offset) = tairix_fdt::thermal::sensor_coefficients(fdt, node.phandle()?)?;
+    Some(ThermalCalibration { slope, offset })
+}
+
+/// Push `node`'s `compatible` strings onto `hw` as match keys, most specific
+/// first.
+///
+/// A string longer than the ABI's bound is rejected on *both* sides — a
+/// driver bind key could never carry it either — so skipping it provably
+/// loses no match. Keys past the node's capacity are dropped, the devicetree
+/// list order keeping the most specific.
+fn push_compatible_keys(node: &Node<'_>, hw: &mut HwNode) {
+    let Some(compat) = node.property("compatible") else {
+        return;
+    };
+    for s in compat.iter_strings() {
+        let Ok(key) = HwMatchKey::compatible(s) else {
+            continue;
+        };
+        if hw.push_match_key(key).is_err() {
+            break;
+        }
+    }
+}
 
 /// The per-port half of the device-tree walk.
 pub trait FdtPlatform {
@@ -183,12 +213,13 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
     fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError> {
         // Root first so every later node's parent is already emitted. Its
         // id is the shared `HW_NODE_ROOT_ID`; its parent is the
-        // `HW_NODE_ROOT` sentinel, so it alone is `is_root`.
-        sink.emit(HwNode::new(
-            HW_NODE_ROOT_ID,
-            HW_NODE_ROOT,
-            HwDeviceClass::Root,
-        ))?;
+        // `HW_NODE_ROOT` sentinel, so it alone is `is_root`. Its keys name
+        // the board, which no driver matches.
+        let mut root = HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root);
+        if let Some(Ok(tree_root)) = self.fdt.nodes().next() {
+            push_compatible_keys(&tree_root, &mut root);
+        }
+        sink.emit(root)?;
         let mut next_id = FIRST_EMITTED_ID;
         // The shared per-depth bus state plus this walk's own per-depth
         // facts: the hardware-tree id of the nearest *emitted* ancestor,
@@ -306,22 +337,7 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
             return None;
         }
 
-        if let Some(compat) = node.property("compatible") {
-            for s in compat.iter_strings() {
-                // A string longer than the ABI's bound is rejected on *both*
-                // sides — a driver bind key could never carry it either — so
-                // skipping it provably loses no match. Keys past the node
-                // capacity are dropped most-specific-first preserved (the
-                // devicetree list order).
-                let Ok(key) = HwMatchKey::compatible(s) else {
-                    continue;
-                };
-                if hw.push_match_key(key).is_err() {
-                    break;
-                }
-            }
-        }
-
+        push_compatible_keys(node, &mut hw);
         push_mmio_resources(&self.platform, node, depth, levels, &mut hw);
         // The kernel's own controllers take only the lines the root controller
         // grants; a line through a second-level controller is a driver's.
@@ -346,6 +362,12 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
         // rather than gated on a board.
         if let Some(octets) = local_mac_address(node) {
             let _ = hw.push_resource(HwResource::link_address(octets));
+        }
+
+        // A temperature sensor's conversion, which only its thermal zone
+        // states: the generic thermal-zones binding, read for every sensor.
+        if let Some(calibration) = sensor_calibration(&self.fdt, node) {
+            let _ = hw.push_resource(HwResource::thermal_calibration(calibration));
         }
 
         let mut streams = StreamRanges::new();
@@ -1591,6 +1613,7 @@ mod tests {
     use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
     use tairix_abi::driver::i2c::I2C_CONTROLLER_ENDPOINTS;
     use tairix_abi::driver::irqline::INTERRUPT_LINE_ENDPOINTS;
+    use tairix_abi::driver::thermal::ThermalCalibration;
     use tairix_abi::hwlink::{LinkDuty, LinkRequest, LinkRole};
     use tairix_abi::{
         DmaCoherence, HwDeviceClass, HwMatchKey, HwNode, HwResource, HwResourceKind, IommuStreams,
@@ -1678,6 +1701,61 @@ mod tests {
         fn root_interrupt_controller(&self) -> Option<u32> {
             Some(ROOT_INTC)
         }
+    }
+
+    #[test]
+    fn a_sensor_carries_its_zone_s_calibration_and_only_a_sensor_does() {
+        let cells =
+            |values: &[i32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.begin_node("thermal");
+        b.prop_str("compatible", "test,sensor");
+        b.prop_u32("#thermal-sensor-cells", 0);
+        b.prop_u32("phandle", 3);
+        b.end_node();
+        b.begin_node("plain");
+        b.prop_str("compatible", "test,plain");
+        b.prop_u32("phandle", 4);
+        b.end_node();
+        b.begin_node("thermal-zones");
+        b.begin_node("cpu-thermal");
+        b.prop("thermal-sensors", &cells(&[3]));
+        b.prop("coefficients", &cells(&[-487, 410_040]));
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        let nodes = discover(&b.build());
+        assert_eq!(
+            by_key(&nodes, b"test,sensor").thermal_calibration(),
+            Some(ThermalCalibration {
+                slope: -487,
+                offset: 410_040
+            })
+        );
+        assert_eq!(by_key(&nodes, b"test,plain").thermal_calibration(), None);
+    }
+
+    #[test]
+    fn the_root_names_the_board_and_a_tree_without_compatible_names_none() {
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop("compatible", b"raspberrypi,4-model-b\0brcm,bcm2711\0");
+        b.end_node();
+        let nodes = discover(&b.build());
+        let root = nodes.first().expect("the root is emitted first");
+        assert!(root.is_root());
+        assert_eq!(
+            root.match_keys(),
+            [
+                HwMatchKey::compatible(b"raspberrypi,4-model-b").expect("fits"),
+                HwMatchKey::compatible(b"brcm,bcm2711").expect("fits"),
+            ]
+        );
+        let mut bare = FdtWriter::new();
+        bare.begin_node("");
+        bare.end_node();
+        assert!(discover(&bare.build())[0].match_keys().is_empty());
     }
 
     #[test]

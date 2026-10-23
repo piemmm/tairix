@@ -59,12 +59,11 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::driver_store::SystemConfigFile;
-    use tairix_abi::fs::DirChangeBatch;
     use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketId};
     use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily};
     use tairix_abi::rtc_ipc::{self, RtcOp, RtcReading, RTC_ENDPOINT};
     use tairix_abi::time::{Duration64, Time64};
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::waitset::WaitSourceKind;
     use tairix_abi::{Errno, WallClockReading, WallTimeState, MAX_TIME_SERVERS};
     use tairix_log::{Event, EventId, Level};
     use tairix_net::addr::IpAddr;
@@ -72,15 +71,15 @@ mod program {
     use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_resolver::RtDnsTransport;
     use tairix_rng::{FastRng, RandU64};
+    use tairix_rt::follow::{Follow, Followed, Verdict};
     use tairix_rt::{LogSink, PrivatePort, WaitSet};
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{worker_role, RtLauncher};
     use tairix_sandbox::timesync::TimeSyncService;
     use tairix_sysconfig::{Switch, SystemConfig, CONFIG_PATH, MAX_CONFIG_LEN};
     use tairix_timed::{
-        retune, selection_for, watch_verdict, Clock, NetworkSettings, NetworkTime, RecordStore,
-        Retune, RtcSource, Timed, TimedConfig, Transport, WatchVerdict, CONFIG_RETRY_ATTEMPTS,
-        CONFIG_RETRY_BASE_NANOS,
+        retune, selection_for, Clock, NetworkSettings, NetworkTime, RecordStore, Retune, RtcSource,
+        Timed, TimedConfig, Transport, CONFIG_RETRY_ATTEMPTS, CONFIG_RETRY_BASE_NANOS,
     };
     use tairix_timesync::events::{
         CONFIG_NOT_FOLLOWED, CONFIG_REFUSED, SERVERS_FROM_FALLBACK, SERVICE_UNAVAILABLE,
@@ -396,124 +395,14 @@ mod program {
         }
     }
 
-    /// The configuration watch: on the configuration's own directory, or on
-    /// its parent until that directory exists.
-    struct ConfigWatch {
-        dir: tairix_rt::Dir,
-        exact: bool,
-    }
-
-    /// What looking for the configuration found.
-    enum Follow {
-        /// The settings tree is not there: the root is not mounted yet.
-        NotYet,
-        /// It is there, and watched.
-        Watching(ConfigWatch),
-        /// It is there but cannot be watched, for this reason.
-        Unwatched(Errno),
-    }
-
-    /// Where the configuration is followed from.
-    struct Places {
-        /// The configuration's directory.
-        dir: &'static str,
-        /// The configuration's name in it.
-        file: &'static str,
-        /// That directory's parent.
-        parent: &'static str,
-        /// That directory's name in its parent.
-        leaf: &'static str,
-    }
-
-    impl Places {
-        /// The places [`CONFIG_PATH`] names.
-        fn of_config() -> Option<Self> {
-            let (dir, file) = CONFIG_PATH.rsplit_once('/')?;
-            let (parent, leaf) = dir.rsplit_once('/')?;
-            Some(Self {
-                dir,
-                file,
-                parent,
-                leaf,
-            })
-        }
-    }
-
-    /// Watch the configuration's directory, or its parent until it exists,
-    /// joined to `set`.
-    fn follow(set: &WaitSet) -> Follow {
-        let Some(places) = Places::of_config() else {
-            return Follow::Unwatched(Errno::OutOfRange);
-        };
-        let (opened, exact) = match tairix_rt::open_dir(places.dir.as_bytes()) {
-            Ok(opened) => (opened, true),
-            Err(_) => match tairix_rt::open_dir(places.parent.as_bytes()) {
-                Ok(opened) => (opened, false),
-                Err(_) => return Follow::NotYet,
-            },
-        };
-        let armed = opened
-            .watch(WATCH_LATENCY_NS)
-            .map_err(Errno::from_syscall)
-            .and_then(|()| {
-                set.add(
-                    WaitSourceKind::DirWatch,
-                    u64::from(opened.fd()),
-                    WATCH_TOKEN,
-                )
-            });
-        match armed {
-            Ok(()) => Follow::Watching(ConfigWatch { dir: opened, exact }),
-            Err(err) => Follow::Unwatched(err),
-        }
-    }
-
-    impl ConfigWatch {
-        /// Drain the watch, answering the most it asks for.
-        fn drain(&self) -> WatchVerdict {
-            let Some(places) = Places::of_config() else {
-                return WatchVerdict::Rewatch;
-            };
-            let name = if self.exact { places.file } else { places.leaf };
-            let mut scratch = [0u8; 2 * DirChangeBatch::MIN_BUFFER];
-            let mut verdict = WatchVerdict::Unconcerned;
-            for _ in 0..WATCH_DRAIN_BATCHES {
-                let Ok(len) = self.dir.read_changes(&mut scratch) else {
-                    return WatchVerdict::Rewatch;
-                };
-                let (said, more) = watch_verdict(
-                    scratch.get(..len).unwrap_or_default(),
-                    self.exact,
-                    name.as_bytes(),
-                );
-                verdict = verdict.max(said);
-                if !more {
-                    return verdict;
-                }
-            }
-            verdict.max(WatchVerdict::Reread)
-        }
-
-        /// Leave `set` and close the watch.
-        fn leave(self, set: &WaitSet) {
-            let _ = tairix_rt::waitset_ctl(
-                set.handle(),
-                WaitSetOp::Del,
-                WaitSourceKind::DirWatch,
-                u64::from(self.dir.fd()),
-                WATCH_TOKEN,
-            );
-        }
-    }
-
     /// Look for the configuration again, replacing `watch`; answers whether
     /// the settings tree was there. A tree that is there but cannot be watched
     /// is recorded, since its changes then wait for a restart.
-    fn refollow(set: &WaitSet, watch: &mut Option<ConfigWatch>) -> bool {
+    fn refollow(set: &WaitSet, watch: &mut Option<Followed>) -> bool {
         if let Some(old) = watch.take() {
             old.leave(set);
         }
-        match follow(set) {
+        match Followed::follow(CONFIG_PATH, set, WATCH_TOKEN, WATCH_LATENCY_NS) {
             Follow::NotYet => false,
             Follow::Watching(followed) => {
                 *watch = Some(followed);
@@ -757,11 +646,11 @@ mod program {
             if waited == 0 && token == WATCH_TOKEN {
                 match watch
                     .as_ref()
-                    .map_or(WatchVerdict::Rewatch, ConfigWatch::drain)
+                    .map_or(Verdict::Rewatch, |watch| watch.drain(WATCH_DRAIN_BATCHES))
                 {
-                    WatchVerdict::Unconcerned => {}
-                    WatchVerdict::Reread => changed = true,
-                    WatchVerdict::Rewatch => {
+                    Verdict::Unconcerned => {}
+                    Verdict::Reread => changed = true,
+                    Verdict::Rewatch => {
                         reachable = refollow(&set, &mut watch);
                         changed = true;
                     }

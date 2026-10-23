@@ -728,8 +728,11 @@ the pointer.
 - **Per-task network bytes** — no per-process socket accounting exists
   anywhere in the system; attribution belongs to the network service, which
   owns the sockets. The interface pane states that in words.
-- **Temperature, AC and battery** — no sensor or power-supply interface
-  exists, and no driver to serve one.
+- **Temperature** — the cooling service's ungated `thermal-v1` status serves
+  the processor's temperature where a board's sensor is driven
+  ([thermald](../userland/thermald.md)); this surface does not read it.
+- **AC and battery** — no power-supply interface exists, and no driver to
+  serve one.
 - **In-panel system actions** — the machine's power transitions are not
   rows *in this window*: they live in the taskbar's quick-actions menu,
   where the user confirms them, and reach this service as the `Power`

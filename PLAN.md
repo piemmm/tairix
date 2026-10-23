@@ -140,7 +140,8 @@ plan's ledger. A `blocked` row names its blocker.
 | USB | The modular USB stack and hot-removal (`plans/USB.md`) | in progress |
 | HID | One report model and HID class driver for every transport (`plans/HID.md`) | in progress |
 | SUPPLIERS | Kernel-mediated links between hardware-tree nodes (`plans/SUPPLIERS.md`) | in progress |
-| GPIO | GPIO controllers and their line interrupts (`plans/GPIO.md`) | planned |
+| GPIO | GPIO controllers and their line interrupts (`plans/GPIO.md`) | in progress |
+| COOLING | Temperature sensors, header GPIO lines, the cooling service and the Raspberry Pi pane (`plans/COOLING.md`) | done |
 | I2C | The shared-memory I2C protocol, its controllers, and HID over I2C (`plans/I2C.md`) | in progress |
 | ACPI | The ACPI namespace bus driver and its AML interpreter (`plans/ACPI.md`) | planned |
 | SOUND | The audio stack and the `dmaengine-v1` DMA-engine seam (`plans/SOUND.md`) | in progress |
@@ -281,7 +282,7 @@ README requires this file to name them:
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init` |
 | `count`, `tailwindow` | `head`, `tail` |
 | `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`) |
-| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/cursor`, `lib/discovery`, `lib/font`, `lib/fsprobe`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/terrain`, `lib/writeback`, the kernel, the ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `cp`, `mv`, `fstree`, the file manager, TextEdit, `view`, Paint, WinterSun |
+| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/cursor`, `lib/discovery`, `lib/font`, `lib/fsprobe`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/terrain`, `lib/writeback`, the kernel, the ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `sysinfod`, `thermald`, `devmgr`, `cp`, `mv`, `fstree`, the file manager, TextEdit, `view`, Paint, WinterSun |
 | `fmt` | `kernel/sec`, `kernel/ipc` |
 | `hexdump` | `fstree`, TextEdit |
 | `join` | `lib/procinfo`'s multi-valued readings, `netmap`'s host tooltip |
@@ -943,6 +944,12 @@ plan's own text is corrected when it is next touched, or sooner.
 
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
+
+- **2026-10-22 — §2.20, §3, §15.18: the Raspberry Pi settings category,
+  `drivers/gpio`, `drivers/sensor`, `thermald`.** At the user's direction
+  Settings has one board-named category, gated on the board's discovered
+  identity; the fan it configures is switched by a generic service over a
+  generic header-line protocol.
 
 - **2026-10-21 — §3, §16.2, §16.3, §16.5, §16.8: the `screensaver` kind.**
   So that a user can install a screensaver, and none can reach anything,

@@ -137,6 +137,19 @@ interessato — non cambia mai un risultato.
   livello da cui parte ogni uscita e ingresso. Mai sopra `0dB`. Il servizio
   audio adotta un valore cambiato all'avvio successivo; `audioctl` cambia
   la macchina in funzione.
+- `cooling.fan.mode` — `off` per impostazione predefinita, `on` o `auto`: se
+  la ventola della CPU sul connettore GPIO della scheda non viene pilotata,
+  gira sempre o viene comandata dalla temperatura del processore.
+- `cooling.fan.line` — `none` per impostazione predefinita, o la linea GPIO
+  a cui è collegata la ventola, da `0` a `63`. Si può pilotare solo una
+  linea che il connettore della scheda mette a disposizione.
+- `cooling.fan.signal` — `active-high` per impostazione predefinita, o
+  `active-low`: quale livello della linea fa girare la ventola.
+- `cooling.fan.start`, `cooling.fan.hysteresis` — gradi Celsius interi, `65`
+  e `10` per impostazione predefinita: una ventola automatica parte a
+  `start`, da `40` a `85`, e si ferma quando il processore si è raffreddato
+  di `hysteresis`, da `2` a `20`. Una modifica a un'impostazione della
+  ventola ha effetto subito.
 
 Una chiave che non è nell'elenco qui sopra viene cercata in un secondo
 registro: le impostazioni di rete di ciascuna interfaccia, conservate in

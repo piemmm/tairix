@@ -52,7 +52,11 @@ against one pattern allocate once.
 
 A pattern is untrusted input, so `MAX_PATTERN_LEN`, `MAX_TOKENS`,
 `MAX_CLASS_ITEMS`, `MAX_GROUPS` and `MAX_GROUP_DEPTH` are fixed security
-bounds. Matching never backtracks: the engine tracks, as bit sets, the
+bounds. Compiling costs time linear in the pattern's length: a component's
+bracket expressions share one table of where each `[:…:]`, `[=…=]` and
+`[.….]` element can close, and of the positions a scan is known to read on
+from to the end unclosed, so a run of unclosed `[` never re-reads what
+follows it. Matching never backtracks: the engine tracks, as bit sets, the
 positions of the candidate each node can reach from those the previous one
 reached. A pattern without groups costs time linear in its nodes times the
 candidate's length. Each group's reach from a start position, and what its

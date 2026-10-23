@@ -81,6 +81,7 @@ pub mod syscall;
 pub mod syscalls;
 pub mod sysinfo;
 pub mod terminal;
+pub mod thermal_ipc;
 pub mod time;
 pub mod touch;
 pub mod usb_urb;

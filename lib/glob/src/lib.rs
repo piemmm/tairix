@@ -30,7 +30,9 @@
 //!
 //! A pattern is untrusted input, so its size is bounded ([`MAX_PATTERN_LEN`],
 //! [`MAX_TOKENS`], [`MAX_CLASS_ITEMS`], [`MAX_GROUPS`], [`MAX_GROUP_DEPTH`])
-//! and a malformed one is a typed [`GlobError`]. Matching never fails and
+//! and a malformed one is a typed [`GlobError`]. Compiling one costs time
+//! linear in its length, its bracket expressions sharing one table of where
+//! each can close. Matching never fails and
 //! never backtracks: it tracks the set of positions each step can reach. A
 //! pattern without groups matches in time linear in its tokens times the
 //! candidate's length. A group's matches are memoised per start position,

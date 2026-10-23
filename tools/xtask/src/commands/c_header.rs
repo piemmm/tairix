@@ -816,6 +816,9 @@ fn property_name(key: HwProperty) -> &'static str {
         HwProperty::RadioCoexistence => "RADIO_COEXISTENCE",
         HwProperty::ConsoleHost => "CONSOLE_HOST",
         HwProperty::BlockMedium => "BLOCK_MEDIUM",
+        HwProperty::GpioHeaderLines => "GPIO_HEADER_LINES",
+        HwProperty::ThermalCalibration => "THERMAL_CALIBRATION",
+        HwProperty::ThermalZone => "THERMAL_ZONE",
     }
 }
 

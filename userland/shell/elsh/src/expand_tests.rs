@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::{Errno, FileKind};
 
-use super::{ExpandError, Expander};
+use super::{Budget, ExpandError, Expander, MAX_EXPANSION_BYTES};
 use crate::complete::{DirEntryInfo, DirLister};
 use crate::env::Environment;
 use crate::error::ParseError;
@@ -57,7 +57,7 @@ fn expand_with(
     env: &Environment,
     line: &str,
 ) -> Result<Vec<String>, ExpandError> {
-    Expander::new(env, &options, fs).fields(&words(line))
+    Expander::new(env, &options, fs).fields(&words(line), &mut Budget::new(MAX_EXPANSION_BYTES))
 }
 
 fn expand(options: ShellOptions, line: &str) -> Vec<String> {
@@ -295,6 +295,15 @@ impl DirLister for Endless {
 }
 
 impl GlobFs for Endless {
+    fn read_dir(
+        &self,
+        _dir: &str,
+        each: &mut dyn FnMut(&str, FileKind) -> core::ops::ControlFlow<()>,
+    ) -> Result<(), Errno> {
+        let _ = each("n", FileKind::Directory);
+        Ok(())
+    }
+
     fn kind(&self, _path: &str, _follow: bool) -> Result<FileKind, Errno> {
         Ok(FileKind::Directory)
     }
@@ -304,7 +313,7 @@ impl GlobFs for Endless {
 fn a_walk_ends_where_a_path_could_no_longer_be_spelled() {
     for line in ["**", "**/", "**/*", "**/n"] {
         let paths = Expander::new(&Environment::new(), &GLOBSTAR, &Endless)
-            .fields(&words(line))
+            .fields(&words(line), &mut Budget::new(MAX_EXPANSION_BYTES))
             .expect("expands");
         assert_eq!(paths.len(), tairix_path::MAX_COMPONENTS, "{line}");
     }
@@ -461,6 +470,17 @@ fn export_s_assignment_operands_are_not_globbed() {
     assert_eq!(fields("export x={a,b}"), ["export", "x=a", "x=b"]);
 }
 
+/// A listing that fails once it has begun handed over only part of its
+/// directory, whatever the failure, so the line stops rather than use it.
+#[test]
+fn a_listing_that_fails_part_way_is_never_taken_as_whole() {
+    let fs = tree().interrupted("d", Errno::NotFound);
+    let err = expand_with(&fs, ShellOptions::default(), &Environment::new(), "d/*")
+        .expect_err("a partial listing");
+    assert_eq!(err.error, ParseError::UnreadableDirectory(Errno::NotFound));
+    assert_eq!(err.subject.as_deref(), Some("d"));
+}
+
 #[test]
 fn a_reference_shaped_word_names_nothing_on_disk() {
     assert_eq!(default("cat sys:*"), ["cat", "sys:*"]);
@@ -481,8 +501,9 @@ fn listing_failures_mean_nothing_there_unless_the_result_would_be_partial() {
         expand_with(&deep, ShellOptions::default(), &env, "d/e/*").expect("expands"),
         ["d/e/*"]
     );
-    // A failing device, or a listing the ABI does not describe, is not.
-    for errno in [Errno::DeviceFault, Errno::BadMagic] {
+    // A failing device, a volume gone, or a listing the ABI does not
+    // describe, is not.
+    for errno in [Errno::DeviceFault, Errno::NotAttached, Errno::BadMagic] {
         let faulty = tree().failing("d/e", errno);
         let err = expand_with(&faulty, GLOBSTAR, &env, "**").expect_err("an unreadable directory");
         assert_eq!(err.error, ParseError::UnreadableDirectory(errno));
@@ -652,4 +673,86 @@ fn an_assignment_value_is_not_globbed() {
     let fs = tree();
     let (_, console, _) = shell_run(&fs, &["x=*", "echo \"$x\" $x"]);
     assert_eq!(console.stdout(), "* *\n");
+}
+
+// --- Names a listing returns -----------------------------------------------
+
+/// A volume written elsewhere may hold a directory named `Home:`, which,
+/// leading a relative path, the grammar reads as the alias root.
+fn stick() -> MemFs {
+    MemFs::new("/stick")
+        .file("Home:/stick-file")
+        .dir("Home:/Documents")
+        .file("B")
+        .file("-x")
+        .alias("Home", "/Users/me")
+        .file("/Users/me/home-file")
+        .dir("/Users/me/Documents")
+}
+
+#[test]
+fn a_listed_name_holding_a_colon_stays_relative() {
+    let fs = stick();
+    let env = Environment::new();
+    let fields = |line| expand_with(&fs, ShellOptions::default(), &env, line).expect("expands");
+    assert_eq!(fields("*/Documents"), ["./Home:/Documents"]);
+    assert_eq!(fields("*/*"), ["./Home:/Documents", "./Home:/stick-file"]);
+    // Sorted by name, as bash spells them.
+    assert_eq!(fields("*"), ["-x", "B", "./Home:"]);
+    // A root the word spells itself is kept as written.
+    assert_eq!(fields("Home:/*"), ["Home:/Documents", "Home:/home-file"]);
+}
+
+#[test]
+fn globignore_reads_a_listed_name_as_bash_spells_it() {
+    let fs = stick();
+    let mut env = Environment::new();
+    env.set("GLOBIGNORE", "Home?");
+    assert_eq!(
+        expand_with(&fs, ShellOptions::default(), &env, "*").expect("expands"),
+        ["-x", "B"]
+    );
+}
+
+#[test]
+fn a_command_is_handed_the_listed_name_never_the_alias() {
+    let fs = stick();
+    let (host, _, status) = shell_run(&fs, &["rm -r */Documents"]);
+    assert_eq!(status, 0);
+    assert_eq!(launched_argv(&host), [["rm", "-r", "./Home:/Documents"]]);
+}
+
+// --- One bound per line ----------------------------------------------------
+
+#[test]
+fn a_pipeline_s_members_share_one_bound() {
+    let fs = tree();
+    let member = alloc::format!("cmd x{{1..20000}}{}", "y".repeat(200));
+    let (host, _, status) = shell_run(&fs, &[member.as_str()]);
+    assert_eq!(status, 0, "one member fits");
+    assert_eq!(host.launches().len(), 1);
+    let line = alloc::format!("{member} | {member}");
+    let (host, console, status) = shell_run(&fs, &[line.as_str()]);
+    assert_eq!(status, 1);
+    assert!(console
+        .stderr()
+        .contains("expansion exceeds the argument size limit"));
+    assert!(host.launches().is_empty());
+}
+
+#[test]
+fn assignments_on_one_line_share_the_bound() {
+    let fs = tree();
+    let seed = alloc::format!("x={}", "0123456789abcdef".repeat(64));
+    let doubling = ["x=$x$x"; 14].join("; ");
+    let (_, console, status) = shell_run(&fs, &[seed.as_str(), doubling.as_str()]);
+    assert_eq!(status, 1);
+    assert!(console
+        .stderr()
+        .contains("expansion exceeds the argument size limit"));
+    // The next line has a bound of its own, and a value nearly the bound's
+    // size passes through it whole.
+    let (host, _, status) = shell_run(&fs, &[seed.as_str(), doubling.as_str(), "cmd $x"]);
+    assert_eq!(status, 0);
+    assert_eq!(launched_argv(&host)[0][1].len(), 1024 << 13);
 }

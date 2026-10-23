@@ -35,6 +35,7 @@ use crate::blkio::{BlkMedium, BlkStatus, FaultDomainState};
 use crate::driver::display::{DisplayFormat, DisplayMode};
 use crate::driver::exit::DriverEnding;
 use crate::driver::net::MAC_ADDRESS_LEN;
+use crate::driver::thermal::ThermalCalibration;
 use crate::hwlink::{LinkDuty, LinkRequest, LinkRole, LINK_SELECTOR_MAX_CELLS};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::{CapabilityId, Errno};
@@ -684,6 +685,19 @@ pub enum HwProperty {
     /// each fact, as the driver that probed it found. Built and read through
     /// [`HwResource::block_medium`] and [`HwNode::block_medium`].
     BlockMedium = 9,
+    /// The controller's lines its board leads to an expansion header for
+    /// system services to drive, a bit per line
+    /// ([`crate::driver::gpio::HeaderLines`]). Only discovery states it: which
+    /// lines reach the header is the board's.
+    GpioHeaderLines = 10,
+    /// The linear conversion from the sensor's raw reading to millidegrees
+    /// Celsius its thermal zone states. Built and read through
+    /// [`HwResource::thermal_calibration`] and [`HwNode::thermal_calibration`].
+    /// Only discovery states it.
+    ThermalCalibration = 11,
+    /// The node is a temperature sensor's channel: what it measures, as
+    /// [`ThermalZone`](crate::driver::thermal::ThermalZone)'s wire value.
+    ThermalZone = 12,
 }
 
 impl HwProperty {
@@ -699,6 +713,9 @@ impl HwProperty {
         Self::RadioCoexistence,
         Self::ConsoleHost,
         Self::BlockMedium,
+        Self::GpioHeaderLines,
+        Self::ThermalCalibration,
+        Self::ThermalZone,
     ];
 
     /// Raw on-wire key.
@@ -711,7 +728,13 @@ impl HwProperty {
     /// it would claim authority only the kernel confers.
     #[must_use]
     pub const fn discovery_only(self) -> bool {
-        matches!(self, Self::KernelDriven | Self::ConsoleHost)
+        matches!(
+            self,
+            Self::KernelDriven
+                | Self::ConsoleHost
+                | Self::GpioHeaderLines
+                | Self::ThermalCalibration
+        )
     }
 
     /// Inverse of [`Self::as_u32`]; `None` for an unknown key.
@@ -727,6 +750,9 @@ impl HwProperty {
             7 => Some(Self::RadioCoexistence),
             8 => Some(Self::ConsoleHost),
             9 => Some(Self::BlockMedium),
+            10 => Some(Self::GpioHeaderLines),
+            11 => Some(Self::ThermalCalibration),
+            12 => Some(Self::ThermalZone),
             _ => None,
         }
     }
@@ -734,6 +760,11 @@ impl HwProperty {
 
 /// The bits of a [`HwProperty::FixedClockRate`] value holding the rate.
 const FIXED_CLOCK_RATE_BITS: u32 = 48;
+
+/// The buffer a whole read of the hardware tree starts at: a typical
+/// discovered tree in one read. A starting capacity, never a ceiling — a
+/// larger tree doubles it until the snapshot fits.
+pub const HW_TREE_READ_START: usize = 64 * 1024;
 
 /// A reserved block of call-endpoint ids, one per hardware-tree node id.
 ///
@@ -761,6 +792,8 @@ impl NodeEndpointBlock {
         crate::driver::encoder::ENCODER_ENDPOINTS,
         crate::driver::audio_channel::AUDIO_CHANNEL_ENDPOINTS,
         crate::driver::net_channel::NET_CHANNEL_ENDPOINTS,
+        crate::driver::thermal::THERMAL_SENSOR_ENDPOINTS,
+        crate::driver::gpio::GPIO_HEADER_ENDPOINTS,
     ];
 
     /// The blocks of device channels: each id is served by the driver loaded
@@ -768,6 +801,8 @@ impl NodeEndpointBlock {
     pub const DEVICE_CHANNELS: &'static [Self] = &[
         crate::driver::audio_channel::AUDIO_CHANNEL_ENDPOINTS,
         crate::driver::net_channel::NET_CHANNEL_ENDPOINTS,
+        crate::driver::thermal::THERMAL_SENSOR_ENDPOINTS,
+        crate::driver::gpio::GPIO_HEADER_ENDPOINTS,
     ];
 
     /// The node whose device channel `id` is, or [`None`] for an id in no
@@ -1805,6 +1840,13 @@ impl HwResource {
             HwProperty::BlockMedium,
             u64::from_le_bytes(BlkMedium::encode(Some(medium))),
         )
+    }
+
+    /// The fact that the sensor's raw readings convert by `calibration`
+    /// ([`HwProperty::ThermalCalibration`]).
+    #[must_use]
+    pub fn thermal_calibration(calibration: ThermalCalibration) -> Self {
+        Self::property(HwProperty::ThermalCalibration, calibration.to_word())
     }
 
     /// The fact that entry `index` of the node's `clocks` is a fixed clock
@@ -2853,6 +2895,14 @@ impl HwNode {
             .find_map(|(held, value)| (held == key).then_some(value))
     }
 
+    /// The calibration a sensor's node states
+    /// ([`HwProperty::ThermalCalibration`]), or [`None`] when it states none.
+    #[must_use]
+    pub fn thermal_calibration(&self) -> Option<ThermalCalibration> {
+        self.property(HwProperty::ThermalCalibration)
+            .map(ThermalCalibration::from_word)
+    }
+
     /// The medium a block unit's node states ([`HwProperty::BlockMedium`]),
     /// or [`None`] when it states none or one this ABI does not define.
     #[must_use]
@@ -3731,12 +3781,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_kernel_s_own_facts_are_discovery_only() {
+    fn only_the_platform_s_own_facts_are_discovery_only() {
         assert!(HwProperty::ALL
             .iter()
             .copied()
             .filter(|key| key.discovery_only())
-            .eq([HwProperty::KernelDriven, HwProperty::ConsoleHost]));
+            .eq([
+                HwProperty::KernelDriven,
+                HwProperty::ConsoleHost,
+                HwProperty::GpioHeaderLines,
+                HwProperty::ThermalCalibration,
+            ]));
         let mut node = HwNode::new(9, HW_NODE_ROOT_ID, HwDeviceClass::Display);
         node.push_resource(HwResource::property(HwProperty::RadioCoexistence, 1))
             .unwrap();

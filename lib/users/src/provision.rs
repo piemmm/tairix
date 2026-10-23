@@ -22,7 +22,7 @@
 //!   and the boot floor holds none.
 //! * One account per system service (`devmgr`, `sysinfod`, `seatmgr`, `login`,
 //!   `netstack`, `fontd`, `greeter`, `confd`, `timed`, `audiod`, `discoveryd`,
-//!   `soundd`),
+//!   `soundd`, `settingsd`, `thermald`),
 //!   each with its own uid in the
 //!   system range and primary group [`SERVICES_GROUP`] — never a shared service
 //!   user, so per-service log partitioning, IPC peer attestation, and
@@ -49,7 +49,7 @@ use tairix_caps::CapabilitySet;
 use crate::grants::{
     capability_set, AUDIOD_CEILING, CONFD_CEILING, DEVMGR_CEILING, DISCOVERYD_CEILING,
     FONTD_CEILING, GREETER_CEILING, LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING,
-    SETTINGSD_CEILING, SOUNDD_CEILING, SYSINFOD_CEILING, TIMED_CEILING,
+    SETTINGSD_CEILING, SOUNDD_CEILING, SYSINFOD_CEILING, THERMALD_CEILING, TIMED_CEILING,
 };
 use crate::groups::GroupRecord;
 use crate::password::StoredPassword;
@@ -167,6 +167,12 @@ pub const SETTINGSD_USERNAME: &str = "settingsd";
 /// The [`Uid`] of [`SETTINGSD_USERNAME`].
 pub const SETTINGSD_UID: Uid = Uid(22);
 
+/// Name of the cooling service account — the only holder of `CAP_GPIO`.
+pub const THERMALD_USERNAME: &str = "thermald";
+
+/// The [`Uid`] of [`THERMALD_USERNAME`].
+pub const THERMALD_UID: Uid = Uid(23);
+
 /// One compiled-in account's specification: the single row both
 /// [`system_accounts`] and [`system_account_uid`] read, so the record
 /// set and the name→uid lookup can never diverge.
@@ -278,6 +284,13 @@ const SYSTEM_ACCOUNTS: &[SystemAccountSpec] = &[
         primary_gid: SERVICES_GID,
         display_name: "Settings Service",
         ceiling: SETTINGSD_CEILING,
+    },
+    SystemAccountSpec {
+        username: THERMALD_USERNAME,
+        uid: THERMALD_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Cooling Service",
+        ceiling: THERMALD_CEILING,
     },
 ];
 
@@ -428,6 +441,7 @@ mod tests {
                 ("discoveryd", 20, 101),
                 ("soundd", 21, 101),
                 ("settingsd", 22, 101),
+                ("thermald", 23, 101),
             ]
         );
         for record in &records {
@@ -497,6 +511,10 @@ mod tests {
         assert_eq!(
             by_name("settingsd").capabilities(),
             capability_set(SETTINGSD_CEILING)
+        );
+        assert_eq!(
+            by_name("thermald").capabilities(),
+            capability_set(THERMALD_CEILING)
         );
     }
 

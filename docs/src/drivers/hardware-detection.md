@@ -91,7 +91,8 @@ fn autoload_at_boot(deps: &mut ServiceDeps) {
 ```
 
 `DeviceManager::autoload` walks the tree in order, resolves each
-non-root node as above, and loads the winning driver once **per
+non-root node as above (the root's keys, a device tree's root `compatible`,
+name the board and no driver binds them), and loads the winning driver once **per
 node** — each load spawns its own driver instance holding exactly that
 node's resource grants, so two identical devices (a virtio keyboard
 and a virtio mouse, say) each get a live instance rather than the

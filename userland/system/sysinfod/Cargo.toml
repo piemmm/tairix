@@ -60,6 +60,8 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # transport.
 tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The whole-snapshot read the hardware tree is taken through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

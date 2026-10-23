@@ -182,6 +182,15 @@ pub const DMA_BCM2835_STORE_PATH: &[&[u8]] = &[b"Drivers", b"dma", b"bcm2835", b
 /// class `irq`, the leaf `brcmstb_l2` its controller family is named for.
 pub const IRQ_BRCMSTB_L2_STORE_PATH: &[&[u8]] = &[b"Drivers", b"irq", b"brcmstb_l2", b"Run"];
 
+/// Store path of the BCM2835-family GPIO controller driver bundle: class
+/// `gpio`, the leaf `bcm2835` its controller family is named for.
+pub const GPIO_BCM2835_STORE_PATH: &[&[u8]] = &[b"Drivers", b"gpio", b"bcm2835", b"Run"];
+
+/// Store path of the BCM2711 AVS temperature sensor driver bundle: class
+/// `sensor`, the part leaf `bcm2711_thermal`.
+pub const SENSOR_BCM2711_THERMAL_STORE_PATH: &[&[u8]] =
+    &[b"Drivers", b"sensor", b"bcm2711_thermal", b"Run"];
+
 /// Store path of the BCM2711 clock manager driver bundle: class `clock`, the
 /// part leaf `bcm2711_cprman`.
 pub const CPRMAN_BCM2711_STORE_PATH: &[&[u8]] = &[b"Drivers", b"clock", b"bcm2711_cprman", b"Run"];
@@ -1174,6 +1183,57 @@ pub fn build_irq_brcmstb_l2_bundle(
         "tairix-drv-irq-brcmstb-l2",
         tairix_drv_irq_brcmstb_l2::REQUIRED_CAPABILITIES,
         tairix_drv_irq_brcmstb_l2::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the BCM2835-family GPIO controller driver bundle for
+/// installation into the image's `/System/Drivers/` store.
+///
+/// It maps the controller's registers (`CAP_MMIO_MAP`), binds its bank
+/// interrupts (`CAP_IRQ_BIND`), its node's interrupt-line endpoint and header
+/// endpoint (`CAP_IPC_BIND_PRIVILEGED`) and publishes the header's channel
+/// node (`CAP_HW_EMIT`). Carries `tairix_drv_gpio_bcm2835::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_gpio_bcm2835_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-gpio-bcm2835",
+        tairix_drv_gpio_bcm2835::REQUIRED_CAPABILITIES,
+        tairix_drv_gpio_bcm2835::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the BCM2711 AVS temperature sensor driver bundle.
+///
+/// It maps the AVS monitor's window its node is granted (`CAP_MMIO_MAP`),
+/// binds the node's sensor channel (`CAP_IPC_BIND_PRIVILEGED`) and publishes
+/// its channel node (`CAP_HW_EMIT`). Carries
+/// `tairix_drv_sensor_bcm2711_thermal::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_sensor_bcm2711_thermal_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-sensor-bcm2711-thermal",
+        tairix_drv_sensor_bcm2711_thermal::REQUIRED_CAPABILITIES,
+        tairix_drv_sensor_bcm2711_thermal::BIND_KEYS,
         profile,
     )
 }

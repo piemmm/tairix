@@ -53,6 +53,7 @@ mod program {
         decode_stats_reply, DisplayRequest, DisplayStats, DISPLAY_ENDPOINT, DISPLAY_STATS_REPLY_LEN,
     };
     use tairix_abi::driver::audio::StreamDirection;
+    use tairix_abi::hwtree::HW_TREE_READ_START;
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
         NetInterfaceRatesRecord, NetInterfaceStateRecord, NetNeighborRecord, NetRouteRecord,
@@ -67,11 +68,11 @@ mod program {
         encode_reply_err, encode_reply_ok, CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord,
         CpuTimeRecord, CrashRecord, DmaGroupRecord, DmaNodeRecord, DmaUnitRecord,
         GroupDirectoryRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
-        MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord,
-        RamzipStats, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SystemIdentity, Uptime,
-        UserDirectoryRecord, ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
-        VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
-        SYSINFO_MAX_REQUEST, SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
+        MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, PlatformCompatible,
+        ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord, SelfAccountRecord,
+        SystemIdentity, Uptime, UserDirectoryRecord, ViewBindingRecord, VolumeIoHealthRecord,
+        VolumeIoQueueRecord, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
+        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, PROC_ID_LEN};
@@ -81,8 +82,10 @@ mod program {
     use tairix_rt::LogSink;
     use tairix_sysinfod::lists::{page_peer, read_whole};
     use tairix_sysinfod::{
-        list_budget, serve, Caller, LiveInstances, ProcessScope, SelfReports, SysinfoSource, Walks,
+        list_budget, root_platform, serve, Caller, LiveInstances, ProcessScope, SelfReports,
+        SysinfoSource, Walks,
     };
+    use tairix_util::fallible::read_snapshot;
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     const CAPACITY: usize = 8;
@@ -139,6 +142,10 @@ mod program {
     struct KernelSysinfoSource {
         /// The most bytes of list a peer service's answer may run to.
         most_bytes: usize,
+        /// The board's `compatible`, read once: the root is emitted at boot
+        /// and never changes, and an ungated query must not copy the whole
+        /// tree each time it is asked.
+        platform: core::cell::OnceCell<PlatformCompatible>,
     }
 
     impl SysinfoSource for KernelSysinfoSource {
@@ -171,30 +178,20 @@ mod program {
         }
 
         fn hardware_tree(&self, _caller: &Caller) -> Result<Vec<u8>, Errno> {
-            // Read the discovered tree, growing the buffer until it fits.
-            let mut buf = Vec::new();
-            let mut len = 4096;
-            loop {
-                buf.try_reserve_exact(len - buf.len())
-                    .map_err(|_| Errno::OutOfMemory)?;
-                buf.resize(len, 0);
-                match tairix_rt::hw_tree_read(&mut buf) {
-                    Ok(n) => {
-                        buf.truncate(n);
-                        return Ok(buf);
-                    }
-                    Err(ret) => {
-                        let err = Errno::from_syscall(ret);
-                        // Grow on a too-small buffer; any other error is
-                        // surfaced fail-closed.
-                        if err == Errno::BufferTooSmall && len < (1 << 20) {
-                            len *= 2;
-                            continue;
-                        }
-                        return Err(err);
-                    }
-                }
+            let mut tree = Vec::new();
+            let len = read_snapshot(&mut tree, HW_TREE_READ_START, |buf| {
+                tairix_rt::hw_tree_read(buf).map_err(Errno::from_syscall)
+            })?;
+            tree.truncate(len);
+            Ok(tree)
+        }
+
+        fn platform_compatible(&self, caller: &Caller) -> Result<PlatformCompatible, Errno> {
+            if let Some(board) = self.platform.get() {
+                return Ok(*board);
             }
+            let board = root_platform(&self.hardware_tree(caller)?)?;
+            Ok(*self.platform.get_or_init(|| board))
         }
 
         fn system_identity(&self, _caller: &Caller) -> Result<SystemIdentity, Errno> {
@@ -855,6 +852,7 @@ mod program {
 
         let source = KernelSysinfoSource {
             most_bytes: list_budget(total_ram_bytes),
+            platform: core::cell::OnceCell::new(),
         };
         let mut request = [0u8; SYSINFO_MAX_REQUEST];
         let mut reply = [0u8; SYSINFO_MAX_REPLY];

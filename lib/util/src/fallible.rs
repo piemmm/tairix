@@ -16,6 +16,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::Errno;
+
 /// `count` copies of `value`, or `None` when the allocator refuses room for
 /// them.
 pub fn filled<T: Clone>(count: usize, value: T) -> Option<Vec<T>> {
@@ -57,6 +59,37 @@ pub fn grow_to<T: Clone>(scratch: &mut Vec<T>, count: usize, value: T) -> bool {
     }
     scratch.resize(count, value);
     true
+}
+
+/// Read a whole snapshot through `read` into `buffer`, answering its length:
+/// for a source that copies all of it or none and does not say how much it
+/// needs, such as the hardware tree. An empty `buffer` starts at `initial`
+/// bytes, and each [`Errno::BufferTooSmall`] doubles it, so a snapshot of any
+/// size is read rather than refused.
+///
+/// # Errors
+///
+/// Any other refusal `read` answers, [`Errno::OutOfMemory`] when the buffer
+/// cannot grow, or [`Errno::OutOfRange`] when doubling it would overflow.
+pub fn read_snapshot(
+    buffer: &mut Vec<u8>,
+    initial: usize,
+    mut read: impl FnMut(&mut [u8]) -> Result<usize, Errno>,
+) -> Result<usize, Errno> {
+    if buffer.is_empty() && !grow_to(buffer, initial.max(1), 0) {
+        return Err(Errno::OutOfMemory);
+    }
+    loop {
+        match read(buffer.as_mut_slice()) {
+            Err(Errno::BufferTooSmall) => {
+                let doubled = buffer.len().checked_mul(2).ok_or(Errno::OutOfRange)?;
+                if !grow_to(buffer, doubled, 0) {
+                    return Err(Errno::OutOfMemory);
+                }
+            }
+            answered => return answered,
+        }
+    }
 }
 
 /// `parts` joined end to end in a string of exactly their length, or `None`

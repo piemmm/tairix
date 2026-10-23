@@ -6,6 +6,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use tairix_abi::driver::gpio::HeaderLines;
+use tairix_abi::driver::thermal::{ThermalCalibration, ThermalZone};
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwMatchKind, HwNode, HwProperty, HwResource, HwResourceKind};
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
@@ -470,6 +472,21 @@ fn describe_property(resource: &HwResource, line: &mut String) {
         Ok((HwProperty::ConsoleHost, _)) => {
             line.push_str("Shows the kernel console");
         }
+        Ok((HwProperty::GpioHeaderLines, mask)) => {
+            line.push_str("Lends header lines ");
+            write_line_runs(HeaderLines::from_mask(mask), line);
+        }
+        Ok((HwProperty::ThermalCalibration, word)) => {
+            let ThermalCalibration { slope, offset } = ThermalCalibration::from_word(word);
+            let _ = write!(
+                line,
+                "Temperature calibrated at {slope} m°C a count from {offset} m°C"
+            );
+        }
+        Ok((HwProperty::ThermalZone, zone)) => match ThermalZone::from_u64(zone) {
+            Some(ThermalZone::Processor) => line.push_str("Measures the processor's temperature"),
+            None => line.push_str("Thermal zone (unknown)"),
+        },
         Ok((HwProperty::BlockMedium, value)) => {
             match tairix_abi::blkio::BlkMedium::decode(&value.to_le_bytes()) {
                 Some(medium) => {
@@ -480,6 +497,31 @@ fn describe_property(resource: &HwResource, line: &mut String) {
             }
         }
         Err(_) => line.push_str("Property (malformed)"),
+    }
+}
+
+/// Append `lines` as runs of consecutive lines: `2-27`, or `2-4, 9`.
+fn write_line_runs(lines: HeaderLines, out: &mut String) {
+    if lines.is_empty() {
+        out.push_str("(none)");
+        return;
+    }
+    let mut runs: Vec<(u8, u8)> = Vec::new();
+    for number in lines.iter() {
+        match runs.last_mut() {
+            Some((_, end)) if end.checked_add(1) == Some(number) => *end = number,
+            _ => runs.push((number, number)),
+        }
+    }
+    for (index, &(start, end)) in runs.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let _ = if start == end {
+            write!(out, "{start}")
+        } else {
+            write!(out, "{start}-{end}")
+        };
     }
 }
 
@@ -1046,6 +1088,42 @@ C 02  Network controller
         assert_eq!(
             out.lines()[1..],
             ["  Keeps clear of the 2.4 GHz radio band"]
+        );
+    }
+
+    #[test]
+    fn verbose_states_a_header_s_lines_and_a_sensor_s_zone_and_calibration() {
+        let mut gpio = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Other);
+        gpio.push_match_key(HwMatchKey::pci(0x1af4, 0x1000, 0x08_80_00))
+            .expect("key fits");
+        let lent = HeaderLines::span(2, 4).mask() | HeaderLines::span(9, 9).mask();
+        gpio.push_resource(HwResource::property(HwProperty::GpioHeaderLines, lent))
+            .expect("resource fits");
+        let calibration = ThermalCalibration {
+            slope: -487,
+            offset: 410_040,
+        };
+        gpio.push_resource(HwResource::property(
+            HwProperty::ThermalCalibration,
+            calibration.to_word(),
+        ))
+        .expect("resource fits");
+        gpio.push_resource(HwResource::property(
+            HwProperty::ThermalZone,
+            ThermalZone::Processor.as_u64(),
+        ))
+        .expect("resource fits");
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&gpio.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines()[1..],
+            [
+                "  Lends header lines 2-4, 9",
+                "  Temperature calibrated at -487 m°C a count from 410040 m°C",
+                "  Measures the processor's temperature",
+            ]
         );
     }
 

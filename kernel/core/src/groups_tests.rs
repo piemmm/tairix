@@ -231,7 +231,7 @@ fn an_empty_database_pair_builds_exactly_the_compiled_identity() {
     let merged = build_identity_table(&users, &groups, &sink).expect("merged table verifies");
     let compiled = crate::groups::system_identity_table(&sink).expect("compiled table verifies");
     for table in [&merged, &compiled] {
-        assert_eq!(table.user_count(), 14);
+        assert_eq!(table.user_count(), 15);
         assert_eq!(table.group_count(), 2);
         assert!(table.user(UserId(0)).is_ok());
         assert!(table.user(UserId(tairix_users::LOGIN_UID.0)).is_ok());
@@ -241,6 +241,7 @@ fn an_empty_database_pair_builds_exactly_the_compiled_identity() {
         assert!(table.user(UserId(tairix_users::AUDIOD_UID.0)).is_ok());
         assert!(table.user(UserId(tairix_users::SOUNDD_UID.0)).is_ok());
         assert!(table.user(UserId(tairix_users::SETTINGSD_UID.0)).is_ok());
+        assert!(table.user(UserId(tairix_users::THERMALD_UID.0)).is_ok());
         assert!(table.user(UserId(1000)).is_err());
     }
 }

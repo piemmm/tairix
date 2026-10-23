@@ -348,6 +348,7 @@ pub(crate) fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::About => ABOUT,
         IconKind::Startup => STARTUP,
         IconKind::Caching => CHIP,
+        IconKind::RaspberryPi => BOARD,
         IconKind::DateTime => CLOCK,
         IconKind::Ethernet => PLUG,
         IconKind::WiFi => WIFI,
@@ -740,6 +741,33 @@ const CHIP: &[Mark] = &[
             "M3.6 8.4H6.4M3.6 12H6.4M3.6 15.6H6.4M17.6 8.4H20.4M17.6 12H20.4M17.6 15.6H20.4",
         )],
         1.6,
+    ),
+];
+
+/// A board seen from above: its header's pins along one edge, and a fan
+/// over its processor.
+const BOARD: &[Mark] = &[
+    cut(&[
+        Outline::Path(
+            "M4.6 4.2H19.4A1.8 1.8 0 0 1 21.2 6V18A1.8 1.8 0 0 1 19.4 19.8H4.6\
+             A1.8 1.8 0 0 1 2.8 18V6A1.8 1.8 0 0 1 4.6 4.2Z",
+        ),
+        circle(5.6, 6.9, 0.7),
+        circle(7.8, 6.9, 0.7),
+        circle(10.0, 6.9, 0.7),
+        circle(12.2, 6.9, 0.7),
+        circle(14.4, 6.9, 0.7),
+        circle(16.6, 6.9, 0.7),
+        circle(18.8, 6.9, 0.7),
+        circle(13.0, 13.6, 4.4),
+    ]),
+    fill(&[circle(13.0, 13.6, 1.2)]),
+    stroke(
+        &[Outline::Path(
+            "M13 12.4C13 10.6 14.2 9.9 15.2 10.4M14.1 14.2C15.7 15.1 15.6 16.5 14.7 17.1\
+             M11.9 14.2C10.3 15.1 9.3 14.2 9.3 13.1",
+        )],
+        1.2,
     ),
 ];
 

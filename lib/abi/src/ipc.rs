@@ -45,7 +45,8 @@ pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 /// service ([`crate::font_ipc::FONT_ENDPOINT`]), the service
 /// manager's control surface
 /// ([`crate::service_control::SERVICE_CONTROL_ENDPOINT`]), the machine
-/// settings service ([`crate::settings_ipc::SETTINGS_ENDPOINT`]), the RAID array
+/// settings service ([`crate::settings_ipc::SETTINGS_ENDPOINT`]), the cooling
+/// service ([`crate::thermal_ipc::THERMAL_ENDPOINT`]), the RAID array
 /// composer's member rendezvous
 /// ([`crate::raid_ipc::RAID_REGISTRY_ENDPOINT`]) and its administration and
 /// status surface ([`crate::raid_admin::RAID_CONTROL_ENDPOINT`]), the
@@ -53,7 +54,7 @@ pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 /// ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
 /// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`), and every per-node block
 /// ([`crate::hwtree::NodeEndpointBlock::ALL`]: the link suppliers' roles and
-/// the NIC and audio device channels).
+/// the NIC, audio, sensor and GPIO-header device channels).
 ///
 /// Binding a reserved id requires
 /// [`crate::CapabilityId::IPC_BIND_PRIVILEGED`] even when the endpoint
@@ -88,6 +89,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::session_ipc::SESSION_ENDPOINT
         || id == crate::settings_ipc::SETTINGS_ENDPOINT
         || id == crate::sound_cue::SOUND_CUE_ENDPOINT
+        || id == crate::thermal_ipc::THERMAL_ENDPOINT
         || id == crate::raid_ipc::RAID_REGISTRY_ENDPOINT
         || id == crate::raid_admin::RAID_CONTROL_ENDPOINT
     {

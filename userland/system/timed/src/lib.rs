@@ -44,7 +44,6 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::fs::{DirChangeBatch, DirWatchStatus};
 use tairix_abi::rtc_ipc::RtcReading;
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{Errno, FieldValue, WallClockReading, WallTimeState};
@@ -849,44 +848,6 @@ pub fn selection_for(
         Vec::new()
     };
     select_servers(&settings.configured, &learned)
-}
-
-/// What a drained batch from the configuration watch asks for, least first.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum WatchVerdict {
-    /// Nothing the configuration lives in changed.
-    Unconcerned,
-    /// The configuration may have changed: read it again.
-    Reread,
-    /// The watched directory went away, or the configuration's own directory
-    /// came or went: watch again, then read.
-    Rewatch,
-}
-
-/// The verdict on change batch `bytes` from a watch on a directory holding
-/// the entry `name`, and whether more changes wait.
-///
-/// `exact` is a watch on the configuration's own directory, where `name` is
-/// the file; otherwise it is on that directory's parent, waiting for the
-/// directory `name` to appear. A batch that cannot be decoded is taken as the
-/// worst case.
-#[must_use]
-pub fn watch_verdict(bytes: &[u8], exact: bool, name: &[u8]) -> (WatchVerdict, bool) {
-    let Ok(batch) = DirChangeBatch::decode(bytes) else {
-        return (WatchVerdict::Rewatch, false);
-    };
-    if batch.status == DirWatchStatus::Gone {
-        return (WatchVerdict::Rewatch, false);
-    }
-    if !batch.concerns(name) {
-        return (WatchVerdict::Unconcerned, batch.more);
-    }
-    let verdict = if exact {
-        WatchVerdict::Reread
-    } else {
-        WatchVerdict::Rewatch
-    };
-    (verdict, batch.more)
 }
 
 /// Emit one audit record through `sink`.

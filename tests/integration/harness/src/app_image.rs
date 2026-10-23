@@ -1581,6 +1581,7 @@ mod tests {
         "tee",
         "telnet",
         "terminal",
+        "thermald",
         "timed",
         "top",
         "traceroute",
@@ -1643,6 +1644,7 @@ mod tests {
                 "soundd",
                 "switchboard",
                 "sysinfod",
+                "thermald",
                 "timed"
             ]
         );

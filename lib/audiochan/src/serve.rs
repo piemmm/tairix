@@ -42,15 +42,14 @@ use tairix_abi::driver::audio_channel::{
     AUDIO_CHANNEL_MAX_REQUEST,
 };
 use tairix_abi::driver::DeviceWake;
-use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId};
-use tairix_caps::CapabilitySet;
+use tairix_abi::{CapabilityId, Errno, HwDeviceClass, ProcId};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::{LogSink, ServedCall};
 
 use crate::{ChannelIo, Dispatcher, MappedRegion};
 use tairix_drvrt::exit::{end, step, DriverExit};
+use tairix_drvrt::serve::{publish_channel, DeviceChannel};
 
 /// Diagnostic event id: the one-shot "device channel published, serving"
 /// beacon an audio driver emits once its device is live and its endpoint is
@@ -72,6 +71,16 @@ const EVENT_TOKEN: u64 = 2;
 /// absorbs a doorbell racing the previous reply — a fail-closed memory bound.
 const ENDPOINT_CAPACITY: usize = 4;
 
+/// The device channel, served restricted-sender to the one holder of
+/// `CAP_AUDIO_DEVICE`, the mixer.
+const CHANNEL: DeviceChannel = DeviceChannel {
+    block: AUDIO_CHANNEL_ENDPOINTS,
+    gate: CapabilityId::AUDIO_DEVICE,
+    max_request: AUDIO_CHANNEL_MAX_REQUEST,
+    max_reply: AUDIO_CHANNEL_MAX_REPLY,
+    capacity: ENDPOINT_CAPACITY,
+};
+
 /// A device channel claimed, published and served: the endpoint the mixer
 /// calls and the dispatcher its wakes go to, driven by [`serve`]'s loop or by
 /// a driver whose loop serves another protocol of the device beside it.
@@ -88,7 +97,7 @@ impl<A: Audio> Channel<A> {
     ///
     /// The exit status to end with, its reason recorded.
     pub fn publish(audio: A) -> Result<Self, i32> {
-        let Some(endpoint) = bind_channel_endpoint() else {
+        let Some(endpoint) = CHANNEL.bind() else {
             return Err(end(
                 DriverExit::NoService,
                 &[step(
@@ -96,7 +105,14 @@ impl<A: Audio> Channel<A> {
                 )],
             ));
         };
-        if emit_audiochan_node(endpoint).is_none() {
+        if publish_channel(
+            HwDeviceClass::Audio,
+            AUDIOCHAN_NODE_COMPATIBLE,
+            endpoint,
+            &[],
+        )
+        .is_none()
+        {
             return Err(end(DriverExit::NoService, &[step("audiochan: the device-channel node could not be published to the hardware tree")]));
         }
         // The channel is the one child this driver publishes. A refused
@@ -180,47 +196,6 @@ pub fn serve<A: Audio>(audio: A, wakes: &[DeviceWake]) -> i32 {
         return end(DriverExit::NoService, &[step("audiochan: the call endpoint and the device's event sources could not be joined into the serve wait set")]);
     }
     serve_loop(channel, set)
-}
-
-/// Bind the device-channel endpoint of the node this driver was loaded for,
-/// **restricted-sender requiring `CAP_AUDIO_DEVICE`**, so only the mixer can
-/// post to it. `recv_caps` is empty — endpoint ownership already restricts
-/// receive to this task. [`None`] on any refusal (fail closed).
-fn bind_channel_endpoint() -> Option<u64> {
-    let id = AUDIO_CHANNEL_ENDPOINTS.endpoint(tairix_rt::hw_self_node().ok()?.node());
-    let mut send_caps = CapabilitySet::empty();
-    send_caps.insert(CapabilityId::AUDIO_DEVICE);
-    let bound = tairix_rt::call_create(
-        id,
-        &send_caps,
-        &CapabilitySet::empty(),
-        AUDIO_CHANNEL_MAX_REQUEST,
-        AUDIO_CHANNEL_MAX_REPLY,
-        ENDPOINT_CAPACITY,
-    );
-    (bound == 0).then_some(id)
-}
-
-/// Publish the `audiochan` hardware-tree node carrying the claimed
-/// device-channel endpoint as a grant request, so `devmgr` observes it (a
-/// hardware-tree generation bump) and hands the endpoint to the mixer.
-/// Returns the kernel-assigned node id, or [`None`] on any refusal.
-///
-/// The node names [`HW_NODE_ROOT`] as its parent; the kernel re-parents it
-/// under the *discovered node this driver was loaded for*, which is what lets
-/// `devmgr` recover the device's stable bus location from the published
-/// channel.
-fn emit_audiochan_node(endpoint: u64) -> Option<u32> {
-    let mut node = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Audio);
-    let key = HwMatchKey::compatible(AUDIOCHAN_NODE_COMPATIBLE).ok()?;
-    node.push_match_key(key).ok()?;
-    node.push_resource(HwResource::endpoint(endpoint)).ok()?;
-    let emit = tairix_rt::hw_emit_node(&node);
-    if emit < 0 {
-        return None;
-    }
-    // `emit >= 0` is the kernel-assigned node id.
-    u32::try_from(emit).ok()
 }
 
 /// Park on the wait set and serve device-channel doorbells and device events

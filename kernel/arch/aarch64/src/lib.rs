@@ -248,5 +248,4 @@ pub use kernel_arch::{halt_current_cpu, Aarch64Arch, Aarch64ArchStorage};
 pub use kernel_arch::enable_fp_el1;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use panic::handle_panic_via_serial;
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use serial::{SerialSink, SERIAL_SINK};

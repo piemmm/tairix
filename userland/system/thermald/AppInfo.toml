@@ -1,0 +1,17 @@
+# Signed-AppInfo manifest source for the `thermald` cooling service
+# (plans/COOLING.md CL6). Discovered by the build's app-bundle composer and
+# planted under /System/Services/.
+#
+# CAP_GPIO switches the fan's header line, and this service is its only
+# holder. CAP_SYSINFO_HW reads the hardware tree, waits on its generation and
+# calls the sensors' channels. CAP_FS_ACCESS reads the machine configuration
+# and watches its directory, per-inode under the service's own identity.
+# CAP_IPC_BIND_PRIVILEGED binds the reserved status endpoint, and
+# CAP_LOG_EMIT writes its records. It parses no foreign input: every frame it
+# decodes comes from a driver or a caller and is validated whole.
+id = "os.tairix.thermald"
+name = "thermald"
+title = "Thermald"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_GPIO", "CAP_SYSINFO_HW", "CAP_FS_ACCESS", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]

@@ -48,9 +48,11 @@ use crate::form::{
 };
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
 use crate::network::{Addressing, NetworkFacts};
+use crate::pi::Cooling;
 use crate::pictures::{Chooser, Offer, PictureWanted};
 use crate::registry::{
-    strip_rows, Category, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow, CATEGORIES,
+    strip_rows, Board, Category, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow,
+    CATEGORIES,
 };
 use crate::saver::SaverEntry;
 use crate::sound::SoundReading;
@@ -84,12 +86,14 @@ enum Reading {
     Effects,
     /// The screensavers the desktop offers.
     Savers,
+    /// What the cooling service reads.
+    Cooling,
 }
 
 impl Reading {
     /// This reading's bit in a [`Wanted`] set.
-    const fn bit(self) -> u8 {
-        1 << (self as u8)
+    const fn bit(self) -> u16 {
+        1 << (self as u16)
     }
 }
 
@@ -101,10 +105,10 @@ impl Reading {
 /// be copies of it to keep in step.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct Wanted {
-    armed: u8,
+    armed: u16,
     /// Armed while already wanted: the answer on its way may predate what
     /// the arming was for, so the reading is asked for again once it lands.
-    again: u8,
+    again: u16,
 }
 
 impl Wanted {
@@ -393,6 +397,10 @@ pub struct Shell {
     notify_sources: Option<Vec<BundleId>>,
     /// What the audio service answered.
     sound: Option<SoundReading>,
+    /// What the cooling service answered.
+    cooling: Cooling,
+    /// The board, which decides the categories only some boards show.
+    board: Board,
     /// What the desktop session answered of the user's sound choices.
     effects: Option<EffectsReading>,
     /// A level being dragged on a sound pane, so a reading landing meanwhile
@@ -450,11 +458,11 @@ impl Shell {
     /// nothing to show, so it answers `None` rather than inventing a
     /// location; the registry's own test rules it out.
     #[must_use]
-    pub fn new(settings: DesktopSettings) -> Option<Self> {
+    pub fn new(settings: DesktopSettings, board: Board) -> Option<Self> {
         let location = Location::opening()?;
         let mut open = DisclosureSet::closed();
         list_pane_of(&mut open, location);
-        let rows = strip_rows(&open, "");
+        let rows = strip_rows(&open, "", board);
         let mut shell = Self {
             location,
             open,
@@ -487,6 +495,8 @@ impl Shell {
             accounts: AccountFacts::default(),
             notify_sources: None,
             sound: None,
+            cooling: Cooling::Unread,
+            board,
             effects: None,
             dragging: false,
             deferred: false,
@@ -905,6 +915,58 @@ impl Shell {
         self.body.composition() == Some(Composition::Sound)
     }
 
+    /// The board this window was opened on.
+    #[must_use]
+    pub const fn board(&self) -> Board {
+        self.board
+    }
+
+    /// The categories this board shows, in table order: the strip's and the
+    /// category list's one source, so a position in either names one row.
+    pub(crate) fn shown_categories(&self) -> impl Iterator<Item = &'static CategoryRow> + '_ {
+        CATEGORIES
+            .iter()
+            .filter(|row| self.board.shows(row.category))
+    }
+
+    /// Whether the pane on show states what the cooling service reads.
+    #[must_use]
+    pub fn states_cooling(&self) -> bool {
+        self.body
+            .composition()
+            .is_some_and(Composition::reads_cooling)
+    }
+
+    /// Whether the caller should ask the cooling service.
+    #[must_use]
+    pub const fn cooling_wanted(&self) -> bool {
+        self.wanted.holds(Reading::Cooling)
+    }
+
+    /// The cooling service's reading is due again: ask for it if the pane
+    /// that states it is on show.
+    pub fn cooling_due(&mut self) {
+        if self.states_cooling() {
+            self.wanted.arm(Reading::Cooling);
+        }
+    }
+
+    /// Adopt what the cooling service answered.
+    pub fn adopt_cooling(&mut self, reading: Cooling) {
+        self.cooling = reading;
+        self.wanted.landed(Reading::Cooling);
+        if !self.states_cooling() {
+            return;
+        }
+        if self.dragging {
+            self.deferred = true;
+            return;
+        }
+        if let Some(form) = self.body.form_mut() {
+            form.adopt_cooling(&self.cooling);
+        }
+    }
+
     /// Whether the pane on show is the Sound Effects pane.
     fn states_effects(&self) -> bool {
         self.body.composition() == Some(Composition::SoundEffects)
@@ -973,7 +1035,11 @@ impl Shell {
 
     /// Adopt the reading of the pane on show that landed during a drag.
     fn adopt_deferred(&mut self) {
-        let (sound, effects) = (self.states_sound(), self.states_effects());
+        let (sound, effects, cooling) = (
+            self.states_sound(),
+            self.states_effects(),
+            self.states_cooling(),
+        );
         let Some(form) = self.body.form_mut() else {
             return;
         };
@@ -981,6 +1047,8 @@ impl Shell {
             form.adopt_sound(self.sound.as_ref());
         } else if effects {
             form.adopt_effects(self.effects.as_ref());
+        } else if cooling {
+            form.adopt_cooling(&self.cooling);
         }
     }
 
@@ -1191,7 +1259,7 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
-        let Some(pane) = Pane::named(name) else {
+        let Some(pane) = Pane::named(name, self.board) else {
             return false;
         };
         self.go_to(pane, viewport, scale, theme, damage)
@@ -1206,7 +1274,10 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
-        let Some((category, row)) = pane.locate() else {
+        let Some((category, row)) = pane
+            .locate()
+            .filter(|(category, _)| self.board.shows(*category))
+        else {
             return false;
         };
         let location = Location {
@@ -1258,6 +1329,7 @@ impl Shell {
         let resolved = self.states_resolvers();
         let sounded = self.states_sound();
         let effected = self.states_effects();
+        let cooled = self.states_cooling();
         // A pane that is not discovered from the capture drops it before
         // it is built: the machine's address book is a privileged reading,
         // and one held while the reader browses elsewhere is one this
@@ -1297,6 +1369,7 @@ impl Shell {
             staged_accounts: &staged_accounts,
             notify_sources: self.notify_sources.as_deref(),
             sound: self.sound.as_ref(),
+            cooling: &self.cooling,
             effects: self.effects.as_ref(),
             lock_refusal: self.lock_refusal,
             preview_refusal: self.preview_refusal,
@@ -1323,6 +1396,11 @@ impl Shell {
         // terminal — so it is re-read whenever the pane comes on show.
         if !sounded && self.states_sound() {
             self.wanted.arm(Reading::Sound);
+        }
+        // The temperature moves on its own, so it is read as its pane comes on
+        // show and again on the caller's period while it stays.
+        if !cooled && self.states_cooling() {
+            self.wanted.arm(Reading::Cooling);
         }
         // Another surface may have changed the choices, and the session holds
         // them, so they are read each time the pane comes on show.
@@ -2841,7 +2919,7 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) {
-        self.rows = strip_rows(&self.open, self.search.text());
+        self.rows = strip_rows(&self.open, self.search.text(), self.board);
         self.strip.restate(strip_of(&self.rows, self.location));
         self.measure_strip(viewport, scale, theme);
         let frame = self.frame(viewport, scale, theme);
@@ -2889,8 +2967,7 @@ impl Shell {
     ) {
         let mut above = None;
         let mut menu = Menu::new(
-            CATEGORIES
-                .iter()
+            self.shown_categories()
                 .map(|row| {
                     let item = MenuItem::new(row.label)
                         .with_icon(row.icon)
@@ -2902,8 +2979,7 @@ impl Shell {
         );
         menu.resolve_glyphs(scale, theme);
         menu.adopt_current(
-            CATEGORIES
-                .iter()
+            self.shown_categories()
                 .position(|row| row.category == self.location.category),
         );
         damage.add(Self::list_rect(&menu, frame, viewport, scale, theme));
@@ -2929,8 +3005,9 @@ impl Shell {
             Some(MenuAction::Activated { index }) => {
                 self.categories = None;
                 damage.add(rect);
-                let chosen = CATEGORIES
-                    .get(index)
+                let chosen = self
+                    .shown_categories()
+                    .nth(index)
                     .and_then(|row| StripRow::Category(row.category).location());
                 match chosen {
                     Some(location) => {

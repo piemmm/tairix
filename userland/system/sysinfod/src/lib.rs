@@ -63,6 +63,6 @@ pub mod walks;
 mod testing;
 
 pub use reporters::SelfReports;
-pub use service::serve;
+pub use service::{root_platform, serve};
 pub use source::{Caller, LiveInstances, ProcessScope, SysinfoSource};
 pub use walks::{list_budget, Walks};

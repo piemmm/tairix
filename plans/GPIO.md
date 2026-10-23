@@ -10,7 +10,7 @@ fires. Lines reach their consumers as `InterruptLine` links
 | Id | Item | Status |
 |---|---|---|
 | G1 | The line-interrupt service (`lib/abi/src/driver/irqline.rs`, `irqline-v1`): a consumer's link endpoint answers `Wait` when its line fires, with the trigger and polarity its selector states; the line stays masked from the moment it fires until the consumer waits again, so a level interrupt is serviced before it re-arms; first served by the BCM L2 controller (`plans/SOUND.md` SND19e) | done |
-| G2 | The BCM2835-family GPIO controller driver (`drivers/gpio/bcm2835`: `brcm,bcm2711-gpio`, `brcm,bcm2835-gpio`): its bank interrupts, per-line edge and level detection, and the service | planned |
+| G2 | The BCM2835-family GPIO controller driver (`drivers/gpio/bcm2835`: `brcm,bcm2711-gpio`, `brcm,bcm2835-gpio`): its bank interrupts, per-line edge and level detection, the service, and the header's lines lent over `gpio-header-v1` (`plans/COOLING.md` CL2) | done |
 | G3 | The Intel PCH GPIO controller driver (`drivers/gpio/intel_pch`, Sunrise Point and later): communities, pad groups, ACPI pin numbering, GPI interrupts through the controller's shared interrupt; published by the ACPI bus driver (`plans/ACPI.md` A4) | planned |
 
 ## The service (G1)
@@ -35,13 +35,18 @@ fires. Lines reach their consumers as `InterruptLine` links
 
 ## The BCM2835 family (G2)
 
-- One driver owns the GPIO block's registers: the event-detect enables, the
-  event-status register it clears, and the per-bank interrupt lines of its
-  node. The kernel's boot-time mux of the console UART's pins is the only other
+- One driver owns the GPIO block's registers: the function selects, the
+  output set and clear, the event-detect enables, the event-status register
+  it clears, and its node's first three interrupts — GPIO 0–27, 28–45, and 46
+  up. The kernel's boot-time mux of the console UART's pins is the only other
   write to the block and happens before any driver loads.
-- Function selection and pulls are not part of the service: a line used as an
-  interrupt is set to input with the pull its node states, and nothing else on
-  the block is touched.
+- A line used as an interrupt is set to input; a header line a holder claims
+  is driven as an output (`plans/COOLING.md` CL2). A line routed to an
+  alternate function is never taken for either. Pulls are the board's wiring,
+  stated by the firmware's `gpio=` lines, and are never touched.
+- A level line's detection is enabled only while its consumer waits and is
+  disabled as it fires; an edge line's stays enabled while held, and an edge
+  with no wait posted is latched in the driver.
 
 ## The Intel PCH (G3)
 

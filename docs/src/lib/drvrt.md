@@ -156,6 +156,16 @@ every supplier needs is defined here once:
   cannot starve it. A driver logs its readiness
   between the two, so readiness means bound. `serve::log_event` and
   `serve::instance_field` write its records.
+- **`serve::DeviceChannel`** is a device channel — an endpoint the driver
+  loaded for a node serves to the one service that uses the device: the id
+  its node is given in a block, bound restricted-sender requiring the
+  service's capability. **`serve::publish_channel`** then publishes the
+  channel node naming it, with whatever facts it states, so the service finds
+  the channel in the tree only once it serves. The audio and network channels,
+  the GPIO header and every temperature sensor bind and publish through these
+  two.
+- **`serve::thermal_sensor`** serves a `ThermalSensor` on its node's sensor
+  channel for the life of the driver, as `serve::rtc` serves a clock chip.
 - **`testkit`**, behind the `test-support` feature, is the kernel a
   supplier's host tests are answered through. `FakeKernel` keeps the kernel's
   rules: a grant counts only where it covers the record quoted, a call is in

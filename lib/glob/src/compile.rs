@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::bracket::{self, Bracket};
+use crate::bracket::{self, Bracket, Brackets};
 use crate::{Component, GlobError, Mark, Options, MAX_GROUPS, MAX_GROUP_DEPTH, MAX_TOKENS};
 
 /// The one-to-one lower-case form of `c`: its lower-case mapping when that is
@@ -110,6 +110,7 @@ fn component(input: &[Mark], options: Options, tokens: &mut usize) -> Result<Com
         leaves: 0,
         groups: 0,
         depth: 0,
+        brackets: None,
     };
     let nodes = parser.sequence(false)?;
     // Every mark of an all-literal component became one literal node, so
@@ -137,6 +138,8 @@ struct Parser<'a> {
     leaves: usize,
     groups: usize,
     depth: usize,
+    /// Built at the component's first `[`, then shared by all of them.
+    brackets: Option<Brackets>,
 }
 
 impl Parser<'_> {
@@ -208,7 +211,9 @@ impl Parser<'_> {
                     }
                     '[' => {
                         let fold = self.options.contains(Options::CASE_INSENSITIVE);
-                        if let Some(parsed) = bracket::parse(&self.input[self.at..], fold) {
+                        let input = self.input;
+                        let brackets = self.brackets.get_or_insert_with(|| Brackets::new(input));
+                        if let Some(parsed) = bracket::parse(input, self.at, brackets, fold) {
                             let (set, width) = parsed?;
                             self.at += width;
                             let leaf = self.next_leaf()?;

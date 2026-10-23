@@ -38,6 +38,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `UPTIME`                | none                   | no      |
 | `MOUNT_LIST`            | none                   | no      |
 | `VIEW_LIST`             | none                   | no      |
+| `PLATFORM_COMPATIBLE`   | none                   | no      |
 | `RESOURCE_LIMITS`       | none (self-scoped)     | no      |
 | `PROCESS_IDENTITY`      | none (self-scoped)     | no      |
 | `LOAD_AVERAGE`          | none                   | no      |
@@ -188,6 +189,18 @@ usable-frame census, so the two can never disagree and there is no second
 definition of "how much RAM this machine has". Only the total is exposed
 here — the gated, audited `MEMORY_PRESSURE` view (free bytes, watermarks,
 the reserve, transition history) is untouched and stays gated.
+
+### The board
+
+`PLATFORM_COMPATIBLE` answers the board's `compatible` strings, most
+specific first: the root `compatible` of the device tree its firmware handed
+over, which the shared device-tree walk carries as the hardware tree's root
+node's match keys. A machine whose firmware states none (ACPI) answers an
+empty list. `sysinfod` reads it from the tree once per boot, since the root
+never changes, so the ungated answer never copies the tree. It is ungated on
+the ground every other system shows a board's model to every user; the tree
+itself stays behind `CAP_SYSINFO_HW`. `tairix_procinfo::platform_compatible`
+reads it.
 
 ### The machine's boot-time configuration
 

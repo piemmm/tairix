@@ -8,8 +8,9 @@
 //!
 //! * a literal component is appended, its existence checked at the end of
 //!   the word (as bash's `lstat` does) or by the listing of a later one;
-//! * a wildcard component lists its directory and keeps the names it
-//!   matches, a leading `.` matched only by a `.` unless `dotglob`;
+//! * a wildcard component reads its directory a batch at a time and keeps
+//!   the names it matches, a leading `.` matched only by a `.` unless
+//!   `dotglob`, so no listing is ever held whole;
 //! * a component before the last, or before a trailing `/`, needs a
 //!   directory: one listed as such, or a link resolving to one;
 //! * under `globstar`, a `**` component (or a run of them) stands for the
@@ -18,11 +19,16 @@
 //!   reads, so no directory is read twice.
 //!
 //! Matches sort bytewise — the C collation every listing on the system uses
-//! — and [`Ignore`] then removes those `GLOBIGNORE` names.
+//! — and [`Ignore`] then removes those `GLOBIGNORE` names. A relative path
+//! that a listed name leads is written from `./` when that name holds a `:`,
+//! which the path grammar would otherwise read as a root.
 
+use alloc::borrow::Cow;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use tairix_abi::{Errno, FileKind};
 use tairix_glob::{Component, Mark, Options, Pattern, Scratch};
@@ -32,13 +38,27 @@ use crate::error::ParseError;
 use crate::expand::{Budget, ExpandError};
 
 /// The read-only view of the filesystem filename generation walks: a
-/// directory's entries ([`DirLister`], links reported as links) and the kind
-/// of the node a path names.
+/// directory's entries, read as they arrive with links reported as links,
+/// and the kind of the node a path names. Completion lists through the same
+/// view ([`DirLister`]).
 ///
 /// On a running kernel both are kernel-authorised (`fs_readdir`, and a
 /// resolve-only open's `fs_stat`), so a pattern never reveals a name the
 /// caller could not list itself; in tests it is an in-memory tree.
 pub trait GlobFs: DirLister {
+    /// Hand each entry of the directory `dir` to `each` as it is read — its
+    /// name and kind — until the listing ends or `each` breaks.
+    ///
+    /// # Errors
+    ///
+    /// The host's [`Errno`] when `dir` cannot be listed, also once some of
+    /// its entries were handed over.
+    fn read_dir(
+        &self,
+        dir: &str,
+        each: &mut dyn FnMut(&str, FileKind) -> ControlFlow<()>,
+    ) -> Result<(), Errno>;
+
     /// The kind of the node `path` names, a final link followed when
     /// `follow` and reported as a link otherwise.
     ///
@@ -58,6 +78,14 @@ impl DirLister for NullFs {
 }
 
 impl GlobFs for NullFs {
+    fn read_dir(
+        &self,
+        _dir: &str,
+        _each: &mut dyn FnMut(&str, FileKind) -> ControlFlow<()>,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
     fn kind(&self, _path: &str, _follow: bool) -> Result<FileKind, Errno> {
         Err(Errno::NotImplemented)
     }
@@ -134,9 +162,12 @@ impl Ignore {
 }
 
 /// A listing or probe failing this way means *nothing here*, as bash reads
-/// it: the path is absent, is not a directory, or is not the caller's to
-/// see. Any other failure would make the result silently partial, so it is
-/// reported instead.
+/// it: the path is absent; is no directory that can be listed — not a
+/// directory, a link that resolves nowhere, a node or view that lists
+/// nothing; lies beyond what a path can reach, too deep or too long for the
+/// kernel to resolve; or is not the caller's to see. Any other failure — a
+/// volume gone, a device failing — would make the result silently partial,
+/// so it is reported instead.
 fn absent(errno: Errno) -> bool {
     matches!(
         errno,
@@ -148,7 +179,6 @@ fn absent(errno: Errno) -> bool {
             | Errno::LengthOutOfRange
             | Errno::NotImplemented
             | Errno::NotSupported
-            | Errno::NotAttached
     )
 }
 
@@ -181,24 +211,36 @@ impl Found {
         }
     }
 
-    /// The spelling to list: the working directory for an empty relative
-    /// root.
-    fn dir(&self) -> &str {
+    /// The spelling to list, as [`spelled`]: the working directory for an
+    /// empty relative root.
+    fn listing(&self, relative: bool) -> Cow<'_, str> {
         if self.path.is_empty() {
-            "."
+            Cow::Borrowed(".")
         } else {
-            &self.path
+            spelled(&self.path, relative)
         }
     }
 }
 
+/// `path` as the filesystem is asked for it: a relative one whose leading
+/// name holds a `:` — read as a root otherwise — written from `./`.
+fn spelled(path: &str, relative: bool) -> Cow<'_, str> {
+    if relative && !tairix_path::is_relative_spelling(path) {
+        Cow::Owned(format!("./{path}"))
+    } else {
+        Cow::Borrowed(path)
+    }
+}
+
 /// The sorted paths `word` matches when it holds a wildcard, or `Ok(None)`
-/// when it holds none and stands for itself.
+/// when it holds none and stands for itself. `filter` removes what it must
+/// from the paths as bash spells them, before any is written from `./`.
 pub(crate) fn expand(
     word: &[Mark],
     settings: &Settings,
     fs: &dyn GlobFs,
     budget: &mut Budget,
+    filter: &dyn Fn(&mut Vec<String>) -> Result<(), ExpandError>,
 ) -> Result<Option<Vec<String>>, ExpandError> {
     if !tairix_glob::may_hold_wildcards(word, settings.word.contains(Options::EXTENDED)) {
         return Ok(None);
@@ -236,11 +278,13 @@ pub(crate) fn expand(
     if dirs_only {
         components = &components[..components.len() - 1];
     }
+    let relative = root.is_empty();
     let mut walker = Walker {
         fs,
         settings,
         scratch: Scratch::new(),
         budget,
+        relative,
     };
     let mut found = vec![Found {
         path: root,
@@ -284,6 +328,15 @@ pub(crate) fn expand(
         .collect();
     paths.sort_unstable();
     paths.dedup();
+    filter(&mut paths)?;
+    if relative {
+        for path in &mut paths {
+            if !tairix_path::is_relative_spelling(path) {
+                walker.budget.spend("./".len())?;
+                path.insert_str(0, "./");
+            }
+        }
+    }
     Ok(Some(paths))
 }
 
@@ -314,6 +367,8 @@ struct Walker<'a, 'b> {
     settings: &'a Settings,
     scratch: Scratch,
     budget: &'b mut Budget,
+    /// The word spells no root, so a listed name may lead a path.
+    relative: bool,
 }
 
 impl Walker<'_, '_> {
@@ -331,38 +386,37 @@ impl Walker<'_, '_> {
         if let Some(name) = component.literal() {
             for base in found {
                 let path = base.join(name);
-                if !last || self.exists(&path.path, need_dir)? {
+                if !last || self.exists(&path, need_dir)? {
                     self.keep(path, &mut next)?;
                 }
             }
             return Ok(next);
         }
         for base in found {
-            if let Some(entries) = self.list(base)? {
-                self.matching(component, base, &entries, need_dir, &mut next)?;
-            }
+            self.read(base, |walker, name, kind| {
+                walker.match_entry(component, base, name, kind, need_dir, &mut next)
+            })?;
         }
         Ok(next)
     }
 
-    /// Keep what `component` matches among `dir`'s `entries`: only a
+    /// Keep `dir`'s entry `name` when `component` matches it: only a
     /// directory, or a link resolving to one, when `need_dir`.
-    fn matching(
+    fn match_entry(
         &mut self,
         component: &Component,
         dir: &Found,
-        entries: &[DirEntryInfo],
+        name: &str,
+        kind: FileKind,
         need_dir: bool,
         into: &mut Vec<Found>,
     ) -> Result<(), ExpandError> {
-        for entry in entries {
-            if !component.matches_with(&entry.name, &mut self.scratch) {
-                continue;
-            }
-            let path = dir.join(&entry.name);
-            if !need_dir || self.is_directory(entry, &path.path)? {
-                self.keep(path, into)?;
-            }
+        if !component.matches_with(name, &mut self.scratch) {
+            return Ok(());
+        }
+        let path = dir.join(name);
+        if !need_dir || self.is_directory(kind, &path)? {
+            self.keep(path, into)?;
         }
         Ok(())
     }
@@ -379,75 +433,76 @@ impl Walker<'_, '_> {
             pending: Vec::new(),
         };
         for base in found {
-            let Some(entries) = self.list(&base)? else {
+            let listed = self.read(&base, |walker, name, kind| {
+                walker.level_entry(&base, name, kind, 0, yields, &mut walk)
+            })?;
+            if !listed {
                 continue;
-            };
+            }
             // The level `**` adds nothing to, spelled with the separator it
             // followed (`dir/**` names `dir/`).
             match yields {
                 Yields::Everything if !base.at_root => {
-                    let mut itself = base.clone();
+                    let mut itself = base;
                     itself.path.push('/');
                     self.keep(itself, &mut walk.next)?;
                 }
                 // A level is charged as it is read, kept or not, so the
                 // walk stays within the expansion bound.
                 Yields::Matches(..) => self.charge(&base)?,
-                _ => self.keep(base.clone(), &mut walk.next)?,
+                _ => self.keep(base, &mut walk.next)?,
             }
-            self.level(&base, &entries, 0, yields, &mut walk)?;
             while let Some((dir, depth)) = walk.pending.pop() {
-                if let Some(entries) = self.list(&dir)? {
-                    self.level(&dir, &entries, depth, yields, &mut walk)?;
-                }
+                self.read(&dir, |walker, name, kind| {
+                    walker.level_entry(&dir, name, kind, depth, yields, &mut walk)
+                })?;
             }
         }
         Ok(walk.next)
     }
 
-    /// Take the listing of one level `depth` below a `**` walk's base: what
-    /// it yields, and each subdirectory — never a link — to read next.
-    fn level(
+    /// Take one entry of a level `depth` below a `**` walk's base: what it
+    /// yields, and — a subdirectory, never a link — a level to read next.
+    fn level_entry(
         &mut self,
         dir: &Found,
-        entries: &[DirEntryInfo],
+        name: &str,
+        kind: FileKind,
         depth: usize,
         yields: Yields<'_>,
         walk: &mut Descent,
     ) -> Result<(), ExpandError> {
         if let Yields::Matches(component, need_dir) = yields {
-            self.matching(component, dir, entries, need_dir, &mut walk.next)?;
+            self.match_entry(component, dir, name, kind, need_dir, &mut walk.next)?;
+        }
+        if !self.settings.dotglob() && tairix_path::is_hidden_name(name) {
+            return Ok(());
         }
         let below = depth + 1;
+        // A deeper level could not be spelled, so the walk ends there.
+        let is_level = kind == FileKind::Directory && below < tairix_path::MAX_COMPONENTS;
         let may_yield = matches!(yields, Yields::Directories | Yields::Everything);
-        for entry in entries {
-            if !self.settings.dotglob() && tairix_path::is_hidden_name(&entry.name) {
-                continue;
+        if !is_level && !may_yield {
+            return Ok(());
+        }
+        let child = dir.join(name);
+        let yielded = match yields {
+            Yields::Levels => is_level,
+            Yields::Directories => self.is_directory(kind, &child)?,
+            Yields::Everything => true,
+            Yields::Matches(..) => false,
+        };
+        match (is_level, yielded) {
+            (true, true) => {
+                self.keep(child.clone(), &mut walk.next)?;
+                walk.pending.push((child, below));
             }
-            // A deeper level could not be spelled, so the walk ends there.
-            let is_level = entry.kind == FileKind::Directory && below < tairix_path::MAX_COMPONENTS;
-            if !is_level && !may_yield {
-                continue;
+            (true, false) => {
+                self.charge(&child)?;
+                walk.pending.push((child, below));
             }
-            let child = dir.join(&entry.name);
-            let yielded = match yields {
-                Yields::Levels => is_level,
-                Yields::Directories => self.is_directory(entry, &child.path)?,
-                Yields::Everything => true,
-                Yields::Matches(..) => false,
-            };
-            match (is_level, yielded) {
-                (true, true) => {
-                    self.keep(child.clone(), &mut walk.next)?;
-                    walk.pending.push((child, below));
-                }
-                (true, false) => {
-                    self.charge(&child)?;
-                    walk.pending.push((child, below));
-                }
-                (false, true) => self.keep(child, &mut walk.next)?,
-                (false, false) => {}
-            }
+            (false, true) => self.keep(child, &mut walk.next)?,
+            (false, false) => {}
         }
         Ok(())
     }
@@ -462,34 +517,60 @@ impl Walker<'_, '_> {
         Ok(())
     }
 
-    fn list(&self, dir: &Found) -> Result<Option<Vec<DirEntryInfo>>, ExpandError> {
-        match self.fs.list_dir(dir.dir()) {
-            // A listing never names `.` or `..`; one that did is not taken
-            // at its word, so neither can ever be matched.
-            Ok(mut entries) => {
-                entries.retain(|entry| entry.name != "." && entry.name != "..");
-                Ok(Some(entries))
+    /// Read `dir`'s listing through `visit` an entry at a time, never `.` or
+    /// `..`, which a listing naming them is not taken at its word on.
+    /// `false` when `dir` is not there to list; an error naming it when the
+    /// listing failed otherwise, or failed once it had begun, since what it
+    /// had read would be only part.
+    fn read(
+        &mut self,
+        dir: &Found,
+        mut visit: impl FnMut(&mut Self, &str, FileKind) -> Result<(), ExpandError>,
+    ) -> Result<bool, ExpandError> {
+        let fs = self.fs;
+        let listing = dir.listing(self.relative);
+        let mut began = false;
+        let mut failed = None;
+        let read = fs.read_dir(&listing, &mut |name, kind| {
+            began = true;
+            if name == "." || name == ".." {
+                return ControlFlow::Continue(());
             }
-            Err(errno) if absent(errno) => Ok(None),
-            Err(errno) => Err(unreadable(dir.dir(), errno)),
+            match visit(self, name, kind) {
+                Ok(()) => ControlFlow::Continue(()),
+                Err(err) => {
+                    failed = Some(err);
+                    ControlFlow::Break(())
+                }
+            }
+        });
+        if let Some(err) = failed {
+            return Err(err);
+        }
+        match read {
+            Ok(()) => Ok(true),
+            Err(errno) if absent(errno) && !began => Ok(false),
+            Err(errno) => Err(unreadable(&listing, errno)),
         }
     }
 
-    /// Whether `path` names a node — a directory, when `need_dir`, a final
+    /// Whether `found` names a node — a directory, when `need_dir`, a final
     /// link then followed to see.
-    fn exists(&self, path: &str, need_dir: bool) -> Result<bool, ExpandError> {
-        match self.fs.kind(path, need_dir) {
+    fn exists(&self, found: &Found, need_dir: bool) -> Result<bool, ExpandError> {
+        let path = spelled(&found.path, self.relative);
+        match self.fs.kind(&path, need_dir) {
             Ok(kind) => Ok(!need_dir || kind.is_dir()),
             Err(errno) if absent(errno) => Ok(false),
-            Err(errno) => Err(unreadable(path, errno)),
+            Err(errno) => Err(unreadable(&path, errno)),
         }
     }
 
-    /// Whether a listed entry is a directory or a link resolving to one.
-    fn is_directory(&self, entry: &DirEntryInfo, path: &str) -> Result<bool, ExpandError> {
-        match entry.kind {
+    /// Whether an entry of `kind` at `found` is a directory or a link
+    /// resolving to one.
+    fn is_directory(&self, kind: FileKind, found: &Found) -> Result<bool, ExpandError> {
+        match kind {
             FileKind::Directory => Ok(true),
-            FileKind::Symlink => self.exists(path, true),
+            FileKind::Symlink => self.exists(found, true),
             FileKind::Regular => Ok(false),
         }
     }

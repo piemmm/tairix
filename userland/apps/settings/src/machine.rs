@@ -13,8 +13,12 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_controls::{ComboBox, FieldControl, FieldRow};
+use tairix_abi::driver::gpio::Polarity;
+use tairix_abi::thermal_ipc::{FanMode, FanPolicy, FAN_HYSTERESIS_CELSIUS, FAN_START_CELSIUS};
+use tairix_controls::{ComboBox, FieldControl, FieldRow, Slider};
 use tairix_sysconfig::{CacheMode, Key, LoginType, NetToggle, Switch, SynCookies, SystemConfig};
+
+use crate::pi::{self, Cooling};
 
 /// What a row states while the machine's configuration has not been read.
 const UNREAD: &str = "not read yet";
@@ -46,6 +50,16 @@ pub enum MachineSetting {
     NetTcpKeepalive,
     /// Whether TCP negotiates explicit congestion notification.
     NetTcpEcn,
+    /// How the CPU fan is switched.
+    FanMode,
+    /// The header line the CPU fan is wired to.
+    FanLine,
+    /// Which level of the fan's line runs it.
+    FanSignal,
+    /// The temperature an automatic fan starts at.
+    FanStart,
+    /// How far a running automatic fan cools the processor before it stops.
+    FanHysteresis,
 }
 
 impl MachineSetting {
@@ -65,6 +79,11 @@ impl MachineSetting {
             Self::NetTcpSynCookies => Key::NetTcpSynCookies,
             Self::NetTcpKeepalive => Key::NetTcpKeepalive,
             Self::NetTcpEcn => Key::NetTcpEcn,
+            Self::FanMode => Key::CoolingFanMode,
+            Self::FanLine => Key::CoolingFanLine,
+            Self::FanSignal => Key::CoolingFanSignal,
+            Self::FanStart => Key::CoolingFanStart,
+            Self::FanHysteresis => Key::CoolingFanHysteresis,
         }
     }
 
@@ -84,6 +103,11 @@ impl MachineSetting {
             Self::NetTcpSynCookies => "Connection-flood defence",
             Self::NetTcpKeepalive => "Keepalive probes",
             Self::NetTcpEcn => "Congestion notification",
+            Self::FanMode => "CPU fan",
+            Self::FanLine => "Control line",
+            Self::FanSignal => "Control signal",
+            Self::FanStart => "Turns on at",
+            Self::FanHysteresis => "Turns off after cooling by",
         }
     }
 
@@ -131,6 +155,20 @@ impl MachineSetting {
                 "Whether connections let a congested router say so, instead of it having to drop \
                  packets to signal the same thing."
             }
+            Self::FanMode => {
+                "Off leaves the fan's line undriven, On runs the fan all the time, and Automatic \
+                 runs it by the processor's temperature."
+            }
+            Self::FanLine => "The GPIO line on the 40-pin header the fan's switch is wired to.",
+            Self::FanSignal => {
+                "Which level of the line runs the fan: high for a fan switched by an NPN \
+                 transistor or an N-channel MOSFET, low for a PNP or P-channel one."
+            }
+            Self::FanStart => "The temperature an automatic fan starts at.",
+            Self::FanHysteresis => {
+                "How far the processor cools before a running automatic fan stops, so a fan near \
+                 its threshold does not turn on and off."
+            }
         }
     }
 
@@ -145,10 +183,29 @@ impl MachineSetting {
     const NO_FAMILY: &'static str =
         "Both IPv4 and IPv6 are off, so this machine makes no connections at all.";
 
+    /// What a fan row states while the fan is off.
+    const FAN_OFF: &'static str = "The fan is off, so this has no effect.";
+
+    /// What a temperature row states while the fan runs all the time.
+    const FAN_ALWAYS: &'static str = "The fan runs all the time, so this has no effect.";
+
     /// The sentence this row shows against `config`: its own, plus the
     /// ceiling where something above it has taken its effect away.
     fn stated(self, config: &SystemConfig) -> String {
         let mut text = String::from(self.description());
+        let fan = config.cooling_fan;
+        let consequence = match self {
+            Self::FanStart => Some(alloc::format!("It starts at {} °C.", fan.start_celsius())),
+            Self::FanHysteresis => Some(alloc::format!(
+                "A running fan stops at {} °C.",
+                fan.stop_celsius()
+            )),
+            _ => None,
+        };
+        if let Some(consequence) = consequence {
+            text.push(' ');
+            text.push_str(&consequence);
+        }
         if let Some(ceiling) = self.overridden(config) {
             text.push(' ');
             text.push_str(ceiling);
@@ -181,6 +238,15 @@ impl MachineSetting {
                     && config.net_ipv6_enabled == NetToggle::Disabled,
                 Self::NO_FAMILY,
             ),
+            Self::FanMode => return None,
+            Self::FanLine | Self::FanSignal => {
+                (config.cooling_fan.mode() == FanMode::Off, Self::FAN_OFF)
+            }
+            Self::FanStart | Self::FanHysteresis => match config.cooling_fan.mode() {
+                FanMode::Off => (true, Self::FAN_OFF),
+                FanMode::On => (true, Self::FAN_ALWAYS),
+                FanMode::Automatic => (false, Self::FAN_OFF),
+            },
         };
         taken.then_some(sentence)
     }
@@ -217,6 +283,9 @@ impl MachineSetting {
                 config.net_tcp_syncookies,
                 syncookies_label,
             ),
+            Self::FanMode => pick(&FanMode::ALL, config.cooling_fan.mode(), fan_mode_label),
+            Self::FanSignal => pick(&POLARITIES, config.cooling_fan.polarity(), polarity_label),
+            Self::FanLine | Self::FanStart | Self::FanHysteresis => (Vec::new(), 0),
         }
     }
 
@@ -238,7 +307,12 @@ impl MachineSetting {
             | Self::CacheBlock
             | Self::CacheTransform
             | Self::CacheSemantic
-            | Self::NetTcpSynCookies => NetToggle::Disabled,
+            | Self::NetTcpSynCookies
+            | Self::FanMode
+            | Self::FanLine
+            | Self::FanSignal
+            | Self::FanStart
+            | Self::FanHysteresis => NetToggle::Disabled,
         }
     }
 
@@ -260,7 +334,12 @@ impl MachineSetting {
             | Self::NetIpv6Privacy
             | Self::NetTcpSynCookies
             | Self::NetTcpKeepalive
-            | Self::NetTcpEcn => CacheMode::Auto,
+            | Self::NetTcpEcn
+            | Self::FanMode
+            | Self::FanLine
+            | Self::FanSignal
+            | Self::FanStart
+            | Self::FanHysteresis => CacheMode::Auto,
         }
     }
 
@@ -270,7 +349,70 @@ impl MachineSetting {
     /// Fails closed: an index outside the list this very surface built
     /// changes nothing, so a routing defect cannot stage a value the reader
     /// did not choose.
-    pub(crate) fn adopt(self, index: usize, config: &mut SystemConfig) -> bool {
+    pub(crate) fn adopt(self, index: usize, config: &mut SystemConfig, cooling: &Cooling) -> bool {
+        let fan = config.cooling_fan;
+        let refan = |mode, line, polarity, start, hysteresis| {
+            FanPolicy::new(mode, line, polarity, start, hysteresis).ok()
+        };
+        let staged = match self {
+            Self::FanMode => FanMode::ALL.get(index).and_then(|&mode| {
+                refan(
+                    mode,
+                    fan.line(),
+                    fan.polarity(),
+                    fan.start_celsius(),
+                    fan.hysteresis_celsius(),
+                )
+            }),
+            Self::FanLine => line_choices(config, cooling).get(index).and_then(|&line| {
+                refan(
+                    fan.mode(),
+                    line,
+                    fan.polarity(),
+                    fan.start_celsius(),
+                    fan.hysteresis_celsius(),
+                )
+            }),
+            Self::FanSignal => POLARITIES.get(index).and_then(|&polarity| {
+                refan(
+                    fan.mode(),
+                    fan.line(),
+                    polarity,
+                    fan.start_celsius(),
+                    fan.hysteresis_celsius(),
+                )
+            }),
+            Self::FanStart => nth_in(&FAN_START_CELSIUS, index).and_then(|start| {
+                refan(
+                    fan.mode(),
+                    fan.line(),
+                    fan.polarity(),
+                    start,
+                    fan.hysteresis_celsius(),
+                )
+            }),
+            Self::FanHysteresis => nth_in(&FAN_HYSTERESIS_CELSIUS, index).and_then(|hysteresis| {
+                refan(
+                    fan.mode(),
+                    fan.line(),
+                    fan.polarity(),
+                    fan.start_celsius(),
+                    hysteresis,
+                )
+            }),
+            _ => return self.adopt_choice(index, config),
+        };
+        match staged {
+            Some(policy) => {
+                config.cooling_fan = policy;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`Self::adopt`] for a setting whose choices do not depend on the fan.
+    fn adopt_choice(self, index: usize, config: &mut SystemConfig) -> bool {
         match self {
             Self::LoginType => set(
                 &[LoginType::Graphical, LoginType::Text],
@@ -292,27 +434,19 @@ impl MachineSetting {
                 index,
                 &mut config.net_tcp_syncookies,
             ),
+            Self::FanMode
+            | Self::FanLine
+            | Self::FanSignal
+            | Self::FanStart
+            | Self::FanHysteresis => false,
         }
     }
 
     /// The value `config` holds for this setting, spelled as the store
     /// spells it — which is what an elevated `configure` is handed.
     #[must_use]
-    pub fn value(self, config: &SystemConfig) -> &'static str {
-        match self {
-            Self::LoginType => config.login_type.as_str(),
-            Self::CacheAll => config.cache_all.as_str(),
-            Self::CacheFilesystem
-            | Self::CacheBlock
-            | Self::CacheTransform
-            | Self::CacheSemantic => self.mode(config).as_str(),
-            Self::NetIpv4Enabled
-            | Self::NetIpv6Enabled
-            | Self::NetIpv6Privacy
-            | Self::NetTcpKeepalive
-            | Self::NetTcpEcn => self.toggle(config).as_str(),
-            Self::NetTcpSynCookies => config.net_tcp_syncookies.as_str(),
-        }
+    pub fn value(self, config: &SystemConfig) -> String {
+        config.render_value(self.key())
     }
 
     /// The row this setting draws for `config`, or the row it draws while
@@ -322,17 +456,106 @@ impl MachineSetting {
     /// value the reader could not account for and could not have set. The
     /// row says so instead, and offers nothing to change until the reading
     /// lands.
-    pub(crate) fn row(self, config: Option<&SystemConfig>) -> FieldRow {
+    pub(crate) fn row(self, config: Option<&SystemConfig>, cooling: &Cooling) -> FieldRow {
         let Some(config) = config else {
             return FieldRow::new(self.label(), FieldControl::Unmeasured(String::from(UNREAD)))
                 .with_description(self.description());
         };
-        let (choices, current) = self.choices(config);
-        let mut combo = ComboBox::new(choices);
-        combo.set_selected(current);
-        FieldRow::new(self.label(), FieldControl::Combo(combo))
-            .with_description(self.stated(config))
+        let control = match self {
+            Self::FanLine => {
+                let mut text = self.stated(config);
+                if let Some(in_use) = in_use_sentence(cooling) {
+                    text.push(' ');
+                    text.push_str(&in_use);
+                }
+                return FieldRow::new(self.label(), line_control(config, cooling))
+                    .with_description(text);
+            }
+            Self::FanStart => scale(&FAN_START_CELSIUS, config.cooling_fan.start_celsius()),
+            Self::FanHysteresis => scale(
+                &FAN_HYSTERESIS_CELSIUS,
+                config.cooling_fan.hysteresis_celsius(),
+            ),
+            _ => {
+                let (choices, current) = self.choices(config);
+                let mut combo = ComboBox::new(choices);
+                combo.set_selected(current);
+                FieldControl::Combo(combo)
+            }
+        };
+        FieldRow::new(self.label(), control).with_description(self.stated(config))
     }
+}
+
+/// Every fan signal polarity, in the order the row offers them.
+const POLARITIES: [Polarity; 2] = [Polarity::ActiveHigh, Polarity::ActiveLow];
+
+/// The lines the fan may be put on, in the order the line row offers them:
+/// none, every line the header lends that is free, and the line the store
+/// names even where it is not, so the row can show what is set.
+fn line_choices(config: &SystemConfig, cooling: &Cooling) -> Vec<Option<u8>> {
+    let mut choices = alloc::vec![None];
+    if let Some(lines) = cooling.status().and_then(|status| status.lines) {
+        choices.extend(lines.free().iter().map(Some));
+    }
+    if let Some(held) = config.cooling_fan.line() {
+        if !choices.contains(&Some(held)) {
+            choices.push(Some(held));
+        }
+    }
+    choices
+}
+
+/// The line row's control: a choice of the lines the fan may be put on, once
+/// the cooling service has said which.
+fn line_control(config: &SystemConfig, cooling: &Cooling) -> FieldControl {
+    if cooling.status().is_none() {
+        return FieldControl::Unmeasured(String::from(UNREAD));
+    }
+    let choices = line_choices(config, cooling);
+    let mut combo = ComboBox::new(
+        choices
+            .iter()
+            .map(|line| line.map_or_else(|| String::from("None"), pi::line_label))
+            .collect(),
+    );
+    let held = config.cooling_fan.line();
+    combo.set_selected(choices.iter().position(|line| *line == held).unwrap_or(0));
+    FieldControl::Combo(combo)
+}
+
+/// Why the header's other lines are not offered, where any are not.
+fn in_use_sentence(cooling: &Cooling) -> Option<String> {
+    let held = cooling.status()?.lines?.held();
+    if held.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = held.iter().map(pi::line_label).collect();
+    Some(alloc::format!(
+        "In use and not offered: {}.",
+        named.join(", ")
+    ))
+}
+
+/// The `index`th whole degree of `range`.
+fn nth_in(range: &core::ops::RangeInclusive<u8>, index: usize) -> Option<u8> {
+    let offset = u8::try_from(index).ok()?;
+    range
+        .start()
+        .checked_add(offset)
+        .filter(|degrees| range.contains(degrees))
+}
+
+/// A slider over the whole degrees of `range`, at `current`.
+fn scale(range: &core::ops::RangeInclusive<u8>, current: u8) -> FieldControl {
+    let stops = u16::from(range.end() - range.start()) + 1;
+    let mut slider = Slider::new(0).with_stops(stops).with_ends(
+        alloc::format!("{} °C", range.start()),
+        alloc::format!("{} °C", range.end()),
+    );
+    let at = u16::from(current.saturating_sub(*range.start()));
+    slider.set_value(slider.stop_value(at).unwrap_or(0));
+    FieldControl::Slider(slider)
 }
 
 /// `values`' labels, and the index of `current` among them.
@@ -417,5 +640,22 @@ const fn syncookies_label(mode: SynCookies) -> &'static str {
     match mode {
         SynCookies::Auto => "Automatic",
         SynCookies::Always => "Always, keeping no queue",
+    }
+}
+
+/// The display label of a fan mode.
+const fn fan_mode_label(mode: FanMode) -> &'static str {
+    match mode {
+        FanMode::Off => "Off",
+        FanMode::On => "On",
+        FanMode::Automatic => "Automatic",
+    }
+}
+
+/// The display label of a fan's signal polarity.
+const fn polarity_label(polarity: Polarity) -> &'static str {
+    match polarity {
+        Polarity::ActiveHigh => "On when high",
+        Polarity::ActiveLow => "On when low",
     }
 }

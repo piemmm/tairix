@@ -61,6 +61,19 @@ error, the terminal bell — whether it plays its theme's sound, a file you
 choose, or nothing. The start-up, sign-in and sign-out sounds are the
 machine's, set by its administrator.
 
+**Raspberry Pi** is listed only when the machine is one. It sets the processor's
+cooling fan, switched through one line of the 40-pin header: *Off*, *On* all the
+time, or *Automatic*, which turns the fan on once the processor reaches the
+temperature you set and off only after it has cooled by the margin you set, so
+it does not switch back and forth around one degree. Choose the control line by
+its GPIO number and header pin, and whether the fan runs when that line is high
+or low; a line something else is using is named rather than offered. A header
+line cannot power a fan itself, so wire the fan through a transistor. The pane
+also shows the processor's temperature and whether the fan is running. When
+*Automatic* cannot read the temperature, the fan runs until it can. Like the
+machine's other settings, a change waits for *Apply*, which asks for an account
+that may change them.
+
 **Storage** lists every mounted volume: where it is mounted, its filesystem,
 its device and medium, how full it is, and whether it is healthy. It is a
 report, not a control — mounting and unmounting are the file manager's and

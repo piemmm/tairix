@@ -1,15 +1,22 @@
 //! A link supplier's bring-up from its node's grants, the loop it serves its
-//! node's endpoint from, the board clock's endpoint, and the log record
+//! node's endpoint from, a device channel's bind and publication, the board
+//! clock's endpoint, a temperature sensor's channel, and the log record
 //! helpers their decisions are written with.
 
 use tairix_abi::driver::rtc::Rtc;
+use tairix_abi::driver::thermal::{
+    self, ThermalSensor, ThermalZone, THERMAL_SENSOR_ENDPOINTS, THERMAL_SENSOR_NODE_COMPATIBLE,
+};
 use tairix_abi::driver::{named_register_window, sole_register_window, DeviceWake};
 use tairix_abi::hwlink::{LinkDuty, LinkRole};
-use tairix_abi::hwtree::HwResource;
+use tairix_abi::hwtree::{HwResource, NodeEndpointBlock, HW_NODE_ROOT};
 use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
 use tairix_abi::rtc_ipc::{self, RTC_ENDPOINT};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::{CapabilityId, Delay, Errno, MmioMapper, ProcId, RegisterWindow, PROC_ID_HEX_LEN};
+use tairix_abi::{
+    CapabilityId, Delay, Errno, HwDeviceClass, HwMatchKey, HwNode, HwProperty, MmioMapper, ProcId,
+    RegisterWindow, PROC_ID_HEX_LEN,
+};
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
@@ -336,6 +343,119 @@ pub fn rtc<R: Rtc + ?Sized>(chip: &mut R) -> i32 {
         // decodes as a fail-closed truncation.
         let framed = rtc_ipc::serve_request(chip, &request[..len], &mut reply).unwrap_or(0);
         let _ = tairix_rt::call_reply(RTC_ENDPOINT, ticket, &reply[..framed]);
+    }
+}
+
+/// A device channel's endpoint: the id its driver's node is given in
+/// `block`, served to the one service holding `gate`, and its protocol's
+/// bounds.
+pub struct DeviceChannel {
+    /// The block the channel's id is the driver's node's entry of.
+    pub block: NodeEndpointBlock,
+    /// The capability a caller must hold: the kernel admits nobody else.
+    pub gate: CapabilityId,
+    /// The protocol's longest request.
+    pub max_request: usize,
+    /// The protocol's longest reply.
+    pub max_reply: usize,
+    /// How many calls may be queued at once, clamped to the kernel's bound.
+    pub capacity: usize,
+}
+
+impl DeviceChannel {
+    /// Bind the channel of the node this driver was loaded for, answering
+    /// its id; [`None`] on any refusal.
+    #[must_use]
+    pub fn bind(&self) -> Option<u64> {
+        let id = self.block.endpoint(tairix_rt::hw_self_node().ok()?.node());
+        let mut send_caps = CapabilitySet::empty();
+        send_caps.insert(self.gate);
+        let bound = tairix_rt::call_create(
+            id,
+            &send_caps,
+            &CapabilitySet::empty(),
+            self.max_request,
+            self.max_reply,
+            self.capacity.clamp(1, IPC_CALL_CAPACITY_MAX),
+        );
+        (bound == 0).then_some(id)
+    }
+}
+
+/// Publish the node `compatible` of `class` naming a bound channel's
+/// `endpoint` and stating `facts`, so the service that uses the device finds
+/// it in the hardware tree only once it serves. The kernel parents it under
+/// the node the driver was loaded for. Answers the node's id; [`None`] on any
+/// refusal.
+#[must_use]
+pub fn publish_channel(
+    class: HwDeviceClass,
+    compatible: &[u8],
+    endpoint: u64,
+    facts: &[HwResource],
+) -> Option<u32> {
+    let mut node = HwNode::new(0, HW_NODE_ROOT, class);
+    node.push_match_key(HwMatchKey::compatible(compatible).ok()?)
+        .ok()?;
+    node.push_resource(HwResource::endpoint(endpoint)).ok()?;
+    for fact in facts {
+        node.push_resource(*fact).ok()?;
+    }
+    u32::try_from(tairix_rt::hw_emit_node(&node)).ok()
+}
+
+/// Calls a sensor's channel queues: its consumer asks once a period, each
+/// answered before the next is received.
+const SENSOR_CHANNEL_CAPACITY: usize = 4;
+
+/// Serve `sensor`, which measures `zone`, on its node's sensor channel for
+/// the life of the driver, answering the status the driver ends with.
+///
+/// Only a holder of `CAP_SYSINFO_HW` may call: a sensor is hardware the
+/// machine's inventory reads. The channel's node is published once the
+/// channel serves.
+pub fn thermal_sensor<S: ThermalSensor + ?Sized>(sensor: &mut S, zone: ThermalZone) -> i32 {
+    let channel = DeviceChannel {
+        block: THERMAL_SENSOR_ENDPOINTS,
+        gate: CapabilityId::SYSINFO_HW,
+        max_request: thermal::SENSOR_REQUEST_LEN,
+        max_reply: thermal::SENSOR_REPLY_LEN,
+        capacity: SENSOR_CHANNEL_CAPACITY,
+    };
+    let Some(endpoint) = channel.bind() else {
+        return end(
+            DriverExit::NoService,
+            &[step("sensor: the channel could not be bound")],
+        );
+    };
+    let zone = HwResource::property(HwProperty::ThermalZone, zone.as_u64());
+    if publish_channel(
+        HwDeviceClass::Other,
+        THERMAL_SENSOR_NODE_COMPATIBLE,
+        endpoint,
+        &[zone],
+    )
+    .is_none()
+    {
+        return end(
+            DriverExit::NoService,
+            &[step("sensor: the channel's node could not be published")],
+        );
+    }
+    let mut request = [0u8; thermal::SENSOR_REQUEST_LEN];
+    let mut reply = [0u8; thermal::SENSOR_REPLY_LEN];
+    loop {
+        let mut ticket = 0u64;
+        let Ok(len) = tairix_rt::call_recv(endpoint, &mut request, &mut ticket) else {
+            return end(
+                DriverExit::ServeFailed,
+                &[step("sensor: the channel was lost")],
+            );
+        };
+        // A reply that cannot be framed goes out empty, which the client
+        // decodes as a fail-closed refusal.
+        let framed = thermal::serve_request(sensor, &request[..len], &mut reply).unwrap_or(0);
+        let _ = tairix_rt::call_reply(endpoint, ticket, &reply[..framed]);
     }
 }
 

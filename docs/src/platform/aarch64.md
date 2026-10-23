@@ -1484,6 +1484,17 @@ controller's registers among its own as `intr2`; the port refuses that
 window (`FdtPlatform::grants_window`), since it is the controller's grant,
 never the encoder's.
 
+Two more facts are the board's own (`plans/COOLING.md`). On a tree whose
+root names a Raspberry Pi (`raspberrypi,…`), the SoC's GPIO block
+(`brcm,bcm2711-gpio`, or the Pi 3's `brcm,bcm2835-gpio`) carries the
+`GpioHeaderLines` the 40-pin header lends to system services: GPIO 2–27,
+leaving GPIO 0 and 1 to the HAT identification EEPROM the firmware reads. And
+the BCM2711's temperature sensor (`brcm,bcm2711-thermal`), which has no window
+of its own, is granted the window of the AVS monitor directly above it; the
+port then refuses the monitor its own copy, so exactly one node holds those
+registers. The sensor's calibration is the shared walk's, read from its
+thermal zone's `coefficients` on every port.
+
 The walker is host-tested against the shared DTB fixtures (the `virt`-
 and Pi-shaped trees, a nested `ranges`-translating bus, the PCIe bridge
 with its `dma-ranges` and outbound `ranges`, fail-closed cases) and

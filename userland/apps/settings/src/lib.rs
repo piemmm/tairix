@@ -33,6 +33,7 @@ mod frame;
 mod machine;
 mod network;
 mod notices;
+mod pi;
 mod pictures;
 mod registry;
 mod renders;
@@ -53,10 +54,11 @@ pub use frame::{
     WINDOW_GROUND, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
 };
 pub use network::{Addressing, NetworkFacts};
+pub use pi::Cooling;
 pub use pictures::{Chooser, PictureWanted, NONE_LABEL};
 pub use registry::{
-    strip_rows, Category, CategoryRow, Group, Location, Pane, PaneBacking, PaneContent, PaneRow,
-    StripRow, CATEGORIES,
+    strip_rows, Board, Category, CategoryRow, Group, Location, Pane, PaneBacking, PaneContent,
+    PaneRow, StripRow, CATEGORIES,
 };
 pub use renders::Renders;
 pub use round::Round;

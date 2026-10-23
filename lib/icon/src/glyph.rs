@@ -277,6 +277,9 @@ pub enum IconKind {
     SoundDevices,
     /// A beamed pair of notes, for the desktop's own sounds.
     SoundEffects,
+    /// A board with its header's pins and a fan, for the Raspberry Pi
+    /// category.
+    RaspberryPi,
     /// A painter's palette, for the desktop-theme category.
     Theme,
     /// A dashed rectangle, for choosing an area of a picture.
@@ -714,6 +717,7 @@ impl IconKind {
             "tcp-ip" => Self::TcpIp,
             "sound-devices" => Self::SoundDevices,
             "sound-effects" => Self::SoundEffects,
+            "raspberry-pi" => Self::RaspberryPi,
             "theme" => Self::Theme,
             "tool-select" => Self::ToolSelect,
             "tool-pencil" => Self::ToolPencil,
@@ -1157,6 +1161,7 @@ impl IconKind {
             Self::ElfExecutable => 258,
             Self::WasmModule => 259,
             Self::DiskOptical => 260,
+            Self::RaspberryPi => 261,
         }
     }
 
@@ -1259,6 +1264,7 @@ impl IconKind {
             Self::TcpIp => "tcp-ip",
             Self::SoundDevices => "sound-devices",
             Self::SoundEffects => "sound-effects",
+            Self::RaspberryPi => "raspberry-pi",
             Self::Theme => "theme",
             Self::ToolSelect => "tool-select",
             Self::ToolPencil => "tool-pencil",
@@ -1657,6 +1663,7 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::TcpIp
         | IconKind::SoundDevices
         | IconKind::SoundEffects
+        | IconKind::RaspberryPi
         | IconKind::AlertError
         | IconKind::AlertWarning
         | IconKind::AlertInformation

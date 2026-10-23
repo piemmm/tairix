@@ -1095,7 +1095,12 @@ mod tests {
              input.mouse.debounce 25\n\
              audio.output auto\n\
              audio.input auto\n\
-             audio.level 0dB\n",
+             audio.level 0dB\n\
+             cooling.fan.mode off\n\
+             cooling.fan.line none\n\
+             cooling.fan.signal active-high\n\
+             cooling.fan.start 65\n\
+             cooling.fan.hysteresis 10\n",
         );
     }
 

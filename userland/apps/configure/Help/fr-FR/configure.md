@@ -136,6 +136,19 @@ travail concerné — cela ne change jamais un résultat.
   démarrent toutes les sorties et entrées. Jamais au-dessus de `0dB`. Le
   service audio prend une valeur modifiée au démarrage suivant ;
   `audioctl` modifie la machine en marche.
+- `cooling.fan.mode` — `off` par défaut, `on` ou `auto` : si le ventilateur
+  du processeur sur le connecteur GPIO de la carte n'est pas piloté, tourne
+  en permanence ou est commandé par la température du processeur.
+- `cooling.fan.line` — `none` par défaut, ou la ligne GPIO à laquelle le
+  ventilateur est relié, de `0` à `63`. Seule une ligne que le connecteur de
+  la carte prête peut être pilotée.
+- `cooling.fan.signal` — `active-high` par défaut, ou `active-low` : le
+  niveau de la ligne qui fait tourner le ventilateur.
+- `cooling.fan.start`, `cooling.fan.hysteresis` — degrés Celsius entiers,
+  `65` et `10` par défaut : un ventilateur automatique démarre à `start`, de
+  `40` à `85`, et s'arrête une fois que le processeur s'est refroidi de
+  `hysteresis`, de `2` à `20`. Un changement d'un réglage du ventilateur
+  s'applique aussitôt.
 
 Une clé absente de la liste ci-dessus est cherchée dans un second
 registre : les paramètres réseau de chaque interface, conservés dans

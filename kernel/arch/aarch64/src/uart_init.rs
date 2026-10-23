@@ -25,7 +25,7 @@ use crate::console;
 // --- BCM2711 GPIO block (BCM2711 ARM Peripherals) ---------------------
 
 /// Device-tree `compatible` string of the BCM2711 GPIO controller.
-const GPIO_COMPATIBLE: &[u8] = b"brcm,bcm2711-gpio";
+pub(crate) const GPIO_COMPATIBLE: &[u8] = b"brcm,bcm2711-gpio";
 
 /// Byte length of the BCM2711 GPIO register block the mux needs:
 /// `GPIO_PUP_PDN_CNTRL_REG3` at `0xF0` is the last register (datasheet

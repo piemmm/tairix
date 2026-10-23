@@ -93,6 +93,15 @@ configure — 读取并更改本机设置
 - `audio.level` — 以分贝为单位，默认 `0dB`，或 `-12dB`、`-6.5dB` 这样的
   衰减，最多两位小数：每个输出和输入的起始电平。绝不高于 `0dB`。音频服务
   在下次启动时采用更改后的值；`audioctl` 用于更改正在运行的机器。
+- `cooling.fan.mode` — 默认 `off`，或 `on`、`auto`：电路板 GPIO 排针上的
+  CPU 风扇是不驱动、一直运转，还是按处理器温度开关。
+- `cooling.fan.line` — 默认 `none`，或风扇所接的 GPIO 线，从 `0` 到 `63`。
+  只能驱动电路板排针出借的线。
+- `cooling.fan.signal` — 默认 `active-high`，或 `active-low`：线的哪个电平
+  让风扇运转。
+- `cooling.fan.start`、`cooling.fan.hysteresis` — 摄氏整度，默认 `65` 和
+  `10`：自动风扇在 `start`（`40` 到 `85`）时启动，处理器降温
+  `hysteresis`（`2` 到 `20`）后停止。风扇设置的更改立即生效。
 
 不在上述列表中的键，会到第二个登记表中查找：每个接口的网络设置，保存在
 `/System/Settings/Network/network.conf`。其键写作

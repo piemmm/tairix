@@ -45,6 +45,20 @@ e solo finché la propria sessione occupa la stanza che serve; un dispositivo
 della stanza di un'altra sessione è mostrato ma qui non si può cambiare. La
 scrivania ricorda ciò che si imposta.
 
+**Raspberry Pi** compare solo quando la macchina lo è. Imposta la ventola del
+processore, comandata da una linea del connettore a 40 pin: *Off*, *On* sempre
+oppure *Automatic*, che accende la ventola quando il processore raggiunge la
+temperatura scelta e la spegne solo dopo che si è raffreddato del margine
+scelto, così che non si accenda e si spenga attorno a un solo grado. La linea di
+controllo si sceglie per numero GPIO e pin, insieme al livello, alto o basso, a
+cui la ventola gira; una linea già usata da altro viene nominata anziché
+offerta. Una linea del connettore non può alimentare da sola una ventola, che va
+quindi collegata tramite un transistor. Il pannello mostra anche la temperatura
+del processore e se la ventola sta girando. Quando *Automatic* non riesce a
+leggere la temperatura, la ventola gira finché non ci riesce. Come le altre
+impostazioni della macchina, una modifica attende *Apply*, che chiede un account
+autorizzato a cambiarle.
+
 ## EXIT STATUS
 
 Zero dopo una chiusura pulita; diverso da zero quando il canale della finestra

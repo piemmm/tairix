@@ -5,9 +5,9 @@
 //! record, and the audit records — with no processes and no sockets.
 
 use super::{
-    events, retune, watch_verdict, Clock, NetworkSettings, NetworkTime, RecordStore, Retune,
-    RtcSource, Step, Timed, TimedConfig, Transport, WatchVerdict, CONFIG_RETRY_ATTEMPTS,
-    CONFIG_RETRY_BASE_NANOS, RTC_RETRY_ATTEMPTS, RTC_RETRY_BASE_NANOS,
+    events, retune, Clock, NetworkSettings, NetworkTime, RecordStore, Retune, RtcSource, Step,
+    Timed, TimedConfig, Transport, CONFIG_RETRY_ATTEMPTS, CONFIG_RETRY_BASE_NANOS,
+    RTC_RETRY_ATTEMPTS, RTC_RETRY_BASE_NANOS,
 };
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -1451,63 +1451,4 @@ fn a_cadence_change_alone_applies_in_place() {
     let off = settings(false, &["a.test"], RefreshCadence::SixHours);
     let still_off = settings(false, &["b.test"], RefreshCadence::Weekly);
     assert_eq!(retune(&off, None, &still_off, no_lease), Retune::Keep);
-}
-
-/// One drained batch over `changes`.
-fn batch(status: tairix_abi::fs::DirWatchStatus, more: bool, names: &[&[u8]]) -> Vec<u8> {
-    use tairix_abi::fs::{DirChange, DirChangeBatch};
-    let mut out = vec![0u8; 4096];
-    let count = u32::try_from(names.len()).expect("few");
-    let mut at = DirChangeBatch::encode_header(&mut out, status, more, count).expect("fits");
-    for name in names {
-        at += DirChange::Absent(name)
-            .encode_into(&mut out[at..])
-            .expect("fits");
-    }
-    out.truncate(at);
-    out
-}
-
-#[test]
-fn the_watch_rereads_on_its_file_and_rewatches_on_its_directory() {
-    use tairix_abi::fs::DirWatchStatus;
-    let file = b"system.conf".as_slice();
-    let dir = b"Configuration".as_slice();
-    assert_eq!(
-        watch_verdict(&batch(DirWatchStatus::Changes, true, &[file]), true, file),
-        (WatchVerdict::Reread, true)
-    );
-    assert_eq!(
-        watch_verdict(
-            &batch(DirWatchStatus::Changes, false, &[b"network.conf"]),
-            true,
-            file
-        ),
-        (WatchVerdict::Unconcerned, false)
-    );
-    assert_eq!(
-        watch_verdict(&batch(DirWatchStatus::Rescan, false, &[]), true, file),
-        (WatchVerdict::Reread, false)
-    );
-    assert_eq!(
-        watch_verdict(&batch(DirWatchStatus::Gone, false, &[]), true, file),
-        (WatchVerdict::Rewatch, false)
-    );
-    // Watching the parent: the directory's own arrival means watch it.
-    assert_eq!(
-        watch_verdict(&batch(DirWatchStatus::Changes, false, &[dir]), false, dir),
-        (WatchVerdict::Rewatch, false)
-    );
-    assert_eq!(
-        watch_verdict(
-            &batch(DirWatchStatus::Changes, false, &[b"Time"]),
-            false,
-            dir
-        ),
-        (WatchVerdict::Unconcerned, false)
-    );
-    assert_eq!(
-        watch_verdict(&[0xFF; 8], true, file),
-        (WatchVerdict::Rewatch, false)
-    );
 }

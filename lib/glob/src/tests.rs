@@ -392,6 +392,15 @@ fn token_count_bound_is_enforced() {
     );
 }
 
+/// A run of unclosed `[` before collating-element openers once cost time
+/// cubic in the pattern's length to refuse; it is refused in linear time.
+#[test]
+fn a_run_of_unclosed_brackets_is_refused_by_the_token_bound() {
+    let pattern = alloc::format!("{}{}", "[".repeat(1000), "[:".repeat(1548));
+    assert_eq!(pattern.len(), MAX_PATTERN_LEN);
+    assert_eq!(Pattern::new(&pattern), Err(GlobError::TooManyTokens));
+}
+
 #[test]
 fn class_item_bound_is_enforced() {
     let mut body = String::from("[");

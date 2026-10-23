@@ -2,6 +2,7 @@
 //! equivalence classes and collating symbols (POSIX XBD 9.3.5, as the shell's
 //! pattern matching notation uses them).
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::compile::fold;
@@ -229,7 +230,62 @@ enum Element {
     Equivalent(char),
 }
 
-/// Parse the bracket expression opening at `input[0] == '['`.
+/// What the bracket expressions of one component share, so parsing them
+/// all costs time linear in its length, a run of unclosed `[` included:
+/// where each `[:…:]`, `[=…=]` and `[.….]` element can close, and the element
+/// positions a scan is known to read on from to the end with no closing `]`.
+pub(crate) struct Brackets {
+    /// For `:`, `=` and `.`, the nearest index at or after each that holds
+    /// that mark followed by `]`, both unescaped.
+    pairs: [Vec<usize>; 3],
+    /// Element positions from which a scan reads to the end unclosed: the
+    /// scan from a position never depends on where it began, so a later scan
+    /// reaching one knows its answer.
+    open_ended: Vec<bool>,
+    /// The positions the scan in progress has read, to mark if it fails.
+    trail: Vec<usize>,
+    #[cfg(test)]
+    pub(crate) elements_read: usize,
+}
+
+const NO_PAIR: usize = usize::MAX;
+
+impl Brackets {
+    pub(crate) fn new(input: &[Mark]) -> Self {
+        let pairs_of = |kind: char| {
+            let mut next = vec![NO_PAIR; input.len() + 1];
+            for at in (0..input.len()).rev() {
+                let mark = input[at];
+                let closes = !mark.literal
+                    && mark.ch == kind
+                    && input.get(at + 1).is_some_and(|b| !b.literal && b.ch == ']');
+                next[at] = if closes { at } else { next[at + 1] };
+            }
+            next
+        };
+        Self {
+            pairs: [pairs_of(':'), pairs_of('='), pairs_of('.')],
+            open_ended: vec![false; input.len() + 1],
+            trail: Vec::new(),
+            #[cfg(test)]
+            elements_read: 0,
+        }
+    }
+
+    /// The index of the `kind` mark of the `kind]` pair closing an element
+    /// whose `[kind` opens at `open`.
+    fn terminator(&self, kind: char, open: usize) -> Option<usize> {
+        let table = match kind {
+            ':' => &self.pairs[0],
+            '=' => &self.pairs[1],
+            _ => &self.pairs[2],
+        };
+        table.get(open + 2).copied().filter(|&at| at != NO_PAIR)
+    }
+}
+
+/// Parse the bracket expression opening at `input[start] == '['`, `input`
+/// being the whole component `brackets` was built for.
 ///
 /// `None` when no `]` closes it: the `[` is then an ordinary character, as
 /// POSIX specifies. Otherwise the expression and the marks it spans, or the
@@ -237,10 +293,12 @@ enum Element {
 /// that never closes cannot refuse a pattern POSIX reads literally.
 pub(crate) fn parse(
     input: &[Mark],
+    start: usize,
+    brackets: &mut Brackets,
     case_insensitive: bool,
 ) -> Option<Result<(Bracket, usize), GlobError>> {
     let fold_if = |c: char| if case_insensitive { fold(c) } else { c };
-    let mut at = 1;
+    let mut at = start + 1;
     let negated = input
         .get(at)
         .is_some_and(|m| !m.literal && matches!(m.ch, '!' | '^'));
@@ -250,12 +308,25 @@ pub(crate) fn parse(
     let first = at;
     let mut items = Vec::new();
     let mut fault = None;
+    brackets.trail.clear();
     loop {
-        let mark = *input.get(at)?;
-        if mark.ch == ']' && !mark.literal && at > first {
-            return Some(fault.map_or(Ok((Bracket { negated, items }, at + 1)), Err));
+        if at > first {
+            if brackets.open_ended.get(at).copied().unwrap_or(true) {
+                return unclosed(brackets);
+            }
+            brackets.trail.push(at);
         }
-        let (element, width) = element_at(&input[at..]);
+        let Some(&mark) = input.get(at) else {
+            return unclosed(brackets);
+        };
+        if mark.ch == ']' && !mark.literal && at > first {
+            return Some(fault.map_or(Ok((Bracket { negated, items }, at + 1 - start)), Err));
+        }
+        #[cfg(test)]
+        {
+            brackets.elements_read += 1;
+        }
+        let (element, width) = element_at(input, at, brackets);
         at += width;
         if items.len() >= MAX_CLASS_ITEMS {
             fault.get_or_insert(GlobError::TooManyTokens);
@@ -267,7 +338,7 @@ pub(crate) fn parse(
             }
             Ok(Element::Class(class)) => items.push(Item::Class(class)),
             Ok(Element::Equivalent(c)) => items.push(Item::Char(fold_if(c))),
-            Ok(Element::Char(lo)) => match range_end(&input[at..]) {
+            Ok(Element::Char(lo)) => match range_end(input, at, brackets) {
                 Some((hi, width)) => {
                     at += width;
                     if hi < lo {
@@ -282,31 +353,44 @@ pub(crate) fn parse(
     }
 }
 
-/// The endpoint of a range whose `-` sits at `input[0]`, and the marks the
+/// A scan that reached the end with no `]`: every position it read leads
+/// there too.
+fn unclosed(brackets: &mut Brackets) -> Option<Result<(Bracket, usize), GlobError>> {
+    for &at in &brackets.trail {
+        brackets.open_ended[at] = true;
+    }
+    None
+}
+
+/// The endpoint of a range whose `-` sits at `input[at]`, and the marks the
 /// `-` and endpoint span. `None` when this is no range: no unescaped `-`, a
 /// `-` just before the closing `]` (a literal member), or an endpoint that is
 /// not a single character.
-fn range_end(input: &[Mark]) -> Option<(char, usize)> {
-    let dash = input.first()?;
-    let next = input.get(1)?;
+fn range_end(input: &[Mark], at: usize, brackets: &Brackets) -> Option<(char, usize)> {
+    let dash = input.get(at)?;
+    let next = input.get(at + 1)?;
     if dash.literal || dash.ch != '-' || (!next.literal && next.ch == ']') {
         return None;
     }
-    match element_at(&input[1..]) {
+    match element_at(input, at + 1, brackets) {
         (Ok(Element::Char(hi)), width) => Some((hi, width + 1)),
         _ => None,
     }
 }
 
-/// Read one bracket element at `input[0]` and its width in marks. A `[`
+/// Read one bracket element at `input[at]` and its width in marks. A `[`
 /// opens a `[:…:]`, `[=…=]` or `[.….]` element only when its terminator
 /// follows; otherwise it is an ordinary member.
-fn element_at(input: &[Mark]) -> (Result<Element, GlobError>, usize) {
-    let head = input[0];
-    let kind = input.get(1).filter(|m| !m.literal).map(|m| m.ch);
+fn element_at(
+    input: &[Mark],
+    at: usize,
+    brackets: &Brackets,
+) -> (Result<Element, GlobError>, usize) {
+    let head = input[at];
+    let kind = input.get(at + 1).filter(|m| !m.literal).map(|m| m.ch);
     if let (false, '[', Some(kind @ (':' | '=' | '.'))) = (head.literal, head.ch, kind) {
-        if let Some(end) = terminator(input, kind) {
-            let body = &input[2..end];
+        if let Some(end) = brackets.terminator(kind, at) {
+            let body = &input[at + 2..end];
             let element = match kind {
                 ':' => CLASSES
                     .iter()
@@ -326,7 +410,7 @@ fn element_at(input: &[Mark]) -> (Result<Element, GlobError>, usize) {
                     .map(Element::Char)
                     .ok_or(GlobError::UnknownCollatingElement),
             };
-            return (element, end + 2);
+            return (element, end + 2 - at);
         }
     }
     (Ok(Element::Char(head.ch)), 1)
@@ -340,11 +424,90 @@ fn single(body: &[Mark]) -> Option<char> {
     }
 }
 
-/// The index of the `kind` mark of the `kind]` pair closing an element
-/// opened at `input[0..2]`.
-fn terminator(input: &[Mark], kind: char) -> Option<usize> {
-    (2..input.len().saturating_sub(1)).find(|&at| {
-        let (close, bracket) = (input[at], input[at + 1]);
-        !close.literal && close.ch == kind && !bracket.literal && bracket.ch == ']'
-    })
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use super::{parse, Brackets};
+    use crate::Mark;
+
+    /// Mark strings over the characters bracket syntax turns on, each mark
+    /// escaped now and then.
+    fn random_marks(rng: &mut tairix_fuzzseed::Prng, most: usize) -> Vec<Mark> {
+        const ALPHABET: [char; 8] = ['[', ']', ':', '=', '.', '-', '!', 'a'];
+        (0..rng.at_most(most))
+            .map(|_| Mark {
+                ch: ALPHABET[rng.below(ALPHABET.len())],
+                literal: rng.below(8) == 0,
+            })
+            .collect()
+    }
+
+    fn opens(input: &[Mark]) -> Vec<usize> {
+        (0..input.len())
+            .filter(|&at| !input[at].literal && input[at].ch == '[')
+            .collect()
+    }
+
+    #[test]
+    fn the_terminator_table_finds_what_a_forward_scan_would() {
+        let mut rng = tairix_fuzzseed::Prng::new(0x6272_6163);
+        for _ in 0..2_000 {
+            let input = random_marks(&mut rng, 24);
+            let table = Brackets::new(&input);
+            for kind in [':', '=', '.'] {
+                for open in 0..input.len() {
+                    let scanned = (open + 2..input.len().saturating_sub(1)).find(|&at| {
+                        let (close, bracket) = (input[at], input[at + 1]);
+                        !close.literal && close.ch == kind && !bracket.literal && bracket.ch == ']'
+                    });
+                    assert_eq!(table.terminator(kind, open), scanned, "{kind} at {open}");
+                }
+            }
+        }
+    }
+
+    /// What one scan learns of where scans end is shared with every later
+    /// one, in any order, and changes no answer.
+    #[test]
+    fn a_shared_table_parses_every_bracket_as_a_fresh_one_would() {
+        let mut rng = tairix_fuzzseed::Prng::new(0x6d65_6d6f);
+        for _ in 0..2_000 {
+            let input = random_marks(&mut rng, 24);
+            let mut positions = opens(&input);
+            if rng.below(2) == 0 {
+                positions.reverse();
+            }
+            let fold = rng.below(2) == 0;
+            let mut shared = Brackets::new(&input);
+            for start in positions {
+                let alone = parse(&input, start, &mut Brackets::new(&input), fold);
+                assert_eq!(parse(&input, start, &mut shared, fold), alone, "{start}");
+            }
+        }
+    }
+
+    /// Each unclosed `[` would otherwise re-read every element after it, so
+    /// a long run of them, each over collating elements, cost cubic time.
+    #[test]
+    fn parsing_a_run_of_unclosed_brackets_is_linear() {
+        const RUN: usize = 1000;
+        let marks = |text: &str| -> Vec<Mark> {
+            text.chars().map(|ch| Mark { ch, literal: false }).collect()
+        };
+        let tails = ["[.ab.]".repeat(500), "[:".repeat(1548)];
+        for tail in tails {
+            let input = marks(&alloc::format!("{}{tail}", "[".repeat(RUN)));
+            let mut brackets = Brackets::new(&input);
+            for start in 0..RUN {
+                assert_eq!(parse(&input, start, &mut brackets, false), None);
+            }
+            assert!(
+                brackets.elements_read <= 2 * input.len(),
+                "{} elements read for {} marks",
+                brackets.elements_read,
+                input.len()
+            );
+        }
+    }
 }

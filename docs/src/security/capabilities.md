@@ -224,9 +224,12 @@ principal is an administrative act, while signalling one's own children
 or one's own other processes needs no capability at all) — no uid is special, there is no admin
 flag, and group membership conveys file reach through ACLs, never class
 capabilities. Driver-class and service-class capabilities
-(`CAP_MEM_DMA`, `CAP_SPAWN_AS_USER`, …) are never part of any account
-ceiling: they belong to the specific system program whose manifest
-requests them.
+(`CAP_MEM_DMA`, `CAP_SPAWN_AS_USER`, `CAP_GPIO`, …) are never part of any
+account ceiling: they belong to the specific system program whose manifest
+requests them. `CAP_GPIO`, switching the lines a board's header lends, is
+the cooling service's alone (`docs/src/userland/thermald.md`): a GPIO
+controller's driver binds its header endpoint requiring it, so the kernel
+refuses a call from anybody else.
 
 Elevation is starting a new process under a more-privileged account
 through the one `CAP_SPAWN_AS_USER` holder (login) after

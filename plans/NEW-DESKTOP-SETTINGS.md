@@ -65,6 +65,7 @@ dropped is a category the surface then has to lie about.
 | **DS27** | Sound — an Output and an Input plate, each choosing the device its direction uses and setting that device's volume and mute (a checkbox: muted, the volume stands silent and disabled), and a Recording plate; acting on `audio-v1` directly under the room the session holds, each change shown at once in the rows it touches | DS11 | §0, §2; `plans/SOUND.md` SND15 | done |
 | **DS28** | Displays — the desktop's Resolution over the output's own modes, applied at once behind the session's Keep/Revert trial | DS3, `plans/DISPLAY.md` D11 | DS28 | done |
 | **DS29** | Sound Effects — the user's own sound choices (the switch, the theme and one volume, then one chooser per event of what it plays: its theme's sound, a chosen file, none, or a pick), read and changed through the desktop session's pinboard sound requests, a file chosen in the session's own picker; the Sound category's two panes, *Output & Input* and *Sound Effects* | DS27, `plans/SOUND.md` SND23 | §2; `plans/SOUND.md` SND23 | done |
+| **DS30** | Raspberry Pi — a board-conditional category shown only where `PLATFORM_COMPATIBLE` names a Raspberry Pi: the CPU fan's `cooling.fan.*` policy staged over `system.conf` and applied through the one `configure` run, beside the cooling service's live `thermal-v1` reading, asked on a worker every two seconds while the pane is on show | DS6, `plans/COOLING.md` CL6 | §2; `plans/COOLING.md` CL7 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -250,6 +251,11 @@ write path on landing.
   keyboard cursor, and the pane dispatch. A pane cannot exist without a row,
   or a row without a pane. Adding a category is adding a row and a renderer,
   never touching the shell.
+  One category is board-conditional: `Board`, read once before the shell is
+  built, decides whether the Raspberry Pi row is shown, and a category a board
+  does not show has no strip row, search hit, category-menu entry or route by
+  name. Every other category is shown on every machine, stating its absence
+  where it has nothing to set.
 
 - **Absence is stated, never mimed.** Three distinct statements, and the
   surface never blurs them, because they are different facts to a reader:
@@ -417,6 +423,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | Lock Screen | the session's published settings document (`lock.after_min`) | session apply; *Lock Now* is the `LockScreen` window request | apply refused, stated; a refused lock stated on its row |
 | Screensaver | the session's published settings document (`screensaver.*`) | session apply | apply refused, stated |
 | Power | — | — (no policy interface, §3) | pane states absence |
+| Raspberry Pi (shown on a Raspberry Pi only) | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig`; ungated `thermal-v1` `Status` from `thermald` | elevated `configure`, which asks the settings service; `thermald` follows the store | working copy stands, refusal stated; a reading not answered is stated |
 | Networking → Ethernet | nothing ungated exists: the live readings need `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL` and stay the Switchboard's, and `network.conf` carries the very identity and addressing those gates protect. The configured addressing is read by the admin-authenticated run (DS8a) | elevated `configure`, which asks the settings service for the change and hands the changed interfaces to the running stack (DS8) | pane states where the live readings live; a refused apply keeps the working copy and states why |
 | Networking → Wi-Fi | — | — | pane states absence (§3) |
 | Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` over each interface's own `dns.servers` (DS8) | reading renders unmeasured; a refused apply keeps the working copy and states why |
@@ -459,7 +466,7 @@ would change nothing.
 | Sharing | no SMB, VNC/RDP, or HTTP server in the tree (`userland/net/` is `netstack` alone) | a new `plans/SHARING.md` |
 | Networking → Wi-Fi | no 802.11 driver, no supplicant, no scan/associate vocabulary | a new `plans/WIRELESS.md` |
 | Displays → the output's own mode, rotation, arrangement | `display_ipc` (`Query`, `Configure`, `Present`, `QueryStats`, `SetPower`) lists no output modes and sets none, and there is one output per seat | a mode-enumeration and mode-set request in `display_ipc` with driver support, and a second output to arrange |
-| Power → sleep, battery, thermal | no power-supply, battery, or sensor interface, and no driver to serve one | `plans/DEVICES.md` sensor work + an ACPI/PSCI sleep path |
+| Power → sleep, battery | no power-supply or battery interface, and no driver to serve one; the processor's temperature and fan are the Raspberry Pi category's, the one board with both | a power-supply interface and its driver + an ACPI/PSCI sleep path |
 | Keyboard → layout, modifier remap | exactly one hard-coded US ANSI table (`lib/hid::console`) | a layout registry (`lib/keymap` grows the data; the seat selects) |
 | Keyboard → shortcuts | no shortcut registry anywhere; each surface owns its own keys | a desktop-wide binding registry |
 | Language & Region → language | the help ships in several locales, but nothing names the language a user reads in or chooses which a surface draws | a language setting and the locale walk that honours it (`plans/APPS.md` §2.1) |

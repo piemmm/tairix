@@ -59,6 +59,8 @@ pub enum Category {
     Screensaver,
     /// The machine's power behaviour.
     Power,
+    /// A Raspberry Pi's own hardware: its CPU fan on the 40-pin header.
+    RaspberryPi,
     /// Interfaces, addressing and name resolution.
     Networking,
     /// Short-range radio devices.
@@ -115,8 +117,10 @@ pub enum Pane {
     LockScreen,
     /// What the screen shows once it is idle.
     Screensaver,
-    /// Battery, sleep and thermal behaviour.
+    /// Battery and sleep behaviour.
     Power,
+    /// The Raspberry Pi's CPU fan and what the cooling service reads.
+    RaspberryPi,
     /// Each wired interface's state and addressing.
     Ethernet,
     /// Wireless networks.
@@ -332,6 +336,35 @@ impl CategoryRow {
     }
 }
 
+/// What the board decides about the strip: the categories only some boards
+/// have hardware for.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Board {
+    raspberry_pi: bool,
+}
+
+impl Board {
+    /// A Raspberry Pi.
+    pub const RASPBERRY_PI: Self = Self { raspberry_pi: true };
+
+    /// The board `platform` names.
+    #[must_use]
+    pub fn of(platform: &tairix_abi::sysinfo::PlatformCompatible) -> Self {
+        Self {
+            raspberry_pi: crate::pi::names_raspberry_pi(platform),
+        }
+    }
+
+    /// Whether this board shows `category` at all.
+    #[must_use]
+    pub const fn shows(self, category: Category) -> bool {
+        match category {
+            Category::RaspberryPi => self.raspberry_pi,
+            _ => true,
+        }
+    }
+}
+
 impl Category {
     /// This category's registry row, or `None` for a category the table does
     /// not list — which the registry's totality test rules out.
@@ -349,10 +382,12 @@ impl Pane {
     /// inside this application confers nothing and can reach nothing but a
     /// pane the registry already lists, so an unknown name is simply not a
     /// pane rather than an error.
+    /// A pane of a category `board` does not show is no pane at all.
     #[must_use]
-    pub fn named(name: &str) -> Option<Self> {
+    pub fn named(name: &str, board: Board) -> Option<Self> {
         CATEGORIES
             .iter()
+            .filter(|row| board.shows(row.category))
             .flat_map(|row| row.panes)
             .find(|row| row.name == name)
             .map(|row| row.pane)
@@ -369,9 +404,9 @@ impl Pane {
     /// pane, and a command line carrying more is one this surface does not
     /// understand rather than one to take a guess at.
     #[must_use]
-    pub fn launched(args: &[&str]) -> Option<Self> {
+    pub fn launched(args: &[&str], board: Board) -> Option<Self> {
         match args {
-            [name] => Self::named(name),
+            [name] => Self::named(name, board),
             _ => None,
         }
     }
@@ -413,8 +448,8 @@ impl Location {
     /// The location a hand-over's pane name identifies, or `None` for a
     /// name the registry does not carry.
     #[must_use]
-    pub fn named(name: &str) -> Option<Self> {
-        let (category, pane) = Pane::named(name)?.locate()?;
+    pub fn named(name: &str, board: Board) -> Option<Self> {
+        let (category, pane) = Pane::named(name, board)?.locate()?;
         Some(Self {
             category,
             pane: pane.pane,
@@ -480,9 +515,9 @@ impl StripRow {
 /// reachable in one press. A query that reaches nothing yields no rows, which
 /// is the honest answer.
 #[must_use]
-pub fn strip_rows(open: &DisclosureSet<Category>, query: &str) -> Vec<StripRow> {
+pub fn strip_rows(open: &DisclosureSet<Category>, query: &str, board: Board) -> Vec<StripRow> {
     let mut rows = Vec::with_capacity(CATEGORIES.len());
-    for row in CATEGORIES {
+    for row in CATEGORIES.iter().filter(|row| board.shows(row.category)) {
         if query.is_empty() {
             rows.push(StripRow::Category(row.category));
             if row.discloses() && open.is_open(&row.category) {
@@ -571,6 +606,15 @@ const TCP_IP_SETTINGS: &[&str] = &[
 ];
 
 /// The Caching pane's setting labels.
+/// The Raspberry Pi pane's settable labels, which the search index reads.
+const RASPBERRY_PI_SETTINGS: &[&str] = &[
+    MachineSetting::FanMode.label(),
+    MachineSetting::FanLine.label(),
+    MachineSetting::FanSignal.label(),
+    MachineSetting::FanStart.label(),
+    MachineSetting::FanHysteresis.label(),
+];
+
 const CACHING_SETTINGS: &[&str] = &[
     MachineSetting::CacheAll.label(),
     MachineSetting::CacheFilesystem.label(),
@@ -1036,6 +1080,20 @@ pub const CATEGORIES: &[CategoryRow] = &[
         }],
     },
     CategoryRow {
+        category: Category::RaspberryPi,
+        label: "Raspberry Pi",
+        icon: IconKind::RaspberryPi,
+        group: Group::Machine,
+        panes: &[PaneRow {
+            pane: Pane::RaspberryPi,
+            name: "raspberry-pi",
+            title: "Raspberry Pi",
+            icon: None,
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::RaspberryPi)),
+            settings: RASPBERRY_PI_SETTINGS,
+        }],
+    },
+    CategoryRow {
         category: Category::Power,
         label: "Power",
         icon: IconKind::Power,
@@ -1046,10 +1104,10 @@ pub const CATEGORIES: &[CategoryRow] = &[
             title: "Power",
             icon: None,
             backing: PaneBacking::None {
-                missing: "This system reads no power supply, battery or temperature, and has no \
-                          driver that could report one. Restarting and shutting down are on the \
-                          icon bar's system menu.",
-                needs: "A sensor interface, a driver to serve it, and a firmware sleep path.",
+                missing: "This system reads no power supply or battery, has no driver that could \
+                          report one, and has no sleep path. Restarting and shutting down are on \
+                          the icon bar's system menu.",
+                needs: "A power-supply interface, a driver to serve it, and a firmware sleep path.",
             },
             settings: &[],
         }],

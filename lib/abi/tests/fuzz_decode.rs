@@ -110,10 +110,10 @@ use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerRecord, CacheReportRequest,
     CpuLoadRecord, DesktopFrameRecord, DesktopFrameTotals, DmaGroupRecord, DmaNodeRecord,
     DmaUnitRecord, GroupDirectoryRecord, IntrospectDomain, KernelMemoryStats, MemoryPressureStats,
-    MountRecord, NetInterfaceRatesRequest, PageRequest, ProcessRecord, RamzipStats,
-    ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SysinfoRequestHeader,
-    SystemIdentity, Uptime, UserDirectoryRecord, ViewBindingRecord, VolumeIoQueueRecord,
-    VolumeIoStatsRecord, SYSINFO_REPLY_STATUS_LEN,
+    MountRecord, NetInterfaceRatesRequest, PageRequest, PlatformCompatible, ProcessRecord,
+    RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SelfAccountRecord,
+    SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, ViewBindingRecord,
+    VolumeIoQueueRecord, VolumeIoStatsRecord, SYSINFO_REPLY_STATUS_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::touch::{
@@ -290,6 +290,13 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
         let redecoded = ViewBindingRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
+    }
+    if let Ok(board) = PlatformCompatible::decode(bytes) {
+        let mut out = [0u8; PlatformCompatible::WIRE_MAX];
+        let len = board
+            .encode(&mut out)
+            .expect("an accepted answer re-encodes");
+        assert_eq!(&out[..len], bytes, "a board answer was normalised");
     }
     if let Ok(rec) = ProcessRecord::from_bytes(bytes) {
         let redecoded = ProcessRecord::from_bytes(&rec.to_le_bytes())

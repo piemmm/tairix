@@ -105,6 +105,7 @@ for filesystems, the feature section below.
 | Civil time zones (`lib/tz`, the IANA 2026e store held to `zic`): the desktop's and login screen's clocks local, in the region's date and time formats, chosen in Settings and, for the machine, in Date & Time | ✓ | ✓ | ✓ | ▢ |
 | Date & Time dialog (`datetime.app`): the clock set by hand in the machine's zone, skipped and repeated local times answered, the clock chip set with it, network time on and off, the zone's next change stated | ✓ | ✓ | ✓ | ▢ |
 | Real-time clock (RTC) drivers | ✓ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
+| Temperature sensors and CPU fan control (`thermald`) | — | ◐ Pi 4 AVS + GPIO header | — | — |
 | Accelerator (offload-engine) drivers | ▢ | ✓ virtio-crypto | ▢ | — |
 | DMA-engine drivers (cyclic channels, `dmaengine-v1`) | — | ◐ bcm2835 | — | — |
 | Interrupt controllers, chosen by discovery | ✓ IO-APIC, xAPIC, x2APIC | ✓ GICv2, GICv3 + ITS | ✓ PLIC, APLIC + IMSIC | — |

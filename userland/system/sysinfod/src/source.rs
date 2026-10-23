@@ -23,9 +23,9 @@ use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, DmaGroupRecord,
     DmaNodeRecord, DmaUnitRecord, GroupDirectoryRecord, IrqRecord, KernelMemoryStats, LoadAverage,
-    MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord, RamzipStats,
-    ResourceLimitRecord, SeatRecord, SelfAccountRecord, SystemIdentity, Uptime,
-    UserDirectoryRecord, ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
+    MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, PlatformCompatible,
+    ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SystemIdentity,
+    Uptime, UserDirectoryRecord, ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
     VolumeIoStatsRecord,
 };
 use tairix_abi::time::Duration64;
@@ -146,6 +146,11 @@ pub trait SysinfoSource {
     /// [`process_records`](Self::process_records) — a syscall-backed source
     /// materialises the bytes on each call.
     fn hardware_tree(&self, caller: &Caller) -> Result<Vec<u8>, Errno>;
+
+    /// Return the board's `compatible` strings: the hardware tree root's
+    /// keys, which [`crate::root_platform`] reads from a tree. Answered to any
+    /// caller; the tree itself stays behind its gate.
+    fn platform_compatible(&self, caller: &Caller) -> Result<PlatformCompatible, Errno>;
 
     /// Return the machine identity (machine ID, OS version, hostname).
     fn system_identity(&self, caller: &Caller) -> Result<SystemIdentity, Errno>;

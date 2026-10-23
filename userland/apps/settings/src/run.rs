@@ -59,6 +59,9 @@ mod program {
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::{SysinfoQueryId, Uptime};
+    use tairix_abi::thermal_ipc::{
+        decode_status, ThermalRequest, THERMAL_ENDPOINT, THERMAL_MAX_REPLY, THERMAL_REQUEST_LEN,
+    };
     use tairix_abi::time::{Time64, NANOS_PER_SEC};
     use tairix_abi::window_ipc::{
         AuthorisedOutcome, DialogModality, PreviewOutcome, PreviewSubject, SystemTask, WindowEvent,
@@ -84,8 +87,8 @@ mod program {
         MachineFacts, OwnAccount, Pane, PictureWanted, Renders, Roster, Round, Shell, ShellOutcome,
         VolumeReading, MOST_OUTSTANDING, WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
     };
+    use tairix_settings::{Board, Cooling, SaverEntry, SoundReading};
     use tairix_settings::{EffectsAsk, EffectsAsks, EffectsReading, EffectsTrip};
-    use tairix_settings::{SaverEntry, SoundReading};
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_tz::ZoneInfo;
@@ -154,6 +157,14 @@ mod program {
     /// The wait-set token of the sound-choices desk's wake: a round trip to
     /// the desktop session about the user's sounds has come back.
     const EFFECTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 9;
+
+    /// The wait-set token of the cooling desk's wake: the cooling service's
+    /// status has come back.
+    const COOLING_TOKEN: u64 = app::FIRST_APP_TOKEN + 10;
+
+    /// How often the Raspberry Pi pane re-reads the cooling service while it
+    /// is on show: the temperature moves on its own.
+    const COOLING_REFRESH_NS: u64 = 2_000_000_000;
 
     /// The desktop settings in effect for the launching user, so every
     /// composed row opens on what the desktop is actually drawn with.
@@ -242,6 +253,21 @@ mod program {
     /// absent, so its row states that rather than showing a value the
     /// reader could not account for.
     type Machine = tairix_rt::work::Worker<(), (), (Option<SystemConfig>, MachineFacts)>;
+
+    /// The cooling desk: one ungated round trip to the cooling service.
+    type CoolingDesk = tairix_rt::work::Worker<(), (), Cooling>;
+
+    /// The cooling desk's body.
+    fn read_cooling(_: &mut (), (): &mut ()) -> Cooling {
+        let mut request = [0u8; THERMAL_REQUEST_LEN];
+        let mut reply = [0u8; THERMAL_MAX_REPLY];
+        let status = ThermalRequest::Status
+            .encode(&mut request)
+            .ok()
+            .and_then(|len| tairix_rt::ipc_call(THERMAL_ENDPOINT, &request[..len], &mut reply).ok())
+            .and_then(|len| decode_status(reply.get(..len)?).ok());
+        status.map_or(Cooling::Unanswered, Cooling::Read)
+    }
 
     /// The machine readings' body.
     fn read_machine(_: &mut (), (): &mut ()) -> (Option<SystemConfig>, MachineFacts) {
@@ -862,6 +888,61 @@ mod program {
             shell.adopt_config(config);
             shell.adopt_machine(facts);
             true
+        }
+    }
+
+    /// The cooling desk's client half: one reading at a time, and the next
+    /// due on its period while the pane that states it is on show.
+    struct CoolingRead<'a> {
+        worker: &'a CoolingDesk,
+        pending: bool,
+        refresh_ns: Option<u64>,
+    }
+
+    impl CoolingRead<'_> {
+        /// Ask for a reading if the pane wants one and none is outstanding,
+        /// answering whether anything on screen changed.
+        fn request(&mut self, shell: &mut Shell) -> bool {
+            if self.pending || !shell.cooling_wanted() {
+                return false;
+            }
+            if self.worker.submit(()) {
+                return self.settle(shell);
+            }
+            self.pending = true;
+            false
+        }
+
+        /// Ask again once the period has passed, answering whether anything on
+        /// screen changed.
+        fn refresh(&mut self, shell: &mut Shell) -> bool {
+            if self
+                .refresh_ns
+                .is_none_or(|due| due > tairix_rt::clock_get())
+            {
+                return false;
+            }
+            self.refresh_ns = None;
+            shell.cooling_due();
+            self.request(shell)
+        }
+
+        /// Adopt a landed reading, answering whether anything changed.
+        fn settle(&mut self, shell: &mut Shell) -> bool {
+            let Some(reading) = self.worker.collect() else {
+                return false;
+            };
+            self.pending = false;
+            shell.adopt_cooling(reading);
+            self.refresh_ns = shell
+                .states_cooling()
+                .then(|| tairix_rt::clock_get().saturating_add(COOLING_REFRESH_NS));
+            true
+        }
+
+        /// When the next reading is due.
+        const fn due(&self) -> Option<u64> {
+            self.refresh_ns
         }
     }
 
@@ -1795,6 +1876,8 @@ mod program {
         sound: SoundRead<'a>,
         /// The session's round trips the Sound Effects pane needs.
         effects: EffectsRead<'a>,
+        /// The cooling service's status the Raspberry Pi pane states.
+        cooling: CoolingRead<'a>,
     }
 
     impl<'a> Desks<'a> {
@@ -1833,6 +1916,11 @@ mod program {
                     worker: &workers.effects,
                     asked: false,
                     asks: EffectsAsks::new(),
+                },
+                cooling: CoolingRead {
+                    worker: &workers.cooling,
+                    pending: false,
+                    refresh_ns: None,
                 },
             }
         }
@@ -2079,9 +2167,21 @@ mod program {
         landed |= desks.desktop.settle(shell);
         landed |= desks.sound.settle(shell);
         landed |= desks.effects.settle(shell);
+        landed |= desks.cooling.settle(shell);
         if !landed {
             return true;
         }
+        repaint_pane(surface, shell, themes, desktop)
+    }
+
+    /// Redraw the pane, whose rows a landed answer rebuilt, answering whether
+    /// the window is still presentable.
+    fn repaint_pane(
+        surface: &mut SettingsWindow,
+        shell: &mut Shell,
+        themes: &ThemeRegistry,
+        desktop: &Desktop,
+    ) -> bool {
         let viewport = surface.viewport();
         shell.lay_out(viewport, desktop.scale(), themes.active());
         let mut damage = tairix_controls::damage::sink();
@@ -2307,6 +2407,7 @@ mod program {
             desks.desktop.request_savers(shell),
             desks.sound.request(shell),
             desks.effects.request(shell),
+            desks.cooling.request(shell),
         ];
         landed.contains(&true)
     }
@@ -2332,6 +2433,10 @@ mod program {
             || !advance_secrets(surface, shell, themes, desktop)
             || !step_held_bars(surface, shell, themes, desktop)
         {
+            return false;
+        }
+        // The temperature's period is the clock's, not an event's.
+        if desks.cooling.refresh(shell) && !repaint_pane(surface, shell, themes, desktop) {
             return false;
         }
         // Every turn, not only an event's: a navigation, a resize and an
@@ -2744,7 +2849,8 @@ mod program {
             ) {
                 break 'serve app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
-            timed_due.set(next_due(shell, &mut zones, surface, (themes, desktop)));
+            let due = next_due(shell, &mut zones, surface, (themes, desktop));
+            timed_due.set(due.into_iter().chain(desks.cooling.due()).min());
             let event = match wait_event(
                 &mut events,
                 (surface, shell),
@@ -2864,7 +2970,7 @@ mod program {
         if let Some(argv) = tairix_rt::args().filter(|argv| !argv.is_empty()) {
             let mut sink = tairix_controls::damage::sink();
             let viewport = surface.viewport();
-            let named = Pane::launched(&argv).is_some_and(|pane| {
+            let named = Pane::launched(&argv, shell.board()).is_some_and(|pane| {
                 shell.go_to(pane, viewport, desktop.scale(), themes.active(), &mut sink)
             });
             if !named {
@@ -2911,6 +3017,7 @@ mod program {
         /// Set when the audio service announces a change, for the sound desk.
         sound_moved: Cell<bool>,
         effects: Arc<EffectsDesk>,
+        cooling: Arc<CoolingDesk>,
     }
 
     impl Workers {
@@ -2999,11 +3106,16 @@ mod program {
                 ),
                 sound_moved: Cell::new(false),
                 effects: started(effects, (set, EFFECTS_TOKEN), "sound-choices"),
+                cooling: started(
+                    CoolingDesk::new(read_cooling, (), tairix_rt::sync::WorkerWake::create()),
+                    (set, COOLING_TOKEN),
+                    "cooling",
+                ),
             })
         }
 
         /// Each desk's wake and the token it is watched under.
-        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64); 9] {
+        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64); 10] {
             [
                 (self.applier.wake(), APPLY_TOKEN),
                 (self.mounts.wake(), MOUNTS_TOKEN),
@@ -3014,6 +3126,7 @@ mod program {
                 (self.desktop.wake(), DESKTOP_TOKEN),
                 (self.sound.wake(), SOUND_TOKEN),
                 (self.effects.wake(), EFFECTS_TOKEN),
+                (self.cooling.wake(), COOLING_TOKEN),
             ]
         }
 
@@ -3074,6 +3187,7 @@ mod program {
             self.sound.stop();
             self.desktop.stop();
             self.effects.stop();
+            self.cooling.stop();
         }
     }
 
@@ -3153,7 +3267,12 @@ mod program {
 
         // An empty registry would leave the window nothing to show at all, so
         // it ends fail-loud rather than opening a blank frame.
-        let Some(mut shell) = Shell::new(settings_in_effect()) else {
+        // The board decides the categories only some boards show, so it is
+        // read before the strip is drawn; an unanswered read shows none of
+        // them.
+        let board = tairix_procinfo::platform_compatible(&IpcTransport)
+            .map_or_else(|_| Board::default(), |platform| Board::of(&platform));
+        let Some(mut shell) = Shell::new(settings_in_effect(), board) else {
             return app::fail(
                 APP_NAME,
                 EXIT_CHANNEL_LOST,

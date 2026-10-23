@@ -18,6 +18,7 @@ use tairix_sysconfig::{Key, NetToggle, SynCookies, SystemConfig};
 use tairix_wallpaper::DesktopSettings;
 
 use crate::form::Composition;
+use crate::registry::Board;
 use crate::registry::{strip_rows, Pane, PaneBacking, PaneContent, StripRow};
 use crate::shell::{Authorised, Shell};
 use crate::test_support::{
@@ -28,7 +29,7 @@ use tairix_abi::window_ipc::SystemTask;
 
 /// A shell showing `pane` with the machine's store already read.
 fn showing_with(pane: &str, config: SystemConfig) -> Shell {
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+    let mut shell = Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
     shell.adopt_config(Some(config));
     let mut sink = damage();
     assert!(
@@ -305,7 +306,7 @@ fn dns_tells_an_empty_set_apart_from_a_reading_it_could_not_take() {
 
 #[test]
 fn the_dns_pane_asks_for_its_reading_when_it_comes_on_show() {
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+    let mut shell = Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
     assert!(
         !shell.network_wanted(),
         "the pane it opens on states no network reading"
@@ -878,7 +879,7 @@ fn every_stack_wide_option_is_searchable_by_its_own_label() {
     // A reader looking for `IPv6` finds the pane that holds it, which is
     // the whole contract between a pane's rows and the search index.
     for term in row_for(Pane::TcpIp).settings {
-        let rows = strip_rows(&DisclosureSet::closed(), term);
+        let rows = strip_rows(&DisclosureSet::closed(), term, Board::default());
         assert!(
             rows.iter()
                 .any(|row| matches!(row, StripRow::Pane(_, pane) if *pane == Pane::TcpIp)),
@@ -889,7 +890,7 @@ fn every_stack_wide_option_is_searchable_by_its_own_label() {
 
 #[test]
 fn the_dns_pane_is_reachable_by_the_subject_a_reader_searches_for() {
-    let rows = strip_rows(&DisclosureSet::closed(), "name servers");
+    let rows = strip_rows(&DisclosureSet::closed(), "name servers", Board::default());
     assert!(
         rows.iter()
             .any(|row| matches!(row, StripRow::Pane(_, pane) if *pane == Pane::Dns)),

@@ -111,6 +111,19 @@
 //!   such as `-12dB` or `-6.5dB`, to at most two decimals: what every sink
 //!   and source starts at. Never above `0dB`: a level never raises a signal
 //!   past its device's own 0 dB point.
+//! * `cooling.fan.mode` — `off` (default), `on` or `auto`: whether the CPU
+//!   fan on the board's header is left undriven, run always, or switched by
+//!   the processor's temperature (`plans/COOLING.md`).
+//! * `cooling.fan.line` — `none` (default), or the GPIO line the fan is wired
+//!   to, from 0 to 63. A mode that runs the fan with no line is a fault the
+//!   cooling service states.
+//! * `cooling.fan.signal` — `active-high` (default) or `active-low`: which
+//!   level of the line runs the fan.
+//! * `cooling.fan.start` — whole degrees Celsius, `65` by default, from 40 to
+//!   85: the temperature an automatic fan starts at.
+//! * `cooling.fan.hysteresis` — whole degrees Celsius, `10` by default, from
+//!   2 to 20: how far a running automatic fan cools the processor before it
+//!   stops, so the stop is always below the start.
 //!
 //! # Security
 //!
@@ -136,10 +149,12 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::audio::{AudioBaseline, AudioGain, AudioLocation};
+use tairix_abi::driver::gpio::{Polarity, GPIO_HEADER_LINES_MAX};
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::net_ipc::{
     socket_budget_for_ram, NetworkSettings, SOCKET_BUDGET_MAX_SETTABLE, SOCKET_BUDGET_MIN_SETTABLE,
 };
+use tairix_abi::thermal_ipc::{FanMode, FanPolicy, FAN_HYSTERESIS_CELSIUS, FAN_START_CELSIUS};
 use tairix_abi::time::Duration64;
 use tairix_abi::zone::ZoneName;
 use tairix_abi::MAX_TIME_SERVERS;
@@ -628,6 +643,17 @@ pub enum Key {
     AudioInput,
     /// `audio.level` — the level every sink and source starts at.
     AudioLevel,
+    /// `cooling.fan.mode` — how the CPU fan is switched.
+    CoolingFanMode,
+    /// `cooling.fan.line` — the header line the fan is wired to.
+    CoolingFanLine,
+    /// `cooling.fan.signal` — which level of the line runs the fan.
+    CoolingFanSignal,
+    /// `cooling.fan.start` — the temperature an automatic fan starts at.
+    CoolingFanStart,
+    /// `cooling.fan.hysteresis` — how far a running automatic fan cools the
+    /// processor before it stops.
+    CoolingFanHysteresis,
 }
 
 impl Key {
@@ -654,6 +680,11 @@ impl Key {
         Self::AudioOutput,
         Self::AudioInput,
         Self::AudioLevel,
+        Self::CoolingFanMode,
+        Self::CoolingFanLine,
+        Self::CoolingFanSignal,
+        Self::CoolingFanStart,
+        Self::CoolingFanHysteresis,
     ];
 
     /// Whether this key belongs to the stack-wide `net.*` family, and so
@@ -685,7 +716,12 @@ impl Key {
             | Self::InputMouseDebounce
             | Self::AudioOutput
             | Self::AudioInput
-            | Self::AudioLevel => false,
+            | Self::AudioLevel
+            | Self::CoolingFanMode
+            | Self::CoolingFanLine
+            | Self::CoolingFanSignal
+            | Self::CoolingFanStart
+            | Self::CoolingFanHysteresis => false,
         }
     }
 
@@ -724,6 +760,11 @@ impl Key {
             Self::AudioOutput => "audio.output",
             Self::AudioInput => "audio.input",
             Self::AudioLevel => "audio.level",
+            Self::CoolingFanMode => "cooling.fan.mode",
+            Self::CoolingFanLine => "cooling.fan.line",
+            Self::CoolingFanSignal => "cooling.fan.signal",
+            Self::CoolingFanStart => "cooling.fan.start",
+            Self::CoolingFanHysteresis => "cooling.fan.hysteresis",
         }
     }
 
@@ -766,6 +807,15 @@ impl Key {
             Self::AudioLevel => {
                 return ValueShape::Free("decibels at or below `0dB`, such as `-12dB` or `-6.5dB`")
             }
+            Self::CoolingFanMode => &["off", "on", "auto"],
+            Self::CoolingFanSignal => &["active-high", "active-low"],
+            Self::CoolingFanLine => return ValueShape::Free("`none`, or a GPIO line from 0 to 63"),
+            Self::CoolingFanStart => {
+                return ValueShape::Free("whole degrees Celsius from 40 to 85")
+            }
+            Self::CoolingFanHysteresis => {
+                return ValueShape::Free("whole degrees Celsius from 2 to 20")
+            }
         })
     }
 }
@@ -806,20 +856,72 @@ fn render_location(location: Option<AudioLocation>) -> String {
     location.map_or_else(|| String::from(AUTO), |place| alloc::format!("{place}"))
 }
 
-/// Parse `input.mouse.debounce` — whole milliseconds, `0` disabling the filter.
+/// Parse a bare decimal count within `range`.
 ///
-/// Rejects anything that is not a bare decimal count, and any count above
-/// [`MAX_CLICK_DEBOUNCE_MS`], rather than clamping: an operator who asked for a
-/// window the system will not honour is told so.
-fn parse_click_debounce_ms(value: &str) -> Result<u16, ConfigError> {
+/// Rejects anything that is not a bare decimal count, and any count outside
+/// `range`, rather than clamping: an operator who asked for a value the
+/// system will not honour is told so.
+fn parse_whole(value: &str, range: core::ops::RangeInclusive<u16>) -> Result<u16, ConfigError> {
     if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
         return Err(ConfigError::InvalidValue);
     }
-    let ms: u16 = value.parse().map_err(|_| ConfigError::InvalidValue)?;
-    if ms > MAX_CLICK_DEBOUNCE_MS {
+    let count: u16 = value.parse().map_err(|_| ConfigError::InvalidValue)?;
+    if !range.contains(&count) {
         return Err(ConfigError::InvalidValue);
     }
-    Ok(ms)
+    Ok(count)
+}
+
+/// Parse a whole number of degrees Celsius within `range`.
+fn parse_celsius(value: &str, range: &core::ops::RangeInclusive<u8>) -> Result<u8, ConfigError> {
+    let celsius = parse_whole(value, u16::from(*range.start())..=u16::from(*range.end()))?;
+    u8::try_from(celsius).map_err(|_| ConfigError::InvalidValue)
+}
+
+/// The spelling of `cooling.fan.line` naming no line.
+const NO_FAN_LINE: &str = "none";
+
+/// Parse `cooling.fan.line`: `none`, or a line the header's width can name.
+fn parse_fan_line(value: &str) -> Result<Option<u8>, ConfigError> {
+    if value == NO_FAN_LINE {
+        return Ok(None);
+    }
+    let most = u16::try_from(GPIO_HEADER_LINES_MAX - 1).map_err(|_| ConfigError::InvalidValue)?;
+    let line = parse_whole(value, 0..=most)?;
+    u8::try_from(line)
+        .map(Some)
+        .map_err(|_| ConfigError::InvalidValue)
+}
+
+/// The canonical spelling of a fan mode (`cooling.fan.mode`).
+#[must_use]
+pub const fn fan_mode_value(mode: FanMode) -> &'static str {
+    match mode {
+        FanMode::Off => "off",
+        FanMode::On => "on",
+        FanMode::Automatic => "auto",
+    }
+}
+
+fn fan_mode_from(value: &str) -> Option<FanMode> {
+    FanMode::ALL
+        .into_iter()
+        .find(|mode| fan_mode_value(*mode) == value)
+}
+
+/// The canonical spelling of a fan's signal polarity (`cooling.fan.signal`).
+#[must_use]
+pub const fn fan_signal_value(polarity: Polarity) -> &'static str {
+    match polarity {
+        Polarity::ActiveHigh => "active-high",
+        Polarity::ActiveLow => "active-low",
+    }
+}
+
+fn fan_signal_from(value: &str) -> Option<Polarity> {
+    [Polarity::ActiveHigh, Polarity::ActiveLow]
+        .into_iter()
+        .find(|polarity| fan_signal_value(*polarity) == value)
 }
 
 /// Why a store text (or a single setting) was refused.
@@ -934,6 +1036,9 @@ pub struct SystemConfig {
     pub audio_input: Option<AudioLocation>,
     /// The level every sink and source starts at (`audio.level`).
     pub audio_level: AudioGain,
+    /// The CPU fan's policy (`cooling.fan.*`): off, with no line chosen, by
+    /// default.
+    pub cooling_fan: FanPolicy,
 }
 
 impl Default for SystemConfig {
@@ -966,6 +1071,7 @@ impl Default for SystemConfig {
             audio_output: None,
             audio_input: None,
             audio_level: AudioGain::UNITY,
+            cooling_fan: FanPolicy::default(),
         }
     }
 }
@@ -1074,6 +1180,14 @@ impl SystemConfig {
             Key::AudioOutput => render_location(self.audio_output),
             Key::AudioInput => render_location(self.audio_input),
             Key::AudioLevel => alloc::format!("{}", self.audio_level),
+            Key::CoolingFanLine => self.cooling_fan.line().map_or_else(
+                || String::from(NO_FAN_LINE),
+                |line| alloc::format!("{line}"),
+            ),
+            Key::CoolingFanStart => alloc::format!("{}", self.cooling_fan.start_celsius()),
+            Key::CoolingFanHysteresis => {
+                alloc::format!("{}", self.cooling_fan.hysteresis_celsius())
+            }
             _ => String::from(self.closed_value(key)),
         }
     }
@@ -1088,7 +1202,14 @@ impl SystemConfig {
             Key::TimeServers => NO_TIME_SERVERS,
             Key::TimeZone => DEFAULT_ZONE,
             // Rendered numerically by `render_value`; no fixed spelling exists.
-            Key::InputMouseDebounce | Key::AudioLevel => "",
+            Key::InputMouseDebounce
+            | Key::AudioLevel
+            | Key::CoolingFanStart
+            | Key::CoolingFanHysteresis => "",
+            // `none` has a spelling; a line is rendered by `render_value`.
+            Key::CoolingFanLine => NO_FAN_LINE,
+            Key::CoolingFanMode => fan_mode_value(self.cooling_fan.mode()),
+            Key::CoolingFanSignal => fan_signal_value(self.cooling_fan.polarity()),
             // `auto` has a spelling; an explicit budget is rendered as a
             // byte size by `render_value`.
             Key::NetSocketsMem => "auto",
@@ -1208,7 +1329,7 @@ impl SystemConfig {
                     SocketBudget::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
             Key::InputMouseDebounce => {
-                self.input_mouse_debounce_ms = parse_click_debounce_ms(value)?;
+                self.input_mouse_debounce_ms = parse_whole(value, 0..=MAX_CLICK_DEBOUNCE_MS)?;
             }
             Key::AudioOutput => self.audio_output = parse_location(value)?,
             Key::AudioInput => self.audio_input = parse_location(value)?,
@@ -1216,8 +1337,34 @@ impl SystemConfig {
                 self.audio_level =
                     AudioGain::parse(value).map_err(|_| ConfigError::InvalidValue)?;
             }
+            Key::CoolingFanMode
+            | Key::CoolingFanLine
+            | Key::CoolingFanSignal
+            | Key::CoolingFanStart
+            | Key::CoolingFanHysteresis => self.cooling_fan = self.fan_with(key, value)?,
         }
         Ok(())
+    }
+
+    /// The fan policy with the one `cooling.fan.*` `key` set to `value`.
+    fn fan_with(&self, key: Key, value: &str) -> Result<FanPolicy, ConfigError> {
+        let fan = self.cooling_fan;
+        let (mut mode, mut line, mut polarity) = (fan.mode(), fan.line(), fan.polarity());
+        let (mut start, mut hysteresis) = (fan.start_celsius(), fan.hysteresis_celsius());
+        match key {
+            Key::CoolingFanMode => mode = fan_mode_from(value).ok_or(ConfigError::InvalidValue)?,
+            Key::CoolingFanLine => line = parse_fan_line(value)?,
+            Key::CoolingFanSignal => {
+                polarity = fan_signal_from(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::CoolingFanStart => start = parse_celsius(value, &FAN_START_CELSIUS)?,
+            Key::CoolingFanHysteresis => {
+                hysteresis = parse_celsius(value, &FAN_HYSTERESIS_CELSIUS)?;
+            }
+            _ => return Err(ConfigError::UnknownKey),
+        }
+        FanPolicy::new(mode, line, polarity, start, hysteresis)
+            .map_err(|_| ConfigError::InvalidValue)
     }
 
     /// Render the canonical store text: the explanatory header comment and
@@ -1316,6 +1463,8 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use tairix_abi::audio::{AudioBaseline, AudioGain, AudioLocation};
+    use tairix_abi::driver::gpio::Polarity;
+    use tairix_abi::thermal_ipc::{FanMode, FanPolicy};
 
     /// The kind of `text`'s refusal, for the tests that assert what was
     /// refused rather than where.
@@ -1558,6 +1707,49 @@ mod tests {
     }
 
     #[test]
+    fn the_fan_keys_set_one_policy_and_each_refuses_what_its_range_does_not_hold() {
+        let config = SystemConfig::parse(
+            "cooling.fan.mode auto\ncooling.fan.line 18\ncooling.fan.signal active-low\n\
+             cooling.fan.start 60\ncooling.fan.hysteresis 8\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            config.cooling_fan,
+            FanPolicy::new(FanMode::Automatic, Some(18), Polarity::ActiveLow, 60, 8).unwrap()
+        );
+        assert_eq!(config.cooling_fan.stop_celsius(), 52);
+        assert_eq!(SystemConfig::default().cooling_fan, FanPolicy::default());
+        for bad in [
+            "cooling.fan.mode automatic",
+            "cooling.fan.line 64",
+            "cooling.fan.line -1",
+            "cooling.fan.line GPIO18",
+            "cooling.fan.signal low",
+            "cooling.fan.start 39",
+            "cooling.fan.start 86",
+            "cooling.fan.start 65.5",
+            "cooling.fan.hysteresis 1",
+            "cooling.fan.hysteresis 21",
+        ] {
+            assert_eq!(parse_kind(bad), Err(ConfigError::InvalidValue), "{bad}");
+        }
+        let mut set = SystemConfig::default();
+        set.set(Key::CoolingFanLine, "none").unwrap();
+        assert_eq!(set.cooling_fan.line(), None);
+        set.set(Key::CoolingFanLine, "63").unwrap();
+        assert_eq!(set.render_value(Key::CoolingFanLine), "63");
+        assert_eq!(
+            set.set(Key::CoolingFanStart, "99"),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            set.cooling_fan.start_celsius(),
+            65,
+            "a refusal changes nothing"
+        );
+    }
+
+    #[test]
     fn render_parse_round_trips_exactly() {
         for login_type in [LoginType::Text, LoginType::Graphical] {
             for cache_all in [Switch::On, Switch::Off] {
@@ -1593,6 +1785,14 @@ mod tests {
                                     audio_output: AudioLocation::new(0x9f3a, 1).ok(),
                                     audio_input: None,
                                     audio_level: AudioGain::new(-650).expect("attenuation"),
+                                    cooling_fan: FanPolicy::new(
+                                        FanMode::Automatic,
+                                        Some(18),
+                                        Polarity::ActiveLow,
+                                        70,
+                                        12,
+                                    )
+                                    .expect("in range"),
                                 };
                                 let rendered = config.render();
                                 assert_eq!(parse_kind(&rendered), Ok(config));

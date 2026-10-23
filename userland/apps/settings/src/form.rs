@@ -71,6 +71,7 @@ use crate::effects::{self, EffectsAsk, EffectsReading, EffectsRow};
 use crate::machine::MachineSetting;
 use crate::network::{self, Addressing, Choice, IfaceSetting};
 use crate::notices;
+use crate::pi::Cooling;
 use crate::pictures::{self, Chooser, PictureWanted, Pictured, Pictures};
 use crate::saver::{self, SaverEntry, SaverRow};
 use crate::sound::{self, SoundReading, SoundRow};
@@ -1337,7 +1338,7 @@ impl Declared {
                     machine_zone: documents.machine_zone.copied(),
                 },
             ),
-            Self::Machine(setting) => setting.row(documents.config),
+            Self::Machine(setting) => setting.row(documents.config, documents.cooling),
             Self::Action(action) => action.row(documents),
         }
     }
@@ -1416,6 +1417,27 @@ const TCP_IP_GROUPS: [GroupSpec; 2] = [
         footnote: None,
     },
 ];
+
+/// Where the Raspberry Pi pane's STATUS plate sits: above the fan's policy.
+const COOLING_STATUS_GROUP: usize = 0;
+
+/// The Raspberry Pi pane's declared group: the CPU fan's policy, staged
+/// and applied through the settings writer as every machine setting is. Its
+/// STATUS plate is discovered from the cooling service's reading.
+const RASPBERRY_PI_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "CPU FAN",
+    settings: &[
+        Declared::Machine(MachineSetting::FanMode),
+        Declared::Machine(MachineSetting::FanLine),
+        Declared::Machine(MachineSetting::FanSignal),
+        Declared::Machine(MachineSetting::FanStart),
+        Declared::Machine(MachineSetting::FanHysteresis),
+    ],
+    pictures: None,
+    footnote: Some(
+        "Wire the fan through a transistor or a MOSFET: a header line cannot power a fan on its own.",
+    ),
+}];
 
 /// The Appearance pane's groups.
 const APPEARANCE_GROUPS: [GroupSpec; 3] = [
@@ -1689,6 +1711,9 @@ pub enum Composition {
     /// The Sound Effects pane: the desktop's switch and theme, then one plate
     /// per event a user's choices reach, read from the desktop session.
     SoundEffects,
+    /// The Raspberry Pi pane: what the cooling service reads, then the CPU
+    /// fan's policy.
+    RaspberryPi,
 }
 
 impl Composition {
@@ -1710,6 +1735,7 @@ impl Composition {
             Self::Screensaver => &SCREENSAVER_GROUPS,
             Self::LockScreen => &LOCK_GROUPS,
             Self::Language => &LANGUAGE_GROUPS,
+            Self::RaspberryPi => &RASPBERRY_PI_GROUPS,
             Self::Ethernet | Self::Dns | Self::Users | Self::Sound | Self::SoundEffects => &[],
         }
     }
@@ -1739,7 +1765,8 @@ impl Composition {
             | Self::TcpIp
             | Self::Ethernet
             | Self::Dns
-            | Self::Users => Posture::Staged,
+            | Self::Users
+            | Self::RaspberryPi => Posture::Staged,
         }
     }
 
@@ -1787,7 +1814,16 @@ impl Composition {
     /// Whether this composition's rows read the machine's boot-time store.
     #[must_use]
     pub(crate) const fn reads_machine(self) -> bool {
-        matches!(self, Self::LoginStartup | Self::Caching | Self::TcpIp)
+        matches!(
+            self,
+            Self::LoginStartup | Self::Caching | Self::TcpIp | Self::RaspberryPi
+        )
+    }
+
+    /// Whether this composition states what the cooling service reads.
+    #[must_use]
+    pub(crate) const fn reads_cooling(self) -> bool {
+        matches!(self, Self::RaspberryPi)
     }
 
     /// Whether this composition's plates are discovered from the addressing
@@ -1837,7 +1873,8 @@ impl Composition {
             | Self::Dns
             | Self::Users
             | Self::Sound
-            | Self::SoundEffects => &[],
+            | Self::SoundEffects
+            | Self::RaspberryPi => &[],
         }
     }
 
@@ -1974,6 +2011,18 @@ impl Composition {
                     if chooser.group >= at {
                         chooser.group += 1;
                     }
+                }
+                built
+            }
+            Self::RaspberryPi => {
+                let mut built = self.declared(documents);
+                built.groups.insert(
+                    COOLING_STATUS_GROUP,
+                    crate::pi::status_group(documents.cooling),
+                );
+                built.owners.insert(COOLING_STATUS_GROUP, Vec::new());
+                for chooser in &mut built.pictured {
+                    chooser.group += 1;
                 }
                 built
             }
@@ -2120,6 +2169,8 @@ pub(crate) struct Documents<'a> {
     /// The sound devices and captures the audio service answered with, or
     /// `None` while the reading has not landed.
     pub(crate) sound: Option<&'a SoundReading>,
+    /// What the cooling service has answered.
+    pub(crate) cooling: &'a Cooling,
     /// The user's sound choices the desktop session answered with, or `None`
     /// while the reading has not landed.
     pub(crate) effects: Option<&'a EffectsReading>,
@@ -2273,6 +2324,8 @@ pub struct Form {
     /// restates it rather than dropping back to unmeasured.
     resolvers: Option<Vec<NetServerAddr>>,
     sound: Option<SoundReading>,
+    /// What the cooling service has answered.
+    cooling: Cooling,
     effects: Option<EffectsReading>,
     /// The account readings the plates are discovered from and a staged
     /// change is measured against.
@@ -2345,6 +2398,7 @@ impl Form {
             staged: documents.staged.to_vec(),
             resolvers: documents.resolvers.map(<[_]>::to_vec),
             sound: documents.sound.cloned(),
+            cooling: documents.cooling.clone(),
             effects: documents.effects.cloned(),
             accounts: documents.accounts.clone(),
             staged_accounts: documents.staged_accounts.to_vec(),
@@ -2416,6 +2470,23 @@ impl Form {
     pub(crate) fn adopt_sound(&mut self, reading: Option<&SoundReading>) {
         self.sound = reading.cloned();
         self.rebuild();
+    }
+
+    /// Adopt what the cooling service answered. A reading that moves only
+    /// the temperature restates that one row; anything else rebuilds.
+    pub(crate) fn adopt_cooling(&mut self, reading: &Cooling) {
+        let only_temperature = self.cooling.only_temperature_moves(reading);
+        self.cooling = reading.clone();
+        if !only_temperature {
+            self.rebuild();
+            return;
+        }
+        let rows = crate::pi::status_rows(&self.cooling);
+        if let Some(group) = self.groups.get_mut(COOLING_STATUS_GROUP) {
+            for (held, fresh) in group.rows_mut().iter_mut().zip(rows) {
+                *held.control_mut() = fresh.control().clone();
+            }
+        }
     }
 
     /// Adopt what the desktop session answered of the user's sound choices.
@@ -2616,7 +2687,7 @@ impl Form {
                 let (working, effect) = (self.config.as_ref()?, self.config_in_effect.as_ref()?);
                 let value = setting.value(working);
                 (value != setting.value(effect))
-                    .then(|| (String::from(setting.key().name()), String::from(value)))
+                    .then(|| (String::from(setting.key().name()), value))
             }
             Owner::Interface(setting) => {
                 let captured = self.addressing.document()?;
@@ -2855,6 +2926,7 @@ impl Form {
             staged: &self.staged,
             resolvers: self.resolvers.as_deref(),
             sound: self.sound.as_ref(),
+            cooling: &self.cooling,
             effects: self.effects.as_ref(),
             accounts: &self.accounts,
             staged_accounts: &self.staged_accounts,
@@ -3553,13 +3625,19 @@ impl Form {
                 let Some(config) = self.config.as_mut() else {
                     return FormOutcome::Changed;
                 };
-                if !setting.adopt(index, config) {
+                if !setting.adopt(index, config, &self.cooling) {
                     return FormOutcome::Changed;
                 }
-                // The master switch is a ceiling over the rows beneath it,
-                // so turning it off restates them rather than leaving four
-                // rows claiming to be running.
-                if setting == MachineSetting::CacheAll {
+                // A setting other rows state their effect against restates
+                // them: the master caching switch, the fan's mode, and the
+                // temperatures each automatic row names.
+                if matches!(
+                    setting,
+                    MachineSetting::CacheAll
+                        | MachineSetting::FanMode
+                        | MachineSetting::FanStart
+                        | MachineSetting::FanHysteresis
+                ) {
                     self.rebuild();
                 }
                 FormOutcome::Staged

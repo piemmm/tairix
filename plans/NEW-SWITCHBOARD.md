@@ -960,7 +960,8 @@ already has the slot.
 | per-task uptime / last-active | `ProcessRecord` carries no creation timestamp | the kernel process record |
 | service list with state/CPU/memory | no service manager exists | `plans/NEW-SERVICEMANAGER.md` |
 | background jobs with progress | no job registry exists anywhere | unowned |
-| temperature, AC/battery | no sensor or power-supply interface, and no driver to serve one | a `drivers/sensor/` class |
+| temperature | nothing here reads it: `thermald`'s ungated `thermal-v1` serves the processor's temperature where a board's sensor is driven (`plans/COOLING.md`) | this surface |
+| AC/battery | no power-supply interface, and no driver to serve one | a power-supply driver class |
 | log reading | the journal has an ingress path but no capability-gated read query | `plans/SYSLOG.md` |
 
 Per-task **disk** bytes are measured: the kernel accounts the bytes each

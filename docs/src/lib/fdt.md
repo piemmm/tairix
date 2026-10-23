@@ -20,8 +20,10 @@ property iterators end at the first malformed token. The fuzz harness
 Above the walk, the crate decodes what discovery needs from the generic
 bindings: a phandle-and-specifier list (`dmas`, `iommus`) framed by each
 provider's cell count, an id map (`iommu-map`, `msi-map`), a translation
-unit's specifier and the windows it keeps, a consumer's regulator supply, and
-address translation through `ranges` and `dma-ranges`.
+unit's specifier and the windows it keeps, a consumer's regulator supply, a
+thermal zone's linear calibration for the one sensor it reads
+(`thermal::sensor_coefficients`), and address translation through `ranges`
+and `dma-ranges`.
 
 ## Writing
 

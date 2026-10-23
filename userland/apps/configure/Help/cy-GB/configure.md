@@ -131,6 +131,18 @@ dan sylw yn arafach — nid yw byth yn newid canlyniad.
   mewnbwn yn dechrau arni. Byth uwchben `0dB`. Mae'r gwasanaeth sain yn
   derbyn gwerth newydd yn y cychwyn nesaf; mae `audioctl` yn newid y
   peiriant sy'n rhedeg.
+- `cooling.fan.mode` — `off` yn ddiofyn, `on` neu `auto`: a yw ffan y CPU ar
+  bennawd GPIO y bwrdd yn cael ei gadael heb ei gyrru, yn rhedeg drwy'r
+  amser, neu'n cael ei throi yn ôl tymheredd y prosesydd.
+- `cooling.fan.line` — `none` yn ddiofyn, neu'r llinell GPIO y mae'r ffan
+  wedi'i chysylltu â hi, o `0` i `63`. Dim ond llinell y mae pennawd y bwrdd
+  yn ei rhoi y gellir ei gyrru.
+- `cooling.fan.signal` — `active-high` yn ddiofyn, neu `active-low`: pa
+  lefel o'r llinell sy'n rhedeg y ffan.
+- `cooling.fan.start`, `cooling.fan.hysteresis` — graddau Celsius cyfan,
+  `65` a `10` yn ddiofyn: mae ffan awtomatig yn dechrau ar `start`, o `40` i
+  `85`, ac yn stopio unwaith y mae'r prosesydd wedi oeri `hysteresis` gradd,
+  o `2` i `20`. Mae newid i osodiad ffan yn dod i rym ar unwaith.
 
 Darllenir allwedd nad yw yn y rhestr uchod yn erbyn ail gofrestr:
 gosodiadau rhwydwaith pob rhyngwyneb, a gedwir yn

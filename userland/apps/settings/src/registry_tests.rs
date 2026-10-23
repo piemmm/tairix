@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use tairix_controls::DisclosureSet;
 
 use crate::form::{Composition, Setting};
+use crate::registry::Board;
 use crate::registry::{
     strip_rows, Category, CategoryRow, Group, Location, Pane, PaneBacking, PaneContent, StripRow,
     CATEGORIES,
@@ -28,6 +29,7 @@ const EVERY_CATEGORY: &[Category] = &[
     Category::LockScreen,
     Category::Screensaver,
     Category::Power,
+    Category::RaspberryPi,
     Category::Networking,
     Category::Bluetooth,
     Category::Sound,
@@ -44,6 +46,10 @@ const EVERY_CATEGORY: &[Category] = &[
     Category::Storage,
 ];
 
+/// The board that shows every category, so a test of the whole table
+/// reaches all of it.
+const EVERY: Board = Board::RASPBERRY_PI;
+
 /// Every pane the enum names.
 const EVERY_PANE: &[Pane] = &[
     Pane::About,
@@ -57,6 +63,7 @@ const EVERY_PANE: &[Pane] = &[
     Pane::LockScreen,
     Pane::Screensaver,
     Pane::Power,
+    Pane::RaspberryPi,
     Pane::Ethernet,
     Pane::WiFi,
     Pane::Dns,
@@ -273,9 +280,9 @@ fn every_pane_has_a_unique_reachable_name() {
             pane.name
         );
         seen.push(pane.name);
-        assert_eq!(Pane::named(pane.name), Some(pane.pane));
+        assert_eq!(Pane::named(pane.name, EVERY), Some(pane.pane));
         assert_eq!(
-            Location::named(pane.name).map(|at| at.pane),
+            Location::named(pane.name, EVERY).map(|at| at.pane),
             Some(pane.pane)
         );
     }
@@ -286,8 +293,16 @@ fn every_pane_has_a_unique_reachable_name() {
 #[test]
 fn an_unknown_pane_name_resolves_to_nothing() {
     for name in ["", "Wallpaper", "../../etc", "wallpaper "] {
-        assert_eq!(Pane::named(name), None, "`{name}` resolved to a pane");
-        assert_eq!(Location::named(name), None, "`{name}` resolved to a place");
+        assert_eq!(
+            Pane::named(name, EVERY),
+            None,
+            "`{name}` resolved to a pane"
+        );
+        assert_eq!(
+            Location::named(name, EVERY),
+            None,
+            "`{name}` resolved to a place"
+        );
     }
 }
 
@@ -296,7 +311,7 @@ fn an_unknown_pane_name_resolves_to_nothing() {
 #[test]
 fn the_shared_wallpaper_pane_name_reaches_the_wallpaper_pane() {
     assert_eq!(
-        Pane::named(tairix_wallpaper::WALLPAPER_PANE),
+        Pane::named(tairix_wallpaper::WALLPAPER_PANE, EVERY),
         Some(Pane::Wallpaper)
     );
 }
@@ -364,7 +379,7 @@ fn categories_in(rows: &[StripRow]) -> Vec<Category> {
 
 #[test]
 fn an_unsearched_strip_lists_every_category_and_discloses_the_open_one() {
-    let rows = strip_rows(&opened(&[Category::General]), "");
+    let rows = strip_rows(&opened(&[Category::General]), "", EVERY);
     assert_eq!(categories_in(&rows).len(), CATEGORIES.len());
 
     // General discloses four panes; nothing else discloses any.
@@ -392,7 +407,11 @@ fn an_unsearched_strip_lists_every_category_and_discloses_the_open_one() {
 /// beneath its own category.
 #[test]
 fn an_unsearched_strip_discloses_every_open_category_at_once() {
-    let rows = strip_rows(&opened(&[Category::General, Category::Networking]), "");
+    let rows = strip_rows(
+        &opened(&[Category::General, Category::Networking]),
+        "",
+        EVERY,
+    );
     for category in [Category::General, Category::Networking] {
         let at = rows
             .iter()
@@ -412,7 +431,7 @@ fn an_unsearched_strip_discloses_every_open_category_at_once() {
 
 #[test]
 fn a_closed_strip_lists_the_categories_alone() {
-    let rows = strip_rows(&DisclosureSet::closed(), "");
+    let rows = strip_rows(&DisclosureSet::closed(), "", EVERY);
     assert_eq!(categories_in(&rows).len(), rows.len());
     let every: Vec<Category> = CATEGORIES.iter().map(|row| row.category).collect();
     assert_eq!(categories_in(&rows), every, "in the table's own order");
@@ -420,14 +439,14 @@ fn a_closed_strip_lists_the_categories_alone() {
 
 #[test]
 fn a_single_pane_category_never_discloses_a_pane_row() {
-    let rows = strip_rows(&opened(&[Category::Keyboard]), "");
+    let rows = strip_rows(&opened(&[Category::Keyboard]), "", EVERY);
     assert!(!rows.iter().any(|row| matches!(row, StripRow::Pane(..))));
 }
 
 #[test]
 fn every_strip_row_resolves_to_a_location() {
     for open in EVERY_CATEGORY {
-        for row in strip_rows(&opened(&[*open]), "") {
+        for row in strip_rows(&opened(&[*open]), "", EVERY) {
             let location = row.location().expect("a resolved location");
             assert!(location.rows().is_some(), "{row:?} names no pane");
         }
@@ -438,7 +457,11 @@ fn every_strip_row_resolves_to_a_location() {
 /// shows no pane of its own; every other row shows the pane it stands for.
 #[test]
 fn only_a_disclosing_category_row_has_no_destination() {
-    for row in strip_rows(&opened(&[Category::General, Category::Networking]), "") {
+    for row in strip_rows(
+        &opened(&[Category::General, Category::Networking]),
+        "",
+        EVERY,
+    ) {
         let discloses = match row {
             StripRow::Category(category) => category.row().expect("listed").discloses(),
             StripRow::Pane(..) => false,
@@ -452,7 +475,7 @@ fn only_a_disclosing_category_row_has_no_destination() {
 
 #[test]
 fn a_search_reaches_a_category_by_its_own_label() {
-    let rows = strip_rows(&opened(&[Category::General]), "keyboard");
+    let rows = strip_rows(&opened(&[Category::General]), "keyboard", EVERY);
     assert_eq!(rows, alloc::vec![StripRow::Category(Category::Keyboard)]);
 }
 
@@ -461,14 +484,14 @@ fn a_search_reaches_a_category_by_its_own_label() {
 #[test]
 fn a_search_reaches_each_sound_pane_by_what_it_sets() {
     assert_eq!(
-        strip_rows(&opened(&[Category::General]), "sound effects"),
+        strip_rows(&opened(&[Category::General]), "sound effects", EVERY),
         alloc::vec![
             StripRow::Category(Category::Sound),
             StripRow::Pane(Category::Sound, Pane::SoundEffects),
         ]
     );
     assert_eq!(
-        strip_rows(&opened(&[Category::General]), "microphone"),
+        strip_rows(&opened(&[Category::General]), "microphone", EVERY),
         alloc::vec![
             StripRow::Category(Category::Sound),
             StripRow::Pane(Category::Sound, Pane::Sound),
@@ -481,7 +504,7 @@ fn a_search_reaches_a_pane_by_its_title_and_discloses_only_that_pane() {
     // Whatever is open: a search lists what it matched, not what the reader
     // happened to leave open.
     for open in [DisclosureSet::closed(), opened(&[Category::General])] {
-        let rows = strip_rows(&open, "caching");
+        let rows = strip_rows(&open, "caching", EVERY);
         assert_eq!(
             rows,
             alloc::vec![
@@ -497,21 +520,24 @@ fn a_search_reaches_a_pane_by_its_title_and_discloses_only_that_pane() {
 fn a_search_ignores_letter_case() {
     let open = DisclosureSet::closed();
     assert_eq!(
-        strip_rows(&open, "BLUETOOTH"),
-        strip_rows(&open, "bluetooth")
+        strip_rows(&open, "BLUETOOTH", EVERY),
+        strip_rows(&open, "bluetooth", EVERY)
     );
-    assert_eq!(strip_rows(&open, "Wi-Fi"), strip_rows(&open, "wi-fi"));
+    assert_eq!(
+        strip_rows(&open, "Wi-Fi", EVERY),
+        strip_rows(&open, "wi-fi", EVERY)
+    );
 }
 
 #[test]
 fn a_search_that_reaches_nothing_lists_nothing() {
-    assert!(strip_rows(&DisclosureSet::closed(), "zzz-no-such-setting").is_empty());
+    assert!(strip_rows(&DisclosureSet::closed(), "zzz-no-such-setting", EVERY).is_empty());
 }
 
 #[test]
 fn a_category_reached_by_its_own_label_offers_all_its_panes() {
     // The reader has not said which pane, so every one is offered.
-    let rows = strip_rows(&DisclosureSet::closed(), "networking");
+    let rows = strip_rows(&DisclosureSet::closed(), "networking", EVERY);
     assert_eq!(rows.len(), 1 + 4);
     assert_eq!(rows[0], StripRow::Category(Category::Networking));
     assert!(rows[1..]
@@ -527,7 +553,7 @@ fn the_search_index_reaches_every_declared_setting_label() {
     for row in CATEGORIES {
         for pane in row.panes {
             for setting in pane.settings {
-                let rows = strip_rows(&DisclosureSet::closed(), setting);
+                let rows = strip_rows(&DisclosureSet::closed(), setting, EVERY);
                 assert!(
                     rows.contains(&StripRow::Category(row.category)),
                     "{setting} did not reach {:?}",
@@ -547,10 +573,10 @@ fn the_search_index_reaches_every_declared_setting_label() {
 fn an_empty_query_is_not_a_search() {
     // The empty needle matches everything, which must read as "no query" and
     // not as a filter that happens to pass: what is listed is what is open.
-    assert!(!strip_rows(&DisclosureSet::closed(), "")
+    assert!(!strip_rows(&DisclosureSet::closed(), "", EVERY)
         .iter()
         .any(|row| matches!(row, StripRow::Pane(..))));
-    assert!(strip_rows(&opened(&[Category::General]), "")
+    assert!(strip_rows(&opened(&[Category::General]), "", EVERY)
         .iter()
         .any(|row| matches!(row, StripRow::Pane(Category::General, _))));
 }
@@ -671,17 +697,17 @@ fn the_bundle_presents_no_icon_bar_slot_and_runs_one_instance() {
 /// what sent *Change Background…* to the wrong pane.
 #[test]
 fn a_launch_names_its_pane_as_the_first_operand() {
-    assert_eq!(Pane::launched(&["wallpaper"]), Some(Pane::Wallpaper));
-    assert_eq!(Pane::launched(&["about"]), Some(Pane::About));
+    assert_eq!(Pane::launched(&["wallpaper"], EVERY), Some(Pane::Wallpaper));
+    assert_eq!(Pane::launched(&["about"], EVERY), Some(Pane::About));
     // Not the second: there is never a pane there, and looking for one
     // finds nothing however the desktop spelled the launch.
-    assert_eq!(Pane::launched(&["settings", "wallpaper"]), None);
+    assert_eq!(Pane::launched(&["settings", "wallpaper"], EVERY), None);
     // And no operands names no pane, which opens the window where it
     // always does.
-    assert_eq!(Pane::launched(&[]), None);
+    assert_eq!(Pane::launched(&[], EVERY), None);
     // An operand outside the closed vocabulary confers nothing and reaches
     // nothing.
-    assert_eq!(Pane::launched(&["../../etc/passwd"]), None);
+    assert_eq!(Pane::launched(&["../../etc/passwd"], EVERY), None);
 }
 
 /// The registry names the one command a pane offers *instead of* a working

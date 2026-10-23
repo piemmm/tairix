@@ -587,6 +587,41 @@ run, so re-reading would cost a second password for an answer already known,
 and the reader is left in place for the next change. The public directories
 are free, so they are read again at once.
 
+## Raspberry Pi
+
+The one category shown only on some boards, and the one userland surface that
+names a board — a narrow exception the charter records for this pane alone. It
+holds no authority: it reads the board's identity, and reaches the hardware
+only through the cooling service ([thermald](../userland/thermald.md)) and the
+settings writer.
+
+**Whether it is shown** is decided once, before the shell is built, from the
+ungated `PLATFORM_COMPATIBLE` reading: the hardware tree root's `compatible`
+strings. A board one of whose names begins `raspberrypi,` shows the category.
+On any other board it has no strip row, no search hit and no route, so a launch
+naming `raspberry-pi` resolves to nothing; a reading that fails hides it.
+
+**The pane** is a STATUS plate above a CPU FAN plate. STATUS states the
+processor's temperature to a tenth of a degree and whether the fan is running,
+with the cooling service's own sentence on the fan's row when it reports a
+fault. CPU FAN holds the `cooling.fan.*` keys of `system.conf`: the mode
+(*Off*, *On*, *Automatic*), the control line, the signal's polarity, the
+temperature it turns on at (40–85 °C), and how far it must cool before it turns
+off again (2–20 °C). They are staged and applied through one `configure` run
+like every machine-scope pane, and the service follows the store, so a change
+takes effect when it is written. The line row offers the header lines the
+service reports as free, or as the fan's already, each labelled with its GPIO
+number and header pin, and names the lines something else holds rather than
+offering them. A row the mode makes moot says so and keeps its value: the line
+and polarity under *Off*, the two temperatures unless *Automatic*.
+
+**The reading** is the service's `thermal-v1` status, asked on a worker so the
+window never waits on it: once when the pane comes on show, then every two
+seconds while it stays there, and never otherwise. An answer that differs only
+in its temperature moves that one reading in place; any other answer rebuilds
+the rows, keeping the working copy. A service that does not answer is stated,
+never stood in for.
+
 ## Notifications, Mouse, Trackpad, Keyboard, Lock Screen, Screensaver and Language & Region
 
 Seven more panes over the desktop's own document, each **immediate** and each
@@ -828,8 +863,8 @@ the staged source of truth; the shape of it is:
   it to its own published app-data scope; the desktop adopts a change only
   after the write succeeded, so memory and disk cannot diverge. A resolution is
   persisted only once its trial is kept;
-- **machine-scope panes** (Login & startup, Caching, TCP/IP, Ethernet, DNS)
-  ask the console's elevation broker to re-authenticate an
+- **machine-scope panes** (Login & startup, Caching, TCP/IP, Ethernet, DNS,
+  Raspberry Pi) ask the console's elevation broker to re-authenticate an
   account that may, and run the same `configure` program the command line
   uses, so the CLI and the GUI are literally the same writer. They are
   **staged**: a choice edits a working copy, the pane's action band says how

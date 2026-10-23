@@ -43,6 +43,7 @@ pub mod iommu;
 pub mod pci;
 pub mod specifier;
 pub mod supply;
+pub mod thermal;
 
 pub use bus::{
     bus_level, dma_ranges, dma_ranges_aperture, dma_ranges_aperture_of, dma_reach,

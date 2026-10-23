@@ -247,6 +247,7 @@ top of the session baseline:
 | `CAP_TIME_HIRES` | Full-resolution monotonic clock (diagnostics/profiling). |
 | `CAP_MEM_PIN` | Exempt a process's anonymous memory from the swap tiers (`mem_pin`, bounded by the `pinned-memory-bytes` limit; `plans/STRESSTEST.md` ST2). |
 | `CAP_SETTINGS_WRITE` | Change the machine's settings, and read its network addressing, through the settings service (`docs/src/userland/settingsd.md`); the service is the documents' one writer and enforces the capability, which it never holds itself. |
+| `CAP_GPIO` | Drive the lines a board's header lends to system services: claim one as an output and switch it (`plans/COOLING.md` CL2). Service-class: the cooling service is its one holder, and a GPIO controller's driver binds its header endpoint requiring it. |
 
 The **debug image's root account** is seeded with exactly the session
 baseline plus this administrative set — the "administrative capability

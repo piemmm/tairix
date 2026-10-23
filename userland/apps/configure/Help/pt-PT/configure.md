@@ -134,6 +134,19 @@ afetado — nunca altera um resultado.
   começa cada saída e entrada. Nunca acima de `0dB`. O serviço de áudio
   adota um valor alterado no arranque seguinte; o `audioctl` altera a
   máquina em funcionamento.
+- `cooling.fan.mode` — `off` por omissão, `on` ou `auto`: se a ventoinha da
+  CPU no conector GPIO da placa não é acionada, funciona sempre ou é
+  comutada pela temperatura do processador.
+- `cooling.fan.line` — `none` por omissão, ou a linha GPIO a que a ventoinha
+  está ligada, de `0` a `63`. Só uma linha que o conector da placa
+  disponibiliza pode ser acionada.
+- `cooling.fan.signal` — `active-high` por omissão, ou `active-low`: qual o
+  nível da linha que faz funcionar a ventoinha.
+- `cooling.fan.start`, `cooling.fan.hysteresis` — graus Celsius inteiros,
+  `65` e `10` por omissão: uma ventoinha automática arranca em `start`, de
+  `40` a `85`, e para quando o processador arrefeceu `hysteresis` graus, de
+  `2` a `20`. Uma alteração a uma definição da ventoinha aplica-se de
+  imediato.
 
 Uma chave que não esteja na lista acima é procurada num segundo registo:
 as definições de rede de cada interface, guardadas em

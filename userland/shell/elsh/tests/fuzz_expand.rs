@@ -133,6 +133,19 @@ impl DirLister for Tree {
 }
 
 impl GlobFs for Tree {
+    fn read_dir(
+        &self,
+        dir: &str,
+        each: &mut dyn FnMut(&str, FileKind) -> core::ops::ControlFlow<()>,
+    ) -> Result<(), Errno> {
+        for entry in self.list_dir(dir)? {
+            if each(&entry.name, entry.kind).is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn kind(&self, path: &str, follow: bool) -> Result<FileKind, Errno> {
         self.resolve(path, follow).map(|(_, node)| kind_of(node))
     }

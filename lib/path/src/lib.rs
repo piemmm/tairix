@@ -664,6 +664,17 @@ pub fn validate_file_name(name: &str) -> Result<(), PathError> {
     validate_component(name)
 }
 
+/// Whether the grammar reads `input` as a path relative to the working
+/// directory: no leading `/` and no `:` before its first `/`.
+///
+/// A name a listing returned may hold a `:` (a foreign volume's `Home:`), and
+/// joined into a relative spelling it would be read as a root. Such a spelling
+/// stays relative when written from `./`.
+#[must_use]
+pub fn is_relative_spelling(input: &str) -> bool {
+    !input.starts_with('/') && root_delimiter(input).is_none()
+}
+
 /// Whether a directory entry named `name` is a *hidden item*, which a
 /// listing leaves out unless asked for everything: a name beginning with a
 /// dot, the convention every listing on the system follows.
@@ -744,6 +755,22 @@ mod tests {
         assert_eq!(root_len("fs::x/y"), Err(PathError::UnsupportedResolver));
         assert_eq!(root_len("::x"), Err(PathError::ResolverEmpty));
         assert_eq!(root_len("id::nope/x"), Err(PathError::VolumeIdInvalid));
+    }
+
+    #[test]
+    fn a_colon_before_the_first_slash_is_no_relative_spelling() {
+        for relative in ["src/*.rs", "a/Home:", "./Home:", "./Home:/Documents", "x"] {
+            assert!(is_relative_spelling(relative), "{relative}");
+        }
+        for rooted in [
+            "/x",
+            "Home:",
+            "Home:/Documents",
+            "sys:null",
+            "alias::Home/x",
+        ] {
+            assert!(!is_relative_spelling(rooted), "{rooted}");
+        }
     }
 
     #[test]

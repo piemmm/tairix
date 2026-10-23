@@ -51,6 +51,20 @@ terminal—, si reproduce el sonido de su tema, un archivo que usted elija o
 nada. Los sonidos de arranque, inicio y cierre de sesión son del equipo y los
 fija su administrador.
 
+**Raspberry Pi** solo aparece cuando la máquina lo es. Ajusta el ventilador del
+procesador, conmutado a través de una línea del conector de 40 pines: *Off*,
+*On* todo el tiempo o *Automatic*, que enciende el ventilador cuando el
+procesador alcanza la temperatura elegida y no lo apaga hasta que se ha enfriado
+el margen elegido, para que no se encienda y se apague en torno a un mismo
+grado. La línea de control se elige por su número GPIO y su pin, junto con si el
+ventilador funciona cuando la línea está a nivel alto o bajo; una línea que ya
+usa otra cosa se nombra en lugar de ofrecerse. Una línea del conector no puede
+alimentar un ventilador por sí sola, así que conéctelo mediante un transistor.
+El panel muestra también la temperatura del procesador y si el ventilador está
+en marcha. Cuando *Automatic* no puede leer la temperatura, el ventilador
+funciona hasta que pueda. Como los demás ajustes de la máquina, un cambio espera
+a *Apply*, que pide una cuenta que pueda cambiarlos.
+
 ## EXIT STATUS
 
 Cero tras un cierre limpio; distinto de cero cuando se rechazó el canal de

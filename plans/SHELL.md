@@ -297,12 +297,15 @@ path grammar:
    path grammar and kept as written; a `:` inside a wildcard component is
    pattern syntax. A word naming no path (a resource reference such as
    `sys:*`) matches nothing.
-3. The rest is matched a component at a time. A wildcard component lists its
-   directory; a literal one is appended and checked only at the end of the
-   word, by a `lstat`-style probe, or by the listing of a later component. A
-   component before a `/` needs a directory: a listed directory or a link
-   resolving to one. A leading `.` is matched only by a `.`, and `.` and `..`
-   are never matched (bash's `globskipdots`, fixed on).
+3. The rest is matched a component at a time. A wildcard component reads its
+   directory a batch at a time, keeping only what it matches; a literal one
+   is appended and checked only at the end of the word, by a `lstat`-style
+   probe, or by the listing of a later component. A component before a `/`
+   needs a directory: a listed directory or a link resolving to one. A
+   leading `.` is matched only by a `.`, and `.` and `..` are never matched
+   (bash's `globskipdots`, fixed on). A listed name holding a `:` that leads
+   a relative path is written from `./`, so the grammar never reads it as a
+   root (`tairix_path::is_relative_spelling`).
 4. Matches are sorted bytewise — the C collation every listing on the system
    uses — and deduplicated, then `GLOBIGNORE`'s `:`-separated patterns remove
    the paths they match whole, along with any path ending in `.` or `..`. A
@@ -339,13 +342,16 @@ option `noglob`.
   line holding one is refused whole before anything runs, as bash refuses it
   as a syntax error.
 
-An expansion is bounded: one command's words may hold no more than the
-largest argument block a program can be handed
-(`PROCESS_START_MAX_TOTAL_LEN`, each word charged its bookkeeping too), so a
-short line can never demand unbounded memory. A directory that cannot be read
-because it is absent, is not a directory, or is not the session's to list
-contributes nothing, as in bash; any other failure aborts the line naming the
-directory rather than leaving a silently partial result. Filename generation
+An expansion is bounded: everything one line expands — every pipeline
+member's words, redirection targets, here-strings, here-documents and
+assignment values — may hold no more than the largest argument block a
+program can be handed (`PROCESS_START_MAX_TOTAL_LEN`, each word charged its
+bookkeeping too), and a word is refused before a value would carry it past
+what the line has left, so a short line can never demand unbounded memory. A
+directory that is absent, is no directory that can be listed, lies past what
+a path can reach, or is not the session's to list contributes nothing, as in
+bash; any other failure, and any failure once a listing has begun, aborts the
+line naming the directory rather than leaving a silently partial result. Filename generation
 reaches the filesystem only through the injected read-only `GlobFs` seam
 (listing and a resolve-only probe), so every permission check stays
 kernel-side.

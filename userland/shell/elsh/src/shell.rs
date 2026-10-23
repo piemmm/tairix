@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 use crate::builtin::{self, is_builtin, BuiltinContext};
 use crate::env::{split_prefix_assignments, Environment};
 use crate::error::ParseError;
-use crate::expand::{ExpandError, Expander};
+use crate::expand::{Budget, ExpandError, Expander, MAX_EXPANSION_BYTES};
 use crate::host::{
     classify_redirect_target, Console, Elevator, LaunchError, LaunchSpec, LimitStore, ProcessHost,
     RedirAction, RedirTarget, ResolvedCommand, ResolvedRedirection, NULL_ELEVATOR,
@@ -210,9 +210,12 @@ impl<'a> Shell<'a> {
         if !self.options.is_on(ShellOption::Extglob) && list_holds_pattern_group(list) {
             return Err(self.fail_line(&ParseError::ExtendedGlobDisabled.into()));
         }
+        // One bound for everything the line expands, the values its
+        // assignments bind included, so no line can demand unbounded memory.
+        let mut budget = Budget::new(MAX_EXPANSION_BYTES);
         for entry in &list.entries {
             if self.should_run(entry.run_if) {
-                if let Err(err) = self.run_entry(entry) {
+                if let Err(err) = self.run_entry(entry, &mut budget) {
                     return Err(self.fail_line(&err));
                 }
             }
@@ -250,11 +253,13 @@ impl<'a> Shell<'a> {
         Expander::new(&self.env, &self.options, self.fs)
     }
 
-    fn run_entry(&mut self, entry: &ListEntry) -> Result<(), ExpandError> {
+    fn run_entry(&mut self, entry: &ListEntry, budget: &mut Budget) -> Result<(), ExpandError> {
         let pipeline = &entry.pipeline;
+        let alone = pipeline.commands.len() == 1 && !entry.background;
         let mut expanded = Vec::with_capacity(pipeline.commands.len());
         for command in &pipeline.commands {
-            expanded.push(self.expand_command(command)?);
+            let launches = !alone || !command.redirections.is_empty();
+            expanded.push(self.expand_command(command, launches, budget)?);
         }
         if let [command] = pipeline.commands.as_slice() {
             if let Some(status) = self.run_in_shell(command, &mut expanded[0], entry.background)? {
@@ -263,7 +268,7 @@ impl<'a> Shell<'a> {
                 return Ok(());
             }
         }
-        let commands = match self.resolve_pipeline(pipeline, expanded)? {
+        let commands = match self.resolve_pipeline(pipeline, expanded, budget)? {
             Ok(commands) => commands,
             Err(status) => {
                 self.env
@@ -285,25 +290,33 @@ impl<'a> Shell<'a> {
 
     /// Expand one command's prefix assignments and words, once: both against
     /// the environment as it stands, as POSIX orders expansion before
-    /// assignment.
-    fn expand_command(&self, command: &Command) -> Result<ExpandedCommand, ExpandError> {
+    /// assignment. `launches` says whether an assignment-only command can
+    /// take the launch path, the one place its words are used.
+    fn expand_command(
+        &self,
+        command: &Command,
+        launches: bool,
+        budget: &mut Budget,
+    ) -> Result<ExpandedCommand, ExpandError> {
         let (assignments, rest) = split_prefix_assignments(&command.words);
         if rest.is_empty() {
             // An assignment-only command with redirections launches its words
             // verbatim, so they are not taken apart as fields either.
-            let mut argv = Vec::with_capacity(command.words.len());
-            for word in &command.words {
-                argv.push(self.env.expand_word(word)?);
+            let mut argv = Vec::new();
+            if launches {
+                for word in &command.words {
+                    argv.push(self.env.expand_word(word, budget)?);
+                }
             }
             return Ok(ExpandedCommand {
-                assignments: self.expand_assignments(assignments)?,
+                assignments: self.expand_assignments(assignments, budget)?,
                 argv,
                 assignment_only: true,
             });
         }
         Ok(ExpandedCommand {
-            assignments: self.expand_assignments(assignments)?,
-            argv: self.expander().fields(rest)?,
+            assignments: self.expand_assignments(assignments, budget)?,
+            argv: self.expander().fields(rest, budget)?,
             assignment_only: false,
         })
     }
@@ -379,10 +392,11 @@ impl<'a> Shell<'a> {
     fn expand_assignments(
         &self,
         assignments: Vec<(String, Word)>,
+        budget: &mut Budget,
     ) -> Result<Vec<(String, String)>, ParseError> {
         let mut expanded = Vec::with_capacity(assignments.len());
         for (name, value_word) in assignments {
-            expanded.push((name, self.env.expand_word(&value_word)?));
+            expanded.push((name, self.env.expand_word(&value_word, budget)?));
         }
         Ok(expanded)
     }
@@ -408,6 +422,7 @@ impl<'a> Shell<'a> {
         &mut self,
         pipeline: &Pipeline,
         expanded: Vec<ExpandedCommand>,
+        budget: &mut Budget,
     ) -> Result<Result<Vec<ResolvedCommand>, i32>, ExpandError> {
         let mut commands = Vec::with_capacity(pipeline.commands.len());
         for (command, expanded) in pipeline.commands.iter().zip(expanded) {
@@ -418,7 +433,7 @@ impl<'a> Shell<'a> {
             }
             let mut redirections = Vec::with_capacity(command.redirections.len());
             for redirection in &command.redirections {
-                match self.lower_redirection(redirection, &mut redirections) {
+                match self.lower_redirection(redirection, &mut redirections, budget) {
                     Ok(()) => {}
                     // Bash fails just the command on these, and so does the
                     // shell: the reason is stated and the line goes on.
@@ -449,8 +464,12 @@ impl<'a> Shell<'a> {
 
     /// The path or resource a redirection's target word names: expanded
     /// like any argument, but to exactly one word.
-    fn redirect_target(&self, target: &Word) -> Result<RedirTarget, ExpandError> {
-        let text = self.expander().target(target)?;
+    fn redirect_target(
+        &self,
+        target: &Word,
+        budget: &mut Budget,
+    ) -> Result<RedirTarget, ExpandError> {
+        let text = self.expander().target(target, budget)?;
         Ok(classify_redirect_target(text)?)
     }
 
@@ -464,6 +483,7 @@ impl<'a> Shell<'a> {
         &mut self,
         redirection: &Redirection,
         out: &mut Vec<ResolvedRedirection>,
+        budget: &mut Budget,
     ) -> Result<(), ExpandError> {
         match redirection {
             Redirection::File { fd, mode, target } => {
@@ -472,7 +492,7 @@ impl<'a> Shell<'a> {
                     fd,
                     action: RedirAction::Open {
                         mode: *mode,
-                        target: self.redirect_target(target)?,
+                        target: self.redirect_target(target, budget)?,
                     },
                 });
             }
@@ -490,7 +510,7 @@ impl<'a> Shell<'a> {
                     fd: STDOUT_FD,
                     action: RedirAction::Open {
                         mode,
-                        target: self.redirect_target(target)?,
+                        target: self.redirect_target(target, budget)?,
                     },
                 });
                 out.push(ResolvedRedirection {
@@ -517,7 +537,7 @@ impl<'a> Shell<'a> {
                 // newline — the one definition of its shape, so the host reads
                 // the bytes verbatim without re-appending the terminator.
                 let fd = self.resolve_bound_fd(fd)?;
-                let mut bytes = self.env.expand_word(content)?;
+                let mut bytes = self.env.expand_word(content, budget)?;
                 bytes.push('\n');
                 out.push(ResolvedRedirection {
                     fd,
@@ -531,10 +551,13 @@ impl<'a> Shell<'a> {
                 // otherwise it undergoes the same `$` expansion as a word.
                 let body = doc.body()?;
                 let content = if doc.is_quoted() {
+                    budget.charge(body.len())?;
                     String::from(body)
                 } else {
-                    self.env
-                        .expand_word(&alloc::vec![Segment::Expandable(String::from(body))])?
+                    self.env.expand_word(
+                        &alloc::vec![Segment::Expandable(String::from(body))],
+                        budget,
+                    )?
                 };
                 let fd = self.resolve_bound_fd(doc.fd())?;
                 out.push(ResolvedRedirection {

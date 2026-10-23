@@ -2110,6 +2110,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-gpio-bcm2835"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-devmatch",
+ "tairix-drvrt",
+ "tairix-log",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-drv-input-ps2"
 version = "0.0.0"
 dependencies = [
@@ -2271,6 +2283,16 @@ dependencies = [
  "tairix-drvrt",
  "tairix-rt",
  "tairix-vcmailbox",
+]
+
+[[package]]
+name = "tairix-drv-sensor-bcm2711-thermal"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-drvrt",
+ "tairix-rt",
 ]
 
 [[package]]
@@ -4561,6 +4583,7 @@ dependencies = [
  "tairix-inline",
  "tairix-log",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -8296,6 +8319,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-thermald"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-caps",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-sysconfig",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-timed"
 version = "0.0.0"
 dependencies = [
@@ -8853,6 +8889,7 @@ dependencies = [
  "tairix-drv-display-framebuffer",
  "tairix-drv-display-gpu-virtio",
  "tairix-drv-dma-bcm2835",
+ "tairix-drv-gpio-bcm2835",
  "tairix-drv-input-usb-hid",
  "tairix-drv-input-virtio-input",
  "tairix-drv-input-virtio-kbd",
@@ -8867,6 +8904,7 @@ dependencies = [
  "tairix-drv-rtc-pcf8523",
  "tairix-drv-rtc-pl031",
  "tairix-drv-rtc-rpi",
+ "tairix-drv-sensor-bcm2711-thermal",
  "tairix-drv-storage-raid",
  "tairix-drv-storage-raid-member",
  "tairix-drv-storage-usb-msd",

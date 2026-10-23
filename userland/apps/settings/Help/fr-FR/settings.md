@@ -53,6 +53,21 @@ son thème, un fichier que vous choisissez ou rien. Les sons de démarrage,
 d'ouverture et de fermeture de session appartiennent à la machine et sont
 fixés par son administrateur.
 
+**Raspberry Pi** n'apparaît que si la machine en est un. On y règle le
+ventilateur du processeur, commuté par une ligne du connecteur à 40 broches :
+*Off*, *On* en permanence ou *Automatic*, qui met le ventilateur en marche dès
+que le processeur atteint la température choisie et ne l'arrête qu'une fois
+qu'il s'est refroidi de l'écart choisi, pour qu'il ne bascule pas sans cesse
+autour d'un même degré. Vous choisissez la ligne de commande par son numéro GPIO
+et sa broche, ainsi que le niveau, haut ou bas, auquel le ventilateur tourne ;
+une ligne déjà utilisée par autre chose est nommée plutôt que proposée. Une
+ligne du connecteur ne peut pas alimenter un ventilateur à elle seule :
+branchez-le par l'intermédiaire d'un transistor. Le panneau indique aussi la
+température du processeur et si le ventilateur tourne. Quand *Automatic* ne peut
+pas lire la température, le ventilateur tourne jusqu'à ce qu'il le puisse. Comme
+les autres réglages de la machine, une modification attend *Apply*, qui demande
+un compte autorisé à les modifier.
+
 ## EXIT STATUS
 
 Zéro après une fermeture propre ; non nul lorsque le canal de fenêtre ou la

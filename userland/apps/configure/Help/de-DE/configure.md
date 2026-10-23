@@ -133,6 +133,19 @@ Arbeit daher nur langsamer — es ändert niemals ein Ergebnis.
   mit dem jede Ausgabe und Eingabe beginnt. Nie über `0dB`. Der Audiodienst
   übernimmt einen geänderten Wert beim nächsten Start; `audioctl` ändert
   den laufenden Rechner.
+- `cooling.fan.mode` — standardmäßig `off`, oder `on` oder `auto`: ob der
+  CPU-Lüfter an der GPIO-Leiste der Platine nicht angesteuert wird, ständig
+  läuft oder nach der Temperatur des Prozessors geschaltet wird.
+- `cooling.fan.line` — standardmäßig `none`, oder die GPIO-Leitung, an der
+  der Lüfter hängt, von `0` bis `63`. Nur eine Leitung, die die Leiste der
+  Platine freigibt, lässt sich ansteuern.
+- `cooling.fan.signal` — standardmäßig `active-high`, oder `active-low`:
+  welcher Pegel der Leitung den Lüfter laufen lässt.
+- `cooling.fan.start`, `cooling.fan.hysteresis` — ganze Grad Celsius,
+  standardmäßig `65` und `10`: ein automatischer Lüfter startet bei `start`,
+  von `40` bis `85`, und hält an, sobald der Prozessor um `hysteresis`
+  abgekühlt ist, von `2` bis `20`. Eine Änderung an einer Lüftereinstellung
+  gilt sofort.
 
 Ein Schlüssel, der nicht in der obigen Liste steht, wird in einem
 zweiten Register gesucht: in den Netzwerkeinstellungen jeder

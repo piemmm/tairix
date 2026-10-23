@@ -234,6 +234,8 @@ members = [
 
     # Drivers — interrupt controllers
     "drivers/irq/brcmstb_l2",
+    "drivers/gpio/bcm2835",
+    "drivers/sensor/bcm2711_thermal",
 
     # Drivers — network
     "drivers/network/genet",
@@ -249,6 +251,7 @@ members = [
     "userland/system/seatmgr",
     "userland/system/soundd",
     "userland/system/sysinfod",
+    "userland/system/thermald",
     "userland/system/timed",
     "userland/system/settingsd",
     "userland/system/fontd",

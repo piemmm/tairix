@@ -200,6 +200,11 @@ ask — never wave the failure through as transient, load, or environment.
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
 
+The tree scans (`cfg-check`, `charter-cite`, `source-text`, `spec-review`)
+walk what a change can carry: `target/`, `.git` and every untracked path git
+ignores (fetched tooling, the generated book, built images) are passed over,
+and a tracked file is scanned even where an ignore pattern names it.
+
 ## The host tests run in a randomised order
 
 A test suite is a set, not a sequence. The harness's default is alphabetical,

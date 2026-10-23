@@ -140,6 +140,7 @@ Compiled into the kernel (`lib/users/src/provision.rs`):
 | `discoveryd` | 20 | `services` | no-login | none | multicast DNS's sockets |
 | `soundd` | 21 | `services` | no-login | none | what any player holds |
 | `settingsd` | 22 | `services` | no-login | none | the settings rendezvous and its two directories |
+| `thermald` | 23 | `services` | no-login | none | incl. `CAP_GPIO` |
 
 Seeded on disk (human data): the debug image's `root` (uid
 `FIRST_USER_UID` = 1000, primary group `wheel` gid `FIRST_USER_GID` =

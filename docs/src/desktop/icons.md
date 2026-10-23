@@ -70,7 +70,9 @@ and the same loop with a stroke inside it), the painter's tools
 `ToolHand`, `ToolZoom`) and its `PixelGrid`, the settings categories each sidebar
 row of [Settings](settings.md) is found by without reading — `Settings` (a
 cog), `Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`,
-`Power`, `Networking` (a globe, beside the tray's `Network` bars), `Bluetooth`,
+`Power`, `RaspberryPi` (a board seen from above, its header's pins along one
+edge and a fan over its processor), `Networking` (a globe, beside the tray's
+`Network` bars), `Bluetooth`,
 `Sound`, `Notifications`, `Keyboard`, `Mouse`, `Trackpad`, `Touchscreen`,
 `Printer`, `Accessibility`, `Language`, `Sharing`, `Users`, `Storage` and
 `Theme` (a painter's palette) — and the panes a category discloses as rows of

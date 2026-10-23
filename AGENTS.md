@@ -366,6 +366,14 @@ These are absolute. They override any local convenience.
       outside the §17.2 allow-list. MMIO bases, IRQ lines, and DMA constraints
       are *discovered values threaded from the tree*, not literals baked into a
       shared or kernel-neutral crate.
+    - **Carve-out — the Settings application's Raspberry Pi category.** At
+      the user's direction the Settings application has one board-named
+      category, shown only when the board's discovered identity (the
+      `PLATFORM_COMPATIBLE` reading) names a Raspberry Pi, which may name the
+      board and its 40-pin header's pin numbering. It holds no authority and
+      reaches the hardware only through the generic cooling service and the
+      settings writer; no other userland surface may name a board
+      (`plans/COOLING.md` CL7).
     - **A driver binds to hardware through discovery, never by naming a
       board.** A concrete driver matches its device via the manifest bind-table
       match keys (§18.3) and receives only the resource capabilities its
@@ -585,11 +593,13 @@ tairix/
 │   │   ├── iso9660/     # CD/DVD volumes, read-only: Joliet, Rock Ridge, RISC OS.
 │   │   ├── udf/         # OSTA UDF 1.02–2.60, read/write.
 │   │   └── arxfs/      # Native, POSIX-compliant, capability-aware FS.
+│   ├── gpio/            # GPIO controllers: bcm2835.
 │   ├── input/
 │   ├── irq/             # Second-level interrupt controllers: brcmstb_l2.
 │   ├── network/
 │   ├── rtc/            # Real-time clocks: pl031, goldfish, mc146818, rpi,
 │   │                    #   and the I2C chips ds3231/pcf8523/pcf85063a.
+│   ├── sensor/          # Temperature sensors: bcm2711_thermal.
 │   ├── storage/
 │   └── bus/             # Bus drivers: virtio, mmio, usb/ (xhci, vl805),
 │                        #   pcie_brcm, i2c/ (bcm2835, brcmstb).
@@ -751,6 +761,7 @@ tairix/
 │   │   ├── soundd/      # Cue authority: plays the desktop's sounds.
 │   │   ├── confd/       # App-data service: the per-app settings store.
 │   │   ├── settingsd/   # Machine-settings service: system.conf and network.conf's one writer.
+│   │   ├── thermald/    # Cooling service: CPU fan policy, sole CAP_GPIO holder.
 │   │   ├── timed/       # Time service: NTP client, sole CAP_TIME_SET holder.
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).
 │   ├── session/         # Authentication and session bring-up.
@@ -1674,6 +1685,7 @@ You are not exempt from any rule above. In addition:
     | HID devices on any transport: the report-descriptor model, the keyboard, mouse, touchpad and touchscreen decoders, the device engine, and the USB and I2C HID class drivers | `plans/HID.md` |
     | Links between hardware-tree nodes: a device wired to another driver's service (an I2C target, a GPIO interrupt line), supplier resolution and bind ordering, cross-subtree authority, device-tree interrupt parents, device facts | `plans/SUPPLIERS.md` |
     | GPIO controllers and the line interrupts they serve (`gpioirq-v1`), the BCM2835-family and Intel PCH drivers | `plans/GPIO.md` |
+    | Cooling: temperature sensors and their calibration, the header lines a board lends to system services and `CAP_GPIO`, the `cooling.fan.*` policy, the `thermald` cooling service, and the Settings application's Raspberry Pi pane | `plans/COOLING.md` |
     | I2C: the shared-memory transfer protocol, target channels, the BSC and DesignWare/LPSS controllers, HID over I2C | `plans/I2C.md` |
     | ACPI's namespace: the namespace node, region access, the AML interpreter bus driver, device publication from `_CRS`/`_DSM`/`_PRT`, power-off and events | `plans/ACPI.md` |
     | Networking: the IPv4/IPv6 stack, sockets, transports, multicast, NIC drivers, offloads | `plans/NETWORK.md` |

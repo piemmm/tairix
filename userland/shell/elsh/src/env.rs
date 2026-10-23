@@ -20,6 +20,7 @@
 //! re-read as a wildcard — the zsh rule — so only pattern characters typed
 //! unquoted reach filename generation.
 
+use alloc::borrow::Cow;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -27,6 +28,7 @@ use alloc::vec::Vec;
 use tairix_glob::Mark;
 
 use crate::error::ParseError;
+use crate::expand::Budget;
 use crate::lexer::{Segment, Word};
 
 /// The default interactive prompt format, stored as `ELSH_PROMPT` when the
@@ -140,55 +142,78 @@ impl Environment {
             .collect()
     }
 
-    /// Expand a parsed word's parameters into its text, quotes removed.
+    /// Expand a parsed word's parameters into its text, quotes removed, and
+    /// charge it to `budget` as one word.
     ///
     /// # Errors
     ///
-    /// Returns [`ParseError::UnterminatedExpansion`] if a `${` is never
-    /// closed by `}`.
-    pub fn expand_word(&self, word: &Word) -> Result<String, ParseError> {
-        Ok(self.expand_marked(word)?.text())
+    /// [`ParseError::UnterminatedExpansion`] if a `${` is never closed by
+    /// `}`, and [`ParseError::ExpansionTooLarge`] when the text would pass
+    /// what `budget` has left.
+    pub(crate) fn expand_word(
+        &self,
+        word: &Word,
+        budget: &mut Budget,
+    ) -> Result<String, ParseError> {
+        let text = self.expand_marked(word, budget)?.text();
+        budget.charge(text.len())?;
+        Ok(text)
     }
 
     /// Expand a parsed word's parameters, keeping which characters stand for
-    /// themselves.
+    /// themselves; refused before it grows past what `budget` has left, which
+    /// the caller then charges for what it keeps.
     ///
     /// # Errors
     ///
     /// As [`Environment::expand_word`].
-    pub(crate) fn expand_marked(&self, word: &Word) -> Result<Expansion, ParseError> {
+    pub(crate) fn expand_marked(
+        &self,
+        word: &Word,
+        budget: &Budget,
+    ) -> Result<Expansion, ParseError> {
         let mut out = Expansion {
             marks: Vec::new(),
             quoted: false,
+        };
+        let mut room = Room {
+            used: 0,
+            limit: budget.remaining(),
         };
         for segment in word {
             match segment {
                 Segment::Literal(s) => {
                     out.quoted = true;
+                    room.take(s)?;
                     out.marks
                         .extend(s.chars().map(|ch| Mark { ch, literal: true }));
                 }
                 Segment::QuotedExpandable(s) => {
                     out.quoted = true;
-                    self.expand_into(s, true, &mut out.marks)?;
+                    self.expand_into(s, true, &mut out.marks, &mut room)?;
                 }
-                Segment::Expandable(s) => self.expand_into(s, false, &mut out.marks)?,
+                Segment::Expandable(s) => self.expand_into(s, false, &mut out.marks, &mut room)?,
             }
         }
         Ok(out)
     }
 
     /// Expand `source`'s parameters onto `out`, its own characters marked
-    /// literal when `quoted` and every expanded value marked literal.
+    /// literal when `quoted` and every expanded value marked literal, each
+    /// piece taken from `room` before it is copied.
     fn expand_into(
         &self,
         source: &str,
         quoted: bool,
         out: &mut Vec<Mark>,
+        room: &mut Room,
     ) -> Result<(), ParseError> {
-        fn value(text: &str, out: &mut Vec<Mark>) {
+        fn value(text: &str, out: &mut Vec<Mark>, room: &mut Room) -> Result<(), ParseError> {
+            room.take(text)?;
             out.extend(text.chars().map(|ch| Mark { ch, literal: true }));
+            Ok(())
         }
+        room.take(source)?;
         let chars: Vec<char> = source.chars().collect();
         let mut i = 0;
         while i < chars.len() {
@@ -213,11 +238,11 @@ impl Environment {
                     }
                     let name: String = chars[start..i].iter().collect();
                     i += 1; // consume '}'
-                    value(&self.lookup(&name), out);
+                    value(&self.value_of(&name), out, room)?;
                 }
                 Some('?') => {
                     i += 1;
-                    value(&self.last_status.to_string(), out);
+                    value(&self.last_status.to_string(), out, room)?;
                 }
                 Some(&c) if is_name_start(c) => {
                     let start = i;
@@ -225,7 +250,7 @@ impl Environment {
                         i += 1;
                     }
                     let name: String = chars[start..i].iter().collect();
-                    value(&self.lookup(&name), out);
+                    value(&self.value_of(&name), out, room)?;
                 }
                 _ => out.push(Mark {
                     ch: '$',
@@ -236,11 +261,11 @@ impl Environment {
         Ok(())
     }
 
-    fn lookup(&self, name: &str) -> String {
+    fn value_of(&self, name: &str) -> Cow<'_, str> {
         if name == "?" {
-            return self.last_status.to_string();
+            return Cow::Owned(self.last_status.to_string());
         }
-        self.get(name).unwrap_or("").to_string()
+        Cow::Borrowed(self.get(name).unwrap_or(""))
     }
 
     /// Seed the standard interactive-session variables, exporting each so a
@@ -357,6 +382,23 @@ impl Environment {
     }
 }
 
+/// How much text one word's expansion may still produce: what the line's
+/// budget had left when it began.
+struct Room {
+    used: usize,
+    limit: usize,
+}
+
+impl Room {
+    fn take(&mut self, text: &str) -> Result<(), ParseError> {
+        self.used = self.used.saturating_add(text.len());
+        if self.used > self.limit {
+            return Err(ParseError::ExpansionTooLarge);
+        }
+        Ok(())
+    }
+}
+
 /// A word after parameter expansion: each character marked literal when it
 /// stands for itself, and whether any part of the word was quoted — which
 /// keeps an empty result as an empty argument rather than no argument.
@@ -442,9 +484,14 @@ fn is_name_char(c: char) -> bool {
 mod tests {
     use super::{assignment_split, is_valid_name, split_prefix_assignments, Environment};
     use crate::error::ParseError;
+    use crate::expand::{Budget, MAX_EXPANSION_BYTES};
     use crate::lexer::{Segment, Word};
     use alloc::string::{String, ToString};
     use alloc::vec;
+
+    fn expanded(env: &Environment, word: &Word) -> Result<String, ParseError> {
+        env.expand_word(word, &mut Budget::new(MAX_EXPANSION_BYTES))
+    }
 
     fn expandable(s: &str) -> Word {
         vec![Segment::Expandable(s.to_string())]
@@ -466,40 +513,63 @@ mod tests {
     fn expands_set_and_unset_variables() {
         let mut env = Environment::new();
         env.set("NAME", "tairix");
-        assert_eq!(env.expand_word(&expandable("$NAME")).unwrap(), "tairix");
-        assert_eq!(env.expand_word(&expandable("${NAME}!")).unwrap(), "tairix!");
+        assert_eq!(expanded(&env, &expandable("$NAME")).unwrap(), "tairix");
+        assert_eq!(expanded(&env, &expandable("${NAME}!")).unwrap(), "tairix!");
         // Unset expands to empty.
-        assert_eq!(env.expand_word(&expandable("[$MISSING]")).unwrap(), "[]");
+        assert_eq!(expanded(&env, &expandable("[$MISSING]")).unwrap(), "[]");
     }
 
     #[test]
     fn expands_last_status() {
         let mut env = Environment::new();
         env.set_last_status(42);
-        assert_eq!(env.expand_word(&expandable("$?")).unwrap(), "42");
-        assert_eq!(env.expand_word(&expandable("${?}")).unwrap(), "42");
+        assert_eq!(expanded(&env, &expandable("$?")).unwrap(), "42");
+        assert_eq!(expanded(&env, &expandable("${?}")).unwrap(), "42");
     }
 
     #[test]
     fn literal_segments_are_never_expanded() {
         let env = Environment::new();
         let word = vec![Segment::Literal("$NAME".to_string())];
-        assert_eq!(env.expand_word(&word).unwrap(), "$NAME");
+        assert_eq!(expanded(&env, &word).unwrap(), "$NAME");
     }
 
     #[test]
     fn lone_dollar_is_literal() {
         let env = Environment::new();
-        assert_eq!(env.expand_word(&expandable("a$ b")).unwrap(), "a$ b");
-        assert_eq!(env.expand_word(&expandable("cost$")).unwrap(), "cost$");
+        assert_eq!(expanded(&env, &expandable("a$ b")).unwrap(), "a$ b");
+        assert_eq!(expanded(&env, &expandable("cost$")).unwrap(), "cost$");
     }
 
     #[test]
     fn unterminated_brace_expansion_fails_closed() {
         let env = Environment::new();
         assert_eq!(
-            env.expand_word(&expandable("${oops")),
+            expanded(&env, &expandable("${oops")),
             Err(ParseError::UnterminatedExpansion)
+        );
+    }
+
+    /// A word stops growing at what the line has left, before the value
+    /// that would pass it is copied, and is charged once as a word.
+    #[test]
+    fn a_word_s_expansion_stops_at_what_the_budget_has_left() {
+        let mut env = Environment::new();
+        env.set("A", "abcd");
+        let word_cost = "abcdabcd".len() + core::mem::size_of::<String>();
+        let mut budget = Budget::new(word_cost);
+        assert_eq!(
+            env.expand_word(&expandable("$A$A"), &mut budget).as_deref(),
+            Ok("abcdabcd")
+        );
+        assert_eq!(budget.remaining(), 0);
+        assert_eq!(
+            env.expand_word(&expandable("$A$A"), &mut Budget::new(word_cost - 1)),
+            Err(ParseError::ExpansionTooLarge)
+        );
+        assert_eq!(
+            env.expand_marked(&expandable("$A$A"), &Budget::new(7)),
+            Err(ParseError::ExpansionTooLarge)
         );
     }
 
@@ -508,7 +578,7 @@ mod tests {
         let mut env = Environment::new();
         env.set("A", "x");
         env.set("B", "y");
-        assert_eq!(env.expand_word(&expandable("$A$B")).unwrap(), "xy");
+        assert_eq!(expanded(&env, &expandable("$A$B")).unwrap(), "xy");
     }
 
     #[test]

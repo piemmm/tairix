@@ -127,6 +127,8 @@ pub const BCM2711_HVS: EventRange = EventRange::new(24_900, 24_910);
 pub const BCM2711_HDMI: EventRange = EventRange::new(24_910, 24_920);
 /// The virtio-gpu display driver.
 pub const VIRTIO_GPU: EventRange = EventRange::new(24_920, 24_930);
+/// The BCM2835-family GPIO controller driver.
+pub const GPIO_BCM2835: EventRange = EventRange::new(24_930, 24_940);
 /// Link-local service discovery.
 pub const DISCOVERYD: EventRange = EventRange::new(25_000, 26_000);
 /// The userland runtime.
@@ -151,6 +153,8 @@ pub const NETCHAN: EventRange = EventRange::new(29_100, 29_200);
 pub const AUDIOD: EventRange = EventRange::new(30_000, 31_000);
 /// The Switchboard system-overview service.
 pub const SWITCHBOARD: EventRange = EventRange::new(31_000, 32_000);
+/// The cooling service.
+pub const THERMALD: EventRange = EventRange::new(32_000, 33_000);
 /// The network map's active reachability probing.
 pub const NETMAP: EventRange = EventRange::new(33_000, 34_000);
 /// The machine-settings service.
@@ -353,6 +357,14 @@ pub const OWNERS: &[Owner] = &[
     Owner {
         range: SETTINGSD,
         crates: &["userland/system/settingsd"],
+    },
+    Owner {
+        range: GPIO_BCM2835,
+        crates: &["drivers/gpio/bcm2835"],
+    },
+    Owner {
+        range: THERMALD,
+        crates: &["userland/system/thermald"],
     },
 ];
 

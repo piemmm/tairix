@@ -384,6 +384,7 @@ pub(crate) struct MemFs {
     aliases: Vec<(String, String)>,
     nodes: BTreeMap<String, MemNode>,
     failing: Vec<(String, Errno)>,
+    interrupted: Vec<(String, Errno)>,
     listings: RefCell<usize>,
 }
 
@@ -398,6 +399,7 @@ impl MemFs {
             aliases: Vec::new(),
             nodes: BTreeMap::new(),
             failing: Vec::new(),
+            interrupted: Vec::new(),
             listings: RefCell::new(0),
         };
         fs.nodes.insert("/".to_string(), MemNode::Dir);
@@ -461,25 +463,36 @@ impl MemFs {
         self
     }
 
+    /// Make listing the directory `path` fail with `errno` once its entries
+    /// have been handed over.
+    pub(crate) fn interrupted(mut self, path: &str, errno: Errno) -> Self {
+        let key = self.key(path);
+        self.interrupted.push((key, errno));
+        self
+    }
+
     /// How many directories have been listed.
     pub(crate) fn listings(&self) -> usize {
         *self.listings.borrow()
     }
 
     /// The components of `path` from the tree's root, aliases and the
-    /// working directory applied.
+    /// working directory applied, its root read by the path grammar's own
+    /// rule.
     fn components(&self, path: &str) -> Result<Vec<String>, Errno> {
         let (base, rest) = if let Some(rest) = path.strip_prefix('/') {
             (String::new(), rest)
-        } else if let Some((name, rest)) = path.split_once(":/") {
+        } else if tairix_path::is_relative_spelling(path) {
+            (self.cwd.clone(), path)
+        } else {
+            let len = tairix_path::alias_root_len(path).ok_or(Errno::NotFound)?;
+            let name = &path[..len - ":/".len()];
             let (_, target) = self
                 .aliases
                 .iter()
                 .find(|(alias, _)| alias == name)
                 .ok_or(Errno::NotFound)?;
-            (target.clone(), rest)
-        } else {
-            (self.cwd.clone(), path)
+            (target.clone(), &path[len..])
         };
         let mut parts: Vec<String> = base
             .split('/')
@@ -587,6 +600,23 @@ impl DirLister for MemFs {
 }
 
 impl GlobFs for MemFs {
+    fn read_dir(
+        &self,
+        dir: &str,
+        each: &mut dyn FnMut(&str, FileKind) -> core::ops::ControlFlow<()>,
+    ) -> Result<(), Errno> {
+        for entry in self.list_dir(dir)? {
+            if each(&entry.name, entry.kind).is_break() {
+                return Ok(());
+            }
+        }
+        let (key, _) = self.lookup(dir, true)?;
+        match self.interrupted.iter().find(|(path, _)| *path == key) {
+            Some((_, errno)) => Err(*errno),
+            None => Ok(()),
+        }
+    }
+
     fn kind(&self, path: &str, follow: bool) -> Result<FileKind, Errno> {
         let (_, node) = self.lookup(path, follow)?;
         Ok(match node {

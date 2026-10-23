@@ -44,6 +44,20 @@ enquanto a sua sessão ocupa a sala que ele serve; um dispositivo da sala de
 outra sessão é mostrado mas não pode ser alterado aqui. O seu ambiente de
 trabalho recorda o que define.
 
+**Raspberry Pi** só aparece quando a máquina é um. Define a ventoinha do
+processador, comutada através de uma linha do conector de 40 pinos: *Off*, *On*
+sempre ou *Automatic*, que liga a ventoinha quando o processador atinge a
+temperatura escolhida e só a desliga depois de ele arrefecer a margem escolhida,
+para que não ligue e desligue em torno de um só grau. A linha de controlo
+escolhe-se pelo número GPIO e pelo pino, bem como o nível, alto ou baixo, em que
+a ventoinha funciona; uma linha já usada por outra coisa é indicada em vez de
+oferecida. Uma linha do conector não consegue alimentar uma ventoinha sozinha,
+por isso ligue-a através de um transístor. O painel mostra também a temperatura
+do processador e se a ventoinha está a funcionar. Quando *Automatic* não
+consegue ler a temperatura, a ventoinha funciona até conseguir. Tal como as
+outras definições da máquina, uma alteração espera por *Apply*, que pede uma
+conta autorizada a alterá-las.
+
 ## EXIT STATUS
 
 Zero após um fecho limpo; diferente de zero quando o canal de janela ou a

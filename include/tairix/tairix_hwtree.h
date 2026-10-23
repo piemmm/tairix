@@ -103,6 +103,9 @@
 #define TAIRIX_HW_PROPERTY_RADIO_COEXISTENCE ((uint32_t)7u)
 #define TAIRIX_HW_PROPERTY_CONSOLE_HOST ((uint32_t)8u)
 #define TAIRIX_HW_PROPERTY_BLOCK_MEDIUM ((uint32_t)9u)
+#define TAIRIX_HW_PROPERTY_GPIO_HEADER_LINES ((uint32_t)10u)
+#define TAIRIX_HW_PROPERTY_THERMAL_CALIBRATION ((uint32_t)11u)
+#define TAIRIX_HW_PROPERTY_THERMAL_ZONE ((uint32_t)12u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed
 * little-endian wire size is TAIRIX_HW_MATCH_KEY_WIRE_LEN. */

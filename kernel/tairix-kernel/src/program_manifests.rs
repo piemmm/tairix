@@ -1583,6 +1583,19 @@ mod tests {
         CapabilityId::LOG_EMIT,
     ];
 
+    // The `thermald` cooling service: the fan's header line, the hardware
+    // tree and its sensors, the machine configuration it follows, its
+    // reserved status endpoint, and its records. Launched by init from its
+    // on-disk bundle only; the effective set is this request intersected with
+    // `THERMALD_CEILING`, the same five.
+    const THERMALD_REQUEST: &[CapabilityId] = &[
+        CapabilityId::GPIO,
+        CapabilityId::SYSINFO_HW,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::IPC_BIND_PRIVILEGED,
+        CapabilityId::LOG_EMIT,
+    ];
+
     // The `greeter` login screen (plans/NEW-DESKTOP-LOGIN.md G3):
     // `CAP_DISPLAY` holds the seat's lease, configures the display service
     // and switches the display off while the login screen sleeps,
@@ -1711,6 +1724,7 @@ mod tests {
         ("tee", ProgramKind::Command, FILE_TOOL_REQUEST),
         ("telnet", ProgramKind::Command, TELNET_TOOL_REQUEST),
         ("terminal", ProgramKind::Application, TERMINAL_REQUEST),
+        ("thermald", ProgramKind::Service, THERMALD_REQUEST),
         ("timed", ProgramKind::Service, TIMED_MANIFEST),
         ("top", ProgramKind::Command, TOP_MANIFEST),
         ("traceroute", ProgramKind::Command, ECHO_PROBE_TOOL_REQUEST),
@@ -1733,6 +1747,11 @@ mod tests {
         ("wintersun", ProgramKind::Application, WINTERSUN_REQUEST),
         ("yes", ProgramKind::Command, PURE_TOOL_REQUEST),
     ];
+
+    #[test]
+    fn the_cooling_service_requests_exactly_its_ceiling() {
+        assert_eq!(set(THERMALD_REQUEST), set(tairix_users::THERMALD_CEILING));
+    }
 
     #[test]
     fn the_settings_service_requests_exactly_its_ceiling() {

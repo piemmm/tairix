@@ -598,6 +598,15 @@ mod tests {
         CONSOLE.pump();
     }
 
+    /// The kernel's console layout names the sink at the crate root on every
+    /// build host, as it does each sibling port's.
+    #[test]
+    fn the_sink_is_named_at_the_crate_root() {
+        let sink: &'static crate::SerialSink = &crate::SERIAL_SINK;
+        sink.write_event(&event());
+        CONSOLE.pump();
+    }
+
     #[test]
     fn the_direct_writer_accepts_a_line_without_a_device() {
         let mut writer = ConsoleWriter;

@@ -1,7 +1,8 @@
 //! Tests for the shared fallible allocation helpers.
 
-use super::{boxed_array, collected, concatenated, filled, grow_to, push, reserve};
+use super::{boxed_array, collected, concatenated, filled, grow_to, push, read_snapshot, reserve};
 use alloc::vec::Vec;
+use tairix_abi::Errno;
 
 /// A count whose `T`-sized layout cannot be reserved on any target: the
 /// byte size overflows, so the refusal is the allocator's answer rather
@@ -61,4 +62,41 @@ fn parts_are_joined_into_a_string_of_exactly_their_length() {
     assert_eq!(joined, "/System/icon.png");
     assert_eq!(joined.capacity(), joined.len());
     assert_eq!(concatenated(&[]).as_deref(), Some(""));
+}
+
+#[test]
+fn a_whole_read_grows_until_the_snapshot_fits() {
+    let snapshot = [7u8; 1000];
+    let mut reads = 0;
+    let mut buffer = Vec::new();
+    let len = read_snapshot(&mut buffer, 64, |into| {
+        reads += 1;
+        let whole = into
+            .get_mut(..snapshot.len())
+            .ok_or(Errno::BufferTooSmall)?;
+        whole.copy_from_slice(&snapshot);
+        Ok(snapshot.len())
+    });
+    assert_eq!(len, Ok(1000));
+    assert_eq!(&buffer[..1000], &snapshot[..]);
+    assert_eq!(reads, 5, "64, 128, 256, 512, then 1024 bytes");
+}
+
+#[test]
+fn a_whole_read_answers_any_other_refusal_at_once() {
+    let mut reads = 0;
+    let mut buffer = Vec::new();
+    let refused = read_snapshot(&mut buffer, 16, |_| {
+        reads += 1;
+        Err(Errno::PermissionDenied)
+    });
+    assert_eq!(refused, Err(Errno::PermissionDenied));
+    assert_eq!(reads, 1);
+}
+
+#[test]
+fn a_whole_read_keeps_a_buffer_already_grown() {
+    let mut buffer = alloc::vec![0u8; 4096];
+    let len = read_snapshot(&mut buffer, 16, |into| Ok(into.len()));
+    assert_eq!(len, Ok(4096), "a reused buffer starts at its own size");
 }

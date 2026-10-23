@@ -1955,7 +1955,9 @@ type DriverBundleBuilder =
 /// the I²S interface's drivers are the audio blocks' consumers, and
 /// a USB audio device behind the bus chain gets the USB Audio Class driver.
 /// Both codec drivers ship, so an I²S HAT carrying either part works with no
-/// rebuild.
+/// rebuild. The GPIO controller's driver binds the discovered GPIO block and
+/// lends its header's lines to the cooling service, and the AVS sensor's
+/// driver serves the processor temperature it switches the fan by.
 const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
     (
         image_drivers::VCMAILBOX_STORE_PATH,
@@ -2028,6 +2030,14 @@ const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
     (
         image_drivers::IRQ_BRCMSTB_L2_STORE_PATH,
         image_drivers::build_irq_brcmstb_l2_bundle,
+    ),
+    (
+        image_drivers::GPIO_BCM2835_STORE_PATH,
+        image_drivers::build_gpio_bcm2835_bundle,
+    ),
+    (
+        image_drivers::SENSOR_BCM2711_THERMAL_STORE_PATH,
+        image_drivers::build_sensor_bcm2711_thermal_bundle,
     ),
     (
         image_drivers::CPRMAN_BCM2711_STORE_PATH,

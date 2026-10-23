@@ -101,6 +101,11 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-abi",
+        test: "fuzz_cooling",
+        description: "lib/abi cooling surface (thermal-sensor-v1 reads, gpio-header-v1 requests and line tables, the thermal-v1 status)",
+    },
+    Target {
+        package: "tairix-abi",
         test: "fuzz_codec",
         description: "lib/abi codec-v1 surface (codec requests naming a codec link, and their replies)",
     },

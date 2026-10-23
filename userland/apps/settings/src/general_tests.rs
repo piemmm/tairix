@@ -19,13 +19,14 @@ use tairix_sysconfig::{CacheMode, LoginType, Switch, SystemConfig};
 use tairix_wallpaper::DesktopSettings;
 
 use crate::facts::MachineFacts;
+use crate::registry::Board;
 use crate::shell::{Authorised, Shell, ShellOutcome};
 use crate::test_support::{band_line, damage, opaque, stated, task_words, theme, WIDE};
 use tairix_abi::window_ipc::SystemTask;
 
 /// A shell showing `pane`, with the machine's store already read.
 fn showing_with(pane: &str, config: SystemConfig) -> Shell {
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+    let mut shell = Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
     shell.adopt_config(Some(config));
     let mut sink = damage();
     assert!(
@@ -252,7 +253,7 @@ fn one_task_is_asked_at_a_time() {
 fn a_machine_row_with_no_reading_says_so_rather_than_showing_a_default() {
     // An unread store is not a store of defaults: showing one would be a
     // value the reader could not account for and could not have set.
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+    let mut shell = Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
     let mut sink = damage();
     shell.go_to_pane("caching", WIDE, Scale::ONE, &theme(), &mut sink);
     assert!(shell.config_wanted(), "the pane asks for the reading");
@@ -302,7 +303,7 @@ fn pane_text(shell: &Shell) -> String {
 fn the_about_pane_states_every_reading_it_could_not_take() {
     // Each query is its own, so one refusal costs one reading — and the
     // row says so rather than borrowing a neighbour's success.
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+    let mut shell = Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
     let mut sink = damage();
     shell.go_to_pane("about", WIDE, Scale::ONE, &theme(), &mut sink);
     let unmeasured = stated(&shell);
@@ -351,7 +352,8 @@ fn the_about_pane_states_every_reading_it_could_not_take() {
 fn the_fact_panes_paint_their_readings() {
     let theme = theme();
     let paint = |pane: &str, facts: MachineFacts| {
-        let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+        let mut shell =
+            Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
         let mut sink = damage();
         assert!(shell.go_to_pane(pane, WIDE, Scale::ONE, &theme, &mut sink));
         shell.adopt_machine(facts);
@@ -382,7 +384,7 @@ fn the_fact_panes_paint_their_readings() {
 
 #[test]
 fn a_clock_that_was_never_set_says_so_rather_than_showing_the_epoch() {
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+    let mut shell = Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
     let mut sink = damage();
     shell.go_to_pane("date-time", WIDE, Scale::ONE, &theme(), &mut sink);
     shell.adopt_machine(MachineFacts {
@@ -412,7 +414,7 @@ fn a_clock_that_was_never_set_says_so_rather_than_showing_the_epoch() {
 /// desktop delegated, and follows a new choice of either.
 #[test]
 fn the_clock_is_read_in_the_users_zone_and_region() {
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+    let mut shell = Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
     let mut sink = damage();
     shell.go_to_pane("date-time", WIDE, Scale::ONE, &theme(), &mut sink);
     shell.adopt_machine(MachineFacts {

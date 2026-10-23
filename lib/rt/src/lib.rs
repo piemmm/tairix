@@ -87,6 +87,8 @@ pub mod changenotice;
 
 pub mod copy;
 
+pub mod follow;
+
 pub mod io;
 
 pub mod keys;
@@ -6699,7 +6701,8 @@ fn positional_errno(err: io::Error) -> i64 {
 /// [`OpenFlags::DIRECTORY`].
 ///
 /// [`Dir::read`] reads one batch of packed [`tairix_abi::DirEntry`] records
-/// into the caller's buffer, and [`Dir::read_all`] the whole listing.
+/// into the caller's buffer, [`Dir::for_each_batch`] every batch in turn
+/// through one, and [`Dir::read_all`] the whole listing.
 #[derive(Debug)]
 pub struct Dir {
     file: File,
@@ -6742,6 +6745,22 @@ impl Dir {
     /// As [`Self::read_all`], and `-LimitExceeded` past `max` bytes.
     pub fn read_all_within(&self, max: usize) -> Result<alloc::vec::Vec<u8>, i64> {
         read_batches(max, |buf, from| fs_readdir(self.file.fd(), buf, from))
+    }
+
+    /// Hand each batch of the listing, from its first entry, to `each`, every
+    /// one read into `buf`, until `each` breaks or the listing ends: a listing
+    /// walked without ever being held whole.
+    ///
+    /// # Errors
+    ///
+    /// As [`fs_readdir`], and `-OutOfRange` for a batch reported longer than
+    /// `buf`.
+    pub fn for_each_batch(
+        &self,
+        buf: &mut [u8],
+        each: impl FnMut(&[u8]) -> core::ops::ControlFlow<()>,
+    ) -> Result<(), i64> {
+        stream_batches(buf, |buf, from| fs_readdir(self.file.fd(), buf, from), each)
     }
 
     /// Arm a change watch on this directory ([`fs_watch`]): add it to a
@@ -6851,11 +6870,44 @@ pub fn read_batches(
         if out.len() > max {
             return Err(refusal(Errno::LimitExceeded));
         }
-        if used + tairix_abi::DirEntry::MAX_LEN <= READDIR_BATCH_MAX {
+        if ends_listing(used, READDIR_BATCH_MAX) {
             return Ok(out);
         }
         from = ReaddirFrom::Next;
     }
+}
+
+/// Each batch of a listing read through `read` into `buf`, from the start,
+/// handed to `each` until it breaks or the listing ends, the end read as
+/// [`read_batches`] reads it.
+///
+/// # Errors
+///
+/// The raw negative result of the failing `read`, or `-OutOfRange` for a
+/// reader reporting more bytes than it was handed.
+fn stream_batches(
+    buf: &mut [u8],
+    mut read: impl FnMut(&mut [u8], ReaddirFrom) -> Result<usize, i64>,
+    mut each: impl FnMut(&[u8]) -> core::ops::ControlFlow<()>,
+) -> Result<(), i64> {
+    let mut from = ReaddirFrom::Start;
+    loop {
+        let used = read(buf, from)?;
+        let batch = buf
+            .get(..used)
+            .ok_or(-i64::from(Errno::OutOfRange.as_i32()))?;
+        if each(batch).is_break() || ends_listing(used, buf.len()) {
+            return Ok(());
+        }
+        from = ReaddirFrom::Next;
+    }
+}
+
+/// Whether a batch of `used` bytes read into `room` ended its listing: a batch
+/// is filled until the next record does not fit, so one leaving room for the
+/// longest record had none left to give, and an empty one is the end.
+const fn ends_listing(used: usize, room: usize) -> bool {
+    used == 0 || used.saturating_add(tairix_abi::DirEntry::MAX_LEN) <= room
 }
 
 /// Read the whole directory listing at the absolute `path`, returning the
@@ -10137,6 +10189,106 @@ mod tests {
         let want = -i64::from(tairix_abi::Errno::OutOfRange.as_i32());
         assert_eq!(
             read_batches(usize::MAX, |buf, _| Ok(buf.len() + 1)),
+            Err(want)
+        );
+    }
+
+    #[test]
+    fn stream_batches_hands_a_short_listing_over_in_one_call() {
+        let mut starts = alloc::vec::Vec::new();
+        let mut buf = alloc::vec![0u8; READDIR_BATCH_MAX];
+        let mut seen = alloc::vec::Vec::new();
+        stream_batches(&mut buf, batch_reader(b"abcdef", 3, &mut starts), |batch| {
+            seen.extend_from_slice(batch);
+            core::ops::ControlFlow::Continue(())
+        })
+        .expect("lists");
+        assert_eq!(seen, b"abcdef");
+        assert_eq!(starts, [ReaddirFrom::Start], "room left over ends it");
+    }
+
+    #[test]
+    fn stream_batches_reuses_its_buffer_until_a_batch_leaves_room() {
+        let record = READDIR_BATCH_MAX / 4;
+        let listing: alloc::vec::Vec<u8> = (0..9 * record).map(|i| i.to_le_bytes()[0]).collect();
+        let mut starts = alloc::vec::Vec::new();
+        let mut buf = alloc::vec![0u8; READDIR_BATCH_MAX];
+        let mut seen = alloc::vec::Vec::new();
+        stream_batches(
+            &mut buf,
+            batch_reader(&listing, record, &mut starts),
+            |batch| {
+                seen.extend_from_slice(batch);
+                core::ops::ControlFlow::Continue(())
+            },
+        )
+        .expect("lists");
+        assert_eq!(seen, listing);
+        assert_eq!(
+            starts,
+            [ReaddirFrom::Start, ReaddirFrom::Next, ReaddirFrom::Next],
+            "two full batches, then a partial one that ends it"
+        );
+    }
+
+    #[test]
+    fn stream_batches_reads_nothing_more_once_each_breaks() {
+        let record = READDIR_BATCH_MAX / 4;
+        let listing = alloc::vec![7u8; 9 * record];
+        let mut starts = alloc::vec::Vec::new();
+        let mut buf = alloc::vec![0u8; READDIR_BATCH_MAX];
+        stream_batches(
+            &mut buf,
+            batch_reader(&listing, record, &mut starts),
+            |_| core::ops::ControlFlow::Break(()),
+        )
+        .expect("lists");
+        assert_eq!(starts, [ReaddirFrom::Start]);
+    }
+
+    #[test]
+    fn stream_batches_ends_at_an_empty_batch_whatever_its_buffer() {
+        let mut calls = 0;
+        let mut buf = [0u8; 8];
+        stream_batches(
+            &mut buf,
+            |_, _| {
+                calls += 1;
+                Ok(0)
+            },
+            |_| core::ops::ControlFlow::Continue(()),
+        )
+        .expect("lists");
+        assert_eq!(
+            calls, 1,
+            "a buffer shorter than a record still sees the end"
+        );
+    }
+
+    #[test]
+    fn stream_batches_surfaces_a_refusal_unchanged() {
+        let denied = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            stream_batches(
+                &mut buf,
+                |_, _| Err(denied),
+                |_| core::ops::ControlFlow::Continue(())
+            ),
+            Err(denied)
+        );
+    }
+
+    #[test]
+    fn stream_batches_refuses_an_over_reporting_reader() {
+        let want = -i64::from(tairix_abi::Errno::OutOfRange.as_i32());
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            stream_batches(
+                &mut buf,
+                |buf, _| Ok(buf.len() + 1),
+                |_| core::ops::ControlFlow::Continue(())
+            ),
             Err(want)
         );
     }

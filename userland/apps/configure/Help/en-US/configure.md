@@ -121,6 +121,17 @@ never changes a result.
   `-12dB` or `-6.5dB`, to at most two decimals: the level every sink and
   source starts at. Never above `0dB`. The audio service takes a changed
   value at the next boot; `audioctl` changes the running machine.
+- `cooling.fan.mode` — `off` by default, `on` or `auto`: whether the CPU fan
+  on the board's GPIO header is left undriven, runs all the time, or is
+  switched by the processor's temperature.
+- `cooling.fan.line` — `none` by default, or the GPIO line the fan is wired
+  to, from `0` to `63`. Only a line the board's header lends can be driven.
+- `cooling.fan.signal` — `active-high` by default, or `active-low`: which
+  level of the line runs the fan.
+- `cooling.fan.start`, `cooling.fan.hysteresis` — whole degrees Celsius,
+  `65` and `10` by default: an automatic fan starts at `start`, from `40` to
+  `85`, and stops once the processor has cooled by `hysteresis`, from `2` to
+  `20`. A change to a fan setting applies at once.
 
 A key that is not in the list above is read against a second registry:
 the network settings of each interface, kept at

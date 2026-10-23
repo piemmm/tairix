@@ -58,7 +58,7 @@ mod program {
 
     use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
-    use tairix_abi::fs::{DirEntries, OpenFlags, FS_IO_MAX};
+    use tairix_abi::fs::{DirEntries, OpenFlags, FS_IO_MAX, READDIR_BATCH_MAX};
     use tairix_abi::net_ipc::if_name_str;
     use tairix_abi::origin::{CapabilitySummary, Origin};
     use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
@@ -142,28 +142,78 @@ mod program {
     /// resolve-only open's `fs_stat`: every path resolution and per-inode
     /// permission check stays kernel-side, so a pattern reveals no name the
     /// session could not list itself.
-    struct RtFs;
+    struct RtFs {
+        /// The batch buffer every listing reads through, kept so a `**` walk
+        /// over many directories allocates and clears it once.
+        batch: RefCell<Vec<u8>>,
+    }
+
+    impl RtFs {
+        fn new() -> Self {
+            Self {
+                batch: RefCell::new(Vec::new()),
+            }
+        }
+    }
 
     impl DirLister for RtFs {
         fn list_dir(&self, dir: &str) -> Result<Vec<DirEntryInfo>, Errno> {
-            let stream = tairix_rt::read_dir_all(dir.as_bytes()).map_err(Errno::from_syscall)?;
             let mut entries = Vec::new();
-            for entry in DirEntries::new(&stream) {
-                // A stream the ABI does not describe — a malformed record, a
-                // name that is not UTF-8 — is refused whole as such, never
-                // mistaken for an absent directory.
-                let entry = entry.map_err(|_| Errno::BadMagic)?;
-                let name = core::str::from_utf8(entry.name).map_err(|_| Errno::BadMagic)?;
+            self.read_dir(dir, &mut |name, kind| {
                 entries.push(DirEntryInfo {
                     name: String::from(name),
-                    kind: entry.kind,
+                    kind,
                 });
-            }
+                core::ops::ControlFlow::Continue(())
+            })?;
             Ok(entries)
         }
     }
 
     impl GlobFs for RtFs {
+        fn read_dir(
+            &self,
+            dir: &str,
+            each: &mut dyn FnMut(&str, FileKind) -> core::ops::ControlFlow<()>,
+        ) -> Result<(), Errno> {
+            let listing = tairix_rt::open_dir(dir.as_bytes()).map_err(Errno::from_syscall)?;
+            // A listing read from inside another's visit has a buffer of its own.
+            let mut own = Vec::new();
+            let mut kept = self.batch.try_borrow_mut();
+            let batch = match &mut kept {
+                Ok(kept) => &mut **kept,
+                Err(_) => &mut own,
+            };
+            if batch.is_empty() {
+                batch
+                    .try_reserve_exact(READDIR_BATCH_MAX)
+                    .map_err(|_| Errno::OutOfMemory)?;
+                batch.resize(READDIR_BATCH_MAX, 0);
+            }
+            // A stream the ABI does not describe — a malformed record, a
+            // name that is not UTF-8 — is refused whole as such, never
+            // mistaken for an absent directory.
+            let mut malformed = false;
+            listing
+                .for_each_batch(batch, |records| {
+                    for entry in DirEntries::new(records) {
+                        let Some((name, kind)) = entry.ok().and_then(|entry| {
+                            Some((core::str::from_utf8(entry.name).ok()?, entry.kind))
+                        }) else {
+                            malformed = true;
+                            return core::ops::ControlFlow::Break(());
+                        };
+                        each(name, kind)?;
+                    }
+                    core::ops::ControlFlow::Continue(())
+                })
+                .map_err(Errno::from_syscall)?;
+            if malformed {
+                return Err(Errno::BadMagic);
+            }
+            Ok(())
+        }
+
         fn kind(&self, path: &str, follow: bool) -> Result<FileKind, Errno> {
             // Neither access bit: the handle only resolves, and with
             // `NO_FOLLOW` it names a final link itself — `lstat`'s posture.
@@ -1077,15 +1127,16 @@ mod program {
             tairix_rt::env_var(name.as_bytes())
                 .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
         });
+        let fs = RtFs::new();
         let mut shell = Shell::with_environment(&host, &console, env)
             .with_limits(&limits)
             .with_elevator(&elevator)
-            .with_filesystem(&RtFs);
+            .with_filesystem(&fs);
         tairix_elsh::run_repl(
             &mut shell,
             &console,
             &mut input,
-            &RtFs,
+            &fs,
             &RtResourceLister::new(),
         )
     }

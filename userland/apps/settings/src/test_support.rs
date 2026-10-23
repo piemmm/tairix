@@ -21,6 +21,7 @@ use tairix_input::{InputEvent, PointerButton};
 use tairix_theme::{Grounds, Theme};
 use tairix_wallpaper::DesktopSettings;
 
+use crate::registry::Board;
 use crate::registry::{Pane, PaneRow, CATEGORIES};
 use crate::shell::{Shell, ShellOutcome};
 
@@ -60,7 +61,7 @@ pub(crate) fn zones() -> &'static tairix_tz::ZoneInfo<'static> {
 
 /// A shell showing `pane`, laid out for [`WIDE`].
 pub(crate) fn showing(pane: &str) -> Shell {
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+    let mut shell = Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
     let mut sink = damage();
     assert!(
         shell.go_to_pane(pane, WIDE, Scale::ONE, &theme(), &mut sink),

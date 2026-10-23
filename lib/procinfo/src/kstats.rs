@@ -29,8 +29,8 @@
 use tairix_abi::net_ipc::{NetBondMemberRecord, NetInterfaceFactsRecord, NetStackDefenceCounters};
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuLoadRecord, DesktopFrameRecord, IrqRecord, MemoryPressureBand,
-    MemoryPressureStats, MemoryTotal, RamzipStats, ReclaimClassRecord, SysinfoQueryId,
-    RECLAIM_CLASS_COUNT,
+    MemoryPressureStats, MemoryTotal, PlatformCompatible, RamzipStats, ReclaimClassRecord,
+    SysinfoQueryId, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::Errno;
 use tairix_sysconfig::SystemConfig;
@@ -179,6 +179,19 @@ pub fn system_config(transport: &dyn Transport) -> Result<Option<SystemConfig>, 
         .and_then(|text| SystemConfig::parse(text).ok())
         .map(Some)
         .ok_or(CallError::Service(Errno::BadMagic))
+}
+
+/// Name the board through the ungated
+/// [`SysinfoQueryId::PLATFORM_COMPATIBLE`] query: its firmware's root
+/// `compatible` strings, none on a machine whose firmware states none.
+///
+/// # Errors
+///
+/// [`CallError::Service`] — the transport failed, or the answer was not a
+/// whole list of `compatible` keys.
+pub fn platform_compatible(transport: &dyn Transport) -> Result<PlatformCompatible, CallError> {
+    let reply = call(transport, SysinfoQueryId::PLATFORM_COMPATIBLE, &[])?;
+    PlatformCompatible::decode(&reply).map_err(|_| CallError::Service(Errno::BadMagic))
 }
 
 /// Query the `ramzip` compressed-tier counters
@@ -459,8 +472,8 @@ mod tests {
     use super::{
         for_each_cache_ledger, for_each_cpu_load, for_each_desktop_frame_report, for_each_irq,
         for_each_reclaim_class, memory_pressure, memory_total_bytes, memory_total_for_budget,
-        ramzip_stats, system_config, WalkStep, CACHE_LEDGER_PAGE, CPU_LOAD_PAGE, IRQ_PAGE,
-        RECLAIM_PAGE,
+        platform_compatible, ramzip_stats, system_config, PlatformCompatible, WalkStep,
+        CACHE_LEDGER_PAGE, CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -613,6 +626,19 @@ mod tests {
                 .to_vec()),
                 SysinfoQueryId::RAMZIP_STATS => Ok(self.ramzip.to_le_bytes().to_vec()),
                 SysinfoQueryId::SYSTEM_CONFIG => Ok(self.system_config.clone()),
+                SysinfoQueryId::PLATFORM_COMPATIBLE => {
+                    let mut root = tairix_abi::HwNode::new(
+                        tairix_abi::HW_NODE_ROOT_ID,
+                        tairix_abi::HW_NODE_ROOT,
+                        tairix_abi::HwDeviceClass::Root,
+                    );
+                    let key = tairix_abi::HwMatchKey::compatible(b"raspberrypi,400")?;
+                    root.push_match_key(key)?;
+                    let mut out = alloc::vec![0u8; PlatformCompatible::WIRE_MAX];
+                    let len = PlatformCompatible::of(&root).encode(&mut out)?;
+                    out.truncate(len);
+                    Ok(out)
+                }
                 SysinfoQueryId::RECLAIM_STATS => {
                     let req = PageRequest::from_bytes(payload)?;
                     page(&self.reclaim, req.offset, req.limit, |r| {
@@ -779,6 +805,18 @@ mod tests {
         assert_eq!(config.cache_block, tairix_sysconfig::CacheMode::Off);
         // Every key the document did not name is at its documented default.
         assert_eq!(config.cache_filesystem, tairix_sysconfig::CacheMode::Auto);
+    }
+
+    #[test]
+    fn the_board_is_read_through_its_ungated_query_and_a_torn_answer_is_refused() {
+        let mut fixture = Fixture::new();
+        let board = platform_compatible(&fixture).expect("read");
+        assert!(board.strings().eq([&b"raspberrypi,400"[..]]));
+        fixture.malformed = Some(SysinfoQueryId::PLATFORM_COMPATIBLE);
+        assert_eq!(
+            platform_compatible(&fixture),
+            Err(CallError::Service(Errno::BadMagic))
+        );
     }
 
     /// An installation that has never had a store is not an error: it means

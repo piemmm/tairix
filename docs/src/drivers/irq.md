@@ -34,6 +34,9 @@ root lines.
   `wait`, or a `post_wait` its serve loop wakes on and `reap_wait` collects,
   beside any direct `Irq` it binds.
 
+The BCM2835-family GPIO controller serves the same service for its lines;
+see [GPIO-controller drivers](./gpio.md).
+
 ## `drivers/irq/brcmstb_l2`
 
 The Broadcom second-level controllers, edge layout (`brcm,l2-intc`,

@@ -356,6 +356,22 @@ pub const SETTINGSD_CEILING: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `thermald` cooling service account's grant ceiling: switch the CPU
+/// fan's header line, read the hardware tree and the sensors it holds, follow
+/// the machine configuration, serve its reserved status endpoint, and emit its
+/// records — nothing more.
+///
+/// It is the only holder of `CAP_GPIO`, so the fan is the one load a
+/// compromise of it reaches. No spawn authority, no network, and no write
+/// authority over the configuration it follows.
+pub const THERMALD_CEILING: &[CapabilityId] = &[
+    CapabilityId::GPIO,
+    CapabilityId::SYSINFO_HW,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `discoveryd` link-local discovery service account's grant ceiling:
 /// hold the multicast DNS sockets, parse every datagram in a capability-empty
 /// worker, serve the reserved discovery endpoint, read the grant store, and
@@ -563,6 +579,7 @@ mod tests {
         assert_eq!(DISCOVERYD_CEILING.len(), 5);
         assert_eq!(SOUNDD_CEILING.len(), 5);
         assert_eq!(SETTINGSD_CEILING.len(), 3);
+        assert_eq!(THERMALD_CEILING.len(), 5);
         // The settings service enforces the settings capability; holding it,
         // or any authority beyond its own files, would make it a way round
         // the gate it keeps.
@@ -661,6 +678,7 @@ mod tests {
             CapabilityId::IRQ_BIND,
             CapabilityId::MMIO_MAP,
             CapabilityId::HW_EMIT,
+            CapabilityId::GPIO,
             CapabilityId::DRV_LOAD,
             CapabilityId::DRV_KERNEL,
             CapabilityId::CPUFREQ,

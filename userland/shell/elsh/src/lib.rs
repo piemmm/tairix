@@ -26,9 +26,9 @@
 //!    here-document (`<<`, `<<-`) parses *pending*: its body is collected from
 //!    the following input lines ([`parser::CommandList::feed_here_doc_line`],
 //!    bounded and fail-closed) before the list runs.
-//! 3. Expansion, in bash's order: brace expansion, `$`-expansion
-//!    ([`env::Environment::expand_word`]), then filename generation through
-//!    the shared `lib/glob` matcher, an unquoted word left empty dropped.
+//! 3. Expansion, in bash's order: brace expansion, `$`-expansion against the
+//!    [`Environment`], then filename generation through the shared `lib/glob`
+//!    matcher, an unquoted word left empty dropped.
 //! 4. [`Shell::run_line`] — run each pipeline, honouring connectors and the
 //!    background flag, dispatching builtins ([`builtin`]) or launching through
 //!    the [`ProcessHost`], and tracking jobs in the [`job::JobTable`].

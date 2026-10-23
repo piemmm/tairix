@@ -39,7 +39,7 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define TAIRIX_SYSINFO_QUERY_NAME_MAX 20u
 #define TAIRIX_SYSINFO_QUERY_RECORD_LEN 26u
-#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1378u
+#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1404u
 #define TAIRIX_SYSINFO_LOAD_FIXED_SHIFT 11u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
@@ -96,6 +96,7 @@
 #define TAIRIX_SYSINFO_QUERY_NET_NEIGHBORS ((uint16_t)50u)
 #define TAIRIX_SYSINFO_QUERY_NET_ROUTES ((uint16_t)51u)
 #define TAIRIX_SYSINFO_QUERY_VIEW_LIST ((uint16_t)52u)
+#define TAIRIX_SYSINFO_QUERY_PLATFORM_COMPATIBLE ((uint16_t)53u)
 
 /* Process lifecycle state carried in a process record (uint8_t). */
 #define TAIRIX_PROCESS_STATE_RUNNABLE ((uint8_t)0u)

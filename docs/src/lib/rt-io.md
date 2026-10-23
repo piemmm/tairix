@@ -119,7 +119,21 @@ from the open description's listing position; `Dir::read_all` and
 (`read_batches`). The kernel fills a batch until the next record does not fit,
 so a batch with room for the longest record ends the listing without a further
 call. `Dir::read_all_within` refuses a listing past a caller's byte bound with
-`-LimitExceeded`.
+`-LimitExceeded`. `Dir::for_each_batch` walks a listing it never holds whole,
+every batch read into one caller buffer and handed over in turn under the same
+end rule, until the caller stops it.
+
+## Following one file
+
+A service that applies a document as it changes — the time service and the
+cooling service each follow `system.conf` — follows it through
+`follow::Followed`. The file's directory is watched once it exists, and its
+parent until then, so a service started before the volume holding the file is
+mounted follows it the moment the directory appears. `Followed::drain`
+answers what a wake asks for: nothing, a re-read, or a re-follow because the
+watched directory came or went; a directory still changing after a bounded
+number of batches is simply read again. The verdict over one change batch
+(`follow::verdict`) is pure and host-tested.
 
 ## Buffering
 

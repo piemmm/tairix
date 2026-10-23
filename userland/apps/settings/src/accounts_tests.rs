@@ -27,6 +27,7 @@ use tairix_wallpaper::DesktopSettings;
 
 use crate::accounts::{AccountFacts, OwnAccount, Roster};
 use crate::form::Composition;
+use crate::registry::Board;
 use crate::registry::{Pane, PaneBacking, PaneContent};
 use crate::shell::{Authorised, Shell};
 use crate::test_support::{
@@ -991,7 +992,8 @@ fn the_pane_draws_in_both_themes_and_at_both_densities() {
     for scale in [Scale::ONE, Scale::from_percent(200).expect("a scale")] {
         for palette in [Theme::dark(), Theme::light()] {
             install_test_transport();
-            let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+            let mut shell =
+                Shell::new(DesktopSettings::default(), Board::default()).expect("a registry");
             let mut sink = damage();
             assert!(shell.go_to_pane("users", WIDE, scale, &palette, &mut sink));
             shell.adopt_accounts(facts());

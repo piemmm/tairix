@@ -162,6 +162,8 @@
 - [DMA-engine drivers](./drivers/dma.md)
 - [Clock-controller drivers](./drivers/clock.md)
 - [Interrupt-line drivers](./drivers/irq.md)
+- [GPIO-controller drivers](./drivers/gpio.md)
+- [Temperature-sensor drivers](./drivers/sensor.md)
 - [Accelerator drivers](./drivers/accelerator.md)
 
 # Filesystem
@@ -200,6 +202,7 @@
 - [Sound controls (`audioctl`)](./userland/audioctl.md)
 - [Music (`music.app`)](./userland/music.md)
 - [Time service (`timed`)](./userland/timed.md)
+- [Cooling service (`thermald`)](./userland/thermald.md)
 - [Networking tools (`ss`, `host`, `telnet`)](./userland/networking.md)
 - [elsh (Element Shell)](./userland/shell.md)
 - [Login: the session authority](./userland/login.md)

@@ -277,6 +277,11 @@ tairix-drv-dma-bcm2835 = { path = "../../drivers/dma/bcm2835", version = "=0.0.0
 # The L2 interrupt controller driver's bind table and capabilities, for the
 # flashable Pi image: the HDMI blocks' hotplug lines arrive through it.
 tairix-drv-irq-brcmstb-l2 = { path = "../../drivers/irq/brcmstb_l2", version = "=0.0.0" }
+# The GPIO controller and AVS temperature sensor drivers' bind tables and
+# capabilities, for the flashable Pi image: the CPU fan's line and the
+# temperature it is switched by.
+tairix-drv-gpio-bcm2835 = { path = "../../drivers/gpio/bcm2835", version = "=0.0.0" }
+tairix-drv-sensor-bcm2711-thermal = { path = "../../drivers/sensor/bcm2711_thermal", version = "=0.0.0" }
 # The clock manager driver's bind table and capabilities, for the flashable Pi
 # image.
 tairix-drv-clock-bcm2711-cprman = { path = "../../drivers/clock/bcm2711_cprman", version = "=0.0.0" }

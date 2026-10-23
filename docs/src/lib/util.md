@@ -57,7 +57,11 @@ and panic-free throughout.
   (`lib/raster`), the compositor's scan-out frame and layer buffers
   (`userland/gui/wm`), and the PNG decoder's row and output buffers
   (`lib/image`) all reserve through this one definition, so a desktop
-  under memory pressure degrades rather than dying in it.
+  under memory pressure degrades rather than dying in it. `read_snapshot`
+  reads a source that copies all or nothing and never says how much it
+  needs — the hardware tree — doubling its buffer from a starting size on
+  each `BufferTooSmall`, so the device manager, the System Information
+  service and the cooling service read a tree of any size the one way.
 * `fmt` — no-allocation numeric formatters that render task / port /
   capability identifiers into `lib/log`'s structured field values
   without touching an allocator on the hot path. Promoted from

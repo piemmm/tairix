@@ -18,8 +18,10 @@ use crate::lexer::{Segment, Word};
 use crate::options::{ShellOption, ShellOptions};
 use crate::pathexp::{self, GlobFs, Ignore, Settings};
 
-/// Most bytes one command's expansion may hold: the largest argument block a
-/// program can be handed, so a short line can never demand unbounded memory.
+/// Most bytes one command line's expansions may produce together — its
+/// fields, redirection targets, here-strings, here-documents and assignment
+/// values: the largest argument block a program can be handed, so a short
+/// line can never demand unbounded memory.
 // The block bound is 16 MiB, which every target's `usize` holds.
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) const MAX_EXPANSION_BYTES: usize = tairix_abi::PROCESS_START_MAX_TOTAL_LEN as usize;
@@ -47,7 +49,8 @@ impl From<ParseError> for ExpandError {
     }
 }
 
-/// The bound on what one expansion may hold, charged as words are made.
+/// The bound on what one line's expansions may hold, charged as text is
+/// made.
 pub(crate) struct Budget {
     remaining: usize,
 }
@@ -63,9 +66,23 @@ impl Budget {
     ///
     /// [`ParseError::ExpansionTooLarge`] once the bound is spent.
     pub(crate) fn charge(&mut self, len: usize) -> Result<(), ParseError> {
+        self.spend(len.saturating_add(WORD_OVERHEAD))
+    }
+
+    /// What is left to charge.
+    pub(crate) fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    /// Charge `len` bytes of text added to a word already charged for.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::ExpansionTooLarge`] once the bound is spent.
+    pub(crate) fn spend(&mut self, len: usize) -> Result<(), ParseError> {
         self.remaining = self
             .remaining
-            .checked_sub(len.saturating_add(WORD_OVERHEAD))
+            .checked_sub(len)
             .ok_or(ParseError::ExpansionTooLarge)?;
         Ok(())
     }
@@ -132,41 +149,45 @@ impl<'a> Expander<'a> {
         }
     }
 
-    /// The fields `words` expand to, in order. Under `export`, an operand
-    /// spelled `NAME=value` skips filename generation, as bash's does.
+    /// The fields `words` expand to, in order, charged to `budget`. Under
+    /// `export`, an operand spelled `NAME=value` skips filename generation,
+    /// as bash's does.
     ///
     /// # Errors
     ///
     /// Why a word could not be expanded.
-    pub(crate) fn fields(&self, words: &[Word]) -> Result<Vec<String>, ExpandError> {
-        let mut budget = Budget::new(MAX_EXPANSION_BYTES);
+    pub(crate) fn fields(
+        &self,
+        words: &[Word],
+        budget: &mut Budget,
+    ) -> Result<Vec<String>, ExpandError> {
         let declares = words
             .first()
             .is_some_and(|word| plain_text(word) == Some("export"));
         let mut fields = Vec::new();
         for (index, word) in words.iter().enumerate() {
             let assignment = declares && index > 0 && assignment_split(word).is_some();
-            for braced in brace::expand(word, &mut budget)? {
-                let expansion = self.env.expand_marked(&braced)?;
+            for braced in brace::expand(word, budget)? {
+                let expansion = self.env.expand_marked(&braced, budget)?;
                 if assignment {
                     budget.charge(expansion.marks.len())?;
                     fields.push(expansion.text());
                 } else {
-                    self.generate(&expansion, &mut budget, &mut fields)?;
+                    self.generate(&expansion, budget, &mut fields)?;
                 }
             }
         }
         Ok(fields)
     }
 
-    /// The one word a redirection target expands to.
+    /// The one word a redirection target expands to, charged to `budget`.
     ///
     /// # Errors
     ///
     /// [`ParseError::AmbiguousRedirectTarget`] when it expands to no word or
     /// to several; otherwise why it could not be expanded.
-    pub(crate) fn target(&self, word: &Word) -> Result<String, ExpandError> {
-        let mut fields = self.fields(core::slice::from_ref(word))?;
+    pub(crate) fn target(&self, word: &Word, budget: &mut Budget) -> Result<String, ExpandError> {
+        let mut fields = self.fields(core::slice::from_ref(word), budget)?;
         match fields.pop() {
             Some(only) if fields.is_empty() => Ok(only),
             _ => Err(ExpandError {
@@ -184,10 +205,13 @@ impl<'a> Expander<'a> {
         fields: &mut Vec<String>,
     ) -> Result<(), ExpandError> {
         if !self.options.is_on(ShellOption::Noglob) {
-            if let Some(mut paths) =
-                pathexp::expand(&expansion.marks, &self.settings, self.fs, budget)?
-            {
-                self.filter(&mut paths)?;
+            if let Some(paths) = pathexp::expand(
+                &expansion.marks,
+                &self.settings,
+                self.fs,
+                budget,
+                &|paths| self.filter(paths),
+            )? {
                 if !paths.is_empty() {
                     fields.extend(paths);
                     return Ok(());

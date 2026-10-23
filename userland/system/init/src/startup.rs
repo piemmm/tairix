@@ -170,10 +170,12 @@ pub const DEFAULT_CONFIG: &str = "\
 # sound waits on. `confd` and `settingsd` bind straight away and answer a typed
 # refusal until the root is mounted, since a headless machine needs both.
 # Those whose crash would leave the machine silent, unconfigurable or without
-# its `.local` names restart on failure. `timed` and `discoveryd` are
-# `enrolled`, so an administrator's `disable` survives a reboot: `timed` starts
-# after `netstack` and paces its own retries, and `discoveryd` requires
-# `network-up`, so a stack relaunch takes it down and brings it back. `fontd`
+# its `.local` names restart on failure. `timed`, `discoveryd` and `thermald`
+# are `enrolled`, so an administrator's `disable` survives a reboot: `timed`
+# starts after `netstack` and paces its own retries, `discoveryd` requires
+# `network-up`, so a stack relaunch takes it down and brings it back, and
+# `thermald` restarts on failure, since the fan's line is undriven while it is
+# down. `fontd`
 # is `ondemand`: only a graphical consumer wants glyphs, so it starts when one
 # asks the manager to connect to it.
 console
@@ -187,6 +189,7 @@ service /System/Services/confd.app/Run confd
 service /System/Services/settingsd.app/Run settingsd restart=on-failure ready=notify
 enrolled /System/Services/timed.app/Run timed
 enrolled /System/Services/discoveryd.app/Run discoveryd restart=on-failure requires=network-up
+enrolled /System/Services/thermald.app/Run thermald restart=on-failure
 ondemand /System/Services/fontd.app/Run fontd
 session /System/Services/login.app/Run login
 ";
@@ -881,8 +884,8 @@ mod tests {
             ],
         );
         // The enrolment-governed tier, so a user who turns automatic
-        // time-setting or link-local discovery off keeps it off across a
-        // reboot.
+        // time-setting, link-local discovery or the fan's control off keeps
+        // it off across a reboot.
         assert_eq!(
             config.enrolled(),
             &[
@@ -893,6 +896,13 @@ mod tests {
                     ..Launch::plain(
                         "/System/Services/discoveryd.app/Run",
                         tairix_users::DISCOVERYD_UID.0,
+                    )
+                },
+                Launch {
+                    restart: RestartPolicy::OnFailure,
+                    ..Launch::plain(
+                        "/System/Services/thermald.app/Run",
+                        tairix_users::THERMALD_UID.0,
                     )
                 },
             ],
@@ -1218,10 +1228,10 @@ mod tests {
         // seatmgr, confd, settingsd; this pins the derived value so a change
         // to the floor is a conscious one.
         assert_eq!(MAX_SERVICES, 8);
-        // The same derivation over the `enrolled` keyword: `timed` and
-        // `discoveryd`.
+        // The same derivation over the `enrolled` keyword: `timed`,
+        // `discoveryd` and `thermald`.
         assert_eq!(floor.enrolled().len(), MAX_ENROLLED_SERVICES);
-        assert_eq!(MAX_ENROLLED_SERVICES, 2);
+        assert_eq!(MAX_ENROLLED_SERVICES, 3);
         // And over `ondemand`: `fontd` alone.
         assert_eq!(floor.ondemand().len(), MAX_ONDEMAND_SERVICES);
         assert_eq!(MAX_ONDEMAND_SERVICES, 1);

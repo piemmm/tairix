@@ -1,0 +1,45 @@
+[package]
+name = "tairix-thermald"
+description = "TAIRiX cooling service: reads the processor's temperature sensors, switches the CPU fan on the board's header line by the cooling.fan.* policy, and answers the ungated thermal-v1 status (`plans/COOLING.md` CL6)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime is an optional,
+# on-by-default build feature, so host tooling builds only the policy library.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "dep:tairix-caps", "dep:tairix-util"]
+
+# The package is both the `tairix-thermald` policy library and the `Run`
+# entry-point binary installed at `/System/Services/thermald.app/Run`.
+[[bin]]
+name = "tairix-thermald-run"
+path = "src/run.rs"
+
+[dependencies]
+# The thermal-sensor-v1, gpio-header-v1 and thermal-v1 protocols, the fan
+# policy, and the hardware tree's channel nodes.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `cooling.fan.*` keys of the machine configuration store.
+tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
+# The structured records every fan decision is written through.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# `_start`, the allocator, the wait set, the endpoints, the hardware tree and
+# the settings directory's watch.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The empty capability sets the ungated status endpoint is bound with.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0", optional = true }
+# The whole-snapshot read the hardware tree is taken through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0", optional = true }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

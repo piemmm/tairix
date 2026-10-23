@@ -26,6 +26,7 @@ use crate::blkio::{
     BLK_MEDIUM_LEN, BLK_QUEUE_COUNTERS_LEN,
 };
 use crate::driver::filesystem::{MountFlags, VolumeStats};
+use crate::hwtree::{HwMatchKey, HwMatchKind, HwNode, HW_NODE_MAX_MATCH_KEYS};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::origin::ProcId;
 use crate::process::SchedPriority;
@@ -70,9 +71,9 @@ impl SysinfoQueryId {
     /// whose `node_count` is the **total** node count of the snapshot and
     /// whose `generation` identifies it — followed by up to
     /// [`PageRequest::limit`] whole
-    /// [`HwNode`](crate::hwtree::HwNode) records starting at
+    /// [`HwNode`] records starting at
     /// [`PageRequest::offset`]. A tree is larger than one framed
-    /// reply can carry (one [`HwNode`](crate::hwtree::HwNode) is hundreds
+    /// reply can carry (one [`HwNode`] is hundreds
     /// of bytes), so a client pages until it holds `node_count` records,
     /// checking that `generation` stayed constant across pages and
     /// restarting the walk when the tree changed under it: no walk holds the
@@ -710,6 +711,14 @@ impl SysinfoQueryId {
     /// attached volumes these bind: the namespace is system-wide and carries
     /// no per-process secret.
     pub const VIEW_LIST: Self = Self(52);
+    /// Name the board: the `compatible` strings its firmware's device tree
+    /// states at its root, most specific first, as one
+    /// [`PlatformCompatible`]. A machine whose firmware describes no board
+    /// this way (ACPI) answers none.
+    ///
+    /// Ungated: the board's model is no secret, and every other system shows
+    /// it to every user.
+    pub const PLATFORM_COMPATIBLE: Self = Self(53);
 
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
@@ -1304,6 +1313,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::VIEW_LIST,
         name: "view_list",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::PLATFORM_COMPATIBLE,
+        name: "platform_compatible",
         required_capability: None,
         audit: false,
     },
@@ -3689,6 +3704,78 @@ impl MountRecord {
             target,
             fstype,
         })
+    }
+}
+
+/// The board's `compatible` strings, answered by
+/// [`SysinfoQueryId::PLATFORM_COMPATIBLE`]: the hardware tree root's match
+/// keys, at most [`HW_NODE_MAX_MATCH_KEYS`], each a
+/// [`HwMatchKey`] on the wire.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct PlatformCompatible {
+    keys: [Option<HwMatchKey>; HW_NODE_MAX_MATCH_KEYS],
+}
+
+impl PlatformCompatible {
+    /// The longest answer: every key a node holds.
+    pub const WIRE_MAX: usize = HW_NODE_MAX_MATCH_KEYS * HwMatchKey::WIRE_LEN;
+
+    /// The `compatible` keys `node` carries, in order.
+    #[must_use]
+    pub fn of(node: &HwNode) -> Self {
+        let mut keys = [None; HW_NODE_MAX_MATCH_KEYS];
+        let compatible = node
+            .match_keys()
+            .iter()
+            .filter(|key| key.kind() == Some(HwMatchKind::Compatible));
+        for (slot, key) in keys.iter_mut().zip(compatible) {
+            *slot = Some(*key);
+        }
+        Self { keys }
+    }
+
+    /// The strings, most specific first.
+    pub fn strings(&self) -> impl Iterator<Item = &[u8]> {
+        self.keys.iter().flatten().map(HwMatchKey::compatible_bytes)
+    }
+
+    /// Encode into `out`, answering the bytes written.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if `out` cannot hold every key.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
+        let mut written = 0;
+        for key in self.keys.iter().flatten() {
+            out.get_mut(written..written + HwMatchKey::WIRE_LEN)
+                .ok_or(Errno::BufferTooSmall)?
+                .copy_from_slice(&key.to_le_bytes());
+            written += HwMatchKey::WIRE_LEN;
+        }
+        Ok(written)
+    }
+
+    /// Decode an answer [`Self::encode`] wrote.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a length that is not a whole number of
+    /// keys or names more than a node holds, or the refusal of a key that is
+    /// not a canonical `compatible` key.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
+        let (records, trailing) = bytes.as_chunks::<{ HwMatchKey::WIRE_LEN }>();
+        if !trailing.is_empty() || records.len() > HW_NODE_MAX_MATCH_KEYS {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut keys = [None; HW_NODE_MAX_MATCH_KEYS];
+        for (slot, record) in keys.iter_mut().zip(records) {
+            let key = HwMatchKey::from_bytes(record)?;
+            if key.kind() != Some(HwMatchKind::Compatible) {
+                return Err(Errno::BadMagic);
+            }
+            *slot = Some(key);
+        }
+        Ok(Self { keys })
     }
 }
 
@@ -8313,6 +8400,43 @@ mod tests {
             CpuTimeRecord::from_bytes(&[0u8; 8]),
             Err(Errno::BufferTooSmall)
         );
+    }
+
+    #[test]
+    fn the_board_s_compatible_round_trips_and_a_malformed_answer_is_refused() {
+        use super::PlatformCompatible;
+        use crate::hwtree::{HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT, HW_NODE_ROOT_ID};
+
+        let mut root = HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root);
+        for name in [&b"raspberrypi,4-model-b"[..], b"brcm,bcm2711"] {
+            root.push_match_key(HwMatchKey::compatible(name).unwrap())
+                .unwrap();
+        }
+        root.push_match_key(HwMatchKey::virtio(1)).unwrap();
+        let board = PlatformCompatible::of(&root);
+        assert!(board
+            .strings()
+            .eq([&b"raspberrypi,4-model-b"[..], b"brcm,bcm2711"]));
+        let mut out = [0u8; PlatformCompatible::WIRE_MAX];
+        let len = board.encode(&mut out).unwrap();
+        assert_eq!(len, 2 * HwMatchKey::WIRE_LEN, "only compatible keys");
+        assert_eq!(PlatformCompatible::decode(&out[..len]), Ok(board));
+        assert_eq!(
+            PlatformCompatible::decode(&[]),
+            Ok(PlatformCompatible::default())
+        );
+        assert_eq!(
+            PlatformCompatible::decode(&out[..len - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let numeric = HwMatchKey::virtio(1).to_le_bytes();
+        assert_eq!(PlatformCompatible::decode(&numeric), Err(Errno::BadMagic));
+        let five = [0u8; 5 * HwMatchKey::WIRE_LEN];
+        assert_eq!(
+            PlatformCompatible::decode(&five),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(board.encode(&mut out[..10]), Err(Errno::BufferTooSmall));
     }
 
     #[test]

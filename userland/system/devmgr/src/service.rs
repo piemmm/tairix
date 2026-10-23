@@ -26,11 +26,13 @@
 use alloc::vec::Vec;
 use core::iter;
 
+use tairix_abi::hwtree::HW_TREE_READ_START;
 use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::waitset::WaitSourceKind;
 use tairix_abi::{Errno, HwNode, HwTreeHeader, NoticeTopic};
 use tairix_devmatch::DriverCandidate;
 use tairix_log::{log as log_event, Event, Level, Sink};
+use tairix_util::fallible::read_snapshot;
 
 use crate::audiobind::{self, AudioBaselineSource, AudioBindState, AudiodBind};
 use crate::autoload::{match_and_load, unload_vanished, AutoloadState, NodeReport};
@@ -107,66 +109,6 @@ pub const WAKE_SOURCES: [(WaitSourceKind, u64); 2] = [
 /// queues behind these milestones, so it is short.
 const DEFERRED_RETRY_NS: u64 = 250_000_000;
 
-/// Initial size of the growable hardware-tree snapshot buffer.
-///
-/// This is a *starting capacity*, never a ceiling: [`read_tree_growing`] doubles the buffer and retries whenever the
-/// kernel reports the discovered tree does not fit, so a machine whose
-/// device tree is larger than this — a real board's full firmware tree has
-/// far more nodes than QEMU `virt`'s handful — is read in full rather than
-/// failing. It is sized as a generous one-read fit for a typical discovered
-/// tree (a `HwNode` is `HwNode::WIRE_LEN` bytes), so the common case takes a
-/// single read and only an unusually large tree pays for a grow.
-const INITIAL_TREE_SNAPSHOT_BYTES: usize = 64 * 1024;
-
-/// Read the current hardware-tree snapshot into `buf`, **growing** `buf`
-/// until the whole snapshot fits.
-///
-/// `hw_tree_read` returns the entire snapshot or [`Errno::BufferTooSmall`]
-/// — it never truncates and does not report the size it
-/// needs — so a buffer too small for the discovered tree is doubled and the
-/// read retried until it fits. The hardware tree is a *discovered capacity*,
-/// not a fixed ceiling: the device manager grows before it fails, so a board with a larger tree than
-/// [`INITIAL_TREE_SNAPSHOT_BYTES`] is read in full rather than aborting the
-/// service. Genuine exhaustion still fails closed: a buffer that cannot grow
-/// is [`Errno::OutOfMemory`], and an arithmetic overflow of the doubling is
-/// [`Errno::OutOfRange`].
-///
-/// # Errors
-///
-/// Any [`Errno`] other than [`Errno::BufferTooSmall`] from
-/// [`HwTreeService::read_tree`] is propagated fail-closed; only
-/// `BufferTooSmall` triggers a grow-and-retry.
-fn read_tree_growing<T: HwTreeService>(tree: &mut T, buf: &mut Vec<u8>) -> Result<usize, Errno> {
-    loop {
-        if buf.is_empty() {
-            grow_zeroed(buf, INITIAL_TREE_SNAPSHOT_BYTES)?;
-        }
-        match tree.read_tree(buf.as_mut_slice()) {
-            Ok(len) => return Ok(len),
-            Err(Errno::BufferTooSmall) => {
-                // Double and retry. `buf` is non-empty here (resized above),
-                // so the new length is strictly larger; an overflow of the
-                // doubling fails closed rather than wrapping.
-                let grown = buf.len().checked_mul(2).ok_or(Errno::OutOfRange)?;
-                grow_zeroed(buf, grown)?;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-}
-
-/// Grow `buf` to `len` zeroed bytes.
-///
-/// # Errors
-///
-/// [`Errno::OutOfMemory`] when the buffer cannot grow; `buf` is unchanged.
-fn grow_zeroed(buf: &mut Vec<u8>, len: usize) -> Result<(), Errno> {
-    buf.try_reserve_exact(len.saturating_sub(buf.len()))
-        .map_err(|_| Errno::OutOfMemory)?;
-    buf.resize(len, 0);
-    Ok(())
-}
-
 /// (Re)fetch the catalogue while it has not yet been obtained, then read the
 /// current tree through `tree` (reporting and collecting its nodes), unload
 /// the drivers of nodes that left it, and match-and-load each node through
@@ -240,7 +182,8 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
             }
         }
     }
-    let len = read_tree_growing(tree, tree_buf)?;
+    // A tree larger than the starting buffer is read in full, never refused.
+    let len = read_snapshot(tree_buf, HW_TREE_READ_START, |buf| tree.read_tree(buf))?;
     // Decode the snapshot once: report each node and collect it (`HwNode`
     // is `Copy`), so the immutable borrow of `tree_buf` ends before the
     // match-and-load pass writes into the disjoint `reply_buf`. The decode
@@ -1658,62 +1601,12 @@ mod tests {
         fn on_node(&mut self, _node: &HwNode) {}
     }
 
-    /// A hardware-tree seam whose `read_tree` always fails with a non-
-    /// `BufferTooSmall` error — to prove [`read_tree_growing`] propagates it
-    /// fail-closed rather than looping.
-    struct ErroringTree(Errno);
-
-    impl HwTreeService for ErroringTree {
-        fn read_tree(&mut self, _buf: &mut [u8]) -> Result<usize, Errno> {
-            Err(self.0)
-        }
-
-        fn wait_for_change(&mut self, _timeout_ns: u64) -> Result<(), Errno> {
-            Ok(())
-        }
-
-        fn on_header(&mut self, _header: &HwTreeHeader) {}
-
-        fn on_node(&mut self, _node: &HwNode) {}
-    }
-
-    #[test]
-    fn read_tree_growing_grows_a_too_small_buffer_until_the_snapshot_fits() {
-        // A snapshot far larger than the buffer we start with, so the read
-        // must grow several times before it fits (grow
-        // before you fail; the tree is a discovered capacity, not a ceiling).
-        let mut nodes = vec![HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)];
-        for id in 2..50u32 {
-            nodes.push(input_node(id, HwMatchKey::virtio(id)));
-        }
-        let snapshot = encode(1, &nodes);
-        let mut tree = FixedSnapshotTree {
-            snapshot: snapshot.clone(),
-            reads: 0,
-        };
-        let mut buf = vec![0u8; 64];
-        let len = read_tree_growing(&mut tree, &mut buf).expect("the read grows to fit");
-        assert_eq!(len, snapshot.len());
-        assert!(buf.len() >= snapshot.len());
-        assert!(tree.reads > 1, "the read had to grow at least once");
-    }
-
-    #[test]
-    fn read_tree_growing_propagates_a_non_buffer_error_fail_closed() {
-        let mut tree = ErroringTree(Errno::NotImplemented);
-        let mut buf = Vec::new();
-        assert_eq!(
-            read_tree_growing(&mut tree, &mut buf),
-            Err(Errno::NotImplemented)
-        );
-    }
-
     #[test]
     fn run_reads_a_tree_larger_than_the_initial_buffer_and_loads_the_match() {
         // The metal scaling case: a real board's full firmware tree is far
         // larger than QEMU `virt`'s handful of nodes, so the service's own
         // snapshot buffer (which starts empty, sizes to
-        // `INITIAL_TREE_SNAPSHOT_BYTES`, then grows) must grow before the
+        // `HW_TREE_READ_START`, then grows) must grow before the
         // discovered tree fits — and still load the matched node, rather than
         // failing closed and being relaunched.
         let target = HwMatchKey::virtio(0x9999);
@@ -1724,7 +1617,7 @@ mod tests {
         nodes.push(input_node(900, target));
         let snapshot = encode(1, &nodes);
         assert!(
-            snapshot.len() > INITIAL_TREE_SNAPSHOT_BYTES,
+            snapshot.len() > HW_TREE_READ_START,
             "the test tree must exceed the initial buffer to exercise the grow"
         );
         let mut tree = FixedSnapshotTree { snapshot, reads: 0 };

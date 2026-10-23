@@ -47,16 +47,15 @@ use tairix_abi::driver::net_channel::{
     AttachParams, NetChannelNotify, NetChannelRequest, NETCHAN_NODE_COMPATIBLE,
     NET_CHANNEL_ENDPOINTS, NET_CHANNEL_MAX_REPLY, NET_CHANNEL_MAX_REQUEST,
 };
-use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId};
-use tairix_caps::CapabilitySet;
+use tairix_abi::{CapabilityId, Errno, HwDeviceClass, ProcId};
 use tairix_log::{log, Event, EventId, Level};
 use tairix_rt::{LogSink, ServedCall};
 
 use crate::{Drain, DrainAction, Drained, NetChannelServer};
 use tairix_drvrt::exit::{end, step, DriverExit};
+use tairix_drvrt::serve::{publish_channel, DeviceChannel};
 
 /// Diagnostic event id: the one-shot "device channel published, serving"
 /// beacon a NIC driver emits once its device is live and its endpoint is
@@ -75,6 +74,16 @@ const IRQ_TOKEN: u64 = 2;
 /// queue absorbs a doorbell racing the previous reply — a fail-closed
 /// memory bound.
 const ENDPOINT_CAPACITY: usize = 4;
+
+/// The device channel, served restricted-sender to the one holder of
+/// `CAP_NET_RAW`, the network stack.
+const CHANNEL: DeviceChannel = DeviceChannel {
+    block: NET_CHANNEL_ENDPOINTS,
+    gate: CapabilityId::NET_RAW,
+    max_request: NET_CHANNEL_MAX_REQUEST,
+    max_reply: NET_CHANNEL_MAX_REPLY,
+    capacity: ENDPOINT_CAPACITY,
+};
 
 /// Device doorbells one wake may drive before returning to the wait set.
 ///
@@ -108,7 +117,7 @@ struct Region {
 /// the driver fail-closed with its reason recorded rather than degrading
 /// into a busy re-poll.
 pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
-    let Some(endpoint) = bind_channel_endpoint() else {
+    let Some(endpoint) = CHANNEL.bind() else {
         return end(
             DriverExit::NoService,
             &[step(
@@ -116,7 +125,14 @@ pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
             )],
         );
     };
-    if emit_netchan_node(endpoint).is_none() {
+    if publish_channel(
+        HwDeviceClass::Network,
+        NETCHAN_NODE_COMPATIBLE,
+        endpoint,
+        &[],
+    )
+    .is_none()
+    {
         return end(
             DriverExit::NoService,
             &[step(
@@ -177,48 +193,6 @@ pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
     // traffic would storm a driver that can only drop it.
     let _ = server.net_mut().set_completion_interrupts(false);
     serve_loop(server, set, endpoint)
-}
-
-/// Bind the device-channel endpoint of the node this driver was loaded for,
-/// **restricted-sender requiring `CAP_NET_RAW`**, so only the network stack
-/// can post to it. `recv_caps` is empty — endpoint ownership already
-/// restricts receive to this task. [`None`] on any refusal (fail closed).
-fn bind_channel_endpoint() -> Option<u64> {
-    let id = NET_CHANNEL_ENDPOINTS.endpoint(tairix_rt::hw_self_node().ok()?.node());
-    let mut send_caps = CapabilitySet::empty();
-    send_caps.insert(CapabilityId::NET_RAW);
-    let bound = tairix_rt::call_create(
-        id,
-        &send_caps,
-        &CapabilitySet::empty(),
-        NET_CHANNEL_MAX_REQUEST,
-        NET_CHANNEL_MAX_REPLY,
-        ENDPOINT_CAPACITY,
-    );
-    (bound == 0).then_some(id)
-}
-
-/// Publish the `netchan` hardware-tree node carrying the claimed
-/// device-channel endpoint as a grant request, so `devmgr` observes it
-/// (a hardware-tree generation bump) and hands the endpoint to the network
-/// stack over the capability-gated admin surface. Returns the
-/// kernel-assigned node id, or [`None`] on any refusal.
-///
-/// The node names [`HW_NODE_ROOT`] as its parent; the kernel re-parents it
-/// under the *discovered node this driver was loaded for*, which is what
-/// lets `devmgr` recover the NIC's stable bus location from the published
-/// channel.
-fn emit_netchan_node(endpoint: u64) -> Option<u32> {
-    let mut node = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Network);
-    let key = HwMatchKey::compatible(NETCHAN_NODE_COMPATIBLE).ok()?;
-    node.push_match_key(key).ok()?;
-    node.push_resource(HwResource::endpoint(endpoint)).ok()?;
-    let emit = tairix_rt::hw_emit_node(&node);
-    if emit < 0 {
-        return None;
-    }
-    // `emit >= 0` is the kernel-assigned node id.
-    u32::try_from(emit).ok()
 }
 
 /// Park on the wait set and serve device-channel doorbells and device

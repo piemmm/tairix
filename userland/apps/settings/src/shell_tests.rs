@@ -26,6 +26,7 @@ use tairix_wallpaper::{DesktopSettings, SettingsKey};
 use crate::form::{Composition, FormPlace, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
 use crate::pictures::Chooser;
+use crate::registry::Board;
 use crate::registry::{Category, Location, Pane, PaneContent, StripRow, CATEGORIES};
 use crate::saver::SaverEntry;
 use crate::shell::{Shell, ShellOutcome};
@@ -41,7 +42,7 @@ const SSD: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata)
 const NARROW: Rect = Rect::new(0, 0, 360, 640);
 
 fn shell() -> Shell {
-    Shell::new(DesktopSettings::default()).expect("the registry holds a category")
+    Shell::new(DesktopSettings::default(), Board::default()).expect("the registry holds a category")
 }
 
 /// A shell showing a pane that states an absence, which is the body that
@@ -545,7 +546,7 @@ fn every_category_is_a_row_of_the_strip() {
         .iter()
         .filter(|row| matches!(row, StripRow::Category(_)))
         .count();
-    assert_eq!(categories, CATEGORIES.len());
+    assert_eq!(categories, shell.shown_categories().count());
 }
 
 #[test]
@@ -1112,7 +1113,7 @@ fn a_query_filters_the_strip_to_what_it_reaches() {
             .iter()
             .filter(|row| matches!(row, StripRow::Category(_)))
             .count(),
-        CATEGORIES.len()
+        shell.shown_categories().count()
     );
 }
 
@@ -1154,7 +1155,7 @@ fn the_leading_crumb_opens_the_category_list_only_once_the_strip_is_shed() {
         .iter()
         .map(MenuItem::icon)
         .collect();
-    let declared: Vec<_> = CATEGORIES.iter().map(|row| Some(row.icon)).collect();
+    let declared: Vec<_> = shell.shown_categories().map(|row| Some(row.icon)).collect();
     assert_eq!(shown, declared, "each row shows its category's own picture");
 
     let mut sink = damage();
@@ -1617,7 +1618,7 @@ fn an_off_ladder_interval_is_offered_as_itself() {
         double_click: tairix_abi::time::Duration64::from_millis(450),
         ..tairix_wallpaper::DesktopSettings::default()
     };
-    let mut shell = Shell::new(settings).expect("a shell");
+    let mut shell = Shell::new(settings, Board::default()).expect("a shell");
     let theme = theme();
     let mut sink = damage();
     shell.go_to_for_test(
@@ -1650,7 +1651,7 @@ fn leaving_an_off_ladder_value_restates_the_row_it_was_a_stop_of() {
         double_click: tairix_abi::time::Duration64::from_millis(450),
         ..tairix_wallpaper::DesktopSettings::default()
     };
-    let mut shell = Shell::new(settings).expect("a shell");
+    let mut shell = Shell::new(settings, Board::default()).expect("a shell");
     let theme = theme();
     let mut sink = damage();
     shell.go_to_for_test(
@@ -1766,7 +1767,7 @@ fn the_display_off_row_counts_in_minutes_and_hours() {
         display_off_after: tairix_wallpaper::DisplayOffAfter::Minutes(90),
         ..tairix_wallpaper::DesktopSettings::default()
     };
-    let mut shell = Shell::new(settings).expect("a shell");
+    let mut shell = Shell::new(settings, Board::default()).expect("a shell");
     let theme = theme();
     let mut sink = damage();
     shell.go_to_for_test(
@@ -2145,7 +2146,7 @@ fn the_rows_show_what_the_desktop_holds_not_the_defaults() {
         contrast: Contrast::Monochrome,
         ..DesktopSettings::default()
     };
-    let mut shell = Shell::new(settings.clone()).expect("a registry");
+    let mut shell = Shell::new(settings.clone(), Board::default()).expect("a registry");
     let theme = theme();
     let mut sink = damage();
     shell.go_to_for_test(
@@ -2517,7 +2518,7 @@ fn a_stored_text_choice_off_the_offered_lists_is_kept() {
     let gone = tairix_theme::FamilyKey::new("gone-family").expect("a family key");
     settings.text_family = tairix_wallpaper::TextFamily::Named(gone);
     settings.text_size = tairix_wallpaper::TextSize::Points(15);
-    let mut shell = Shell::new(settings).expect("a registry");
+    let mut shell = Shell::new(settings, Board::default()).expect("a registry");
     let mut sink = damage();
     assert!(shell.go_to_pane("appearance", WIDE, Scale::ONE, &theme(), &mut sink));
     shell.adopt_text_choices(font_store(), *theme().fonts());
@@ -4087,7 +4088,7 @@ fn choosing(choice: &str) -> DesktopSettings {
 /// The Screensaver pane showing `settings` over the desktop's [`savers`],
 /// laid out for [`WIDE`].
 fn screensaver_showing(settings: DesktopSettings) -> Shell {
-    let mut shell = Shell::new(settings).expect("a shell");
+    let mut shell = Shell::new(settings, Board::default()).expect("a shell");
     let mut sink = damage();
     assert!(shell.go_to_pane("screensaver", WIDE, Scale::ONE, &theme(), &mut sink));
     shell.adopt_savers(Some(savers()));
@@ -4100,7 +4101,7 @@ fn screensaver_showing(settings: DesktopSettings) -> Shell {
 /// lands is not asked for twice.
 #[test]
 fn the_screensavers_are_asked_for_when_their_pane_shows_and_on_focus() {
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a shell");
+    let mut shell = Shell::new(DesktopSettings::default(), Board::default()).expect("a shell");
     assert!(!shell.savers_wanted(), "not before the pane shows");
     shell.focused();
     assert!(!shell.savers_wanted(), "nor on focus elsewhere");
@@ -4478,10 +4479,13 @@ fn a_second_choice_after_leaving_a_picture_the_catalog_lacks_sets_the_one_shown(
         "Nature", "gone.jpg",
     ))
     .expect("a path");
-    let mut shell = Shell::new(DesktopSettings {
-        wallpaper: tairix_wallpaper::WallpaperChoice::Image(gone),
-        ..DesktopSettings::default()
-    })
+    let mut shell = Shell::new(
+        DesktopSettings {
+            wallpaper: tairix_wallpaper::WallpaperChoice::Image(gone),
+            ..DesktopSettings::default()
+        },
+        Board::default(),
+    )
     .expect("a shell");
     let mut sink = damage();
     assert!(shell.go_to_pane("wallpaper", WIDE, Scale::ONE, &theme(), &mut sink));

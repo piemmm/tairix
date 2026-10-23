@@ -796,6 +796,21 @@ impl CapabilityId {
     /// to the login policy or the clock must not be able to.
     pub const SETTINGS_WRITE: Self = Self(51);
 
+    /// Drive the GPIO lines a board lends to system services through its
+    /// expansion header: claim one as an output and switch it.
+    ///
+    /// A controller's driver binds its header endpoint
+    /// ([`crate::driver::gpio::GPIO_HEADER_ENDPOINTS`]) as a restricted-sender
+    /// endpoint requiring this capability, so the kernel refuses a call from a
+    /// task that does not hold it. It guards every lent line of every header:
+    /// whatever is wired to the board, a fan, a relay or a light, is switched
+    /// by its holder. The cooling service holds it to switch the CPU fan.
+    ///
+    /// Not covered by an existing capability: `CAP_MMIO_MAP` maps a device's
+    /// registers whole, which no service switching one line must be granted,
+    /// and `CAP_SYSINFO_HW` only reads.
+    pub const GPIO: Self = Self(52);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -857,6 +872,7 @@ impl CapabilityId {
         (Self::AUDIO_CAPTURE, "CAP_AUDIO_CAPTURE"),
         (Self::NET_DISCOVER_ALL, "CAP_NET_DISCOVER_ALL"),
         (Self::SETTINGS_WRITE, "CAP_SETTINGS_WRITE"),
+        (Self::GPIO, "CAP_GPIO"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -1004,6 +1020,7 @@ mod tests {
         assert_eq!(CapabilityId::AUDIO_CAPTURE.as_u16(), 49);
         assert_eq!(CapabilityId::NET_DISCOVER_ALL.as_u16(), 50);
         assert_eq!(CapabilityId::SETTINGS_WRITE.as_u16(), 51);
+        assert_eq!(CapabilityId::GPIO.as_u16(), 52);
     }
 
     #[test]
@@ -1055,6 +1072,7 @@ mod tests {
             CapabilityId::SETTINGS_WRITE.name(),
             Some("CAP_SETTINGS_WRITE")
         );
+        assert_eq!(CapabilityId::GPIO.name(), Some("CAP_GPIO"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -1065,15 +1083,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=51 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=52 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=51 {
+        for raw in 1..=52 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(52).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(53).expect("in range").name(), None);
     }
 
     #[test]
