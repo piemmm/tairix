@@ -931,7 +931,11 @@ where its pixels go:
   `frame::Scanout` lays it over the ribbon one scanline at a time through
   `lib/raster`'s one span composite, then applies the veil and samples the
   pointer. So a frame of the ribbon re-composes the pixels it moved and
-  never paints the column, and a keystroke never paints the ribbon.
+  never paints the column, and a keystroke never paints the ribbon. The
+  ribbon's paint and the compose share a pool of a thread per online core:
+  the compose in bands of rows, each with a scanline of its own and covering
+  its rows of every owed rectangle, and a wholly clear run of the surface is
+  encoded straight from the scene.
 - **Kept clear of the column.** The ribbon's clear space is
   `AuthSurface::column_rect` (G2.1), stable across every stage, so the
   ribbon runs beneath the login column as it runs beneath the screensaver's

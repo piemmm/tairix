@@ -352,8 +352,9 @@ fn a_display_replayed_in_bands_draws_what_it_draws_whole() {
     let mut one = Surface::new(SCREEN.0, SCREEN.1).expect("a surface");
     display.replay(&mut one, &(0..SCREEN.1), &mut ScanScratch::new());
     let mut banded = Surface::new(SCREEN.0, SCREEN.1).expect("a surface");
-    let mut scratch: Vec<ScanScratch> = (0..8).map(|_| ScanScratch::new()).collect();
     let runner = Reversed::new(8);
+    let mut scratch = tairix_raster::BandScratch::new();
+    scratch.spread_over(&runner);
     draw_craft(&mut banded, &runner, &display, &mut scratch);
     assert_eq!(banded, one);
     assert!(runner.widest() > 1, "the work was split");

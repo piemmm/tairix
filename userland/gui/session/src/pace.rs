@@ -109,6 +109,17 @@ impl FramePacer {
         true
     }
 
+    /// Hold `damaged` work laid after this wake's frame was decided — a frame
+    /// laid once the last reached the display, the minute turning — so the
+    /// park wakes for it as for a frame [`admit`](Self::admit) held: at the
+    /// next period, or at the latch of a display not `ready`.
+    pub fn hold(&mut self, damaged: bool, ready: bool) {
+        if damaged && !self.held {
+            self.held = true;
+            self.for_flip = !ready;
+        }
+    }
+
     /// Note how the display took the frame last admitted: `queued` for one
     /// it shows from its next flip, which paces the frames from then on.
     pub fn presented(&mut self, queued: bool) {

@@ -1840,15 +1840,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             surface.width_px,
             surface.height_px,
             |content, changed| {
-                winframe::decode_list(
-                    frame,
-                    content,
-                    surface,
-                    damage,
-                    winframe::Alpha::AsSent,
-                    runner,
-                    |rect| changed.add(rect),
-                )
+                winframe::decode_list(frame, content, surface, damage, runner, |rect| {
+                    changed.add(rect);
+                })
             },
         ) else {
             return Err(Errno::NotFound);

@@ -1639,14 +1639,7 @@ impl Shell {
     /// No answer moves the strip, the search field or the trail.
     #[must_use]
     pub fn pane_region(&self, viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
-        let content = self.frame(viewport, scale, theme).content;
-        let span = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).unwrap_or(0);
-        Rect::new(
-            content.left(),
-            content.top(),
-            span(content.left(), viewport.right()),
-            span(content.top(), viewport.bottom()),
-        )
+        pane_reach(&self.frame(viewport, scale, theme), viewport)
     }
 
     /// Measure the pane for `viewport`, adopt the scroll range it implies, and
@@ -2884,9 +2877,9 @@ impl Shell {
     /// Show `location`: its category's panes listed, the strip restated, the
     /// trail rewritten, the pane re-measured, and its scroll reset to the top.
     ///
-    /// The whole pane band is reported rather than the column alone, because a
-    /// pane of a different height may have gained or lost the scrollbar
-    /// beside it.
+    /// The column is reported down to the window's foot, because the pane
+    /// shown may have gained or lost the scrollbar beside it or the action
+    /// band beneath it.
     fn show(
         &mut self,
         location: Location,
@@ -2904,7 +2897,7 @@ impl Shell {
         self.measure_pane(viewport, scale, theme);
         self.restate_strip(None, viewport, scale, theme, damage);
         damage.add(frame.breadcrumb);
-        damage.add(pane_band(&frame, viewport));
+        damage.add(pane_reach(&frame, viewport));
     }
 
     /// Rebuild the strip from the registry for the sections open and the
@@ -3526,6 +3519,20 @@ fn outcome_of(acted: FormOutcome) -> ShellOutcome {
         },
         FormOutcome::Effects { ask: Some(ask), .. } => ShellOutcome::Effects(ask),
     }
+}
+
+/// A pane's column and everything beside and beneath it down to the window's
+/// foot: its scrollbar and its action band. The column's left and top edges
+/// hold whatever the pane, so one frame's answer covers another pane's too.
+fn pane_reach(frame: &ShellFrame, viewport: Rect) -> Rect {
+    let content = frame.content;
+    let span = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).unwrap_or(0);
+    Rect::new(
+        content.left(),
+        content.top(),
+        span(content.left(), viewport.right()),
+        span(content.top(), viewport.bottom()),
+    )
 }
 
 /// The band a pane occupies: its column and whatever the scrollbar takes

@@ -21,6 +21,8 @@ path = "src/run.rs"
 [dependencies]
 tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 tairix-geometry = { path = "../../../../lib/geometry", version = "=0.0.0" }
+# The pool a frame's streaks are drawn across.
+tairix-parallel = { path = "../../../../lib/parallel", version = "=0.0.0" }
 tairix-raster = { path = "../../../../lib/raster", version = "=0.0.0" }
 tairix-rng = { path = "../../../../lib/rng", version = "=0.0.0" }
 tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0" }
@@ -37,6 +39,8 @@ tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0", features = 
 
 [dev-dependencies]
 tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0", features = ["test-support"] }
+# The order-shuffling runner a banded frame is proven bit-identical through.
+tairix-parallel = { path = "../../../../lib/parallel", version = "=0.0.0", features = ["test-util"] }
 
 [lints]
 workspace = true

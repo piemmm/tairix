@@ -1119,7 +1119,7 @@ fn rendered_frame(frame: &WindowFrame, theme: &Theme, (w, h): (u32, u32)) -> Sur
 /// from the shared wash rather than restated.
 fn bevelled(under: Rgba, wash: Rgba, (w, h): (u32, u32), (x, y): (u32, u32)) -> Option<Pixel> {
     let mut surface = Surface::filled(w, h, premul(under)).expect("surface");
-    surface.wash_region(x, y, 1, 1, Color::from(wash), |_, _| u8::MAX);
+    surface.wash_region(x, y, 1, 1, Color::from(wash), |_, _, row| row.fill(u8::MAX));
     surface.get(x, y)
 }
 

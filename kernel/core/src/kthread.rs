@@ -64,8 +64,10 @@ use alloc::sync::Arc;
 use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::Ordering;
 
-use tairix_arch_api::{ContextSwitch, KernelStackRegion, TaskContext, STACK_ALIGN};
-use tairix_kernel_mem::LiveUserSpace;
+use tairix_arch_api::{
+    AddressTag, AddressTags, ContextSwitch, KernelStackRegion, TaskContext, STACK_ALIGN,
+};
+use tairix_kernel_mem::{LiveUserSpace, TlbContext};
 use tairix_kernel_sched_api::{
     CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerPolicy, TaskAction, TaskId,
 };
@@ -764,7 +766,7 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
 /// stack can repoint its per-CPU entry stack at it before the switch-in.
 /// aarch64 reuses `SP_EL1` implicitly and ignores the argument; x86_64
 /// uses it to set the per-CPU `SyscallTls.kernel_rsp0` (`plans/PI.md` §X).
-type PreResume = Box<dyn FnMut(u64) + Send + 'static>;
+type PreResume = Box<dyn FnMut(u64, AddressTag) + Send + 'static>;
 
 /// A deposited request to upgrade a currently kernel-form **loading** task
 /// into a user task on its next dispatch step (`plans/FIX-DESKTOP.md`
@@ -994,7 +996,7 @@ where
     C: ContextSwitch + Copy + Send + 'static,
     A: SchedulerArch,
     P: SchedulerPolicy<A>,
-    R: FnMut(u64) + Send + 'static,
+    R: FnMut(u64, AddressTag) + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
     let stack = BoxStack::new().ok_or(SchedError::OutOfMemory)?;
@@ -1040,7 +1042,7 @@ where
     A: SchedulerArch,
     P: SchedulerPolicy<A>,
     S: KernelStack + Send + 'static,
-    R: FnMut(u64) + Send + 'static,
+    R: FnMut(u64, AddressTag) + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
     spawn_control(
@@ -1094,7 +1096,7 @@ where
     A: SchedulerArch,
     P: SchedulerPolicy<A>,
     S: KernelStack + Send + 'static,
-    R: FnMut(u64) + Send + 'static,
+    R: FnMut(u64, AddressTag) + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
     spawn_control(
@@ -1333,18 +1335,15 @@ where
         // repoints its per-CPU entry stack at this before the switch-in
         // (`plans/PI.md` §X). SAFETY: exclusive dispatcher-side access.
         let stack_top = unsafe { (*ctl).stack.top() };
-        // Recorded before the hook loads the root: an unmap that reads the
-        // set after clearing an entry then either reaches this CPU or this
-        // CPU walks the cleared entry. SAFETY: exclusive dispatcher-side
-        // access to `*ctl`.
-        if let Some(live) = unsafe { (*ctl).live.as_ref() } {
-            live.active_cpus().enter(cpu);
-        }
+        // SAFETY: exclusive dispatcher-side access to `*ctl`.
+        let context = unsafe { (*ctl).live.as_ref() }.map(|live| live.tlb_context());
+        let tag = switch_in_tag(cpu, context);
         // SAFETY: `pre_resume` is `Some`; the field is exclusively ours
         // between switches, so the `&mut` borrow does not alias.
         if let Some(pre) = unsafe { (*ctl).pre_resume.as_mut() } {
-            pre(stack_top);
+            pre(stack_top, tag);
         }
+        recheck_switch_in(cpu, tag, context);
         publish_live_space::<C, S>(cpu, block);
     }
     // Every kthread can suspend itself — a user one from its trap path, any
@@ -1428,12 +1427,12 @@ where
         // permanent boot root; the next user resume reprograms the root
         // anyway, so no extra work lands on the resume path.
         //
-        // Leaving the root discarded the space's translations here, so the
-        // CPU leaves its set; one still on the root keeps its place.
+        // A CPU off the root runs the space no more, so it leaves the set;
+        // one still on the root keeps its place.
         // SAFETY: exclusive dispatcher-side access to `*ctl`.
-        let left = matches!(PARK_TRANSLATION.get(), Ok(Some(park)) if park());
+        let left = park_translation(cpu);
         if let Some(live) = unsafe { (*ctl).live.as_ref() }.filter(|_| left) {
-            live.active_cpus().leave(cpu);
+            live.tlb_context().leave(cpu);
         }
     }
 
@@ -1455,20 +1454,97 @@ where
     unsafe { (*ctl).action }
 }
 
-/// The port's park-translation hook: re-installs the permanent boot
-/// kernel root on the calling CPU, so no user space's root stays active
-/// after its task suspends (see the [`dispatch_step`] call site).
-/// Installed set-once by [`crate::kernel_main`] from
-/// [`crate::bootinfo::KernelArch::park_translation`]; absent (the host
-/// test arch, a port with no user address spaces) the dispatcher skips
-/// the park and teardown relies on the port's own defensive re-park.
-static PARK_TRANSLATION: OnceCell<fn() -> bool> = OnceCell::new();
+/// The port's address-space tags, which load the park root and discard a
+/// tag's entries (see the [`dispatch_step`] call sites). Installed set-once
+/// by [`crate::kernel_main`] from
+/// [`crate::bootinfo::KernelArch::address_tags`]; absent (the host test arch,
+/// a port with no user address spaces) every user root is loaded untagged
+/// and the dispatcher skips the park, so teardown relies on the port's own
+/// defensive re-park.
+static ADDRESS_TAGS: OnceCell<&'static dyn AddressTags> = OnceCell::new();
 
-/// Install the port's park-translation hook (set-once; a later call
-/// changes nothing — one boot installs one hook). It reports whether the
-/// CPU left the user root.
-pub fn install_park_translation(park: fn() -> bool) {
-    let _ = PARK_TRANSLATION.set(park);
+/// Install the port's address-space tags (set-once; a later call changes
+/// nothing — one boot installs one port).
+pub fn install_address_tags(tags: &'static dyn AddressTags) {
+    let _ = ADDRESS_TAGS.set(tags);
+}
+
+/// The port's tags, once installed.
+fn address_tags() -> Option<&'static dyn AddressTags> {
+    ADDRESS_TAGS.get().ok().flatten().copied()
+}
+
+/// Enter `cpu` into the set of the space it is about to run, with standing
+/// `context`, and choose the tag its root is loaded under there.
+///
+/// Entered before the tag is chosen, so an unmap that advances the space's
+/// generation and then reads the set either reaches this CPU or this CPU
+/// reads the advance.
+fn switch_in_tag(cpu: CpuId, context: Option<&TlbContext>) -> AddressTag {
+    if let Some(context) = context {
+        context.enter(cpu);
+    }
+    let Some(state) = cpu_state::get(cpu) else {
+        return AddressTag::UNTAGGED;
+    };
+    let mut slots = state.tags.lock();
+    match (context, address_tags()) {
+        (Some(context), Some(tags)) => slots.tag(context, tags),
+        _ => slots.untagged(),
+    }
+}
+
+/// Discard `tag`'s entries again when an invalidation raced the switch that
+/// just loaded it, and may have reached `cpu` only under the tag it left.
+fn recheck_switch_in(cpu: CpuId, tag: AddressTag, context: Option<&TlbContext>) {
+    let (Some(context), Some(tags), Some(state)) = (context, address_tags(), cpu_state::get(cpu))
+    else {
+        return;
+    };
+    if state.tags.lock().recheck(tag, context, tags) {
+        // SAFETY: the dispatcher's context in kernel mode, with the root just
+        // loaded under `tag`.
+        unsafe { tags.flush_current_tag() };
+    }
+}
+
+/// Park `cpu`'s translation on the park root, discarding its tag first only
+/// when it went stale, and answer whether the CPU left the user root.
+fn park_translation(cpu: CpuId) -> bool {
+    let Some(tags) = address_tags() else {
+        return false;
+    };
+    let Some(state) = cpu_state::get(cpu) else {
+        // SAFETY: the dispatcher's context in kernel mode.
+        return unsafe { tags.park(true) };
+    };
+    let mut slots = state.tags.lock();
+    let flush = slots.park(tags);
+    // SAFETY: the dispatcher's context in kernel mode.
+    if !unsafe { tags.park(flush) } {
+        slots.park_refused(flush);
+        return false;
+    }
+    if slots.recheck_park(tags) {
+        // SAFETY: as above, with the park root just loaded.
+        unsafe { tags.flush_current_tag() };
+    }
+    true
+}
+
+/// The calling CPU cleared and discarded entries of the space `context`
+/// stands for, advancing its generation from `from`: while the space's root is
+/// loaded there, the discard reached the space's own tag, which therefore
+/// stays current.
+pub(crate) fn credit_own_flush(context: &TlbContext, from: u64) {
+    let (Some(tags), Some(cpu)) = (address_tags(), crate::preempt::current_cpu()) else {
+        return;
+    };
+    // Held only by this CPU's own dispatcher; a CPU that interrupted itself
+    // there earns no credit, and is left to discard on its return.
+    if let Some(mut slots) = cpu_state::get(cpu).and_then(|state| state.tags.try_lock()) {
+        slots.credit(context, from, tags);
+    }
 }
 
 /// Publish the per-CPU resume handle for the kthread `block`, about to be
@@ -1836,6 +1912,9 @@ mod tests {
         /// Once set, the next switch into a task parks it through the
         /// observed CPU's published handle, as its own control flow would.
         park_on_switch: AtomicBool,
+        /// Once set, the next switch into a task runs this as the task's
+        /// body would, with its root loaded.
+        during_switch: tairix_sync::SpinLock<Option<Box<dyn FnOnce() + Send>>>,
         /// The observed CPU's kernel-activity crumb at switch time.
         #[cfg(feature = "watchdog-diagnostics")]
         crumb_during_switch: core::sync::atomic::AtomicU8,
@@ -1857,6 +1936,7 @@ mod tests {
                 published_during_switch: AtomicBool::new(false),
                 gate_during_switch: AtomicBool::new(false),
                 park_on_switch: AtomicBool::new(false),
+                during_switch: tairix_sync::SpinLock::new(None),
                 #[cfg(feature = "watchdog-diagnostics")]
                 crumb_during_switch: core::sync::atomic::AtomicU8::new(u8::MAX),
             }
@@ -1911,6 +1991,10 @@ mod tests {
                 self.0
                     .crumb_during_switch
                     .store(state.kbc_site.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+            let body = self.0.during_switch.lock().take();
+            if let Some(body) = body {
+                body();
             }
             if self.0.park_on_switch.swap(false, Ordering::SeqCst) {
                 let cpu = self.0.observed_cpu.load(Ordering::SeqCst);
@@ -2014,7 +2098,7 @@ mod tests {
             state: RunState::NotStarted,
             stack,
             work: Some(Box::new(|_y: &mut Yielder<C>| {})),
-            pre_resume: Some(Box::new(move |_stack_top: u64| {
+            pre_resume: Some(Box::new(move |_stack_top: u64, _tag: AddressTag| {
                 hits.fetch_add(1, Ordering::SeqCst);
             })),
             live: None,
@@ -2542,7 +2626,7 @@ mod tests {
 
         // Deposit the upgrade exactly as `Yielder::become_user` would.
         control.pending_upgrade = Some(UserUpgrade {
-            pre_resume: Box::new(move |_stack_top: u64| {
+            pre_resume: Box::new(move |_stack_top: u64, _tag: AddressTag| {
                 hits.fetch_add(1, Ordering::SeqCst);
             }),
             live: None,
@@ -2668,7 +2752,7 @@ mod tests {
     fn only_a_thread_that_entered_user_mode_suspends_through_the_entry_bracket() {
         let rec = recorder!();
         let cpu = crate::test_boot::claim_cpu();
-        install_park_translation(count_park);
+        install_address_tags(&COUNTING_TAGS);
         rec.observed_cpu.store(cpu, Ordering::SeqCst);
 
         let mut kernel = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
@@ -2702,20 +2786,43 @@ mod tests {
 
     std::thread_local! {
         static PARKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+        static DISCARDS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     }
 
-    /// The park hook every test installs. The slot is process-global and
-    /// set-once, so whichever test installs first installs this; the count is
-    /// thread-local, so each test sees only its own steps' parks.
-    fn count_park() -> bool {
-        PARKS.with(|parks| parks.set(parks.get() + 1));
-        true
+    /// The port tags every test installs. The slot is process-global and
+    /// set-once, so whichever test installs first installs these; the park and
+    /// discard counts are thread-local, so each test sees only its own steps'.
+    struct CountingTags;
+
+    impl AddressTags for CountingTags {
+        fn user_tags(&self) -> u16 {
+            8
+        }
+
+        fn root_register(&self, root_phys: u64, tag: u16) -> u64 {
+            root_phys | u64::from(tag)
+        }
+
+        fn invalidation_reaches_every_tag(&self) -> bool {
+            false
+        }
+
+        unsafe fn flush_current_tag(&self) {
+            DISCARDS.with(|discards| discards.set(discards.get() + 1));
+        }
+
+        unsafe fn park(&self, _flush: bool) -> bool {
+            PARKS.with(|parks| parks.set(parks.get() + 1));
+            true
+        }
     }
+
+    static COUNTING_TAGS: CountingTags = CountingTags;
 
     #[test]
     fn a_user_task_holds_its_cpu_in_its_spaces_set_from_before_its_root_loads_until_it_parks() {
         let cpu = crate::test_boot::claim_cpu();
-        install_park_translation(count_park);
+        install_address_tags(&COUNTING_TAGS);
 
         let space = Arc::new(crate::procspace::ProcessSpace::for_test(
             crate::procspace::host_test_space!(),
@@ -2728,8 +2835,8 @@ mod tests {
             pre_resume_counter!(),
         );
         let (seen, watched) = (Arc::clone(&joined), Arc::clone(&space));
-        user.pre_resume = Some(Box::new(move |_stack_top: u64| {
-            seen.store(!watched.active_cpus().is_idle(), Ordering::SeqCst);
+        user.pre_resume = Some(Box::new(move |_stack_top: u64, _tag: AddressTag| {
+            seen.store(!watched.tlb_context().is_idle(), Ordering::SeqCst);
         }));
         user.live = Some(Arc::clone(&space));
 
@@ -2739,9 +2846,168 @@ mod tests {
             "the CPU joined the set before the hook loaded the space's root"
         );
         assert!(
-            space.active_cpus().is_idle(),
+            space.tlb_context().is_idle(),
             "and left it once parked off that root"
         );
+    }
+
+    /// A thread's space is loaded under the tag its CPU gave it: discarded
+    /// the first time, kept on the next switch in, and discarded again once
+    /// an unmap advanced the space's generation while the CPU was away.
+    #[test]
+    fn a_space_runs_under_its_own_tag_and_keeps_its_entries_across_switches() {
+        let cpu = crate::test_boot::claim_cpu();
+        install_address_tags(&COUNTING_TAGS);
+        let space = Arc::new(crate::procspace::ProcessSpace::for_test(
+            crate::procspace::host_test_space!(),
+        ));
+        let loaded = Arc::new(tairix_sync::SpinLock::new(alloc::vec::Vec::new()));
+        let rec = recorder!();
+        let mut user = user_control_with(
+            RecordingCs(rec),
+            BoxStack::new().expect("stack allocates"),
+            pre_resume_counter!(),
+        );
+        let record = Arc::clone(&loaded);
+        user.pre_resume = Some(Box::new(move |_stack_top: u64, tag: AddressTag| {
+            record.lock().push(tag);
+        }));
+        user.live = Some(Arc::clone(&space));
+        let _ = dispatch_step(&mut user, cpu);
+        let _ = dispatch_step(&mut user, cpu);
+        let page = space
+            .with(|live| live.reserve_anonymous(1))
+            .expect("a page reserves");
+        space
+            .with(|live| live.map_anonymous(page, 1))
+            .expect("the page maps");
+        space
+            .with(|live| live.unmap_anonymous(page, 1, &mut tairix_kernel_mem::Unpublished))
+            .expect("the page unmaps");
+        let _ = dispatch_step(&mut user, cpu);
+        let tag = loaded
+            .lock()
+            .first()
+            .map(|tag| tag.tag)
+            .expect("a tag was loaded");
+        assert_ne!(tag, 0, "a user space never shares the park root's tag");
+        assert_eq!(
+            *loaded.lock(),
+            [
+                AddressTag { tag, flush: true },
+                AddressTag { tag, flush: false },
+                AddressTag { tag, flush: true },
+            ]
+        );
+    }
+
+    /// A user thread over a space with one page mapped, recording the tag
+    /// each switch loads its root under.
+    struct TaggedThread {
+        cpu: CpuId,
+        space: Arc<crate::procspace::ProcessSpace>,
+        page: u64,
+        loaded: Arc<tairix_sync::SpinLock<alloc::vec::Vec<AddressTag>>>,
+        user: Box<ThreadControl<RecordingCs, BoxStack>>,
+        rec: &'static Recorder,
+    }
+
+    impl TaggedThread {
+        fn new(rec: &'static Recorder) -> Self {
+            let cpu = crate::test_boot::claim_cpu();
+            crate::test_boot::run_claim_on(cpu);
+            install_address_tags(&COUNTING_TAGS);
+            let space = Arc::new(crate::procspace::ProcessSpace::for_test(
+                crate::procspace::host_test_space!(),
+            ));
+            let page = space
+                .with(|live| live.reserve_anonymous(1))
+                .expect("a page reserves");
+            space
+                .with(|live| live.map_anonymous(page, 1))
+                .expect("the page maps");
+            let loaded = Arc::new(tairix_sync::SpinLock::new(alloc::vec::Vec::new()));
+            let mut user = user_control_with(
+                RecordingCs(rec),
+                BoxStack::new().expect("stack allocates"),
+                pre_resume_counter!(),
+            );
+            let record = Arc::clone(&loaded);
+            user.pre_resume = Some(Box::new(move |_stack_top: u64, tag: AddressTag| {
+                record.lock().push(tag);
+            }));
+            user.live = Some(Arc::clone(&space));
+            Self {
+                cpu,
+                space,
+                page,
+                loaded,
+                user,
+                rec,
+            }
+        }
+
+        /// The thread's own unmap of its page.
+        fn unmap(&self) -> impl FnOnce() + Send + 'static {
+            let (space, page) = (Arc::clone(&self.space), self.page);
+            move || {
+                space
+                    .with(|live| live.unmap_anonymous(page, 1, &mut tairix_kernel_mem::Unpublished))
+                    .expect("the page unmaps");
+            }
+        }
+
+        fn step(&mut self) {
+            let _ = dispatch_step(&mut self.user, self.cpu);
+        }
+
+        /// The tag of every switch so far, all of them one tag.
+        fn loads(&self) -> alloc::vec::Vec<bool> {
+            let loaded = self.loaded.lock();
+            let tag = loaded.first().map(|tag| tag.tag).expect("a tag was loaded");
+            assert!(loaded.iter().all(|load| load.tag == tag), "{loaded:?}");
+            loaded.iter().map(|load| load.flush).collect()
+        }
+    }
+
+    fn discards() -> usize {
+        DISCARDS.with(core::cell::Cell::get)
+    }
+
+    /// A CPU that unmaps part of the space it runs discards the entries itself,
+    /// under the space's own tag, so the next switch in keeps the tag.
+    #[test]
+    fn a_cpu_that_unmaps_the_space_it_runs_keeps_its_tag() {
+        let _ = crate::test_boot::claim_scheduler();
+        let mut thread = TaggedThread::new(recorder!());
+        *thread.rec.during_switch.lock() = Some(Box::new(thread.unmap()));
+        let before = discards();
+        thread.step();
+        thread.step();
+        assert_eq!(discards(), before, "no switch owed a second discard");
+        assert_eq!(thread.loads(), [true, false]);
+    }
+
+    /// An unmap the CPU makes once it has entered the space's set but before
+    /// the space's root is loaded discards under the tag it left: the recheck
+    /// after the load discards the space's tag itself.
+    #[test]
+    fn an_unmap_before_the_root_is_loaded_earns_no_credit() {
+        let _ = crate::test_boot::claim_scheduler();
+        let mut thread = TaggedThread::new(recorder!());
+        let (mut unmap, record) = (Some(thread.unmap()), Arc::clone(&thread.loaded));
+        thread.user.pre_resume = Some(Box::new(move |_stack_top: u64, tag: AddressTag| {
+            if let Some(unmap) = unmap.take() {
+                unmap();
+            }
+            record.lock().push(tag);
+        }));
+        let before = discards();
+        thread.step();
+        assert_eq!(discards(), before + 1, "the recheck discarded the tag");
+        thread.step();
+        assert_eq!(discards(), before + 1, "and the next switch kept it");
+        assert_eq!(thread.loads(), [true, false]);
     }
 
     #[test]
@@ -2750,7 +3016,7 @@ mod tests {
         // dispatcher re-parks the CPU's translation (so a dead task's
         // page-table teardown can never free a root a CPU still walks); a
         // kernel kthread's step, which activated no user root, does not.
-        install_park_translation(count_park);
+        install_address_tags(&COUNTING_TAGS);
 
         let rec = recorder!();
         let hits = pre_resume_counter!();

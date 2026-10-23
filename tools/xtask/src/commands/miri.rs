@@ -65,14 +65,15 @@ pub enum Scope {
         /// it.
         reason: &'static str,
     },
-    /// The crate's `--lib` tests within `module` alone, for the reason
-    /// carried here: a crate whose `unsafe` the compiler confines to that
-    /// module, whose own tests drive all of it.
-    LibModule {
-        /// The libtest filter naming the module, `path::` and all.
-        module: &'static str,
+    /// The crate's `--lib` tests within `modules` alone, for the reason
+    /// carried here: a crate whose `unsafe` the compiler confines to those
+    /// modules, whose own tests drive all of it.
+    LibModules {
+        /// The libtest filters naming the modules, `path::` and all; a test
+        /// any of them matches runs.
+        modules: &'static [&'static str],
         /// Why the rest of the library tells the interpreter nothing the
-        /// module's own tests do not.
+        /// modules' own tests do not.
         reason: &'static str,
     },
     /// The crate's integration test `name` alone (`--test <name>`), for the
@@ -101,7 +102,7 @@ impl Scope {
     const fn binary(self) -> Option<&'static str> {
         match self {
             Self::AllTargets => None,
-            Self::LibOnly(_) | Self::LibExcept { .. } | Self::LibModule { .. } => Some("lib"),
+            Self::LibOnly(_) | Self::LibExcept { .. } | Self::LibModules { .. } => Some("lib"),
             Self::Test { name, .. } => Some(name),
         }
     }
@@ -109,25 +110,25 @@ impl Scope {
     /// The libtest `--skip` patterns this scope excludes.
     const fn skip_patterns(self) -> &'static [&'static str] {
         match self {
-            Self::AllTargets | Self::LibOnly(_) | Self::LibModule { .. } | Self::Test { .. } => &[],
+            Self::AllTargets | Self::LibOnly(_) | Self::LibModules { .. } | Self::Test { .. } => {
+                &[]
+            }
             Self::LibExcept { skip, .. } => skip,
         }
     }
 
-    /// The libtest filter this scope runs within, if any.
-    const fn filter(self) -> Option<&'static str> {
+    /// The libtest filters this scope runs within, none for every test.
+    const fn filters(self) -> &'static [&'static str] {
         match self {
-            Self::LibModule { module, .. } => Some(module),
-            Self::AllTargets | Self::LibOnly(_) | Self::LibExcept { .. } | Self::Test { .. } => {
-                None
-            }
+            Self::LibModules { modules, .. } => modules,
+            Self::AllTargets | Self::LibOnly(_) | Self::LibExcept { .. } | Self::Test { .. } => &[],
         }
     }
 
     /// The arguments the test binary is handed: the scope's filter, then its
     /// exclusions.
     fn harness_args(self) -> Vec<&'static str> {
-        let mut args: Vec<&'static str> = self.filter().into_iter().collect();
+        let mut args: Vec<&'static str> = self.filters().to_vec();
         for pattern in self.skip_patterns() {
             args.extend(["--skip", pattern]);
         }
@@ -330,17 +331,22 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-raster",
-        description: "the vector blend, blur and run-scan kernels: SSE2 loads, stores, lane \
-                      arithmetic and alpha masks over pixel and running-sum rows of every \
-                      length, driven against the portable reference over random rows and every \
-                      verify case",
+        description: "the vector blend, blur and run-scan kernels over pixel and running-sum \
+                      rows of every length against the portable reference; the lent store's \
+                      one borrow of a lender, held as a raw keeper the surface moves without \
+                      retagging and reclaimed on drop, over memory that holds the surface, is \
+                      longer, or is refused short; and the column bands' row spans \
+                      cut from one exclusive borrow, written under a clip window and an origin \
+                      from several threads at once",
         features: &[],
-        scope: Scope::LibModule {
-            module: "accel::",
-            reason: "the crate denies `unsafe` outside its two kernel modules, and these \
-                     tests drive every kernel directly; the rest of the library reaches the \
-                     same kernels through dispatch at image size, hours interpreted for no \
-                     path these do not already take",
+        scope: Scope::LibModules {
+            modules: &["accel::", "lent::", "columns::"],
+            reason: "the crate denies `unsafe` outside its two kernel modules, the lent-memory \
+                     view and the column bands, whose own tests drive all of it, the bands' \
+                     threaded one putting their disjointness before the data-race detector; \
+                     the rest of the library reaches the same kernels through dispatch at \
+                     image size and borrows owned surfaces as safe slices, hours interpreted \
+                     for no path these do not already take",
         },
         spread: Spread::OneProcess,
     },
@@ -885,7 +891,7 @@ fn base_command(ctx: &Context, target: &Target, seed: u64) -> Command {
     cmd.args(["miri", "test", "-p", target.package, "--locked"]);
     match target.scope {
         Scope::AllTargets => {}
-        Scope::LibOnly(_) | Scope::LibExcept { .. } | Scope::LibModule { .. } => {
+        Scope::LibOnly(_) | Scope::LibExcept { .. } | Scope::LibModules { .. } => {
             cmd.arg("--lib");
         }
         Scope::Test { name, .. } => {
@@ -912,7 +918,7 @@ fn scope_label(target: &Target) -> String {
         Scope::AllTargets => String::new(),
         Scope::LibOnly(_) => " --lib".to_string(),
         Scope::LibExcept { .. } => " --lib (part)".to_string(),
-        Scope::LibModule { module, .. } => format!(" --lib {module}"),
+        Scope::LibModules { modules, .. } => format!(" --lib {}", modules.join(" ")),
         Scope::Test { name, .. } => format!(" --test {name}"),
     };
     if target.features.is_empty() {
@@ -1155,7 +1161,7 @@ mod tests {
                 Scope::AllTargets => None,
                 Scope::LibOnly(reason)
                 | Scope::LibExcept { reason, .. }
-                | Scope::LibModule { reason, .. }
+                | Scope::LibModules { reason, .. }
                 | Scope::Test { reason, .. } => Some(reason),
             };
             if let Some(reason) = reason {

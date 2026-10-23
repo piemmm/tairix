@@ -10,8 +10,10 @@ screen) travels around them. It ships as `/System/Screensavers/Ribbon.app`.
 - `src/run.rs` — the bundle's `Run`: the face served by `tairix_saver::run`
   in the drawing sandbox.
 
-It asks for no capability and no feed. The time and the spelled-out date are
-the host's wall reading. Its option is `date` (a switch); under reduced motion
+It asks for no capability and no feed; it declares `threads = "cores"` and
+paints the ribbon a band of columns at a time across them, lettering the text
+over each strip the ribbon moved once it is painted. The time and the
+spelled-out date are the host's wall reading. Its option is `date` (a switch); under reduced motion
 the ribbon holds still and only the reading changing redraws anything.
 
 The design is `plans/SCREENSAVERS.md`.

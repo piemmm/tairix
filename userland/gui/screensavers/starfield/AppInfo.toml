@@ -1,5 +1,6 @@
 # Signed-AppInfo manifest source for Starfield, a desktop screensaver. It runs
-# in the drawing sandbox, so it asks for no capability and no feed.
+# in the drawing sandbox, so it asks for no capability and no feed; it draws a
+# frame's streaks across every core it is granted.
 id = "os.tairix.saver.starfield"
 name = "Starfield"
 version = "0.1.0"
@@ -7,5 +8,6 @@ kind = "screensaver"
 purpose = "A field of stars flown through, surging into warp and back"
 author = "The TAIRiX Project"
 capabilities = []
+threads = "cores"
 option.stars = { label = "Stars", note = "How many stars the flight passes.", choice = ["sparse:Sparse", "normal:Normal", "dense:Dense"], default = "normal" }
 option.warp = { label = "Warp", note = "Whether the flight surges into warp now and then, rather than only cruising.", switch = true }

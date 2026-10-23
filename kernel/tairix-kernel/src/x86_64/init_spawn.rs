@@ -52,6 +52,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
+use tairix_arch_api::AddressTag;
 use tairix_arch_x86_64::paging::{activate_user_root, AddressSpace as ArchAddressSpace};
 use tairix_arch_x86_64::syscall_entry;
 use tairix_arch_x86_64::userentry::{set_user_thread_pointer, USER_MODE};
@@ -223,31 +224,33 @@ impl InitSpawn for X86_64InitSpawn {
         // repoints the per-CPU `syscall` entry stack at the switching-in
         // thread's own kernel stack, and reinstalls that thread's thread
         // pointer. It captures only the `u64` root, so it is `Send`.
-        let pre_resume: ProcessResume = Arc::new(move |stack_top: u64, tls_base: u64| {
-            // `set_kernel_rsp0` repoints **both** PID 1's `syscall` entry
-            // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at PID 1's
-            // own kernel stack — the latter is what makes an involuntary
-            // LAPIC-timer preemption (P-1c), delivered through the IDT
-            // interrupt gate which reads `TSS.RSP0`, land on PID 1's own stack
-            // (one per-task kernel stack for both entry
-            // kinds). A rejected value leaves the slots unchanged and the next
-            // entry faults loudly (fail closed).
-            // The one CPU production x86_64 runs; a second needs the resuming
-            // CPU named here (`plans/OPEN-DEFECTS.md` D378).
-            let _ = syscall_entry::set_kernel_rsp0(tairix_arch_api::BOOT_CPU as usize, stack_top);
-            // The `FS` base is privileged on this port, so the kernel — not
-            // the thread — maintains it: every switch-in reinstalls the
-            // switching-in thread's own value (`plans/THREADS.md` decision 7).
-            // SAFETY: this runs at CPL 0 on the dispatcher's context, on the
-            // CPU about to enter that thread, which is exactly
-            // `set_user_thread_pointer`'s contract.
-            unsafe { set_user_thread_pointer(tls_base) };
-            // SAFETY: paging is enabled and `init_root_phys` is the PML4 of
-            // PID 1's space, which maps the low identity + higher-half kernel
-            // window the running dispatcher executes from — exactly
-            // `activate_user_root`'s contract.
-            unsafe { activate_user_root(init_root_phys) };
-        });
+        let pre_resume: ProcessResume =
+            Arc::new(move |stack_top: u64, tls_base: u64, tag: AddressTag| {
+                // `set_kernel_rsp0` repoints **both** PID 1's `syscall` entry
+                // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at PID 1's
+                // own kernel stack — the latter is what makes an involuntary
+                // LAPIC-timer preemption (P-1c), delivered through the IDT
+                // interrupt gate which reads `TSS.RSP0`, land on PID 1's own stack
+                // (one per-task kernel stack for both entry
+                // kinds). A rejected value leaves the slots unchanged and the next
+                // entry faults loudly (fail closed).
+                // The one CPU production x86_64 runs; a second needs the resuming
+                // CPU named here (`plans/OPEN-DEFECTS.md` D378).
+                let _ =
+                    syscall_entry::set_kernel_rsp0(tairix_arch_api::BOOT_CPU as usize, stack_top);
+                // The `FS` base is privileged on this port, so the kernel — not
+                // the thread — maintains it: every switch-in reinstalls the
+                // switching-in thread's own value (`plans/THREADS.md` decision 7).
+                // SAFETY: this runs at CPL 0 on the dispatcher's context, on the
+                // CPU about to enter that thread, which is exactly
+                // `set_user_thread_pointer`'s contract.
+                unsafe { set_user_thread_pointer(tls_base) };
+                // SAFETY: paging is enabled and `init_root_phys` is the PML4 of
+                // PID 1's space, which maps the low identity + higher-half kernel
+                // window the running dispatcher executes from — exactly
+                // `activate_user_root`'s contract.
+                unsafe { activate_user_root(init_root_phys, tag) };
+            });
 
         // Freeze the just-built mappings into the registry-storable,
         // `Send + Sync` snapshot the kernel-wide address-space registry holds

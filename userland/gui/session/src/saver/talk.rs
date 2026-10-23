@@ -1,7 +1,13 @@
 //! The host's half of one saver's conversation (`lib/abi` `saver_ipc`), free
 //! of I/O: whose turn it is, which frame is outstanding and when the next is
-//! owed, who holds the region's feed area, and the deadlines a saver is held
-//! to.
+//! owed, who holds the region's frame and feed areas, and the deadlines a saver
+//! is held to.
+//!
+//! Frames are pipelined: the next is asked for once the last is laid in the
+//! window, so the saver draws it while the host composites the one before. A
+//! frame presented before the one laid has reached the screen waits in the
+//! region, which the saver may then not touch, until [`Talk::shown`] hands it
+//! over.
 //!
 //! A saver is untrusted, so every message is checked against the turn it
 //! arrives in: one out of turn, one naming a frame or a slide not asked for,
@@ -10,25 +16,28 @@
 //! back when [`Talk::due_ns`] says.
 
 use tairix_abi::bounded_text::BoundedText;
-use tairix_abi::driver::display::DamageList;
 use tairix_abi::font_ipc::FontRequest;
 use tairix_abi::saver::SaverFeeds;
 use tairix_abi::saver_ipc::{
-    NextFrame, SaverMessage, Start, SAVER_FONT_CALLS_MAX, SAVER_FRAME_DEADLINE_NS, SAVER_KEEPS_MAX,
-    SAVER_KEEP_SPACING_NS, SAVER_KEEP_TITLE_MAX, SAVER_START_DEADLINE_NS,
+    NextFrame, SaverDamage, SaverMessage, Start, SAVER_FONT_CALLS_MAX, SAVER_FRAME_DEADLINE_NS,
+    SAVER_KEEPS_MAX, SAVER_KEEP_SPACING_NS, SAVER_KEEP_TITLE_MAX, SAVER_START_DEADLINE_NS,
 };
 use tairix_abi::Errno;
 
-/// What a saver said that the embedder acts on.
+/// What a saver said that the embedder acts on, borrowing from the message.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Said {
+pub enum Said<'m> {
     /// The saver is ready: its first frame may be asked for.
     Ready,
-    /// The frame asked for is in the region, changed where `damage` says.
+    /// The frame asked for is in the region, changed where `damage` says: the
+    /// host's to lay in the window now.
     Presented {
         /// What changed; `None` when nothing did.
-        damage: Option<DamageList>,
+        damage: Option<&'m SaverDamage>,
     },
+    /// The frame asked for is in the region, changed where `damage` says, and
+    /// waits there until the one laid before it reaches the screen.
+    Held(&'m SaverDamage),
     /// Relay this request to the font service, and its reply back.
     FontCall([u8; FontRequest::WIRE_LEN]),
     /// The saver asked to keep a picture sooner, or more often, than one run
@@ -72,6 +81,17 @@ enum Stage {
     Drawing { serial: u32, deadline_ns: u64 },
 }
 
+/// What a frame reaching the screen leaves the host to do.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Shown {
+    /// No laid frame was waiting for the screen.
+    Nothing,
+    /// The laid frame reached it, and none waits behind it.
+    Laid,
+    /// The laid frame reached it; the one held behind it is to be laid now.
+    Next,
+}
+
 /// Who holds the region's feed area.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FeedHolder {
@@ -107,6 +127,10 @@ pub struct Talk {
     /// A feed message went to a saver drawing a frame: the frame after is
     /// owed at once.
     fed: bool,
+    /// A frame is laid in the window and has yet to reach the screen.
+    laid: bool,
+    /// A frame presented while one was laid waits in the region for it.
+    held: bool,
 }
 
 impl Talk {
@@ -129,6 +153,8 @@ impl Talk {
             keeps: 0,
             last_keep_ns: None,
             fed: false,
+            laid: false,
+            held: false,
         }
     }
 
@@ -138,7 +164,7 @@ impl Talk {
     ///
     /// [`Fault::OutOfTurn`] for a message the conversation does not allow
     /// now; the saver is then to be ended.
-    pub fn hear(&mut self, message: SaverMessage, now_ns: u64) -> Result<Said, Fault> {
+    pub fn hear<'m>(&mut self, message: &'m SaverMessage, now_ns: u64) -> Result<Said<'m>, Fault> {
         match message {
             SaverMessage::Ready => {
                 let Stage::Starting { .. } = self.stage else {
@@ -157,7 +183,7 @@ impl Talk {
                 let Stage::Drawing { serial: asked, .. } = self.stage else {
                     return Err(Fault::OutOfTurn);
                 };
-                if serial != asked
+                if *serial != asked
                     || damage
                         .as_ref()
                         .is_some_and(|damage| !on_screen(damage, self.screen))
@@ -167,11 +193,19 @@ impl Talk {
                 let next_ns = match next {
                     _ if core::mem::take(&mut self.fed) => Some(now_ns),
                     NextFrame::Soon => Some(now_ns),
-                    NextFrame::At(at) => Some(at),
+                    NextFrame::At(at) => Some(*at),
                     NextFrame::Idle => None,
                 };
                 self.stage = Stage::Idle { next_ns };
-                Ok(Said::Presented { damage })
+                match damage {
+                    Some(damage) if self.laid => {
+                        self.held = true;
+                        Ok(Said::Held(damage))
+                    }
+                    damage => Ok(Said::Presented {
+                        damage: damage.as_ref(),
+                    }),
+                }
             }
             SaverMessage::FontCall(request) => {
                 if self.font.is_some() || self.font_calls >= SAVER_FONT_CALLS_MAX {
@@ -179,7 +213,7 @@ impl Talk {
                 }
                 self.font_calls += 1;
                 self.font = Some(now_ns);
-                Ok(Said::FontCall(request))
+                Ok(Said::FontCall(*request))
             }
             SaverMessage::Keep {
                 title,
@@ -188,10 +222,10 @@ impl Talk {
             } => {
                 if !self.feeds.keep()
                     || self.feed != FeedHolder::Saver
-                    || width == 0
-                    || height == 0
-                    || width > self.screen.0
-                    || height > self.screen.1
+                    || *width == 0
+                    || *height == 0
+                    || *width > self.screen.0
+                    || *height > self.screen.1
                 {
                     return Err(Fault::OutOfTurn);
                 }
@@ -205,29 +239,29 @@ impl Talk {
                 self.keeps += 1;
                 self.last_keep_ns = Some(now_ns);
                 Ok(Said::Keep {
-                    title,
-                    size: (width, height),
+                    title: *title,
+                    size: (*width, *height),
                 })
             }
             SaverMessage::WantSlide(index) => {
-                if !self.feeds.slides() || self.feed != FeedHolder::Saver || index >= self.slides {
+                if !self.feeds.slides() || self.feed != FeedHolder::Saver || *index >= self.slides {
                     return Err(Fault::OutOfTurn);
                 }
-                self.feed = FeedHolder::Slide(index);
-                Ok(Said::WantSlide(index))
+                self.feed = FeedHolder::Slide(*index);
+                Ok(Said::WantSlide(*index))
             }
             SaverMessage::Unstarted(errno) => {
                 let Stage::Starting { .. } = self.stage else {
                     return Err(Fault::OutOfTurn);
                 };
-                Ok(Said::Unstarted(errno))
+                Ok(Said::Unstarted(*errno))
             }
         }
     }
 
     /// The serial of a frame to ask for at `now_ns`, if one is owed: none is
-    /// outstanding, the one asked last is a display frame behind, and the
-    /// saver wants one by now.
+    /// outstanding or held, the one asked last is a display frame behind, and
+    /// the saver wants one by now.
     pub fn frame_due(&mut self, now_ns: u64) -> Option<u32> {
         let Stage::Idle {
             next_ns: Some(next_ns),
@@ -235,7 +269,7 @@ impl Talk {
         else {
             return None;
         };
-        if now_ns < self.paced(next_ns) {
+        if self.held || now_ns < self.paced(next_ns) {
             return None;
         }
         self.serial = self.serial.wrapping_add(1);
@@ -262,8 +296,8 @@ impl Talk {
     }
 
     /// When the embedder is next to come back: the next frame owed, or the
-    /// deadline the saver is held to; `None` while it waits only on a feed or
-    /// on the font call being relayed.
+    /// deadline the saver is held to; `None` while it waits only on a feed, on
+    /// the font call being relayed, or on the screen taking the frame laid.
     #[must_use]
     pub fn due_ns(&self) -> Option<u64> {
         match self.stage {
@@ -271,7 +305,34 @@ impl Talk {
             Stage::Starting { deadline_ns } | Stage::Drawing { deadline_ns, .. } => {
                 Some(deadline_ns)
             }
+            Stage::Idle { .. } if self.held => None,
             Stage::Idle { next_ns } => next_ns.map(|next| self.paced(next)),
+        }
+    }
+
+    /// A frame the host was told to lay is laid in the window.
+    pub fn laid(&mut self) {
+        self.laid = true;
+    }
+
+    /// The frame just presented could not reach the screen yet: it waits in
+    /// the region, as one held behind a laid frame does, and no frame is asked
+    /// for until [`shown`](Self::shown) lets it go.
+    pub fn hold(&mut self) {
+        self.laid = true;
+        self.held = true;
+    }
+
+    /// A frame was presented to the display, carrying whatever was laid.
+    #[must_use]
+    pub fn shown(&mut self) -> Shown {
+        if !core::mem::take(&mut self.laid) {
+            return Shown::Nothing;
+        }
+        if core::mem::take(&mut self.held) {
+            Shown::Next
+        } else {
+            Shown::Laid
         }
     }
 
@@ -345,7 +406,7 @@ impl Talk {
 }
 
 /// Whether every rectangle of `damage` lies on a `screen`.
-fn on_screen(damage: &DamageList, screen: (u32, u32)) -> bool {
+fn on_screen(damage: &SaverDamage, screen: (u32, u32)) -> bool {
     let bounds = damage.bounds();
     bounds
         .x

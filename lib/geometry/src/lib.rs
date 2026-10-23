@@ -28,6 +28,9 @@
 //! grid of tiles on the desktop lays out and hit-tests through one arithmetic.
 //!
 //! [`desktop_modes`] is the one list of sizes a desktop may take on an output.
+//!
+//! [`Tiles`] marks a change in whole tiles at a cost per tile, and covers it
+//! with the few tile rectangles a compositor merges cheaply.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -39,11 +42,13 @@ mod grid;
 mod modes;
 mod region;
 mod scale;
+mod tiles;
 
 pub use grid::{GridFill, GridRun};
 pub use modes::{desktop_modes, DESKTOP_MIN, STANDARD_SIZES};
 pub use region::Region;
 pub use scale::{Scale, REFERENCE_DPI};
+pub use tiles::Tiles;
 
 /// A point in screen space.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]

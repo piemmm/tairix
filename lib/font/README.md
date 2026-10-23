@@ -72,17 +72,17 @@ the payload exceeds the pre-Korean size ceiling.
   precomposed Hangul syllables and 94 compatibility jamo, plus Hebrew and
   Yiddish letters, punctuation, and marks.
 - `font::BitmapFont` — the face's metrics (cell size, pen advance, line
-  height) plus the glyph blitter. `draw_text` composites each covered pixel
-  onto a `lib/raster` `Surface` through that crate's single
-  premultiplied-alpha `Pixel::over` path, scaling the text colour once into a
-  256-entry coverage table — anti-aliased edges and translucent text both
-  blend correctly with no colour arithmetic duplicated here (`AGENTS.md`
-  §2.2). Both of a glyph's axes are clipped once, before any pixel is touched,
-  against what the surface admits — its bounds at any stated origin and the
-  active clip window — and each visible row then blends its coverage bytes
-  against the destination row slice (`Surface::row_span_mut`) in step, so a bounds
-  check and a row address are paid per row rather than per pixel and a glyph
-  off the edge clips instead of being tested pixel by pixel. `text_width` and
+  height) plus the glyph blitter. `draw_text` premultiplies the text colour
+  once and lays each visible row of a glyph's coverage onto a `lib/raster`
+  `Surface` through that crate's `cover_span`, the one coverage composite and
+  its vector kernels — anti-aliased edges and translucent text both blend
+  correctly with no colour arithmetic duplicated here. Both of a glyph's axes
+  are clipped once, before any pixel is touched, against what the surface
+  admits — its bounds at any stated origin and the active clip window — and
+  each visible row is laid against the destination row slice
+  (`Surface::row_span_mut`), so a bounds check and a row address are paid per
+  row rather than per pixel and a glyph off the edge clips instead of being
+  tested pixel by pixel. `text_width` and
   `truncate_to_width` give the shared layout arithmetic.
 - `TextShadow` / `font::BitmapFont::draw_run` — the
   one soft shadow for text over ground the caller cannot know: the scene

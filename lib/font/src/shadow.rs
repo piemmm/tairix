@@ -10,7 +10,7 @@ use core::ops::Range;
 use alloc::vec::Vec;
 
 use tairix_geometry::Scale;
-use tairix_raster::{div255, soften_coverage, Color, Pixel, Surface, SOFTEN_PASSES};
+use tairix_raster::{div255, soften_coverage, Color, Surface, SOFTEN_PASSES};
 
 use crate::client::FontClient;
 use crate::font::{draw_coverage, BitmapFont, Coverage};
@@ -246,11 +246,16 @@ impl ShadowMask {
         soften_coverage(&mut self.levels, width, height, radius, &mut aux);
     }
 
-    /// Composite the block onto `surface` in the shadow's colour.
-    fn draw(&self, surface: &mut Surface, shadow: TextShadow) {
+    /// Composite the block onto `surface` in the shadow's colour, each blurred
+    /// level amplified by [`SPREAD`] and saturating at the colour's own alpha.
+    fn draw(mut self, surface: &mut Surface, shadow: TextShadow) {
         let (Ok(x), Ok(y)) = (i32::try_from(self.x), i32::try_from(self.y)) else {
             return;
         };
+        for level in &mut self.levels {
+            *level =
+                u8::try_from(u32::from(*level).saturating_mul(SPREAD).min(255)).unwrap_or(u8::MAX);
+        }
         let coverage = Coverage {
             width: self.width,
             height: self.height,
@@ -262,7 +267,7 @@ impl ShadowMask {
             y,
             coverage,
             self.width,
-            &spread_sources(shadow.color),
+            shadow.color.premultiply(),
         );
     }
 }
@@ -301,18 +306,6 @@ fn clipped(offset: i64, count: u32, limit: u32) -> Option<Clipped> {
     let source = usize::try_from(first).ok()?..usize::try_from(last).ok()?;
     let target = usize::try_from(offset + first).ok()?..usize::try_from(offset + last).ok()?;
     Some(Clipped { source, target })
-}
-
-/// The premultiplied source pixel for each blurred coverage level, amplified
-/// by [`SPREAD`] and saturating at the colour's own alpha.
-fn spread_sources(color: Color) -> [Pixel; 256] {
-    let source = color.premultiply();
-    let mut sources = [source; 256];
-    for (level, slot) in (0u32..).zip(sources.iter_mut()) {
-        let spread = u8::try_from(level.saturating_mul(SPREAD).min(255)).unwrap_or(u8::MAX);
-        *slot = source.scale_alpha(spread);
-    }
-    sources
 }
 
 #[cfg(test)]

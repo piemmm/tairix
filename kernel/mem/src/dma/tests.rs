@@ -14,7 +14,7 @@ use super::*;
 use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use crate::frame::{FrameAllocator, PAGE_SIZE};
 use crate::phys::SimPhysMap;
-use crate::retire::{ActiveCpus, RecordedRemote, SpaceTlb};
+use crate::retire::{RecordedRemote, SpaceTlb, TlbContext};
 use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
 use core::cell::{Cell, RefCell};
 use std::vec::Vec;
@@ -823,7 +823,7 @@ static REMOTE: RecordedRemote = RecordedRemote(record_remote);
 
 /// A space live on another CPU too, so a release must reach it.
 fn shared_space() -> AddressSpace<HostPageTable> {
-    let cpus = ActiveCpus::new(2).expect("one word allocates");
+    let cpus = TlbContext::new(2).expect("one word allocates");
     cpus.enter(1);
     let mut space = AddressSpace::new(HostPageTable::new());
     space.attach_tlb(SpaceTlb::new(cpus, Some(&REMOTE)));

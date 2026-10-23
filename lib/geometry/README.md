@@ -29,6 +29,19 @@ used by the compositing window manager (`userland/gui/wm`), the taskbar
   far end. The file manager's and the desktop's grids and the picture choice
   all lay their tiles out through it, and `within` narrows each cell to one
   part of it — a tile's picture — over the same count and stride.
+- `Region` — a set of screen pixels held as disjoint rectangles in a canonical
+  band form, exact or, `with_budget`, degrading to its bounding box past a
+  rectangle count: the one damage and clip set every consumer shares. A
+  rectangle past the end of the band form is appended in place, and
+  `add_region`/`subtract_region` merge a whole region in one walk over both,
+  so folding one region into another costs their sizes, not their product.
+- `Tiles` — which tiles of a picture a change touches, a bit a tile, and the
+  cover of them a compositor is told to repaint: the marked tiles in band
+  form, each tile row's runs joined with the rows beneath that mark the same
+  tiles, the tiles doubled until the rectangles fit a budget, so a region
+  holds exactly as many as were counted. Marking costs a tile's bit however many changes
+  land on it, so a scattered change (a screensaver's cells, a ray tracer's
+  passes) is named as a few rectangles rather than thousands.
 - `desktop_modes` — the sizes a graphical desktop may take on an output: its
   native size first, then each standard VESA/CEA size smaller on both axes,
   no smaller than `DESKTOP_MIN`, within 1% of the output's shape. The session
@@ -57,6 +70,8 @@ vocabulary.
 
 ## Stability tier
 
-`experimental` — the Stage 7 desktop geometry seam. It is `no_std`, performs
-no allocation, and has no dependencies. No `unsafe`, and no
+`experimental` — the Stage 7 desktop geometry seam. It is `no_std` with
+`alloc` and has no dependencies: `Region` and `Tiles` hold their rectangles
+and bits on the heap (a `Tiles` the heap refuses is `None`), and the rest
+allocates nothing. No `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).

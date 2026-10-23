@@ -277,6 +277,15 @@ painted surface is `Backdrop::Scene`, transparent behind the column, laid over
 it one scanline at a time through `lib/raster`'s one span composite before the
 veil and the pointer. A frame of the ribbon therefore re-composes the pixels it
 moved and never paints the column, and a keystroke never paints the ribbon.
+Where a run of the surface is wholly clear the scene is encoded straight from
+its own pixels, since laying nothing over it is the identity, and most of a
+frame's strips lie outside the column.
+
+The ribbon is painted, and every rectangle a round owes composed into the
+frame, across a pool of a thread per online core: the composite in bands of
+rows, each band holding a scanline of its own and composing its rows of every
+owed rectangle, so a frame's dozens of narrow strips are shared out as one
+region rather than one strip at a time.
 
 The ribbon is kept clear of `AuthSurface::column_rect` — the column centred
 on the screen, which no stage, keystroke or clock tick moves — so it runs

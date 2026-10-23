@@ -39,6 +39,27 @@ fn each_known_format_maps_to_its_byte_order() {
     );
 }
 
+/// A transcode lays exactly what decoding opaque and encoding again lays, in
+/// either order to either, and stops at the shorter side.
+#[test]
+fn a_transcode_is_an_opaque_decode_then_an_encode() {
+    let bytes: alloc::vec::Vec<u8> = (0..64u8)
+        .map(|at| at.wrapping_mul(37).wrapping_add(11))
+        .collect();
+    for from in [ChannelOrder::Rgba, ChannelOrder::Bgra] {
+        for to in [ChannelOrder::Rgba, ChannelOrder::Bgra] {
+            let mut pixels = [Pixel::TRANSPARENT; 16];
+            assert_eq!(from.decode_opaque_run(&bytes, &mut pixels), 16);
+            let mut through = [0u8; 64];
+            assert_eq!(to.encode_run(&pixels, &mut through), 16);
+            let mut straight = [0u8; 64];
+            assert_eq!(to.transcode_opaque_run(from, &bytes, &mut straight), 16);
+            assert_eq!(straight, through, "{from:?} to {to:?}");
+            assert_eq!(to.transcode_opaque_run(from, &bytes[..9], &mut straight), 2);
+        }
+    }
+}
+
 #[test]
 fn a_pixel_encodes_into_the_order_its_format_wants() {
     let pixel = Pixel {
@@ -105,6 +126,35 @@ fn a_run_encodes_byte_for_byte_like_the_per_pixel_loop() {
             );
             assert_eq!(bulk, one_by_one);
         }
+    }
+}
+
+/// An opaque run decodes every pixel as the per-pixel decoder does with full
+/// alpha, at every length on either side of a lane of eight, and stops at the
+/// shorter of its input's whole pixels and its output.
+#[test]
+fn an_opaque_run_decodes_like_the_per_pixel_decoder_at_full_alpha() {
+    let mut seed = 5u8;
+    let bytes: [u8; MAX_RUN * 4 + 3] = core::array::from_fn(|_| step(&mut seed));
+    for order in ORDERS {
+        for len in [0, 1, 7, 8, 9, 16, 17, MAX_RUN] {
+            let mut out = [Pixel::TRANSPARENT; MAX_RUN];
+            assert_eq!(
+                order.decode_opaque_run(&bytes[..len * 4 + 3], &mut out),
+                len
+            );
+            for (index, pixel) in out.iter().enumerate() {
+                let want = if index < len {
+                    let [b0, b1, b2, _] = bytes[index * 4..index * 4 + 4].try_into().expect("four");
+                    order.decode([b0, b1, b2, 0xFF])
+                } else {
+                    Pixel::TRANSPARENT
+                };
+                assert_eq!(*pixel, want, "{order:?} pixel {index} of {len}");
+            }
+        }
+        let mut short = [Pixel::TRANSPARENT; 3];
+        assert_eq!(order.decode_opaque_run(&bytes, &mut short), 3);
     }
 }
 

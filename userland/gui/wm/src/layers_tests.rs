@@ -523,6 +523,51 @@ fn a_repaint_is_baked_into_the_buffer_the_engine_is_not_showing() {
     );
 }
 
+/// A repaint scattered across a window on a free layer stales the layer's own
+/// pixels as one region, each rectangle made the layer's and clipped to it:
+/// the screen shows exactly what the software composite does.
+#[test]
+fn a_scattered_repaint_reaches_a_free_layer_as_one_region() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let [.., top] = three(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+
+    let repaint = |c: &mut Compositor, id: WindowId| {
+        let mut area = Region::new();
+        for rect in [
+            Rect::new(0, 0, 2, 2),
+            Rect::new(5, 1, 1, 4),
+            Rect::new(3, 7, 4, 1),
+            Rect::new(8, 8, 9, 9),
+        ] {
+            area.add(rect);
+        }
+        assert!(c.repaint_window(id, (10, 10), &area, |surface, rects| {
+            for rect in rects {
+                surface.fill_rect(
+                    rect.left().cast_unsigned(),
+                    rect.top().cast_unsigned(),
+                    rect.width,
+                    rect.height,
+                    Color::rgb(9, 9, 9),
+                );
+            }
+        }));
+    };
+    repaint(&mut c, top);
+    c.present(&mut engine).expect("presents");
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let [.., top] = three(c);
+            repaint(c, top);
+        }),
+        0,
+    );
+}
+
 #[test]
 fn an_idle_layered_scene_presents_nothing() {
     let output = mode(32, 24);
@@ -1670,6 +1715,66 @@ fn holds_through_ticks(look: impl Fn(&mut Compositor)) {
             tick(c, id, shade);
         });
         assert_close(&engine.screen, &expected, 1);
+    }
+}
+
+/// An opaque framed window on a free layer under a frosted framed one, focus
+/// passing between them while the first keeps presenting and is retitled:
+/// every present is held to the software composite, and the two after the
+/// last change catch a buffer of the free layer left behind.
+#[test]
+fn a_free_layer_under_a_frost_keeps_its_title_bar_as_focus_moves() {
+    type Step = fn(&mut Compositor, WindowId, WindowId);
+    let output = mode(200, 160);
+    let grey = Color::rgb(0x80, 0x80, 0x80);
+    let scene = |c: &mut Compositor| {
+        let map = framed(c);
+        let board = c.add_window(Point::new(90, 10), clear(80, 50));
+        assert!(c.set_window_frame(board, WindowFrame::new(decorated())));
+        assert!(c.set_backdrop_blur(board, 2));
+        (map, board)
+    };
+    let steps: [Step; 6] = [
+        |c, _, board| {
+            c.follow_focus(Some(board));
+            assert!(c.raise(board));
+            c.step_elevations(0);
+            c.step_elevations(SETTLED_NS);
+        },
+        |c, map, _| tick(c, map, 9),
+        |c, map, _| {
+            c.follow_focus(Some(map));
+            assert!(c.raise(map));
+            c.step_elevations(0);
+            c.step_elevations(SETTLED_NS);
+        },
+        |c, map, _| assert!(c.set_window_title(map, "Network map")),
+        |c, map, _| tick(c, map, 10),
+        |c, map, _| tick(c, map, 11),
+    ];
+    let mut c = new_compositor(output, grey).expect("compositor");
+    let (map, board) = scene(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert!(
+        c.layers.as_ref().is_some_and(|stack| stack
+            .layers
+            .iter()
+            .any(|layer| layer.source == Source::Window(map, super::Role::Free))),
+        "the opaque window has a free layer"
+    );
+    for done in 1..=steps.len() {
+        steps[done - 1](&mut c, map, board);
+        c.present(&mut engine).expect("presents");
+        let expected = software(output, grey, |c| {
+            let (map, board) = scene(c);
+            for step in &steps[..done] {
+                step(c, map, board);
+            }
+        });
+        // A focused window's deeper shadow is rounded on its layer and again
+        // by the engine, where software rounds it once.
+        assert_close(&engine.screen, &expected, 2);
     }
 }
 

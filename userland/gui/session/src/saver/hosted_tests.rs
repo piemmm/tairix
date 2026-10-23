@@ -5,15 +5,20 @@
 use alloc::boxed::Box;
 
 use tairix_abi::bounded_text::BoundedText;
-use tairix_abi::driver::display::{DamageList, DamageRect, RefreshRate};
+use tairix_abi::driver::display::{
+    DamageRect, DisplayFormat, DisplayMode, DisplayPower, RefreshRate,
+};
 use tairix_abi::font_ipc::FontRequest;
 use tairix_abi::saver::SaverFeeds;
 use tairix_abi::saver_ipc::{
-    HostMessage, NextFrame, SaverMessage, SaverRegion, SlideOutcome, Start, WallReading,
-    SAVER_START_DEADLINE_NS,
+    HostMessage, NextFrame, SaverDamage, SaverMessage, SaverRegion, SlideOutcome, Start,
+    WallReading, SAVER_DAMAGE_RECTS, SAVER_START_DEADLINE_NS,
 };
+use tairix_abi::DriverError;
 use tairix_abi::{APPINFO_FLAG_FEED_KEEP, APPINFO_FLAG_FEED_MACHINE, APPINFO_FLAG_FEED_SLIDES};
 use tairix_display::winframe;
+use tairix_display::{DrawInPlace, Presenter};
+use tairix_geometry::{Rect, Region};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_wallpaper::TaskNames;
 use tairix_wm::{Compositor, Point, WindowId};
@@ -25,8 +30,12 @@ use crate::tests::compositor;
 const SIZE: (u32, u32) = (16, 8);
 
 fn start(feeds: u32) -> Start {
+    start_of(feeds, SIZE)
+}
+
+fn start_of(feeds: u32, size: (u32, u32)) -> Start {
     let feeds = SaverFeeds::from_bits(feeds).expect("feeds");
-    let region = SaverRegion::new(SIZE.0, SIZE.1, feeds).expect("a region");
+    let region = SaverRegion::new(size.0, size.1, feeds).expect("a region");
     let mut start = Start::new(region, 100, RefreshRate::ASSUMED);
     start.feeds = feeds;
     if feeds.slides() {
@@ -45,7 +54,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(feeds: u32) -> Self {
-        let start = start(feeds);
+        Self::of(&start(feeds))
+    }
+
+    fn of(start: &Start) -> Self {
         let pipes = Pipes::default();
         let hosted = Hosted::begin(
             (
@@ -53,13 +65,14 @@ impl Fixture {
                 Box::new(Heap(alloc::vec![0u8; start.region.len()])),
                 tairix_log::DiscardSink,
             ),
-            &start,
+            start,
             (TaskNames::Own, "Waves"),
             0,
         )
         .expect("hosted");
         let mut compositor = compositor();
-        let mut black = Surface::new(SIZE.0, SIZE.1).expect("a surface");
+        let size = (start.region.width(), start.region.height());
+        let mut black = Surface::new(size.0, size.1).expect("a surface");
         black.fill(Color::rgb(0, 0, 0));
         let wm = compositor.add_window(Point::ORIGIN, black);
         let mut fixture = Self {
@@ -78,9 +91,23 @@ impl Fixture {
     }
 
     fn read(&mut self, now: u64) -> Result<(), Ended> {
-        let result =
-            self.hosted
-                .on_readable(now, (&mut self.compositor, self.wm), &mut self.errands);
+        let result = self.hosted.on_readable(
+            now,
+            (&mut self.compositor, self.wm, None),
+            &mut self.errands,
+        );
+        self.flush();
+        result
+    }
+
+    /// [`read`](Self::read), with frames drawn straight into `display` where
+    /// the saver covers it.
+    fn read_onto(&mut self, now: u64, display: &mut Scanout) -> Result<(), Ended> {
+        let result = self.hosted.on_readable(
+            now,
+            (&mut self.compositor, self.wm, Some(display)),
+            &mut self.errands,
+        );
         self.flush();
         result
     }
@@ -91,11 +118,27 @@ impl Fixture {
         result
     }
 
+    /// A frame went to the display.
+    fn shown(&mut self) -> bool {
+        self.hosted.shown((&mut self.compositor, self.wm))
+    }
+
+    /// The saver presents frame `serial`, changed over `QUARTER`.
+    fn presents(&mut self, serial: u32, now: u64) {
+        self.pipes.say(&SaverMessage::Presented {
+            serial,
+            damage: SaverDamage::new(&[QUARTER]).ok(),
+            next: NextFrame::Soon,
+        });
+        self.read(now).expect("heard");
+    }
+
     /// Draw `color` over `rect` of the frame area as a saver would.
     fn draw(&mut self, color: Color, rect: DamageRect) {
-        let mut picture = Surface::new(SIZE.0, SIZE.1).expect("a surface");
+        let layout = self.hosted.layout;
+        let mut picture = Surface::new(layout.width(), layout.height()).expect("a surface");
         picture.fill(color);
-        let mode = start(0).region.display_mode();
+        let mode = layout.display_mode();
         winframe::encode(
             &picture,
             self.hosted.region_mut(),
@@ -113,6 +156,284 @@ impl Fixture {
             .and_then(|content| content.get(x, y))
             .expect("in bounds")
     }
+}
+
+/// A display a saver's frames are drawn straight into: one frame at a padded
+/// stride in an output's byte order, which takes a present at once or,
+/// flipping, holds it until its latch, and may refuse it.
+struct Scanout {
+    mode: DisplayMode,
+    stride: u32,
+    frame: alloc::vec::Vec<u8>,
+    flips: bool,
+    in_flight: bool,
+    refuses: bool,
+    drawn: alloc::vec::Vec<alloc::vec::Vec<Rect>>,
+}
+
+impl Scanout {
+    fn new(size: (u32, u32)) -> Self {
+        let stride = size.0 * 4 + 8;
+        Self {
+            mode: DisplayMode {
+                width_px: size.0,
+                height_px: size.1,
+                stride_bytes: stride,
+                format: DisplayFormat::Bgra8888,
+            },
+            stride,
+            frame: alloc::vec![0; usize::try_from(stride * size.1).expect("small")],
+            flips: false,
+            in_flight: false,
+            refuses: false,
+            drawn: alloc::vec::Vec::new(),
+        }
+    }
+
+    /// The bytes the display shows at `(x, y)`, in its own order.
+    fn at(&self, x: u32, y: u32) -> [u8; 4] {
+        let at = usize::try_from(y * self.stride + x * 4).expect("small");
+        self.frame[at..at + 4].try_into().expect("a pixel")
+    }
+}
+
+impl Presenter for Scanout {
+    fn mode(&self) -> DisplayMode {
+        self.mode
+    }
+
+    fn ready(&self) -> bool {
+        !self.in_flight
+    }
+
+    fn present(&mut self, _: &[u8], _: &[DamageRect]) -> Result<(), DriverError> {
+        Ok(())
+    }
+
+    fn set_power(&mut self, _: DisplayPower) -> Result<(), DriverError> {
+        Ok(())
+    }
+
+    fn present_drawn(
+        &mut self,
+        damage: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<(), DriverError> {
+        if self.refuses {
+            return Err(DriverError::Unsupported);
+        }
+        if self.in_flight {
+            return Err(DriverError::Busy);
+        }
+        draw(&mut self.frame, self.stride, damage)?;
+        self.drawn.push(damage.rects().to_vec());
+        self.in_flight = self.flips;
+        Ok(())
+    }
+}
+
+/// A saver covering the output is drawn straight into the display: its whole
+/// frame first, every pixel opaque and in the display's order, then only what
+/// changed, and never into the window, which the compositor stops presenting.
+#[test]
+fn a_saver_covering_the_output_is_drawn_straight_into_the_display() {
+    let mut saver = Fixture::new(0);
+    let mut display = Scanout::new(SIZE);
+    saver.pipes.say(&SaverMessage::Ready);
+    saver.read(0).expect("heard");
+    saver.advance(0).expect("on time");
+    saver.draw(Color::rgb(200, 10, 10), QUARTER);
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 1,
+        damage: SaverDamage::new(&[QUARTER]).ok(),
+        next: NextFrame::Soon,
+    });
+    saver.read_onto(1, &mut display).expect("heard");
+    assert_eq!(
+        display.drawn,
+        [alloc::vec![Rect::new(0, 0, SIZE.0, SIZE.1)]],
+        "whole first"
+    );
+    assert_eq!(display.at(1, 1), [10, 10, 200, 255]);
+    let window = saver.window_pixel(1, 1);
+    assert_eq!(
+        (window.r, window.g, window.b),
+        (0, 0, 0),
+        "the window is left alone"
+    );
+    assert!(saver.hosted.scans_out());
+    assert!(saver.hosted.take_reached(), "shown as presented");
+    let later = 2 + RefreshRate::ASSUMED.frame_ns();
+    saver.advance(later).expect("on time");
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 2,
+        damage: SaverDamage::new(&[QUARTER]).ok(),
+        next: NextFrame::Idle,
+    });
+    saver.read_onto(later + 1, &mut display).expect("heard");
+    assert_eq!(
+        display.drawn[1],
+        [Rect::new(0, 0, 8, 4)],
+        "then only what changed"
+    );
+}
+
+/// A frame presented while the display flips the last waits in the region,
+/// with no frame asked meanwhile, and goes to the display at the latch.
+#[test]
+fn a_frame_drawn_while_the_display_flips_waits_for_its_latch() {
+    let mut saver = Fixture::new(0);
+    let mut display = Scanout::new(SIZE);
+    display.flips = true;
+    saver.pipes.say(&SaverMessage::Ready);
+    saver.read(0).expect("heard");
+    saver.advance(0).expect("on time");
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 1,
+        damage: SaverDamage::new(&[QUARTER]).ok(),
+        next: NextFrame::Soon,
+    });
+    saver.read_onto(1, &mut display).expect("heard");
+    assert!(!saver.hosted.take_reached(), "not yet latched");
+    saver
+        .advance(1 + RefreshRate::ASSUMED.frame_ns())
+        .expect("on time");
+    assert_eq!(
+        saver.pipes.heard().last(),
+        Some(&OP_FRAME),
+        "the next is drawn meanwhile"
+    );
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 2,
+        damage: SaverDamage::new(&[QUARTER]).ok(),
+        next: NextFrame::Soon,
+    });
+    saver
+        .read_onto(2 + RefreshRate::ASSUMED.frame_ns(), &mut display)
+        .expect("heard");
+    assert_eq!(display.drawn.len(), 1, "held while the display flips");
+    let asked = saver.pipes.heard().len();
+    saver
+        .advance(3 * RefreshRate::ASSUMED.frame_ns())
+        .expect("on time");
+    assert_eq!(
+        saver.pipes.heard().len(),
+        asked,
+        "nothing asked while one is held"
+    );
+    display.in_flight = false;
+    assert!(saver
+        .hosted
+        .latched((&mut saver.compositor, saver.wm), &mut display));
+    assert_eq!(display.drawn.len(), 2, "the held frame went at the latch");
+}
+
+/// A display still taking the compositor's last frame when the saver's first
+/// arrives holds that frame for its latch, and then draws it whole.
+#[test]
+fn a_first_frame_held_for_the_latch_is_drawn_whole_at_it() {
+    let mut saver = Fixture::new(0);
+    let mut display = Scanout::new(SIZE);
+    display.in_flight = true;
+    saver.pipes.say(&SaverMessage::Ready);
+    saver.read(0).expect("heard");
+    saver.advance(0).expect("on time");
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 1,
+        damage: SaverDamage::new(&[QUARTER]).ok(),
+        next: NextFrame::Soon,
+    });
+    saver.read_onto(1, &mut display).expect("heard");
+    assert!(display.drawn.is_empty(), "held for the latch");
+    assert!(
+        saver.hosted.scans_out(),
+        "the compositor presents nothing meanwhile"
+    );
+    display.in_flight = false;
+    assert!(saver
+        .hosted
+        .latched((&mut saver.compositor, saver.wm), &mut display));
+    assert_eq!(
+        display.drawn,
+        [alloc::vec![Rect::new(0, 0, SIZE.0, SIZE.1)]],
+        "whole"
+    );
+}
+
+/// A display that refuses a frame drawn in its memory sends it, and every one
+/// after, to the window.
+#[test]
+fn a_display_that_refuses_sends_every_frame_to_the_window() {
+    let mut saver = Fixture::new(0);
+    let mut display = Scanout::new(SIZE);
+    display.refuses = true;
+    saver.pipes.say(&SaverMessage::Ready);
+    saver.read(0).expect("heard");
+    saver.advance(0).expect("on time");
+    saver.draw(Color::rgb(200, 10, 10), QUARTER);
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 1,
+        damage: SaverDamage::new(&[QUARTER]).ok(),
+        next: NextFrame::Soon,
+    });
+    saver.read_onto(1, &mut display).expect("heard");
+    assert!(!saver.hosted.scans_out());
+    let pixel = saver.window_pixel(1, 1);
+    assert_eq!((pixel.r, pixel.a), (200, 255), "laid on the window");
+    assert!(saver.shown(), "the compositor presented it");
+    display.refuses = false;
+    let later = 2 + RefreshRate::ASSUMED.frame_ns();
+    saver.advance(later).expect("on time");
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 2,
+        damage: SaverDamage::new(&[QUARTER]).ok(),
+        next: NextFrame::Idle,
+    });
+    saver.read_onto(later + 1, &mut display).expect("heard");
+    assert!(display.drawn.is_empty(), "never tried again");
+}
+
+/// A frame the display's memory cannot hold is refused before a byte of it is
+/// drawn and never shown, and goes to the window instead.
+#[test]
+fn a_frame_the_display_cannot_hold_is_never_shown_there() {
+    let mut saver = Fixture::new(0);
+    let mut display = Scanout::new(SIZE);
+    let short = display.frame.len() / 2;
+    display.frame.truncate(short);
+    saver.pipes.say(&SaverMessage::Ready);
+    saver.read(0).expect("heard");
+    saver.advance(0).expect("on time");
+    saver.draw(Color::rgb(200, 10, 10), QUARTER);
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 1,
+        damage: SaverDamage::new(&[QUARTER]).ok(),
+        next: NextFrame::Soon,
+    });
+    saver.read_onto(1, &mut display).expect("heard");
+    assert!(display.drawn.is_empty(), "nothing shown");
+    assert!(display.frame.iter().all(|byte| *byte == 0), "nothing drawn");
+    assert!(!saver.hosted.scans_out());
+    let pixel = saver.window_pixel(1, 1);
+    assert_eq!((pixel.r, pixel.a), (200, 255), "laid on the window");
+}
+
+/// A display of another size than the saver's region is never drawn into.
+#[test]
+fn a_display_the_saver_does_not_cover_is_left_to_the_compositor() {
+    let mut saver = Fixture::new(0);
+    let mut display = Scanout::new((SIZE.0 * 2, SIZE.1));
+    saver.pipes.say(&SaverMessage::Ready);
+    saver.read(0).expect("heard");
+    saver.advance(0).expect("on time");
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 1,
+        damage: SaverDamage::new(&[QUARTER]).ok(),
+        next: NextFrame::Idle,
+    });
+    saver.read_onto(1, &mut display).expect("heard");
+    assert!(display.drawn.is_empty());
+    assert!(!saver.hosted.scans_out());
 }
 
 const QUARTER: DamageRect = DamageRect {
@@ -149,7 +470,7 @@ fn a_presented_frame_is_laid_on_the_window_where_it_changed() {
     saver.draw(Color::rgb(200, 10, 10), QUARTER);
     saver.pipes.say(&SaverMessage::Presented {
         serial: 1,
-        damage: DamageList::new(&[QUARTER]).ok(),
+        damage: SaverDamage::new(&[QUARTER]).ok(),
         next: NextFrame::Idle,
     });
     saver.read(2).expect("heard");
@@ -163,6 +484,53 @@ fn a_presented_frame_is_laid_on_the_window_where_it_changed() {
     );
 }
 
+/// However a saver scatters its damage, the compositor is handed no more
+/// rectangles than the protocol names, in band form: a staircase of slivers
+/// whose band form would cut the screen into thousands is laid within the
+/// count, every stair still laid.
+#[test]
+fn a_saver_scattering_its_damage_cannot_fragment_the_compositors() {
+    let size = (300, 140);
+    let mut saver = Fixture::of(&start_of(0, size));
+    saver.pipes.say(&SaverMessage::Ready);
+    saver.read(0).expect("heard");
+    saver.advance(0).expect("on time");
+    saver.draw(
+        Color::rgb(200, 10, 10),
+        DamageRect::full(&saver.hosted.layout.display_mode()),
+    );
+    let stairs: alloc::vec::Vec<DamageRect> = (0..u32::try_from(SAVER_DAMAGE_RECTS)
+        .expect("small"))
+        .map(|step| DamageRect {
+            x: 2 * step,
+            y: step,
+            width_px: 1,
+            height_px: size.1 - step,
+        })
+        .collect();
+    saver.pipes.say(&SaverMessage::Presented {
+        serial: 1,
+        damage: Some(SaverDamage::new(&stairs).expect("disjoint stairs")),
+        next: NextFrame::Idle,
+    });
+    saver.read(1).expect("heard");
+    let laid = saver.hosted.laying.rects();
+    assert!(
+        laid.len() <= SAVER_DAMAGE_RECTS,
+        "{} rectangles",
+        laid.len()
+    );
+    let mut canonical = Region::new();
+    for rect in laid {
+        canonical.add(*rect);
+    }
+    assert_eq!(canonical.rects(), laid, "in band form");
+    for stair in &stairs {
+        let pixel = saver.window_pixel(stair.x, stair.y + stair.height_px - 1);
+        assert_eq!((pixel.r, pixel.a), (200, 255), "{stair:?}");
+    }
+}
+
 /// However a saver drew its pixels, what it presents covers the screen: a
 /// transparent pixel is laid opaque.
 #[test]
@@ -174,7 +542,7 @@ fn a_transparent_frame_is_laid_opaque() {
     saver.draw(Color::rgba(0, 0, 0, 0), QUARTER);
     saver.pipes.say(&SaverMessage::Presented {
         serial: 1,
-        damage: DamageList::new(&[QUARTER]).ok(),
+        damage: SaverDamage::new(&[QUARTER]).ok(),
         next: NextFrame::Idle,
     });
     saver.read(1).expect("heard");
@@ -192,7 +560,7 @@ fn a_window_that_lost_its_picture_is_laid_whole_and_opaque() {
     saver.compositor.teardown_content();
     saver.pipes.say(&SaverMessage::Presented {
         serial: 1,
-        damage: DamageList::new(&[QUARTER]).ok(),
+        damage: SaverDamage::new(&[QUARTER]).ok(),
         next: NextFrame::Idle,
     });
     saver.read(1).expect("heard");
@@ -201,10 +569,11 @@ fn a_window_that_lost_its_picture_is_laid_whole_and_opaque() {
         u8::MAX,
         "beyond the damage too"
     );
-    assert!(saver.hosted.has_presented());
+    assert!(saver.shown());
 }
 
-/// A frame that changed nothing lays nothing, so it is not yet a frame shown.
+/// A frame that changed nothing lays nothing, so no frame of the saver's
+/// reaches the screen with the next present.
 #[test]
 fn a_frame_that_changed_nothing_is_not_a_frame_shown() {
     let mut saver = Fixture::new(0);
@@ -217,7 +586,57 @@ fn a_frame_that_changed_nothing_is_not_a_frame_shown() {
         next: NextFrame::Idle,
     });
     saver.read(1).expect("heard");
-    assert!(!saver.hosted.has_presented());
+    assert!(!saver.shown());
+}
+
+const FRAME_NS: u64 = RefreshRate::ASSUMED.frame_ns();
+
+/// The next frame is asked for once the last is laid, not once it is shown:
+/// the saver draws it while the host composites the one before.
+#[test]
+fn the_next_frame_is_asked_for_while_the_last_awaits_the_screen() {
+    let mut saver = Fixture::new(0);
+    saver.pipes.say(&SaverMessage::Ready);
+    saver.read(0).expect("heard");
+    saver.advance(0).expect("on time");
+    saver.presents(1, 1);
+    saver.advance(FRAME_NS).expect("on time");
+    assert_eq!(
+        saver.pipes.heard(),
+        [OP_START, OP_FRAME, OP_FRAME],
+        "asked before any present"
+    );
+}
+
+/// A frame presented before the one laid has reached the screen waits in the
+/// region, and no further frame is asked for until the screen takes the first.
+#[test]
+fn a_frame_presented_ahead_of_the_screen_waits_for_it() {
+    let mut saver = Fixture::new(0);
+    saver.pipes.say(&SaverMessage::Ready);
+    saver.read(0).expect("heard");
+    saver.advance(0).expect("on time");
+    saver.draw(Color::rgb(200, 0, 0), QUARTER);
+    saver.presents(1, 1);
+    saver.advance(FRAME_NS).expect("on time");
+    saver.draw(Color::rgb(0, 200, 0), QUARTER);
+    saver.presents(2, FRAME_NS + 1);
+    assert_eq!(saver.window_pixel(1, 1).r, 200, "the first still laid");
+    saver.advance(4 * FRAME_NS).expect("on time");
+    assert_eq!(
+        saver.pipes.heard(),
+        [OP_START, OP_FRAME, OP_FRAME],
+        "nothing asked while one waits"
+    );
+    assert!(saver.shown(), "the first reached the screen");
+    assert_eq!(saver.window_pixel(1, 1).g, 200, "the second laid behind it");
+    saver.advance(4 * FRAME_NS).expect("on time");
+    assert_eq!(
+        saver.pipes.heard(),
+        [OP_START, OP_FRAME, OP_FRAME, OP_FRAME]
+    );
+    assert!(saver.shown(), "the second reached it");
+    assert!(!saver.shown(), "and nothing waits");
 }
 
 #[test]

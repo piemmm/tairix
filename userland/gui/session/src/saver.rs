@@ -94,9 +94,9 @@ pub const SAVER_CATALOGUE_SHOWN_MESSAGE: &str = "screensaver catalogue shown in 
 /// picture is lost.
 const DIM_ALPHA: u8 = 176;
 
-/// The address space a saver is given beyond its region's own: room for its
-/// own picture and an ordinary heap. A containment bound on untrusted code,
-/// held to a share of the machine below.
+/// The address space a saver is given beyond its region, which is its picture:
+/// room for an ordinary heap. A containment bound on untrusted code, held to a
+/// share of the machine below.
 const SAVER_MEMORY_BYTES: u64 = 128 << 20;
 
 /// What a saver asking for the large ceiling is given beyond that: a scene of
@@ -491,13 +491,26 @@ impl<T: SessionTransport, S: Sink + Clone> Screensaver<T, S> {
         Some(end)
     }
 
-    /// Record the hosted saver's first frame on the screen, once.
-    fn record_shown(&mut self) {
+    /// A frame was presented to the display: lay the hosted saver's frame held
+    /// behind the one it carried, and record the saver's first frame on the
+    /// screen, once.
+    pub fn shown(&mut self, compositor: &mut Compositor) {
+        self.announce(|hosted, wm| hosted.shown((compositor, wm)));
+    }
+
+    /// Record the hosted saver's first frame on the screen, once: `reached`
+    /// says whether one of its frames has reached it.
+    fn announce(&mut self, reached: impl FnOnce(&mut Hosted<T, S>, WindowId) -> bool) {
         let preview = self.steady_until_ns.is_some();
-        let Some(saver) = self.shown.as_mut().and_then(|shown| shown.hosted.as_mut()) else {
+        let Some(Shown {
+            wm,
+            hosted: Some(saver),
+            ..
+        }) = self.shown.as_mut()
+        else {
             return;
         };
-        if saver.announced || !saver.hosted.has_presented() {
+        if !reached(&mut saver.hosted, *wm) || saver.announced {
             return;
         }
         saver.announced = true;
@@ -644,14 +657,33 @@ impl<T: SessionTransport, S: Sink + Clone> Screensaver<T, S> {
     pub fn on_readable(
         &mut self,
         now_ns: u64,
-        compositor: &mut Compositor,
+        (compositor, display): (&mut Compositor, Option<&mut dyn Presenter>),
         errands: &mut dyn SaverErrands,
     ) -> Option<SaverEnd> {
         let ended = self.with_hosted(compositor, |hosted, wm, compositor| {
-            hosted.on_readable(now_ns, (compositor, wm), errands)
+            hosted.on_readable(now_ns, (compositor, wm, display), errands)
         });
-        self.record_shown();
+        if ended.is_none() {
+            self.announce(|hosted, _| hosted.take_reached());
+        }
         ended
+    }
+
+    /// The display latched a frame: one the hosted saver drew in its memory
+    /// may let the next go, and the saver's first frame on the screen is
+    /// recorded once.
+    pub fn latched(&mut self, compositor: &mut Compositor, display: &mut dyn Presenter) {
+        self.announce(|hosted, wm| hosted.latched((compositor, wm), display));
+    }
+
+    /// Whether the hosted saver's frames go straight to the display, the
+    /// compositor to present nothing meanwhile.
+    #[must_use]
+    pub fn scans_out(&self) -> bool {
+        self.shown
+            .as_ref()
+            .and_then(|shown| shown.hosted.as_ref())
+            .is_some_and(|saver| saver.hosted.scans_out())
     }
 
     /// The saver's pipe has room, at `now_ns`, for what is queued.
@@ -830,6 +862,7 @@ pub fn saver_start(saver: &Saver, context: &SaverContext<'_>, now_ns: u64) -> Re
     start.machine = BoundedText::new(context.identity.1).unwrap_or(BoundedText::EMPTY);
     let (memory, threads) = ceilings(saver, region.len(), context.machine);
     start.memory = memory;
+    start.installed_memory = context.machine.1;
     start.threads = u32::try_from(threads).unwrap_or(1);
     if let Some(id) = &saver.id {
         for option in &saver.options {
@@ -844,9 +877,10 @@ pub fn saver_start(saver: &Saver, context: &SaverContext<'_>, now_ns: u64) -> Re
 
 /// The address space and threads `saver` is held to, its region `len` bytes,
 /// on a machine of `cores` cores holding `memory` bytes: its own thread, or
-/// one per core for a saver that runs in parallel; room for its region, its
-/// picture and its heap, and the large ceiling's more where it asks — never
-/// more than a share of the machine, however much it asks for.
+/// one per core for a saver that runs in parallel; room for its region, which
+/// its scene draws straight into, and its heap, and the large ceiling's more
+/// where it asks — never more than a share of the machine, however much it
+/// asks for.
 #[must_use]
 pub fn ceilings(saver: &Saver, len: usize, (cores, memory): (u16, u64)) -> (u64, u64) {
     let region = u64::try_from(len).unwrap_or(u64::MAX);
@@ -856,7 +890,6 @@ pub fn ceilings(saver: &Saver, len: usize, (cores, memory): (u16, u64)) -> (u64,
         0
     };
     let asked = region
-        .saturating_mul(2)
         .saturating_add(SAVER_MEMORY_BYTES)
         .saturating_add(large);
     let threads = if saver.parallel {

@@ -12,6 +12,7 @@ use core::panic::Location;
 #[cfg(feature = "watchdog-diagnostics")]
 use core::sync::atomic::AtomicU32;
 
+use tairix_kernel_mem::TagSlots;
 use tairix_kernel_sched_api::TaskAction;
 use tairix_sync::{OnceCell, SpinLock};
 
@@ -182,6 +183,9 @@ unsafe impl Send for LiveSpacePtr {}
 pub(crate) struct CpuState {
     pub(crate) resume: SpinLock<Option<ResumeHandle>>,
     pub(crate) live_space: SpinLock<Option<LiveSpacePtr>>,
+    /// The address-space tags this CPU gives the user spaces it runs, which
+    /// only its own dispatcher takes.
+    pub(crate) tags: SpinLock<TagSlots>,
     /// The kill gate of the thread switched in here, published by its
     /// dispatcher for the run, so the thread's syscalls and faults reach their
     /// own gate rather than a structure every CPU contends on.
@@ -429,6 +433,7 @@ impl CpuState {
         Self {
             resume: SpinLock::new(None),
             live_space: SpinLock::new(None),
+            tags: SpinLock::new(TagSlots::new()),
             gate: SpinLock::new(None),
             preempt_pending: AtomicBool::new(false),
             preemptions: AtomicU64::new(0),

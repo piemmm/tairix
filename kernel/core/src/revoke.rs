@@ -574,7 +574,7 @@ mod tests {
         let shared = crate::devres::NULL_SHARED_MEM_FACILITY;
         let driver = task(0x7_0020);
         let space = fx.with_space(driver, crate::procspace::host_test_space!(Some(&REMOTE)));
-        space.active_cpus().enter(OTHER_CPU);
+        space.tlb_context().enter(OTHER_CPU);
         let (revoked_window, kept_window) = (
             HwResource::mmio(0xFE00_0040, 0x40),
             HwResource::mmio(0xFE20_0000, 0x1000),
@@ -681,7 +681,7 @@ mod tests {
     fn a_region_a_live_node_still_confers_is_withdrawn_before_its_frames_are_freed() {
         let fx = Fixture::new();
         let m = map_through_node_7(&fx);
-        m.holder_space.active_cpus().enter(OTHER_CPU);
+        m.holder_space.tlb_context().enter(OTHER_CPU);
         let parent_driver = task(0x7_0030);
         fx.aspaces
             .write()

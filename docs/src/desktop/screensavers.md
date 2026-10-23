@@ -57,9 +57,9 @@ Its signed `AppInfo` declares, beside the fields every bundle has:
     offers every picture).
 - **threads** (`threads = "cores"`) for a saver that runs a thread per online
   core, where any other runs one, and **memory** (`memory = "large"`) for one
-  that needs the large ceiling. Every saver is given twice its region and
-  128 MiB of address space, the large ceiling 2 GiB more, and never more than
-  half the machine.
+  that needs the large ceiling. Every saver is given its region and 128 MiB
+  of address space, the large ceiling 2 GiB more, and never more than half
+  the machine.
 
 A saver also ships `Resources/Preview.png`, the picture Settings shows for
 it: 16:9, at least as large as the largest picture the chooser draws, and
@@ -69,8 +69,9 @@ within 1 MiB. The image build refuses a system saver without one.
 
 Its start carries the screen's size and scale, the display's refresh rate,
 the desktop's look — appearance, text, contrast, density and reduced motion
-— a seed from the CSPRNG, the account and machine names, the memory
-pressure band (moved as it moves), its ceilings, and its options. Each frame
+— a seed from the CSPRNG, the account and machine names, the machine's
+installed memory (its font caches are sized from it), the memory pressure
+band (moved as it moves), its ceilings, and its options. Each frame
 it is asked for carries its serial, its monotonic time and the wall clock as
 the icon bar reads it. Text is drawn through the font service, the desktop
 relaying each call.
@@ -93,29 +94,36 @@ relaying each call.
   with tabular figures, over the local date spelled out (`Mon 28 Sep 2026`),
   still, with a ribbon of orange light roaming the screen beneath it — five
   soft strands, each one smooth Bézier curve, kept clear of the text — from
-  [`lib/ribbon`](../lib/ribbon.md), which the login screen stands over too.
-  Under reduced motion the ribbon holds still and only the minute turning
-  redraws.
+  [`lib/ribbon`](../lib/ribbon.md), which the login screen stands over too,
+  painted a band of columns at a time across the saver's threads. Under reduced
+  motion the ribbon holds still and only the minute turning redraws.
 - **Starfield** (`Starfield.app`): stars flown through, projected with
   perspective and drawn as the path each travelled over the frame — a dot
   while cruising, a streak in warp — the flight cruising, surging into warp,
   holding and settling back as the field turns slowly about the line of
-  flight. Its options set the density and whether it warps; under reduced
-  motion it only cruises and does not turn.
+  flight. A frame erases where its stars were and draws where they are a band
+  of rows at a time across the saver's threads, each streak's brightness
+  stepped along its rows in whole numbers. Its options set the density and
+  whether it warps; under reduced motion it only cruises and does not turn.
 - **Game of Life** (`Life.app`): Conway's B3/S23 on a torus, bit-packed and
   stepped a word at a time, a newborn taking the colour of the colony most of
   its parents belong to and cells shading as they age; a world that settles
-  into stillness, a cycle or near-emptiness is reseeded after a grace. Its
-  options set the cell size and the speed; while no cell is changing it asks
-  for no frame until the next generation.
+  into stillness, a cycle or near-emptiness is reseeded after a grace. A
+  frame's changing cells are painted a band of rows at a time across the
+  saver's threads, and named as the tiles they touch. Its options set the cell
+  size and the speed; while no cell is changing it asks for no frame until the
+  next generation.
 - **Ray Tracer** (`Raytrace.app`, over [`lib/raytrace`](../lib/raytrace.md)):
   a scene composed at random in one of the tracer's settings, prepared a
   bounded unit at a time and revealed coarse to fine (`plans/RAYTRACE.md`):
   soft within moments, sharpening pass by pass, every pixel traced once at the
   tracer's best quality. A readout in the lower right says how far the scene
-  is prepared and then traced. A whole picture is held a minute, faded out
+  is prepared and then traced. While the picture forms each paint's change
+  fades in over at least eight frames, however slowly they come, and the next
+  paint waits for it. A whole picture is held a minute, faded out
   and followed by a scene set elsewhere. Its options set whether it traces on
-  one thread of its own or on every core the desktop grants, whether each
+  one thread of its own, painting its frames on the threads that leaves free,
+  or on every core the desktop grants, whether each
   whole picture is kept through the keeping feed, and the detail its scenes
   are set out at — a scene whose peak the memory the desktop granted and the
   pressure band cannot spare is set out simply.
@@ -138,7 +146,9 @@ relaying each call.
 Each animated saver draws on whole frames of the display's rate, at most
 thirty a second (`tairix_theme::motion::SceneClock`), presents only what
 changed, and asks for its next frame no sooner than it needs one; the
-desktop asks for none faster than the display shows them.
+desktop asks for none faster than the display shows them, and asks for the
+next as soon as the last is laid, so a saver draws one frame while the
+desktop composites the one before.
 
 ## Tests
 

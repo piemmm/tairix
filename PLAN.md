@@ -645,7 +645,9 @@ grandfather lists, and `cargo xtask build --headless` proves the headless image
 existing HAL slices in place rather than adding one:
 `PageTableFrames::free_table` with the shared `frames::reclaim_hierarchy` walk,
 and `AddressSpace::reclaim_table_frames`. Each CPU parks on its boot
-translation at every task suspend, which is what makes the teardown SMP-safe
+translation at every task suspend, which is what makes the teardown SMP-safe;
+the `AddressTags` slice tags each CPU's TLB entries with their space, so a
+switch between user spaces keeps the outgoing space's entries
 (`docs/src/architecture/memory.md`).
 
 ## §19 Threat Model and Hardening Burn-down

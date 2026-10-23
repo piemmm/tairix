@@ -1,14 +1,36 @@
 //! A saver's `Run`: its standard streams and its spawn share.
 
+use alloc::boxed::Box;
+
 use tairix_abi::Errno;
-use tairix_rt::shm::SpawnShare;
+use tairix_raster::PixelMemory;
+use tairix_rt::shm::{SpawnPart, SpawnShare};
 use tairix_sandbox::rt::StdioChannel;
 
 use crate::{serve, Ended, RegionBytes, Scene, Setup};
 
-impl RegionBytes for SpawnShare {
+/// One part of the spawn share: the frame area a scene draws straight into,
+/// or the feed area after it.
+pub struct Part(SpawnPart);
+
+impl PixelMemory for Part {
     fn bytes_mut(&mut self) -> &mut [u8] {
-        SpawnShare::bytes_mut(self)
+        self.0.bytes_mut()
+    }
+}
+
+impl AsMut<[u8]> for Part {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.0.bytes_mut()
+    }
+}
+
+impl RegionBytes for SpawnShare {
+    type Rest = Part;
+
+    fn into_parts(self, frame_len: usize) -> Result<(Box<dyn PixelMemory>, Part), Errno> {
+        let (frame, rest) = self.split(frame_len)?;
+        Ok((Box::new(Part(frame)), Part(rest)))
     }
 }
 

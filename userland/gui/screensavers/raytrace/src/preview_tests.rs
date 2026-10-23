@@ -14,7 +14,9 @@ use tairix_raytrace::{Reveal, Step};
 
 use super::{Cells, Preview};
 use crate::engine::Traced;
-use crate::tiles::{COVER_BUDGET, TILE};
+use tairix_abi::saver_ipc::SAVER_DAMAGE_RECTS;
+
+use crate::TILE;
 
 const WHITE: Pixel = Pixel {
     r: 255,
@@ -199,7 +201,7 @@ fn a_frame_marks_a_bounded_cover_of_whole_tiles() {
             let mut damage = Region::new();
             preview.take(chunk, &mut damage);
             preview.paint(&mut surface, &SERIAL);
-            assert!(damage.rects().len() <= COVER_BUDGET);
+            assert!(damage.rects().len() <= SAVER_DAMAGE_RECTS);
             for rect in damage.rects() {
                 let tiled = |edge: i32, end: u32| {
                     let edge = u32::try_from(edge).expect("on the picture");

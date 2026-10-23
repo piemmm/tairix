@@ -7,8 +7,10 @@
 //! left alone going dark and waking again — is exercised on the host. What
 //! the `Run` binary adds is only where the events and the pixels come from.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::iter;
 
 use tairix_abi::driver::display::{DamageRect, DisplayMode, RefreshRate};
 use tairix_abi::input::{PointerButtonCode, PointerInput};
@@ -22,6 +24,7 @@ use tairix_display::{DisplaySleep, Presenter, SwitchedOff};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_greeter::{AccountTile, Asking, AuthSurface, Backdrop, Courier, EventContext, Outcome};
 use tairix_input::{InputEvent, PointerButton};
+use tairix_parallel::JobRunner;
 use tairix_raster::Surface;
 use tairix_ribbon::SKY;
 use tairix_theme::{MotionInteraction, Theme};
@@ -31,7 +34,7 @@ use tairix_window::pointer_input_events;
 
 use crate::chrome::Teller;
 use crate::cursor::Cursor;
-use crate::frame::{Present, Scanout};
+use crate::frame::{Layers, Present, Scanout};
 use crate::scene::Scene;
 use crate::verify::{Answer, Checked};
 use crate::wait::{frame_budget, park_timeout, Idle};
@@ -126,6 +129,8 @@ pub struct LoginScreen<C: Courier<Answer = Checked>> {
     touch: Recogniser,
     /// The rate the display scans at, which every animation is paced by.
     refresh: RefreshRate,
+    /// What the ribbon is painted across.
+    runner: Box<dyn JobRunner>,
 }
 
 /// One pointing action, from a mouse report or a touch gesture.
@@ -195,20 +200,23 @@ fn wider(one: Option<Rect>, other: Option<Rect>) -> Option<Rect> {
 }
 
 impl<C: Courier<Answer = Checked>> LoginScreen<C> {
-    /// A screen offering `accounts`, painted into `scanout`, naming the
-    /// machine by `identity`, asking its authority through `courier`.
+    /// A screen offering `accounts`, painted into `scanout` with its ribbon
+    /// and its frames spread across `runner`, naming the machine by
+    /// `identity`, asking its authority through `courier`.
     ///
     /// An empty list is not an error: the chooser always carries its
     /// typed-name tile, so a machine whose account directory could not be
     /// read is still one a user can log into.
     pub fn new(
-        scanout: Scanout,
+        mut scanout: Scanout,
         theme: Theme,
         scale: Scale,
         (identity, civil): (String, CivilClock<'static>),
         accounts: Vec<AccountTile>,
         courier: C,
+        runner: Box<dyn JobRunner>,
     ) -> Self {
+        scanout.spread_over(&*runner);
         let cursor = Cursor::centred(scanout.mode());
         let mut touch = Recogniser::new(TouchSettings::DEFAULT);
         let mode = scanout.mode();
@@ -234,6 +242,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
             asleep_owes: AsleepOwes::Nothing,
             touch,
             refresh: RefreshRate::ASSUMED,
+            runner,
         }
     }
 
@@ -252,7 +261,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         let screen = self.scanout.screen();
         let clear = self.surface.column_rect(screen, self.scale);
         let still = self.theme.motion().reduced_motion();
-        self.scene = Scene::new(screen, clear, (now_ns, self.refresh), still);
+        self.scene = Scene::new(screen, clear, (now_ns, self.refresh), still, &*self.runner);
         self.paint_owed = true;
         self.scene.is_some()
     }
@@ -297,6 +306,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         }
         let ribbon = self.scene.take().is_some();
         self.scanout = scanout;
+        self.scanout.spread_over(&*self.runner);
         self.painted = None;
         self.paint_owed = true;
         self.sleep = DisplaySleep::new();
@@ -358,40 +368,38 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
             scene,
             owed,
             ribbon_owed,
+            runner,
             ..
         } = self;
         let Some(painted) = painted.as_ref() else {
             return Present::Nothing;
         };
-        let cursor = if drawn { pointer.as_ref() } else { None };
-        let ground = scene.as_ref().map(Scene::layer);
-        let mode = *scanout.mode();
-        let mut compose = |rect| scanout.compose(painted, ground, cursor, rect, reveal);
-        let surface = match owed {
-            damage::Repaint::Whole => compose(None),
-            damage::Repaint::Parts(parts) => parts
-                .rects()
-                .iter()
-                .fold(Present::Nothing, |present, rect| {
-                    present.merged(compose(Some(*rect)), &mode)
-                }),
+        let layers = Layers {
+            cursor: if drawn { pointer.as_ref() } else { None },
+            surface: painted,
+            ground: scene.as_ref().map(Scene::layer),
+            reveal,
         };
-        let ribbon = match scene.as_ref() {
-            Some(scene) if *ribbon_owed && surface != Present::Whole => scene
-                .damage()
-                .rects()
-                .iter()
-                .fold(Present::Nothing, |present, strip| {
-                    present.merged(compose(Some(*strip)), &mode)
-                }),
-            _ => Present::Nothing,
+        let present = match owed {
+            damage::Repaint::Whole => {
+                let screen = scanout.screen();
+                scanout.compose(layers, iter::once(screen), &**runner)
+            }
+            damage::Repaint::Parts(parts) => {
+                let strips = match scene.as_ref() {
+                    Some(scene) if *ribbon_owed => scene.damage().rects(),
+                    _ => &[],
+                };
+                let damage = parts.rects().iter().chain(strips).copied();
+                scanout.compose(layers, damage, &**runner)
+            }
         };
         match owed {
             damage::Repaint::Whole => *owed = damage::Repaint::clean(),
             damage::Repaint::Parts(parts) => parts.clear(),
         }
         *ribbon_owed = false;
-        surface.merged(ribbon, &mode)
+        present
     }
 
     /// Put the chrome up for `wall` and begin the fade the screen arrives out
@@ -561,10 +569,11 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
             .remaining(now_ns, self.surface.selected_account());
         let cooldown = Repaint::of(self.surface.set_cooldown(remaining));
         let motion = Repaint::of(self.surface.advance(now_ns));
+        let runner = &*self.runner;
         let moved = self
             .scene
             .as_mut()
-            .is_some_and(|scene| scene.advance(now_ns, self.refresh));
+            .is_some_and(|scene| scene.advance(now_ns, self.refresh, runner));
         self.owe(clock.merged(cooldown).merged(motion));
         self.ribbon_owed |= moved;
     }

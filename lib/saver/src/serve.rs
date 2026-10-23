@@ -5,29 +5,30 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DamageList, DamageRect, MAX_DAMAGE_RECTS};
 use tairix_abi::saver_ipc::{
-    HostMessage, SaverMessage, SaverRegion, SlideOutcome, Start, SAVER_SEED_LEN,
+    HostMessage, SaverDamage, SaverMessage, SaverRegion, SlideOutcome, Start, SAVER_DAMAGE_RECTS,
+    SAVER_SEED_LEN,
 };
 use tairix_abi::sysinfo::MemoryBand;
 use tairix_abi::Errno;
-use tairix_display::winframe::{damage_in, encode};
+use tairix_display::winframe::damage_in;
 use tairix_geometry::{Region, Scale};
 use tairix_hash::HashSeed;
-use tairix_raster::Surface;
+use tairix_raster::{PixelMemory, Surface};
 use tairix_reclaim::PressureBand;
 use tairix_rt::sync::Mutex;
 use tairix_sandbox::proto::Channel;
 
 use crate::link::{FontRelay, Link};
-use crate::{areas, FeedArea, Frame, Host, Scene, Setup, GROUND};
+use crate::{feed_of, FeedArea, Frame, Host, Scene, Setup, GROUND};
 
 const _: () = assert!(HashSeed::LEN + 8 <= SAVER_SEED_LEN);
 
-/// The most rectangles a frame's damage holds before it is its bounding box:
-/// enough for the present's few to be fitted well, few enough that the region
-/// stays cheap to build however many small changes a scene reports.
-pub(crate) const DAMAGE_BUDGET: usize = 8 * MAX_DAMAGE_RECTS;
+/// The most of what a saver may map each of its two font caches takes, as a
+/// divisor: they are sized from the machine's memory as every desktop
+/// program's are, and a machine with memory to spare must not size them past
+/// the saver's ceiling.
+const FONT_CACHE_SHARE: u64 = 16;
 
 /// How a saver's run ended.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -43,8 +44,17 @@ pub enum Ended {
 
 /// The memory a saver's region is mapped into.
 pub trait RegionBytes {
-    /// The region's bytes.
-    fn bytes_mut(&mut self) -> &mut [u8];
+    /// What the region holds after its frame area: the feed area, for a saver
+    /// given one.
+    type Rest: AsMut<[u8]>;
+
+    /// The frame area, the region's first `frame_len` bytes, as memory the
+    /// scene's surface draws straight into, and the bytes after it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a region shorter than its frame area.
+    fn into_parts(self, frame_len: usize) -> Result<(Box<dyn PixelMemory>, Self::Rest), Errno>;
 }
 
 /// Run a saver over `channel` until its host closes it: map the region the
@@ -92,8 +102,10 @@ where
 /// A saver under way.
 struct Running<R, S> {
     start: Start,
-    region: R,
+    /// The scene's picture, drawn straight into the region's frame area.
     surface: Surface,
+    /// The region after its frame area.
+    rest: R,
     damage: Region,
     scene: S,
     feed: FeedArea,
@@ -105,15 +117,21 @@ fn begin<C, R, S>(
     link: &Arc<Mutex<Link<C>>>,
     map: impl FnOnce(&SaverRegion) -> Result<R, Errno>,
     make: impl FnOnce(&Setup<'_>) -> Result<S, Errno>,
-) -> Result<Running<R, S>, Ended>
+) -> Result<Running<R::Rest, S>, Ended>
 where
     C: Channel + Send + 'static,
     R: RegionBytes,
 {
     let start = first_start(link).map_err(Ended::Broken)?;
     let scale = Scale::from_percent(start.scale_percent).ok_or(Ended::Broken(Errno::OutOfRange))?;
-    let mut region = map(&start.region).map_err(Ended::Unstarted)?;
-    if region.bytes_mut().len() < start.region.len() {
+    let layout = start.region;
+    let (frame, mut rest) = map(&layout)
+        .and_then(|region| region.into_parts(layout.frame_len()))
+        .map_err(Ended::Unstarted)?;
+    if layout
+        .feed_range()
+        .is_some_and(|range| rest.as_mut().len() < range.len())
+    {
         return Err(Ended::Unstarted(Errno::LengthOutOfRange));
     }
     tairix_font::set_font_transport(Box::new(FontRelay {
@@ -121,23 +139,17 @@ where
     }));
     let mut key = [0u8; HashSeed::LEN];
     key.copy_from_slice(&start.seed[..HashSeed::LEN]);
-    tairix_font::install_caches(start.memory, HashSeed::from_bytes(key));
+    tairix_font::install_caches(
+        start.installed_memory,
+        start.memory / FONT_CACHE_SHARE,
+        HashSeed::from_bytes(key),
+    );
     feel(start.pressure);
-    let mut surface = Surface::new(start.region.width(), start.region.height())
-        .ok_or(Ended::Unstarted(Errno::OutOfMemory))?;
+    // The frame area is the picture from here on; the host reads it only from
+    // a `Presented` to the `Frame` after it.
+    let mut surface = Surface::lent(layout.width(), layout.height(), frame)
+        .ok_or(Ended::Unstarted(Errno::LengthOutOfRange))?;
     surface.fill(GROUND);
-    // From here the frame area holds the whole picture, so the host may read
-    // any part of it at any time, not only what the last frame changed.
-    let mode = start.region.display_mode();
-    let (pixels, _) = areas(region.bytes_mut(), &start.region);
-    encode(
-        &surface,
-        pixels,
-        &mode,
-        DamageRect::full(&mode),
-        &tairix_parallel::Serial,
-    )
-    .map_err(Ended::Unstarted)?;
     let mut seed = [0u8; 8];
     seed.copy_from_slice(&start.seed[HashSeed::LEN..HashSeed::LEN + 8]);
     let setup = Setup {
@@ -151,22 +163,21 @@ where
         .map_err(Ended::Broken)?;
     Ok(Running {
         start,
-        region,
         surface,
-        damage: Region::with_budget(DAMAGE_BUDGET),
+        rest,
+        damage: Region::with_budget(SAVER_DAMAGE_RECTS),
         scene,
         feed: FeedArea::Saver,
     })
 }
 
-impl<R: RegionBytes, S: Scene> Running<R, S> {
+impl<R: AsMut<[u8]>, S: Scene> Running<R, S> {
     /// Answer one host `message`; a message out of turn is refused.
     fn answer<C: Channel>(
         &mut self,
         message: HostMessage<'_>,
         link: &Mutex<Link<C>>,
     ) -> Result<(), Errno> {
-        let (pixels, fed) = areas(self.region.bytes_mut(), &self.start.region);
         match message {
             HostMessage::Frame {
                 serial,
@@ -178,7 +189,7 @@ impl<R: RegionBytes, S: Scene> Running<R, S> {
                     send: &mut send,
                     start: &self.start,
                     feed: &mut self.feed,
-                    feed_bytes: fed,
+                    feed_bytes: feed_of(self.rest.as_mut(), &self.start.region),
                 };
                 let frame = Frame {
                     serial,
@@ -189,10 +200,9 @@ impl<R: RegionBytes, S: Scene> Running<R, S> {
                 let next = self
                     .scene
                     .frame(&mut self.surface, &mut self.damage, &frame, &mut host);
-                let damage = present(&self.surface, pixels, &self.start.region, &self.damage)?;
                 link.lock().send(&SaverMessage::Presented {
                     serial,
-                    damage,
+                    damage: named(&self.start.region, &self.damage),
                     next,
                 })
             }
@@ -256,25 +266,14 @@ pub(crate) fn relay_pressure(
     }
 }
 
-/// Write what `damage` covers of `surface` into the frame area, answering the
-/// rectangles written; `None` when nothing inside the screen changed.
-fn present(
-    surface: &Surface,
-    frame: &mut [u8],
-    region: &SaverRegion,
-    damage: &Region,
-) -> Result<Option<DamageList>, Errno> {
+/// What `damage` names inside the screen `region` lays out, as a `Presented`
+/// carries it; `None` when nothing inside the screen changed.
+fn named(region: &SaverRegion, damage: &Region) -> Option<SaverDamage> {
     let mode = region.display_mode();
-    let Some(list) = DamageList::fitted(
+    SaverDamage::fitted(
         damage
             .rects()
             .iter()
             .filter_map(|rect| damage_in(&mode, *rect)),
-    ) else {
-        return Ok(None);
-    };
-    for rect in list.rects() {
-        encode(surface, frame, &mode, *rect, &tairix_parallel::Serial)?;
-    }
-    Ok(Some(list))
+    )
 }

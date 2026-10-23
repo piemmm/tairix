@@ -4,6 +4,7 @@
 
 use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::{Point, Rect};
+use tairix_parallel::SERIAL;
 use tairix_raster::Surface;
 use tairix_ribbon::SKY;
 use tairix_theme::motion::SceneClock;
@@ -20,7 +21,7 @@ const SCREEN: Rect = Rect::new(0, 0, 640, 360);
 const COLUMN: Rect = Rect::new(210, 20, 220, 210);
 
 fn moving() -> Scene {
-    Scene::new(SCREEN, COLUMN, (0, RATE), false).expect("a ribbon")
+    Scene::new(SCREEN, COLUMN, (0, RATE), false, &SERIAL).expect("a ribbon")
 }
 
 /// Every pixel whose value differs between `before` and `after`.
@@ -67,16 +68,19 @@ fn a_moving_ribbon_asks_for_its_frames_and_a_still_one_for_none() {
         "an overdue frame is due now"
     );
 
-    let mut still = Scene::new(SCREEN, COLUMN, (0, RATE), true).expect("a ribbon");
+    let mut still = Scene::new(SCREEN, COLUMN, (0, RATE), true, &SERIAL).expect("a ribbon");
     assert_eq!(still.due_in(0), None);
-    assert!(!still.advance(u64::MAX, RATE), "a still ribbon never moves");
+    assert!(
+        !still.advance(u64::MAX, RATE, &SERIAL),
+        "a still ribbon never moves"
+    );
 }
 
 #[test]
 fn an_early_wake_moves_nothing() {
     let mut scene = moving();
     let before = scene.layer().clone();
-    assert!(!scene.advance(FRAME_NS - 1, RATE));
+    assert!(!scene.advance(FRAME_NS - 1, RATE, &SERIAL));
     assert_eq!(changed(&before, scene.layer()).count(), 0, "it repainted");
 }
 
@@ -89,7 +93,10 @@ fn a_frame_repaints_only_what_it_reports() {
     for _ in 0..12 {
         now += FRAME_NS;
         let before = scene.layer().clone();
-        assert!(scene.advance(now, RATE), "a frame moved the ribbon");
+        assert!(
+            scene.advance(now, RATE, &SERIAL),
+            "a frame moved the ribbon"
+        );
         let damage = scene.damage();
         assert!(!damage.is_empty());
         for pixel in changed(&before, scene.layer()) {
@@ -108,5 +115,5 @@ fn a_frame_repaints_only_what_it_reports() {
 
 #[test]
 fn an_empty_screen_has_no_ribbon() {
-    assert!(Scene::new(Rect::new(0, 0, 0, 360), COLUMN, (0, RATE), false).is_none());
+    assert!(Scene::new(Rect::new(0, 0, 0, 360), COLUMN, (0, RATE), false, &SERIAL).is_none());
 }

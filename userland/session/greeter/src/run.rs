@@ -50,7 +50,7 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
-    use tairix_abi::driver::display::{DamageRect, DisplayMode, OutputMode};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode, OutputMode, RefreshRate};
     use tairix_abi::input::{KeyInput, PointerInput};
     use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -573,6 +573,48 @@ mod program {
         }
     }
 
+    /// The login screen on `scanout`, paced by `refresh`, asking through
+    /// `courier`: its ribbon raised and painted across every online CPU, and
+    /// its pointer drawn.
+    fn login_screen(scanout: Scanout, refresh: Option<RefreshRate>, courier: ToWorker) -> Screen {
+        // The ribbon is a night sky, so the column is drawn in the dark theme
+        // whichever appearance the desktop defaults to: a dark ink on it
+        // would be unreadable.
+        let mut themes = ThemeRegistry::with_builtins();
+        let _ = themes.set_appearance(Appearance::Dark);
+        let online = tairix_procinfo::online_cpus(&IpcTransport);
+        let mut screen = LoginScreen::new(
+            scanout,
+            themes.active().clone(),
+            Scale::ONE,
+            (identity(), civil()),
+            tiles(),
+            courier,
+            alloc::boxed::Box::new(app::pool_across(
+                APP_NAME,
+                online,
+                "drawing the login screen",
+            )),
+        );
+        screen.set_refresh_rate(refresh);
+        if !screen.raise_ribbon(tairix_rt::clock_get()) {
+            record(
+                RIBBON_UNAVAILABLE,
+                Level::Info,
+                "greeter: the ribbon could not be drawn, so the flat desktop colour stands in",
+            );
+        }
+        match pointer_image(Scale::ONE) {
+            Some(image) => screen.set_pointer(image),
+            None => record(
+                POINTER_UNAVAILABLE,
+                Level::Info,
+                "greeter: the pointer cursor could not be drawn",
+            ),
+        }
+        screen
+    }
+
     /// Own the seat and run the screen until a secret is verified.
     ///
     /// Split from `main` so every exit after the acquire flows back through
@@ -642,35 +684,7 @@ mod program {
             );
         }
 
-        // The ribbon is a night sky, so the column is drawn in the dark theme
-        // whichever appearance the desktop defaults to: a dark ink on it
-        // would be unreadable.
-        let mut themes = ThemeRegistry::with_builtins();
-        let _ = themes.set_appearance(Appearance::Dark);
-        let mut screen = LoginScreen::new(
-            scanout,
-            themes.active().clone(),
-            Scale::ONE,
-            (identity(), civil()),
-            tiles(),
-            ToWorker(Arc::clone(&worker)),
-        );
-        screen.set_refresh_rate(refresh);
-        if !screen.raise_ribbon(tairix_rt::clock_get()) {
-            record(
-                RIBBON_UNAVAILABLE,
-                Level::Info,
-                "greeter: the ribbon could not be drawn, so the flat desktop colour stands in",
-            );
-        }
-        match pointer_image(Scale::ONE) {
-            Some(image) => screen.set_pointer(image),
-            None => record(
-                POINTER_UNAVAILABLE,
-                Level::Info,
-                "greeter: the pointer cursor could not be drawn",
-            ),
-        }
+        let mut screen = login_screen(scanout, refresh, ToWorker(Arc::clone(&worker)));
         // The opening frame is the veil at full black, with the chrome already
         // up behind it, so the screen appears out of the black the seat was
         // handed over cleared to rather than snapping onto it; the park loop

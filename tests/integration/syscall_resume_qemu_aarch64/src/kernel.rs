@@ -3,6 +3,7 @@
 use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use alloc::sync::Arc;
 
@@ -257,10 +258,10 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     };
 
     let context_switch = ContextSwitchHal::new();
-    let parent_pre_resume = move |_stack_top: u64| {
+    let parent_pre_resume = move |_stack_top: u64, tag: AddressTag| {
         // SAFETY: `parent_root` is the retained L1 root built above and the MMU
         // is enabled; the mapping includes the running kernel window.
-        unsafe { activate_user_root(parent_root) };
+        unsafe { activate_user_root(parent_root, tag) };
     };
     let parent = spawn_user_kthread(
         &scheduler,
@@ -285,10 +286,10 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_PARENT);
     }
 
-    let child_pre_resume = move |_stack_top: u64| {
+    let child_pre_resume = move |_stack_top: u64, tag: AddressTag| {
         // SAFETY: `child_root` is the retained L1 root built above and the MMU
         // is enabled; the mapping includes the running kernel window.
-        unsafe { activate_user_root(child_root) };
+        unsafe { activate_user_root(child_root, tag) };
     };
     let child = match spawn_user_kthread(
         &scheduler,

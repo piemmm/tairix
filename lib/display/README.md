@@ -54,7 +54,8 @@ and the client can never drift apart.
   many bytes a frame is for a mode (`scanout_len`), which byte order the
   mode's format wants (`ChannelOrder::for_format`), the channel encode
   itself (`ChannelOrder::encode`, and `encode_run` for a whole row span
-  at a time — the bulk form of that same encoder, not a second one), and
+  at a time — the bulk form of that same encoder, not a second one; and
+  `decode_opaque_run`, the bulk decode with every alpha forced to 255), and
   whether a damage rectangle is a sub-region or the whole frame
   (`sub_screen_damage`). Each refuses rather than guesses: an
   unencodable mode or format is `None`, and a run writes whole pixels
@@ -70,7 +71,11 @@ and the client can never drift apart.
   copy of the app's surface, and `decode` copies a presented frame into the
   compositor's own window surface — clamping each colour channel to its alpha,
   since the frame is the client's — and reports the sub-rectangle whose pixels
-  genuinely changed. It lives beside
+  genuinely changed. `lay_opaque`, `lay_opaque_region` and `lay_opaque_into` (a
+  display's own frame, at its stride and in its byte order) copy a frame whose
+  every pixel is to be shown opaque — a screensaver's — straight into the
+  window surface with each alpha forced to 255, no clamp or compare, about four
+  times the decode's speed. It lives beside
   the scan-out encode because the channel-order decision is the same one, and no
   program may hold a second opinion about which byte is red. Both directions are
   row-independent and are expressed over `lib/parallel`'s `JobRunner`: the
@@ -93,7 +98,11 @@ and the client can never drift apart.
   unchanged: a present copies only the changed pixels (the damage
   unioned with the target frame's stale region — the double-buffer
   bookkeeping that keeps every frame current) into the back frame and
-  sends the index + damage, never the pixels.
+  sends the index + damage, never the pixels. `Presenter::present_drawn`
+  hands that same back frame and region to a caller that draws into it
+  itself — a picture covering the output reaching the display with no copy
+  between — and presents it the same way, or, where the caller refuses,
+  shows nothing and leaves that frame owing the whole region.
 
 Every input is validated fail-closed on both halves; the error
 vocabulary crosses the wire as typed `Errno` status frames, converted

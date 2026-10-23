@@ -24,15 +24,18 @@ The ribbon at an instant.
   Every buffer a frame needs — the per-column state, the toning table, the
   strand profile, the scratch light is summed in — is reserved here, so a
   frame allocates nothing, and a heap that refuses one is `None`.
+- `spread_over(runner)` holds a scratch room for each of `runner`'s
+  participants; a refusal keeps what was held and only paints in fewer bands.
 - `step(t, exclusion, damage)` moves it to a new time, adding to `damage`
   every pixel whose light may have changed; the very same instant around the
   very same clear space is the frame already placed and moves nothing.
-- `paint_moved(surface, after)` repaints exactly the strips the last step
-  reported, handing each to `after` once it is painted, so an embedder can
-  letter its text back over just those pixels.
-- `paint(surface, area)` paints any area at all. Every sample is summed the
-  same way whatever area asks for it, so a part painted on its own matches the
-  whole painted at once, pixel for pixel.
+- `paint_moved(surface, runner)` repaints exactly the strips the last step
+  reported (`strips()`). No two strips share a pixel, so an embedder letters
+  its text back over each strip once the paint is done and every pixel is
+  lettered once.
+- `paint(surface, area, runner)` paints any area at all. Every sample is
+  summed the same way whatever area or band asks for it, so a part painted on
+  its own matches the whole painted at once, pixel for pixel.
 
 ### Keeping clear of text
 
@@ -56,12 +59,23 @@ repaints nothing inside the text.
 ### Cost
 
 The light is summed at every other pixel each way and blended up to every
-pixel as it is toned and dithered. A frame repaints only the rows each column's
+pixel as it is toned and dithered, the blending up and the dither one packed
+kernel of `lib/raster` (`wide::widen`) and a row that tones to nothing one
+fill. A frame repaints only the rows each column's
 light reaches now and reached the frame before — under half the screen — in
 strips a few dozen pixels wide. Any paint, a whole screen's included, sums and
 writes a chunk of sample columns only over the rows its light reaches and lays
-the sky over the rest of it, and a lone column left at a chunk's end joins the
-chunk before it, so a strip is two chunks rather than three.
+the sky over the rest of it. A strip's last pixel blends the next strip's first
+sample, so that sample's rows are the strip's too.
+
+A paint large enough is split into bands of whole strips' columns
+(`tairix_raster::ColumnBand`), one a participant of its runner, each working in
+a scratch room a column deep. The light is summed down each column, so a band
+sums each of its columns once and repeats nothing of another's, and the ribbon
+crosses every column, so the bands share the work evenly. Bands of rows would
+do neither: each repeats every column's setup, and the band holding the
+strands carries most of the work. The greeter paints across a thread per
+online core, the screensaver across every thread it is granted.
 
 ## Pacing
 
@@ -86,7 +100,10 @@ to roaming freely and moving independently, the clear space to staying
 `SKY` with no light that shows beneath it and no frame repainting it, the
 ribbon rising nearer the text than its glow's whole tail would let it, the
 light that shows to be the first toning step that lifts every pixel a whole
-level, strips to matching the whole with and without text, the light to being soft everywhere and
+level, strips to matching the whole with and without text and to sharing no
+pixel, a paint in bands to laying the very pixels one band lays, the scratch to
+handing out a whole column of room for each band it holds, the light to being
+soft everywhere and
 black beyond the rows it reports, an unlit area to laying the sky over itself
 alone, a paint to summing under half the screen's sample rows and a strip to
 being two chunks, and a frame to repainting under half the screen. The clock's own tests live with `SceneClock` in `lib/theme`.

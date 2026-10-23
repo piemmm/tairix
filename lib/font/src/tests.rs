@@ -320,7 +320,7 @@ mod render {
         let mut surface = surface();
         font.draw_text(&mut surface, 0, 0, "█", WHITE);
         // Full 8-bit coverage (255) must map to the caller's exact colour, not
-        // one rounded down — the top entry of the 256-entry blend table.
+        // one rounded down.
         let px = surface.get(1, 1).expect("in bounds");
         assert_eq!((px.r, px.g, px.b, px.a), (255, 255, 255, 255));
     }

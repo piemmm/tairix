@@ -23,11 +23,10 @@
 //! of multiplying a character count by a cell width.
 //!
 //! [`BitmapFont::draw_text`] composites each fetched glyph onto a `lib/raster`
-//! [`Surface`] through that crate's single premultiplied-alpha
-//! [`Pixel::over`] path: the text colour is premultiplied once, scaled per
-//! 8-bit coverage level into a 256-entry table, and blended per lit pixel —
-//! so anti-aliased edges and translucent text both come out right with no
-//! colour arithmetic duplicated here.
+//! [`Surface`] through that crate's premultiplied-alpha arithmetic: the text
+//! colour is premultiplied once and laid through each glyph row's 8-bit
+//! coverage by `cover_span` — so anti-aliased edges and translucent text both
+//! come out right with no colour arithmetic duplicated here.
 //!
 //! # Fitting a label to its box
 //!
@@ -42,7 +41,7 @@ use core::ops::Range;
 
 use tairix_abi::font_ipc::{FamilyKey, FontMetrics, FontWeight};
 use tairix_geometry::Scale;
-use tairix_raster::{Color, Pixel, Surface};
+use tairix_raster::{cover_span, Color, DitherRow, Pixel, Surface};
 use tairix_theme::{Fonts, TextRole};
 use tairix_vt::char_width;
 
@@ -864,10 +863,10 @@ impl BitmapFont {
         text: &str,
         color: Color,
     ) -> i32 {
-        let sources = coverage_sources(color);
+        let ink = color.premultiply();
         self.walk_on(client, x, text, |left, glyph| {
             let coverage = Coverage::of(glyph);
-            draw_coverage(surface, left, y, coverage, coverage.width, &sources);
+            draw_coverage(surface, left, y, coverage, coverage.width, ink);
         })
     }
 
@@ -1241,19 +1240,6 @@ const fn clamp_pixel_height(pixels: u32) -> u32 {
     }
 }
 
-/// The premultiplied source pixel for each of the 256 8-bit coverage levels:
-/// `color` with its alpha scaled by `level / 255`, computed once per
-/// [`BitmapFont::draw_text`] call so the per-pixel work is one table load
-/// and one `over`. Level 255 keeps the caller's exact alpha.
-fn coverage_sources(color: Color) -> [Pixel; 256] {
-    let source = color.premultiply();
-    let mut sources = [source; 256];
-    for (level, slot) in (0u8..=u8::MAX).zip(sources.iter_mut()) {
-        *slot = source.scale_alpha(level);
-    }
-    sources
-}
-
 /// A row-major `width * height` block of 8-bit coverage: one glyph's bitmap,
 /// or a run's blurred shadow.
 #[derive(Copy, Clone)]
@@ -1286,23 +1272,21 @@ impl<'a> Coverage<'a> {
     }
 }
 
-/// Blit `coverage` at top-left `(x, y)`, blending each covered pixel of its
-/// first `visible` columns through `sources`. Pixels the surface does not
-/// admit clip rather than panic.
+/// Blit `coverage` at top-left `(x, y)`, laying the premultiplied `ink`
+/// through each covered pixel of its first `visible` columns. Pixels the
+/// surface does not admit clip rather than panic.
 ///
 /// Both axes are clipped once, before any pixel is touched, against what the
 /// surface admits in the paint's own coordinates — its bounds at the stated
-/// origin and any clip window in force — so the loop walks only pixels that
-/// land: each row blends the coverage bytes against the destination row
-/// slice in step, paying one bounds check and one row-address computation
-/// per row rather than per pixel.
+/// origin and any clip window in force — so each row lays its coverage bytes
+/// over the destination row slice in step.
 pub(crate) fn draw_coverage(
     surface: &mut Surface,
     x: i32,
     y: i32,
     coverage: Coverage<'_>,
     visible: u32,
-    sources: &[Pixel; 256],
+    ink: Pixel,
 ) {
     let Some(columns) = non_negative_span(x, visible.min(coverage.width)) else {
         return;
@@ -1337,12 +1321,7 @@ pub(crate) fn draw_coverage(
         let Some(line) = line.get(withheld..) else {
             continue;
         };
-        for (&level, pixel) in line.iter().zip(destination.iter_mut()) {
-            if level == 0 {
-                continue;
-            }
-            *pixel = sources[usize::from(level)].over(*pixel);
-        }
+        cover_span(destination, ink, line, DitherRow::NEAREST, drawn_from);
     }
 }
 
@@ -1398,7 +1377,7 @@ mod blit_tests {
     use tairix_raster::{Color, Pixel, Surface};
     use tairix_reclaim::PressureBand;
 
-    use super::{advance_step, coverage_sources, draw_coverage, BitmapFont, Coverage};
+    use super::{advance_step, draw_coverage, BitmapFont, Coverage};
     use crate::client::tests::LocalClient;
     use crate::client::tests::{caching_client, glyph_lookups, INTER};
     use crate::client::FontClient;
@@ -1438,6 +1417,17 @@ mod blit_tests {
                 }
             }
         }
+    }
+
+    /// The premultiplied source pixel for each 8-bit coverage level: `color`
+    /// with its alpha scaled by `level / 255`, the per-pixel yardstick's table.
+    fn coverage_sources(color: Color) -> [Pixel; 256] {
+        let source = color.premultiply();
+        let mut sources = [source; 256];
+        for (level, slot) in (0u8..=u8::MAX).zip(sources.iter_mut()) {
+            *slot = source.scale_alpha(level);
+        }
+        sources
     }
 
     /// A glyph whose coverage spans transparent, partial, and full levels, so
@@ -1480,7 +1470,7 @@ mod blit_tests {
     #[test]
     fn coverage_blit_is_confined_by_the_clip_window() {
         let glyph = varied_glyph(10, 14);
-        let sources = coverage_sources(Color::rgba(240, 20, 90, 255));
+        let ink = Color::rgba(240, 20, 90, 255).premultiply();
         // Windows that cut the glyph on each side, through its middle, and
         // one that misses it entirely.
         let windows = [
@@ -1495,9 +1485,9 @@ mod blit_tests {
             let mut clipped = untouched.clone();
             let mut whole = untouched.clone();
             clipped.with_clip(cx, cy, cw, ch, |surface| {
-                draw_coverage(surface, 3, 5, Coverage::of(&glyph), 10, &sources);
+                draw_coverage(surface, 3, 5, Coverage::of(&glyph), 10, ink);
             });
-            draw_coverage(&mut whole, 3, 5, Coverage::of(&glyph), 10, &sources);
+            draw_coverage(&mut whole, 3, 5, Coverage::of(&glyph), 10, ink);
             for y in 0..18 {
                 for x in 0..24 {
                     let inside = (cx..cx + cw).contains(&x) && (cy..cy + ch).contains(&y);
@@ -1530,20 +1520,13 @@ mod blit_tests {
         y: i32,
         text: &str,
     ) -> i32 {
-        let sources = coverage_sources(ink());
+        let ink = ink().premultiply();
         let mut pen = x;
         for ch in text.chars() {
             let advance = font.advance_on(client, ch);
             client.with_glyph(ch, font.family, font.pixel_height, font.weight, |glyph| {
                 let origin_x = pen.saturating_add(glyph.left);
-                draw_coverage(
-                    surface,
-                    origin_x,
-                    y,
-                    Coverage::of(glyph),
-                    glyph.width,
-                    &sources,
-                );
+                draw_coverage(surface, origin_x, y, Coverage::of(glyph), glyph.width, ink);
             });
             pen = pen.saturating_add(advance_step(advance));
         }
@@ -1621,12 +1604,13 @@ mod blit_tests {
         let origins = [i32::MIN, -40, -9, -1, 0, 1, 13, 23, 24, 90, i32::MAX];
         for &color in &[Color::rgba(240, 20, 90, 255), Color::rgba(240, 20, 90, 180)] {
             let sources = coverage_sources(color);
+            let ink = color.premultiply();
             for &visible in &[0u32, 1, 6, 10, 40] {
                 for &x in &origins {
                     for &y in &origins {
                         let mut actual = patterned_surface(24, 18);
                         let mut expected = actual.clone();
-                        draw_coverage(&mut actual, x, y, Coverage::of(&glyph), visible, &sources);
+                        draw_coverage(&mut actual, x, y, Coverage::of(&glyph), visible, ink);
                         reference_coverage_glyph(&mut expected, x, y, &glyph, visible, &sources);
                         for (index, (got, want)) in
                             actual.pixels().iter().zip(expected.pixels()).enumerate()

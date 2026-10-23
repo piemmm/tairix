@@ -118,7 +118,7 @@ pub use client::{
     FontTransport, GlyphCache, GlyphKey, OutlineReply, OwnedContour, OwnedOutline, OwnedSegment,
 };
 #[cfg(feature = "test-util")]
-pub use client::{install_test_transport, note_text_landed, SolidTestTransport};
+pub use client::{glyph_cache_holds, install_test_transport, note_text_landed, SolidTestTransport};
 #[cfg(feature = "render")]
 pub use font::{BitmapFont, Cut, TextLine, TextLines, TextWrap, ELLIPSIS};
 pub use glyph::{lookup, lookup_or_fallback, Glyph};

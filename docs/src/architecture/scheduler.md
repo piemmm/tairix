@@ -101,8 +101,8 @@ interrupt-context work (a device-IRQ deferred wake, an elapsed timed
 deadline, a queued foreground signal) to drain. A **lone** runnable task's
 tick therefore does its periodic accounting and returns to that same task
 without a switch-to-self: switching to itself has no scheduling effect and
-would only churn the per-dispatch user-address-space reactivation (and, on
-an emulated target, its full TLB flush), starving the task's own progress.
+would only churn the per-dispatch user-address-space reactivation, starving
+the task's own progress.
 This gate lives in the policy-neutral preempt path, keyed off a
 scheduler-backed "runnable competitor?" query, so it holds for every
 policy — but only CFQ ever exercises it, because only CFQ arms a lone

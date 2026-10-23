@@ -32,7 +32,7 @@ use alloc::sync::Arc;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, SpawnSession};
-use tairix_arch_api::{ContextSwitch, EnterUser, UserEntry};
+use tairix_arch_api::{AddressTag, ContextSwitch, EnterUser, UserEntry};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::{
     build_process_image, AddressSpace, AllocError, Frame, FrameAllocator, PageTable, PhysMap,
@@ -907,15 +907,16 @@ pub static EMPTY_PROGRAM_REGISTRY: ProgramRegistry = ProgramRegistry::EMPTY;
 ///
 /// It receives the switching-in thread's own kernel-stack top (a port whose
 /// syscall entry does not implicitly land on it repoints its per-CPU entry
-/// stack) and that thread's thread-pointer value (a port whose psABI thread
+/// stack), that thread's thread-pointer value (a port whose psABI thread
 /// pointer is a *privileged* register — x86_64's `FS` base — reloads it here;
 /// the ports whose register is user-writable frame it instead and ignore the
-/// argument).
+/// argument), and the address-space tag the dispatcher chose to load the root
+/// under.
 ///
 /// It is shared, not owned: every thread of the process resumes under the same
 /// page-table root, so the hook is cloned per thread rather than rebuilt, which
 /// is what lets `kernel/core` create a thread without a new per-arch producer.
-pub type ProcessResume = Arc<dyn Fn(u64, u64) + Send + Sync>;
+pub type ProcessResume = Arc<dyn Fn(u64, u64, AddressTag) + Send + Sync>;
 
 /// Bind a process's [`ProcessResume`] hook to one thread's `tls_base`,
 /// producing the per-thread switch-in hook the kthread runtime stores.
@@ -924,9 +925,12 @@ pub type ProcessResume = Arc<dyn Fn(u64, u64) + Send + Sync>;
 /// deferred load, and `thread_create` — so the per-thread and per-process
 /// halves of the hook can never be composed two different ways.
 #[must_use]
-pub fn thread_pre_resume(hook: &ProcessResume, tls_base: u64) -> Box<dyn FnMut(u64) + Send> {
+pub fn thread_pre_resume(
+    hook: &ProcessResume,
+    tls_base: u64,
+) -> Box<dyn FnMut(u64, AddressTag) + Send> {
     let hook = Arc::clone(hook);
-    Box::new(move |stack_top: u64| hook(stack_top, tls_base))
+    Box::new(move |stack_top: u64, tag: AddressTag| hook(stack_top, tls_base, tag))
 }
 
 /// The port handle and register state one thread is entered in user mode with.

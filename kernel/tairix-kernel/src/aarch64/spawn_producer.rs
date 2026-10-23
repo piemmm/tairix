@@ -38,6 +38,7 @@ use tairix_arch_aarch64::paging::{
     self, activate_user_root, configured_identity_gigapages, AddressSpace as ArchAddressSpace,
 };
 use tairix_arch_aarch64::userentry::USER_MODE;
+use tairix_arch_api::AddressTag;
 use tairix_kernel_core::{
     refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BuiltImage, ImageBuildCtx,
     ProcessResume, ProcessSpace, SpawnMode, SpawnRequest, UserThreadEntry,
@@ -328,13 +329,14 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
         // before every switch into the child, so it `eret`s into EL0 under
         // its own `TTBR0_EL1` root. It captures only the `u64` root, so it is
         // `Send`. aarch64 reuses `SP_EL1` and ignores the stack-top argument.
-        let pre_resume: ProcessResume = Arc::new(move |_stack_top: u64, _tls_base: u64| {
-            // SAFETY: the MMU is already enabled and `child_root_phys` is the
-            // L1 root of the child's space, which identity-maps the
-            // kernel's own extents and the board MMIO the running kernel
-            // executes from — exactly `activate_user_root`'s contract.
-            unsafe { activate_user_root(child_root_phys) };
-        });
+        let pre_resume: ProcessResume =
+            Arc::new(move |_stack_top: u64, _tls_base: u64, tag: AddressTag| {
+                // SAFETY: the MMU is already enabled and `child_root_phys` is the
+                // L1 root of the child's space, which identity-maps the
+                // kernel's own extents and the board MMIO the running kernel
+                // executes from — exactly `activate_user_root`'s contract.
+                unsafe { activate_user_root(child_root_phys, tag) };
+            });
 
         // Freeze the just-built mappings into the registry-storable,
         // `Send + Sync` snapshot, then hand the child's threads the same arch

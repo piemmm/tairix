@@ -126,12 +126,14 @@ buffer at once. Moving a pointer on the plane presents no frame.
 
 A compositor names none of these traits. It presents through
 `tairix_display::Presenter` — the mode, whether a present may go now
-(`ready`), `present(frame, damage)`, `set_power` — and, where the device has
+(`ready`), `present(frame, damage)`, `present_drawn(damage, draw)` for a
+caller that draws the frame in place, `set_power` — and, where the device has
 them, `LayerPresenter` (the caps, layer buffers it bakes into, and
 `present_layers` over the output frame as the bottom layer) and
 `CursorPlane`. `RemoteDisplay` implements all three over `DISPLAY_ENDPOINT`:
 it maps the frames the driver granted at `Configure`, copies each present's
-damage into the frame the device does not read, together with whatever that
+damage into the frame the device does not read — or hands that frame to the
+caller's draw, showing nothing should it refuse — together with whatever that
 frame missed while others were shown, and names it by id. How the desktop
 uses the layers and the plane is [the window manager's](../desktop/wm.md).
 

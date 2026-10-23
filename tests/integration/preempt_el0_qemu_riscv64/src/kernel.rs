@@ -6,6 +6,7 @@
 use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use alloc::sync::Arc;
 
@@ -385,11 +386,11 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // reactivates its page-table root (isolation), and its work body
     // `enter_user`s into U-mode.
     let cs = ContextSwitchHal::new();
-    let pre_resume = move |_top: u64| {
+    let pre_resume = move |_top: u64, tag: AddressTag| {
         // SAFETY: paging is enabled and `root_phys` is the Sv39 root of a space
         // that maps the low identity window the running dispatcher executes
         // from — exactly `activate_user_root`'s contract.
-        unsafe { activate_user_root(root_phys) };
+        unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so

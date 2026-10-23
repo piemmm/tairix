@@ -2788,7 +2788,12 @@ register. Three things follow. A process root pays no page and no slot for
 anything of the kernel's, so its whole content is the user regime's. A
 switch between user spaces (`activate_user_root`) reprograms `TTBR0_EL1`
 alone, which is also what makes a `TTBR0`-only unmap of the kernel (KPTI) a
-change to that one function rather than to the layout. And because the
+change to that one function rather than to the layout. It loads the root
+under the 8-bit ASID the kernel chose, beside a non-global bit on each of the
+root's own leaves, so no switch discards another space's entries; a tag given
+a new space is discarded first (`tlbi aside1`). The identity gigapages every
+root shares stay global, and so does every leaf of the kernel regime, so one
+entry of each serves every ASID. And because the
 kernel root's tables live inside the kernel image rather than in
 allocator-backed frames, the Supervisor's destructive whole-RAM sweep keeps
 running under the translation it is testing.

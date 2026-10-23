@@ -10,6 +10,11 @@ use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, BufferId, CursorCaps, DamageRect, DisplayMode, DisplayPower,
 };
 use tairix_abi::DriverError;
+use tairix_geometry::Region;
+
+/// What [`Presenter::present_drawn`] hands a frame to: its bytes, its stride,
+/// and the region of it to bring up to date, answering whether it drew it.
+pub type DrawInPlace<'a> = dyn FnMut(&mut [u8], u32, &Region) -> Result<(), DriverError> + 'a;
 
 /// A display a compositor presents finished frames to.
 pub trait Presenter {
@@ -34,6 +39,28 @@ pub trait Presenter {
     /// * [`DriverError::SeatRevoked`] or [`DriverError::PermissionDenied`]
     ///   once the seat is lost.
     fn present(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError>;
+
+    /// Present a frame drawn straight into the display's own memory, of which
+    /// only `damage` changed: `draw` is handed the frame the present shows,
+    /// laid out as [`Self::mode`] but `stride` bytes a row, and the region of
+    /// it to bring up to date — `damage` and whatever that frame missed since
+    /// it was last shown — and the frame is shown once it returns `Ok`. A
+    /// picture that covers the output so reaches it with no copy between.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::Unsupported`] for a presenter holding no frame of its
+    /// own to draw into; whatever `draw` refuses with, nothing then shown and
+    /// that frame still owed the whole region; and
+    /// [`present`](Self::present)'s others.
+    fn present_drawn(
+        &mut self,
+        damage: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<(), DriverError> {
+        let _ = (damage, draw);
+        Err(DriverError::Unsupported)
+    }
 
     /// Switch the display on or off.
     ///

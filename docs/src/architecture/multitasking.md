@@ -284,9 +284,13 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
 
 * **Per-arch address-space reactivation.** The `pre_resume` hook captures
   only the user page-table root (a `u64`, keeping the runtime `Send`) and
-  calls a small per-arch `activate_user_root` primitive (on aarch64:
-  reprogram `TTBR0_EL1` + `tlbi`/`isb`, MMU already on; on x86_64: reload
-  `CR3`), so each task stays hardware-isolated (§4).
+  calls a small per-arch `activate_user_root` primitive with the
+  address-space tag the dispatcher chose for the CPU (on aarch64: reprogram
+  `TTBR0_EL1` under its ASID + `isb`, MMU already on; on riscv64: write
+  `satp` under its ASID; on x86_64: reload `CR3` under its PCID), discarding
+  the tag's entries only when it was another space's or went stale, so each
+  task stays hardware-isolated (§4) and keeps its TLB entries across switches
+  (*Address-space tags* in [Memory](./memory.md)).
 * **Per-arch syscall-entry stack (x86_64, `plans/PI.md` X1).** Where an EL1
   trap implicitly reuses the running kthread's `SP_EL1` (aarch64), the
   x86_64 `syscall` stub instead loads its kernel stack from a per-CPU slot,

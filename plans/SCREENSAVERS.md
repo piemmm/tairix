@@ -56,11 +56,18 @@ store), `docs/src/security/sandbox.md`.
   applies them before a byte reaches the saver, so no saver is trusted to hide
   what it was given: another account's task names reach a saver only when the
   user chose `all` (closes D496).
-- **Frames travel like any window's.** The saver draws into its own surface and
-  writes the damaged rectangles into the shared region, laid out as an app's
-  window frame; the session decodes them with the same fail-closed decoder
-  (`winframe::decode_list`), every pixel laid opaque so no saver can show what
-  it covers. A frame costs a saver what a frame costs an app.
+- **Frames travel like any window's, or straight to the display.** The saver
+  draws in place on the shared region's frame area, laid out as an app's
+  window frame, and names the rectangles it changed; the session holds them to
+  band form, refuses one off the frame, and forces every pixel opaque so no
+  saver can show what it covers. Where the saver covers the output and the
+  display draws in place, that one lay goes straight into the display's own
+  frame in its byte order (`Presenter::present_drawn`,
+  `winframe::lay_opaque_into`), the compositor presenting nothing meanwhile,
+  and a frame arriving before the display latched the last waits in the region
+  for the latch; elsewhere, or once a display refuses one, it goes into the
+  screensaver's window (`winframe::lay_opaque_region`). Neither side copies a
+  frame more than that one lay.
 - **Nothing waits on a saver.** The session drives it through the duplex
   sandbox session, never blocking; a saver late past its deadline, or crashed,
   or speaking out of turn, is ended, the screen goes Blank, and the end is
@@ -127,9 +134,8 @@ nothing outside the task (`docs/src/security/sandbox.md`).
 `SpawnAttach::drawing(wires, memory, threads, share)` is the canonical block.
 
 The host sizes the bounds from the machine and the saver's declared needs: one
-thread, or one per online core for `PARALLEL`; an address space of twice the
-region and 128 MiB, 2 GiB more for `LARGE_MEMORY`, never more than half the
-machine. The ray tracer's *Performance* takes its cores and its *Maximum*
+thread, or one per online core for `PARALLEL`; an address space of the region
+and 128 MiB, 2 GiB more for `LARGE_MEMORY`, never more than half the machine. The ray tracer's *Performance* takes its cores and its *Maximum*
 detail its memory within those bounds.
 
 ## 4. SV4 — admission
@@ -152,22 +158,24 @@ One frame is outstanding at a time.
 
 - **Host to saver:** `Start` (size, scale, refresh, the monotonic time it set
   off at, reduced motion, contrast, density, the desktop's text, appearance,
-  seed, pressure band, cores, the granted threads and memory, the account and
-  machine names, option values, granted feeds, the region's layout, the slide
-  count); `Frame` (serial, monotonic time, the wall reading as the bar spells
+  seed, pressure band, cores, the granted threads and memory, the machine's
+  installed memory, the account and machine names, option values, granted
+  feeds, the region's layout, the slide count); `Frame` (serial, monotonic time, the wall reading as the bar spells
   it); `Machine` (a filtered machine reading); `MachineLost` (its source
   stopped); `Slide` (a picture written into the feed area, or why not);
   `FontReply` (the font service's reply); `Kept` (the feed area is the
   saver's again); `Pressure` (the band moved).
 - **Saver to host:** `Ready`; `Presented` (serial, at most
-  `MAX_DAMAGE_RECTS` damage rectangles, and when the next frame is wanted);
+  `SAVER_DAMAGE_RECTS` damage rectangles, and when the next frame is wanted);
   `FontCall` (one font request in the font service's own wire form); `Keep` (a
   finished picture in the feed area, and its title); `WantSlide`; `Unstarted`
   (why it cannot start, before `Ready` alone).
 - **The region** is one window frame (stride × height, the app frame format)
   and, for a saver given slides or keeping, a feed area of one screen-sized
   picture after it, owned by whichever side the protocol last handed it to.
-  The frame area holds the whole picture from before `Ready`.
+  The frame area holds the whole picture from before `Ready`; the saver writes
+  it only from a `Frame` to its `Presented`, the host reads it only from a
+  `Presented` to the next `Frame`.
 
 ## 6. SV6 — `lib/saver`
 
@@ -175,22 +183,29 @@ The saver side, `no_std` + `alloc`: the `Scene` trait (frame, machine
 reading, machine lost, slide, kept; the scene itself is built by the closure
 `run` is given), and `run`, which maps the region, answers `Start` (or says
 `Unstarted` with the reason the region or the scene could not be had), draws each
-`Frame` into the scene's own surface, writes the damage into the region and
-replies `Presented`. The font relay is a `tairix_font::FontTransport` that
-sends `FontCall` and blocks for its `FontReply`, keeping any other message that
-arrives meanwhile, so `BitmapFont` works unchanged. Options are read by key
-and kind, strictly; the wall reading spells the time and date as the bar
-does. A frame's damage past what one `Presented` carries is folded into a
-covering few.
+`Frame` in place on a surface lent over the region's frame area and replies
+`Presented` naming what changed. The font relay is a
+`tairix_font::FontTransport` that sends `FontCall` and blocks for its
+`FontReply`, keeping any other message that arrives meanwhile, so `BitmapFont`
+works unchanged; its caches are sized from the machine's installed memory as
+every desktop program's are, each never past a sixteenth of the saver's memory.
+Options are read by key and kind, strictly; the wall reading spells the time
+and date as the bar does. A frame's damage past what one `Presented` carries
+is folded into a covering few, so a scene with a scattered change marks it in
+`DAMAGE_TILE` tiles (`tairix_geometry::Tiles`) and names their cover.
 
 ## 7. SV7 — the host
 
 The session spawns the chosen saver with a fresh region sized to the screen
-(`saver::Hosted` over the pure conversation in `saver/talk.rs`), asks for each
-frame on its own frame step at the time each `Presented` asks for and never
-faster than the display, after every feed message, decodes each frame into
-the screensaver's window opaque, and serves its feeds off the loop, each
-answer carrying the saver instance that asked so none reaches a later one:
+(`saver::Hosted` over the pure conversation in `saver/talk.rs`). Frames are
+pipelined: the next is asked for once the last is laid in the screensaver's
+window, at the time its `Presented` asked for and never sooner than a display
+frame after the last ask, so the saver draws one frame while the session
+composites the one before; one presented before the laid frame reaches the
+screen waits in the region until it has. A feed message is followed by a
+frame too. Each frame's rectangles are laid opaque across the compositor's
+pool, and the feeds are served off the loop, each answer carrying the saver
+instance that asked so none reaches a later one:
 
 - **fonts** relayed to `fontd` on a thread of their own, one call
   outstanding and at most `SAVER_FONT_CALLS_MAX` while starting or from one

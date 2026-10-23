@@ -19,10 +19,11 @@ use tairix_rt::shm::{MappedGrant, SharedRegion};
 use tairix_rt::PrivatePort;
 
 use tairix_abi::driver::display::{DamageRect, DisplayPower};
+use tairix_geometry::Region;
 
 use crate::client::{BufferMapper, DisplayClient, DisplayTransport, RemoteDisplay};
 use crate::memory::{BufferMemory, DeviceBuffer, SharedBuffer};
-use crate::presenter::{CursorPlane, LayerPresenter, Presenter};
+use crate::presenter::{CursorPlane, DrawInPlace, LayerPresenter, Presenter};
 use crate::region::{FrameRegion, ShmMapper};
 
 /// A client region mapped through `shm_map`, unmapped on drop.
@@ -213,6 +214,14 @@ impl<T: DisplayTransport> Presenter for RtDisplay<T> {
 
     fn present(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
         self.display.present(frame, damage)
+    }
+
+    fn present_drawn(
+        &mut self,
+        damage: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<(), DriverError> {
+        self.display.present_drawn(damage, draw)
     }
 
     fn set_power(&mut self, power: DisplayPower) -> Result<(), DriverError> {

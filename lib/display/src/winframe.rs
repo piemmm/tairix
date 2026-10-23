@@ -14,6 +14,9 @@
 //!   own window surface, every colour channel clamped to its alpha because the
 //!   bytes are the client's, reporting the sub-rectangle whose pixels the
 //!   conversion actually *changed*.
+//! * [`lay_opaque`] — the desktop's side for a picture that may not show what
+//!   it covers, a screensaver's: every pixel laid opaque, at copy speed, and
+//!   nothing compared, because the frame's own damage already bounds it.
 //!
 //! # Why only one side is given a real [`JobRunner`]
 //!
@@ -41,7 +44,7 @@ use core::ops::Range;
 
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
 use tairix_abi::Errno;
-use tairix_geometry::Rect;
+use tairix_geometry::{Rect, Region};
 use tairix_parallel::JobRunner;
 use tairix_raster::{RowBand, Surface};
 
@@ -83,8 +86,8 @@ struct Shape {
 }
 
 impl Shape {
-    /// Validate `damage` against `mode` and `surface`, and against `frame_len`
-    /// bytes of frame.
+    /// Validate `damage` against `mode` and a surface of `size`, and against
+    /// `frame_len` bytes of frame.
     ///
     /// # Errors
     ///
@@ -94,7 +97,7 @@ impl Shape {
     /// names, or any arithmetic that would overflow.
     fn resolve(
         mode: &DisplayMode,
-        surface: &Surface,
+        size: (u32, u32),
         damage: DamageRect,
         frame_len: usize,
     ) -> Result<Self, Errno> {
@@ -110,7 +113,7 @@ impl Shape {
             .y
             .checked_add(damage.height_px)
             .ok_or(Errno::OutOfRange)?;
-        if right > surface.width() || bottom > surface.height() {
+        if right > size.0 || bottom > size.1 {
             return Err(Errno::OutOfRange);
         }
         let stride = mode.stride_bytes as usize;
@@ -225,7 +228,12 @@ pub fn encode(
     damage: DamageRect,
     runner: &dyn JobRunner,
 ) -> Result<(), Errno> {
-    let shape = Shape::resolve(mode, surface, damage, frame.len())?;
+    let shape = Shape::resolve(
+        mode,
+        (surface.width(), surface.height()),
+        damage,
+        frame.len(),
+    )?;
     if shape.rows() == 0 || shape.columns == 0 {
         return Ok(());
     }
@@ -299,10 +307,14 @@ pub fn decode(
     surface: &mut Surface,
     mode: &DisplayMode,
     damage: DamageRect,
-    alpha: Alpha,
     runner: &dyn JobRunner,
 ) -> Result<Rect, Errno> {
-    let shape = Shape::resolve(mode, surface, damage, frame.len())?;
+    let shape = Shape::resolve(
+        mode,
+        (surface.width(), surface.height()),
+        damage,
+        frame.len(),
+    )?;
     if shape.rows() == 0 || shape.columns == 0 {
         return Ok(Rect::EMPTY);
     }
@@ -320,7 +332,7 @@ pub fn decode(
         bands,
         Bounds::default(),
         &|mut band| {
-            decode_band(&shape, frame, alpha, &mut band);
+            decode_band(&shape, frame, &mut band);
             band.changed
         },
         &|mut joined, band| {
@@ -344,28 +356,235 @@ pub fn decode_list(
     surface: &mut Surface,
     mode: &DisplayMode,
     damage: &DamageList,
-    alpha: Alpha,
     runner: &dyn JobRunner,
     mut changed: impl FnMut(Rect),
 ) -> Result<(), Errno> {
+    let size = (surface.width(), surface.height());
     for rect in damage.rects() {
-        Shape::resolve(mode, surface, *rect, frame.len())?;
+        Shape::resolve(mode, size, *rect, frame.len())?;
     }
     for rect in damage.rects() {
-        changed(decode(frame, surface, mode, *rect, alpha, runner)?);
+        changed(decode(frame, surface, mode, *rect, runner)?);
     }
     Ok(())
 }
 
-/// What a decode makes of the alpha a frame carries.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Alpha {
-    /// The frame's own: a window may be translucent.
-    AsSent,
-    /// Full, whatever the frame says, for a picture that may not show what it
-    /// covers. Applied before a pixel is compared, so a transparent pixel over
-    /// a transparent one is still a change.
-    Opaque,
+/// Lay `damage`'s pixels of `frame` (laid out per `mode`) into `surface`, every
+/// one opaque whatever alpha it carries, across `runner`.
+///
+/// For a picture that may not show what it covers. Its damage is the frame's
+/// own and bounds the change, so nothing is compared: the conversion is a
+/// byte-order copy of every pixel named.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shape validation reports. Nothing is written on a refusal.
+pub fn lay_opaque(
+    frame: &[u8],
+    surface: &mut Surface,
+    mode: &DisplayMode,
+    damage: DamageRect,
+    runner: &dyn JobRunner,
+) -> Result<(), Errno> {
+    let shape = Shape::resolve(
+        mode,
+        (surface.width(), surface.height()),
+        damage,
+        frame.len(),
+    )?;
+    if shape.rows() == 0 || shape.columns == 0 {
+        return Ok(());
+    }
+    let per_band = shape.rows_per_band(runner);
+    tairix_parallel::for_each_drawn(
+        runner,
+        surface.row_bands_mut(shape.top..shape.bottom, per_band),
+        &|mut band| lay_band(&shape, frame, &mut band),
+    );
+    Ok(())
+}
+
+/// [`lay_opaque`] for every pixel of `damage` inside `mode`'s surface, each
+/// rectangle checked before a pixel is written, so a refusal writes nothing.
+/// The rows the region spans are laid in one pass of bands across `runner`,
+/// each band laying its own rows of every rectangle that reaches it.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shape validation reports for any of the rectangles.
+pub fn lay_opaque_region(
+    frame: &[u8],
+    surface: &mut Surface,
+    mode: &DisplayMode,
+    damage: &Region,
+    runner: &dyn JobRunner,
+) -> Result<(), Errno> {
+    let size = (surface.width(), surface.height());
+    let Some(lay) = RegionLay::plan((mode, size, frame.len()), damage, runner, |_| Ok(()))? else {
+        return Ok(());
+    };
+    tairix_parallel::for_each_drawn(
+        runner,
+        surface.row_bands_mut(lay.rows.clone(), lay.per_band),
+        &|mut band| {
+            for shape in lay.reaching(&band.rows()) {
+                lay_band(&shape, frame, &mut band);
+            }
+        },
+    );
+    Ok(())
+}
+
+/// [`lay_opaque_region`] into `target` rather than a surface: a display's own
+/// frame, `stride` bytes a row in `order`, so a picture covering the output
+/// reaches the memory the display shows with no copy between. Every pixel is
+/// opaque whatever alpha it carries, and the region's rows are laid in bands
+/// across `runner`.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shape validation reports for any of the rectangles, and
+/// [`Errno::OutOfRange`] for one `target` cannot hold. Nothing is written on a
+/// refusal.
+pub fn lay_opaque_into(
+    frame: &[u8],
+    mode: &DisplayMode,
+    (target, stride, order): (&mut [u8], usize, ChannelOrder),
+    damage: &Region,
+    runner: &dyn JobRunner,
+) -> Result<(), Errno> {
+    let size = (mode.width_px, mode.height_px);
+    let held = target.len();
+    let fits = |shape: &Shape| {
+        let last_row = usize::try_from(shape.bottom.saturating_sub(1)).ok();
+        let reach = last_row
+            .and_then(|row| row.checked_mul(stride))
+            .and_then(|start| start.checked_add(shape.first_byte))
+            .and_then(|start| start.checked_add(shape.row_bytes));
+        if shape.first_byte + shape.row_bytes > stride || reach.is_none_or(|reach| reach > held) {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(())
+    };
+    let Some(lay) = RegionLay::plan((mode, size, frame.len()), damage, runner, fits)? else {
+        return Ok(());
+    };
+    let band_bytes = usize::try_from(lay.per_band)
+        .ok()
+        .and_then(|rows| rows.checked_mul(stride))
+        .ok_or(Errno::OutOfRange)?;
+    let from = usize::try_from(lay.rows.start)
+        .ok()
+        .and_then(|top| top.checked_mul(stride));
+    let Some(region) = from.and_then(|from| target.get_mut(from..)) else {
+        return Err(Errno::OutOfRange);
+    };
+    let bands = region.chunks_mut(band_bytes).zip(
+        lay.rows
+            .clone()
+            .step_by(usize::try_from(lay.per_band).unwrap_or(usize::MAX)),
+    );
+    tairix_parallel::for_each_drawn(runner, bands, &|(bytes, first)| {
+        let within = first..first.saturating_add(lay.per_band).min(lay.rows.end);
+        for shape in lay.reaching(&within) {
+            for y in shape.top.max(within.start)..shape.bottom.min(within.end) {
+                let local = usize::try_from(y - first).unwrap_or(usize::MAX);
+                let at = local
+                    .saturating_mul(stride)
+                    .saturating_add(shape.first_byte);
+                let (Some(source), Some(row)) = (
+                    shape.frame_span(0, y).and_then(|span| frame.get(span)),
+                    bytes.get_mut(at..at.saturating_add(shape.row_bytes)),
+                ) else {
+                    continue;
+                };
+                let _ = order.transcode_opaque_run(shape.order, source, row);
+            }
+        }
+    });
+    Ok(())
+}
+
+/// A region's rectangles validated for one lay before any pixel is written:
+/// the rows they span inside the surface, and how many of them a band takes.
+struct RegionLay<'a> {
+    damage: &'a Region,
+    mode: &'a DisplayMode,
+    size: (u32, u32),
+    frame_len: usize,
+    rows: Range<u32>,
+    per_band: u32,
+}
+
+impl<'a> RegionLay<'a> {
+    /// Resolve every rectangle of `damage` inside `mode`'s surface of `size`
+    /// against `frame_len` bytes of frame, each also passing `fits`, and size
+    /// the bands across `runner` by the pixels a row averages; `None` for a
+    /// region naming no pixel.
+    fn plan(
+        (mode, size, frame_len): (&'a DisplayMode, (u32, u32), usize),
+        damage: &'a Region,
+        runner: &dyn JobRunner,
+        fits: impl Fn(&Shape) -> Result<(), Errno>,
+    ) -> Result<Option<Self>, Errno> {
+        let (mut top, mut bottom, mut pixels) = (u32::MAX, 0, 0_usize);
+        for rect in damage
+            .rects()
+            .iter()
+            .filter_map(|rect| damage_in(mode, *rect))
+        {
+            let shape = Shape::resolve(mode, size, rect, frame_len)?;
+            fits(&shape)?;
+            top = top.min(shape.top);
+            bottom = bottom.max(shape.bottom);
+            pixels = pixels.saturating_add(shape.rows().saturating_mul(shape.columns));
+        }
+        let Some(span) = bottom.checked_sub(top).filter(|span| *span != 0) else {
+            return Ok(None);
+        };
+        let rows = usize::try_from(span).unwrap_or(usize::MAX);
+        let per_row = (pixels / rows).max(1);
+        let count = tairix_parallel::bands(runner, rows, MIN_PARALLEL_BAND_PX.div_ceil(per_row));
+        Ok(Some(Self {
+            damage,
+            mode,
+            size,
+            frame_len,
+            rows: top..bottom,
+            per_band: tairix_raster::band_rows(rows, count).max(1),
+        }))
+    }
+
+    /// The shapes of the rectangles reaching `rows`: one run of them, the
+    /// region being band-ordered.
+    fn reaching(&self, rows: &Range<u32>) -> impl Iterator<Item = Shape> + '_ {
+        let (start, end) = (i64::from(rows.start), i64::from(rows.end));
+        let rects = self.damage.rects();
+        let first = rects.partition_point(|rect| i64::from(rect.bottom()) <= start);
+        let last = rects.partition_point(|rect| i64::from(rect.top()) < end);
+        rects
+            .get(first..last)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|rect| damage_in(self.mode, *rect))
+            .filter_map(|rect| Shape::resolve(self.mode, self.size, rect, self.frame_len).ok())
+    }
+}
+
+/// Lay every row of one band opaque.
+fn lay_band(shape: &Shape, frame: &[u8], band: &mut RowBand<'_>) {
+    let rows = band.rows();
+    for y in rows.start.max(shape.top)..rows.end.min(shape.bottom) {
+        let (Some(span), Some((_, target))) = (
+            shape.frame_span(0, y),
+            band.row_span_mut(y, shape.left, shape.width()),
+        ) else {
+            continue;
+        };
+        if let Some(source) = frame.get(span) {
+            let _ = shape.order.decode_opaque_run(source, target);
+        }
+    }
 }
 
 /// One band of a [`decode`]: the surface rows it owns, and the box of pixels it
@@ -376,7 +595,7 @@ struct DecodeBand<'a> {
 }
 
 /// Decode every row of one band, accumulating the pixels it changed.
-fn decode_band(shape: &Shape, frame: &[u8], alpha: Alpha, band: &mut DecodeBand<'_>) {
+fn decode_band(shape: &Shape, frame: &[u8], band: &mut DecodeBand<'_>) {
     let rows = band.rows.rows();
     for y in rows.start.max(shape.top)..rows.end.min(shape.bottom) {
         // Addressed from the frame's own first row: the frame is shared
@@ -395,10 +614,7 @@ fn decode_band(shape: &Shape, frame: &[u8], alpha: Alpha, band: &mut DecodeBand<
         // loop runs over every damaged pixel of every application repaint.
         let (groups, _tail) = source.as_chunks::<PIXEL_BYTES>();
         for (index, (bytes, slot)) in groups.iter().zip(target).enumerate() {
-            let mut pixel = shape.order.decode(*bytes);
-            if alpha == Alpha::Opaque {
-                pixel.a = u8::MAX;
-            }
+            let pixel = shape.order.decode(*bytes);
             if *slot == pixel {
                 continue;
             }

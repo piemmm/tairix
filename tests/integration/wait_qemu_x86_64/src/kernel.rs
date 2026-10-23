@@ -6,6 +6,7 @@
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -405,7 +406,7 @@ fn build_el0_space(
 /// own kernel stack before every switch-in (isolation). Returns its task id.
 fn admit(sched: &Scheduler<X86_64Arch>, root_phys: u64, entry: UserEntry) -> u64 {
     let cs = ContextSwitchHal::new();
-    let pre_resume = move |kernel_stack_top: u64| {
+    let pre_resume = move |kernel_stack_top: u64, tag: AddressTag| {
         // `set_kernel_rsp0` repoints **both** this task's `syscall` entry
         // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at its own
         // kernel stack, so an involuntary LAPIC-timer preemption (P-1c) taken
@@ -421,7 +422,7 @@ fn admit(sched: &Scheduler<X86_64Arch>, root_phys: u64, entry: UserEntry) -> u64
         // SAFETY: paging is enabled and `root_phys` is the PML4 of the task's
         // space, which maps the low identity + higher-half kernel window the
         // running dispatcher executes from — `activate_user_root`'s contract.
-        unsafe { activate_user_root(root_phys) };
+        unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so

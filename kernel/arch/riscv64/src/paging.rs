@@ -29,7 +29,7 @@
 //! riscv64 target.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{
     active_frames, pool_slot_of, reclaim_hierarchy, PageTableFrames, TableFrame,
@@ -38,6 +38,7 @@ use tairix_arch_api::gigapages;
 use tairix_arch_api::mmu::{
     AccessTracking, AddressSpace as MmuAddressSpace, KernelWindow, MapError, PageFlags,
 };
+use tairix_arch_api::tags::{AddressTag, AddressTags, ParkRoot};
 use tairix_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page): the one system granule.
@@ -54,6 +55,14 @@ pub const SATP_MODE_SV39: u64 = 8;
 
 /// Bit position of the `satp` MODE field on RV64.
 pub const SATP_MODE_SHIFT: u64 = 60;
+
+/// Bit position and width of the `satp` ASID field on RV64.
+const SATP_ASID_SHIFT: u64 = 44;
+const SATP_ASID_BITS: u32 = 16;
+
+/// A physical page number's 44 bits, as `satp` and a page-table entry both
+/// hold it.
+pub(crate) const PPN_MASK: u64 = (1 << SATP_ASID_SHIFT) - 1;
 
 /// Page-table entry permission/valid bits (privileged spec §4.4.1).
 pub mod flags {
@@ -98,7 +107,7 @@ pub const fn pte_from_phys(paddr: u64, flags: u64) -> u64 {
 /// into place). Inverse of [`pte_from_phys`] modulo the flag bits.
 #[must_use]
 pub const fn phys_from_pte(pte: u64) -> u64 {
-    ((pte >> 10) & 0x0FFF_FFFF_FFFF) << 12
+    ((pte >> 10) & PPN_MASK) << 12
 }
 
 /// Extract the 9-bit VPN index for paging `level` (0 = leaf, 2 = root)
@@ -109,10 +118,90 @@ pub const fn vpn_index(vaddr: u64, level: usize) -> usize {
 }
 
 /// Assemble the `satp` value selecting Sv39 with `root_phys` as the
-/// root table (ASID 0).
+/// root table under ASID `asid`.
 #[must_use]
-pub const fn satp_sv39(root_phys: u64) -> u64 {
-    (SATP_MODE_SV39 << SATP_MODE_SHIFT) | (root_phys >> 12)
+pub const fn satp_sv39(root_phys: u64, asid: u16) -> u64 {
+    (SATP_MODE_SV39 << SATP_MODE_SHIFT) | ((asid as u64) << SATP_ASID_SHIFT) | (root_phys >> 12)
+}
+
+/// How many ASID bits a hart implements, from the `satp` it read back after
+/// one wrote every ASID bit: the field is WARL, and keeps only those.
+#[must_use]
+pub fn asid_bits(readback: u64) -> u8 {
+    let field = (readback >> SATP_ASID_SHIFT) & ((1 << SATP_ASID_BITS) - 1);
+    u8::try_from(field.count_ones()).unwrap_or(0)
+}
+
+/// The fewest ASID bits any hart implements, each noting its own when it
+/// first turns translation on. Every hart tags by the narrowest, so none is
+/// handed an ASID its `satp` would truncate onto another.
+struct AsidWidth(AtomicU8);
+
+impl AsidWidth {
+    /// Above every width a hart can report, so the first probe's minimum is
+    /// its own: no hart tags until one ran.
+    const UNPROBED: u8 = u8::MAX;
+
+    const fn new() -> Self {
+        Self(AtomicU8::new(Self::UNPROBED))
+    }
+
+    /// Fold in the `satp` a hart read back after writing every ASID bit.
+    #[cfg(any(test, all(target_arch = "riscv64", target_os = "none")))]
+    fn note(&self, readback: u64) {
+        self.0.fetch_min(asid_bits(readback), Ordering::AcqRel);
+    }
+
+    /// A hart that had no root to probe with shows no width, and no width it
+    /// never showed can be trusted: no hart tags.
+    #[cfg(any(test, all(target_arch = "riscv64", target_os = "none")))]
+    fn note_unprobed(&self) {
+        self.0.fetch_min(0, Ordering::AcqRel);
+    }
+
+    /// Every ASID but `0`, the park root's, that the narrowest hart keeps;
+    /// none before any hart probed, or when one keeps no ASID bit.
+    fn user_tags(&self) -> u16 {
+        match self.0.load(Ordering::Acquire) {
+            Self::UNPROBED | 0 => 0,
+            bits => u16::try_from((1u32 << bits.min(16)) - 1).unwrap_or(u16::MAX),
+        }
+    }
+}
+
+static ASID_WIDTH: AsidWidth = AsidWidth::new();
+
+/// Load `root_phys` under ASID `0` on the calling hart, noting first how many
+/// ASID bits the hart keeps: `satp` is written with every ASID bit set and
+/// read back, the field being WARL, then written under ASID `0`, and every
+/// entry is then discarded so neither the probe nor any earlier regime
+/// survives. Each hart does this as it first turns translation on, so no
+/// hart is handed an ASID its own `satp` would truncate.
+///
+/// # Safety
+///
+/// `root_phys` must map the running `pc` and `sp` as the regime in force
+/// does.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub(crate) unsafe fn load_probing_asids(root_phys: u64) {
+    let satp = satp_sv39(root_phys, 0);
+    let probe = satp_sv39(root_phys, u16::MAX);
+    let readback: u64;
+    // SAFETY: both writes load the same root, which the caller asserts maps
+    // `pc` and `sp`; `sfence.vma x0, x0` then discards every entry.
+    unsafe {
+        core::arch::asm!(
+            "csrw satp, {probe}",
+            "csrr {readback}, satp",
+            "csrw satp, {satp}",
+            "sfence.vma",
+            probe = in(reg) probe,
+            readback = out(reg) readback,
+            satp = in(reg) satp,
+            options(nostack, preserves_flags),
+        );
+    }
+    ASID_WIDTH.note(readback);
 }
 
 /// One page-table page: 512 × u64, naturally aligned.
@@ -309,7 +398,7 @@ impl AddressSpace {
     ///
     /// The space retains only `root_phys`: a `&'static mut` to the root
     /// held here would alias the second `&mut` the fault-time walk of the
-    /// *active* root mints ([`set_accessed_flag_in_active`]).
+    /// *active* root mints ([`retry_granted_fault`]).
     fn root_table(&self) -> Option<*mut [u64; ENTRIES_PER_TABLE]> {
         self.frames.table_at(self.root_phys)
     }
@@ -451,20 +540,9 @@ impl AddressSpace {
         // permanent boot space: publish its root, set-once, as the park
         // root teardown and the dispatcher's suspend path re-install so a
         // dead user root is never left active (see [`park_kernel_root`]).
-        let _ = PARK_ROOT.compare_exchange(0, self.root_phys, Ordering::AcqRel, Ordering::Relaxed);
-        let satp = satp_sv39(self.root_phys);
-        // SAFETY: the caller asserts the new mappings cover `pc` and
-        // `sp`. Writing `satp` then `sfence.vma` is the documented Sv39
-        // activation sequence; `sfence.vma x0, x0` flushes all TLB
-        // entries so stale translations cannot survive the switch.
-        unsafe {
-            core::arch::asm!(
-                "csrw satp, {satp}",
-                "sfence.vma",
-                satp = in(reg) satp,
-                options(nostack, preserves_flags),
-            );
-        }
+        PARK_ROOT.publish(self.root_phys);
+        // SAFETY: the caller asserts this space maps `pc` and `sp`.
+        unsafe { load_probing_asids(self.root_phys) };
     }
 
     /// Physical address of the root table (the PPN that goes into
@@ -658,7 +736,7 @@ impl MmuAddressSpace for AddressSpace {
         // `test_and_clear_accessed` clears A (and invalidates the leaf's
         // TLB entry); on a Svadu part the next access re-sets A in the walk,
         // on a Svade part it raises a load/store/instruction page fault the
-        // trap path resolves through [`set_accessed_flag_in_active`] by
+        // trap path resolves through [`retry_granted_fault`] by
         // setting A back and retrying. Either way a probe reading A still
         // clear proves the page went untouched, so the facility is honestly
         // Supported. The software Svade path is proven on emulated `svade`
@@ -740,7 +818,7 @@ impl MmuAddressSpace for AddressSpace {
         // regime would be catastrophic, so verify and re-park first. With
         // no park root published the frames are retired unreclaimed
         // rather than dismantling the active translation (fail closed).
-        if active_root_phys() == self.root_phys && !park_kernel_root() {
+        if active_root_phys() == self.root_phys && !park_kernel_root(true) {
             return;
         }
         // The kernel's own root slots — the direct physical map and the
@@ -1240,33 +1318,99 @@ fn invalidate_all_local() {
     }
 }
 
-/// The permanent kernel translation root a hart parks on whenever it must
-/// leave a user root — published set-once by the first
-/// `AddressSpace::switch` (the boot space, whose tables live for the
-/// image's lifetime), read by [`park_kernel_root`]. `0` means "not yet
-/// published" (the boot space's root table is never at physical 0).
-static PARK_ROOT: AtomicU64 = AtomicU64::new(0);
+/// The boot space's root, which [`park_kernel_root`] parks on.
+static PARK_ROOT: ParkRoot = ParkRoot::new();
+
+/// Bring a secondary hart's translation in line with the boot hart's before
+/// anything can hand it a tag: join the boot space's root, noting the ASID
+/// bits the hart keeps, or, where the boot hart runs untranslated and has
+/// published none, stay untranslated with no hart tagging.
+///
+/// # Safety
+///
+/// The hart runs on the kernel image and a stack inside it, which the boot
+/// root identity-maps.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub(crate) unsafe fn join_boot_translation() {
+    match PARK_ROOT.published() {
+        // SAFETY: the caller's contract: the boot root maps the running `pc`
+        // and `sp`.
+        Some(root) => unsafe { load_probing_asids(root) },
+        None => ASID_WIDTH.note_unprobed(),
+    }
+}
 
 /// Park the calling hart's translation regime on the published boot
-/// kernel root, so no user space's root remains active after its task
-/// suspends or exits. Returns `false`, changing nothing, when no park
-/// root has been published yet (fail closed).
+/// kernel root under ASID `0`, discarding that ASID's entries first when
+/// `flush`, so no user space's root remains active after its task suspends
+/// or exits. Returns `false`, changing nothing, when no park root has been
+/// published yet (fail closed).
 ///
 /// The dispatcher calls this after every switch-back from a user task;
-/// address-space teardown calls it defensively before dismantling a root
-/// that is somehow still active.
-pub fn park_kernel_root() -> bool {
-    let root = PARK_ROOT.load(Ordering::Acquire);
-    if root == 0 {
-        return false;
-    }
+/// address-space teardown and the machine takeover call it, flushing,
+/// before dismantling a root that is somehow still active.
+pub fn park_kernel_root(flush: bool) -> bool {
     // SAFETY: the published root is the boot space's, which identity-maps
     // the kernel window and the board MMIO for the image's lifetime —
     // exactly `activate_user_root`'s contract (inert on the host, where
     // the root is never published anyway).
-    unsafe { activate_user_root(root) };
-    true
+    unsafe { PARK_ROOT.park(flush, activate_user_root) }
 }
+
+/// The port's address-space tags: the ASID field of `satp`, as wide as the
+/// narrowest hart implements.
+pub struct Riscv64Tags;
+
+/// The riscv64 port's tags, which the kernel loads user roots and parks by.
+pub static TAGS: Riscv64Tags = Riscv64Tags;
+
+impl AddressTags for Riscv64Tags {
+    fn user_tags(&self) -> u16 {
+        ASID_WIDTH.user_tags()
+    }
+
+    fn root_register(&self, root_phys: u64, tag: u16) -> u64 {
+        satp_sv39(root_phys, tag)
+    }
+
+    /// A user space's remote fences reach only the harts running it now.
+    fn invalidation_reaches_every_tag(&self) -> bool {
+        false
+    }
+
+    unsafe fn flush_current_tag(&self) {
+        // SAFETY: the caller runs in S-mode on the dispatcher's context.
+        unsafe { flush_current_asid() };
+    }
+
+    unsafe fn park(&self, flush: bool) -> bool {
+        park_kernel_root(flush)
+    }
+}
+
+/// Discard every entry of the ASID `satp` is loaded under, on this hart.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+unsafe fn flush_current_asid() {
+    // SAFETY: `sfence.vma x0, rs2` with `rs2` holding the ASID read from
+    // `satp` discards only that ASID's non-global entries on this hart. No
+    // memory is touched and no Rust spelling exists for either.
+    unsafe {
+        core::arch::asm!(
+            "csrr {asid}, satp",
+            "srli {asid}, {asid}, {shift}",
+            "and {asid}, {asid}, {mask}",
+            "sfence.vma zero, {asid}",
+            asid = out(reg) _,
+            shift = const SATP_ASID_SHIFT,
+            mask = in(reg) (1u64 << SATP_ASID_BITS) - 1,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Host substitute: there are no TLBs to discard.
+#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+unsafe fn flush_current_asid() {}
 
 /// The physical root of the calling hart's active Sv39 translation
 /// regime (`satp`'s PPN shifted back to an address), or `0` on the host,
@@ -1280,7 +1424,7 @@ fn active_root_phys() -> u64 {
         unsafe {
             core::arch::asm!("csrr {v}, satp", v = out(reg) satp, options(nostack, preserves_flags, nomem));
         }
-        (satp & 0x0FFF_FFFF_FFFF) << 12
+        (satp & PPN_MASK) << 12
     }
     #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
     {
@@ -1288,10 +1432,9 @@ fn active_root_phys() -> u64 {
     }
 }
 
-/// The leaf-permission bit a faulting access requires, so
-/// [`set_accessed_flag_in_active`] sets the Accessed bit only on a leaf
-/// that genuinely permits the access — never masking a real permission
-/// fault (which raises the same page-fault cause under Svade).
+/// What a faulting access did, and so the leaf-permission bit it requires:
+/// [`retry_granted_fault`] retries only on a leaf that genuinely grants it,
+/// never masking a real permission fault, which raises the same cause.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AccessKind {
     /// A load page fault (`scause` 13): the leaf must be readable.
@@ -1320,29 +1463,52 @@ impl AccessKind {
     }
 }
 
-/// Set the Accessed (and, for a store, Dirty) bit on the leaf of the
-/// *active* Sv39 regime (`satp`) covering `vaddr`, resolving the RISC-V
-/// A/D page fault a Svade part raises when the bit must be updated.
+/// How a faulting access reached its leaf: what it did, and the mode and the
+/// reach into user memory it ran with.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct FaultingAccess {
+    /// What the access did.
+    pub kind: AccessKind,
+    /// It ran in U-mode.
+    pub from_user: bool,
+    /// `sstatus.SUM` was set, so an S-mode load or store may reach a user
+    /// page.
+    pub user_memory: bool,
+}
+
+impl FaultingAccess {
+    /// Whether `leaf`, a valid leaf, grants this access as the hart's own walk
+    /// would: its permission bit, and its user bit against the mode.
+    const fn granted_by(self, leaf: u64) -> bool {
+        if (leaf & self.kind.required_perm()) == 0 {
+            return false;
+        }
+        let user_page = (leaf & flags::USER) != 0;
+        if self.from_user {
+            user_page
+        } else {
+            !user_page || (self.user_memory && !matches!(self.kind, AccessKind::Instruction))
+        }
+    }
+}
+
+/// Retry an access that faulted on the leaf of the *active* Sv39 regime
+/// (`satp`) covering `vaddr` when that leaf grants it, answering whether it
+/// will be retried.
 ///
-/// This is the trap-path counterpart of
-/// [`AddressSpace::test_and_clear_accessed`]: after the cold-page scanner
-/// clears a leaf's A bit, the next access to that page on a Svade part
-/// (QEMU `svade`, or silicon without hardware A/D update) raises a
-/// load/store/instruction page fault. The trap handler (`crate::trap`)
-/// calls this with `stval` and the [`AccessKind`]; it sets A (and D for a
-/// store) back on the faulting leaf and invalidates its stale TLB entry,
-/// so the retried instruction succeeds and a later probe sees the page was
-/// touched.
-///
-/// It sets the bit(s) **only** on a valid leaf that already permits the
-/// faulting access (so a genuine permission fault — which shares the same
-/// `scause` — is *not* masked) and whose relevant bit is actually clear,
-/// and returns `true` only in that case. Any other `vaddr` leaves the
-/// tables untouched and returns `false` — the caller then takes the
-/// ordinary fault path (fail closed). It allocates nothing and is sound in
-/// trap context.
+/// A granting leaf means the fault was not the access's own: either its
+/// Accessed (or, for a store, Dirty) bit was clear on a part without hardware
+/// A/D update — the bit the cold-page scanner clears through
+/// [`AddressSpace::test_and_clear_accessed`] — or this hart used a
+/// translation it cached before the leaf was made valid, which Sv39 lets an
+/// implementation keep. The bits are set, this hart's entry for the page is
+/// discarded, and the access retried, so a page another hart mapped reaches
+/// this one with no fence to every hart that ever ran the space. A
+/// non-canonical address, an absent leaf, or one that does not grant the
+/// access is the access's own fault and touches nothing. It allocates nothing
+/// and is sound in trap context.
 #[must_use]
-pub fn set_accessed_flag_in_active(vaddr: u64, kind: AccessKind) -> bool {
+pub fn retry_granted_fault(vaddr: u64, access: FaultingAccess) -> bool {
     let root_phys = active_root_phys();
     if root_phys == 0 {
         return false;
@@ -1355,14 +1521,12 @@ pub fn set_accessed_flag_in_active(vaddr: u64, kind: AccessKind) -> bool {
     // below it; the trap handler holds the hart exclusively while it
     // resolves the fault, so the `&mut` borrows of the descriptors are
     // unique.
-    unsafe { set_accessed_flag_in_root(frames, root_phys, vaddr, kind) }
+    unsafe { retry_granted_in_root(frames, root_phys, vaddr, access) }
 }
 
-/// Walk the Sv39 hierarchy rooted at `root_phys` and set the Accessed
-/// (and, for a store, Dirty) bit on the valid, access-permitting leaf
-/// covering `vaddr` when the relevant bit is clear, as
-/// [`set_accessed_flag_in_active`] does for the live root. Returns `true`
-/// only when it updated such a leaf.
+/// Walk the Sv39 hierarchy rooted at `root_phys` for the leaf covering
+/// `vaddr` and retry `access` there, as [`retry_granted_fault`] does for the
+/// live root.
 ///
 /// # Safety
 ///
@@ -1371,12 +1535,18 @@ pub fn set_accessed_flag_in_active(vaddr: u64, kind: AccessKind) -> bool {
 /// hold exclusive access to the hierarchy for the duration of the call (no
 /// aliasing `&mut`).
 #[must_use]
-unsafe fn set_accessed_flag_in_root(
+unsafe fn retry_granted_in_root(
     frames: &dyn PageTableFrames,
     root_phys: u64,
     vaddr: u64,
-    kind: AccessKind,
+    access: FaultingAccess,
 ) -> bool {
+    // Sv39 faults an address whose bits 63..=38 are not all one value before
+    // it walks; the walk below would otherwise find its canonical alias.
+    let high = vaddr >> 38;
+    if high != 0 && high != u64::MAX >> 38 {
+        return false;
+    }
     let Some(root_table) = frames.table_at(root_phys) else {
         return false;
     };
@@ -1389,7 +1559,7 @@ unsafe fn set_accessed_flag_in_root(
         return false;
     }
     if pte_is_leaf(e2) {
-        return set_ad_if_permitted(&mut root[vpn_index(vaddr, 2)], vaddr, kind);
+        return retry_leaf(&mut root[vpn_index(vaddr, 2)], vaddr, access);
     }
     let Some(l1_table) = frames.table_at(phys_from_pte(e2)) else {
         return false;
@@ -1401,7 +1571,7 @@ unsafe fn set_accessed_flag_in_root(
         return false;
     }
     if pte_is_leaf(e1) {
-        return set_ad_if_permitted(&mut l1[vpn_index(vaddr, 1)], vaddr, kind);
+        return retry_leaf(&mut l1[vpn_index(vaddr, 1)], vaddr, access);
     }
     let Some(l0_table) = frames.table_at(phys_from_pte(e1)) else {
         return false;
@@ -1413,50 +1583,35 @@ unsafe fn set_accessed_flag_in_root(
     if (l0[i0] & flags::VALID) == 0 || !pte_is_leaf(l0[i0]) {
         return false;
     }
-    set_ad_if_permitted(&mut l0[i0], vaddr, kind)
+    retry_leaf(&mut l0[i0], vaddr, access)
 }
 
-/// Set the Accessed (and, for a store, Dirty) bit on `leaf` when the leaf
-/// permits `kind`'s access and the relevant bit is clear, invalidate the
-/// stale TLB entry for `vaddr`, and report whether anything changed.
-///
-/// Returns `false` (touching nothing) when the leaf does not permit the
-/// access — a genuine permission fault shares the same page-fault cause,
-/// so the caller must fall through to the ordinary fault path — or when
-/// the bits are already set (the fault was not the software A/D mechanism).
-fn set_ad_if_permitted(leaf: &mut u64, vaddr: u64, kind: AccessKind) -> bool {
-    if (*leaf & kind.required_perm()) == 0 {
+/// Set the Accessed (and, for a store, Dirty) bit on `leaf` when it grants
+/// `access`, discard this hart's entry for `vaddr`, and answer whether it did.
+fn retry_leaf(leaf: &mut u64, vaddr: u64, access: FaultingAccess) -> bool {
+    if !access.granted_by(*leaf) {
         return false;
     }
-    let mut updated = *leaf;
-    if kind.sets_dirty() {
-        updated |= flags::ACCESSED | flags::DIRTY;
+    *leaf |= if access.kind.sets_dirty() {
+        flags::ACCESSED | flags::DIRTY
     } else {
-        updated |= flags::ACCESSED;
-    }
-    if updated == *leaf {
-        return false;
-    }
-    *leaf = updated;
+        flags::ACCESSED
+    };
     invalidate_page_local(vaddr);
     true
 }
 
-/// Reactivate `root_phys` as the active Sv39 translation root (write
-/// `satp`) on a hart whose paging is already on.
+/// Reactivate `root_phys` as the active Sv39 translation root under `tag`'s
+/// ASID (write `satp`) on a hart whose paging is already on, discarding that
+/// ASID's entries when the tag says so.
 ///
 /// This is the RV-X1 user-kthread `pre_resume` primitive (`plans/PI.md`
 /// §X), the riscv64 sibling of the `aarch64`/`x86_64` `activate_user_root`:
 /// immediately before the kernel `sret`s back into a user task's U-mode,
 /// that task's own page-table root must be installed so its translations —
-/// and only its — are in force, keeping sibling processes hardware-isolated. It takes only the `u64` root, so the per-task hook
-/// that calls it captures a plain word and stays `Send`.
-///
-/// Unlike [`AddressSpace::switch`] this is a free function over a raw
-/// `root_phys` rather than an owned [`AddressSpace`]: the per-task hook
-/// holds only the captured root word, not the (`!Send`) space. The `satp`
-/// write + `sfence.vma` sequence is identical — Sv39 has a single
-/// translation regime, so reprogramming the root reprograms everything.
+/// and only its — are in force, keeping sibling processes hardware-isolated.
+/// Every other ASID's entries stay in the TLB unseen, for its space to find
+/// again when it next runs here.
 ///
 /// # Safety
 ///
@@ -1466,20 +1621,23 @@ fn set_ad_if_permitted(leaf: &mut u64, vaddr: u64, kind: AccessKind) -> bool {
 /// identity-maps the low kernel window, so this holds for any task root,
 /// but a `root_phys` that does not faults the hart on its next access.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub unsafe fn activate_user_root(root_phys: u64) {
-    let satp = satp_sv39(root_phys);
-    // SAFETY: writing `satp` swaps the Sv39 translation root; `sfence.vma`
-    // (with both operands `x0`) flushes the stale entries so the new root
-    // is in force before the next access. No memory is touched and no Rust
-    // spelling exists for `satp`. The caller's contract guarantees the new
-    // root covers the running kernel context.
+pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
+    let satp = satp_sv39(root_phys, tag.tag);
+    // SAFETY: writing `satp` swaps the Sv39 translation root and its ASID;
+    // the caller's contract guarantees the new root covers the running
+    // kernel context. No memory is touched and no Rust spelling exists for
+    // `satp`.
     unsafe {
         core::arch::asm!(
             "csrw satp, {satp}",
-            "sfence.vma",
             satp = in(reg) satp,
             options(nostack, preserves_flags),
         );
+    }
+    if tag.flush {
+        // SAFETY: as above; the root is loaded, so this discards the ASID's
+        // entries before any of them is used for the space.
+        unsafe { flush_current_asid() };
     }
 }
 
@@ -1493,8 +1651,8 @@ pub unsafe fn activate_user_root(root_phys: u64) {
 /// enabled; `root_phys` maps the running kernel context), so the two `cfg`
 /// arms present one `unsafe` API. The host body is inert.
 #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
-pub unsafe fn activate_user_root(root_phys: u64) {
-    let _ = root_phys;
+pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
+    let _ = (root_phys, tag);
 }
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned

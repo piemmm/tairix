@@ -400,7 +400,10 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
     unsafe { load(gdt, idt, &ists)? };
     // After the tables, so a fault here is reported rather than a triple
     // fault. SAFETY: CPL 0 on the CPU being brought up, interrupts disabled.
-    unsafe { crate::xstate::init_cpu() }.map_err(|_| InitError::XstateMismatch)
+    unsafe { crate::xstate::init_cpu() }.map_err(|_| InitError::XstateMismatch)?;
+    // SAFETY: as above, with the root the CPU came up on loaded under PCID 0.
+    unsafe { crate::paging::enable_pcids() };
+    Ok(())
 }
 
 /// The table every CPU loads, the boot CPU's first one included: each

@@ -11,6 +11,9 @@ publish.workspace = true
 [dependencies]
 # The rectangle the ribbon is kept clear of and the damage a frame reports.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# The runner a paint's bands of columns are spread across. `default-features =
+# false` takes the contract alone: the ribbon creates no thread.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
 # The surface it paints into, its pixels, and the ordered dither it tones with.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
 # Bounded maths and the swept sine its bright points run on, and the one
@@ -20,6 +23,10 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 [dev-dependencies]
 # The display rate a scene clock's frame is drawn against.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The order-shuffling runner a banded paint is held to the serial one by.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = [
+    "test-util",
+] }
 # The scene clock the tests pace frames with, as the ribbon's hosts do.
 tairix-theme = { path = "../theme", version = "=0.0.0" }
 

@@ -31,7 +31,7 @@
 //! creep.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{pool_slot_of, PageTableFrames, TableFrame};
 
@@ -42,6 +42,7 @@ extern "C" {
     static boot_pdpt_physmap: u8;
 }
 use tairix_arch_api::mmu::{AddressSpace as MmuAddressSpace, KernelWindow, MapError, PageFlags};
+use tairix_arch_api::tags::{AddressTag, AddressTags, ParkRoot};
 use tairix_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page): the one system granule.
@@ -880,7 +881,7 @@ impl AddressSpace {
         // permanent boot space: publish its root, set-once, as the park
         // root teardown and the dispatcher's suspend path re-install so a
         // dead user root is never left active (see [`park_kernel_root`]).
-        let _ = PARK_ROOT.compare_exchange(0, self.pml4_phys, Ordering::AcqRel, Ordering::Relaxed);
+        PARK_ROOT.publish(self.pml4_phys);
         // SAFETY: caller asserts the new mappings cover RIP and RSP; see
         // the `# Safety` paragraph above. `mov cr3, _` is otherwise a
         // pure architectural state change.
@@ -1174,14 +1175,13 @@ const fn is_kernel_half_slot(index: usize) -> bool {
     index >= PHYSMAP_PML4_FIRST_SLOT
 }
 
-/// Discard every cached translation on the calling CPU by reloading `CR3`
-/// with the value it already holds.
+/// Discard the calling CPU's cached translations under the PCID loaded —
+/// every one, with PCIDs off — by reloading `CR3` with the value it already
+/// holds.
 ///
-/// The port sets no `GLOBAL` leaf, so a `CR3` reload discards the whole
-/// TLB and the paging-structure caches; the root is unchanged and still
-/// maps the executing code, stack, and per-CPU data. This is the port's
-/// only whole-address-space local invalidation, shared by the direct map's
-/// widening and the block split — never a second copy of the sequence.
+/// The port sets no `GLOBAL` leaf, so the reload leaves nothing of that PCID
+/// in the TLB or the paging-structure caches; the root is unchanged and still
+/// maps the executing code, stack, and per-CPU data.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub(crate) fn invalidate_all_local() {
     // SAFETY: `mov cr3` with the value already loaded is a pure TLB flush.
@@ -1253,32 +1253,136 @@ fn install_kernel_window_slot(pml4: &mut [u64; ENTRIES_PER_TABLE]) {
     }
 }
 
-/// The permanent kernel translation root a CPU parks on whenever it must
-/// leave a user root — published set-once by the first
-/// `AddressSpace::switch` (the boot space, whose tables live for the
-/// image's lifetime), read by [`park_kernel_root`]. `0` means "not yet
-/// published" (the boot space's PML4 is never at physical 0).
-static PARK_ROOT: AtomicU64 = AtomicU64::new(0);
+/// The boot space's root, which [`park_kernel_root`] parks on.
+static PARK_ROOT: ParkRoot = ParkRoot::new();
 
 /// Park the calling CPU's translation regime on the published boot
-/// kernel root, so no user space's root remains active after its task
-/// suspends or exits. Returns `false`, changing nothing, when no park
-/// root has been published yet (fail closed).
+/// kernel root under PCID `0`, discarding that PCID's entries first when
+/// `flush`, so no user space's root remains active after its task suspends
+/// or exits. Returns `false`, changing nothing, when no park root has been
+/// published yet (fail closed).
 ///
 /// The dispatcher calls this after every switch-back from a user task;
-/// address-space teardown calls it defensively before dismantling a root
+/// address-space teardown calls it, flushing, before dismantling a root
 /// that is somehow still active.
-pub fn park_kernel_root() -> bool {
-    let root = PARK_ROOT.load(Ordering::Acquire);
-    if root == 0 {
-        return false;
-    }
+pub fn park_kernel_root(flush: bool) -> bool {
     // SAFETY: the published root is the boot space's, which maps the low
     // identity window and the higher-half kernel window for the image's
     // lifetime — exactly `activate_user_root`'s contract (inert on the
     // host, where the root is never published anyway).
-    unsafe { activate_user_root(root) };
-    true
+    unsafe { PARK_ROOT.park(flush, activate_user_root) }
+}
+
+/// The PCID field of `CR3`, below the table base, and the bit of a `CR3`
+/// write that keeps the loaded PCID's entries instead of discarding them.
+pub(crate) const CR3_PCID: u64 = 0xFFF;
+const CR3_KEEP: u64 = 1 << 63;
+
+/// Whether every CPU brought up has PCIDs on: [`PCIDS_UNKNOWN`] before the
+/// first, which decides; any later CPU without them turns them off for all,
+/// before a user task can run.
+static PCIDS: AtomicU8 = AtomicU8::new(PCIDS_UNKNOWN);
+const PCIDS_UNKNOWN: u8 = 0;
+const PCIDS_ON: u8 = 1;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+const PCIDS_OFF: u8 = 2;
+
+/// Advanced before every invalidation of the kernel's shared mappings, which
+/// `invlpg` and a `CR3` reload carry out only under the PCID in use.
+static KERNEL_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Advance [`KERNEL_EPOCH`], before a kernel-range shootdown reaches any CPU.
+#[cfg(all(feature = "sched-arch", target_arch = "x86_64", target_os = "none"))]
+pub(crate) fn advance_kernel_epoch() {
+    KERNEL_EPOCH.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The `CR3` value loading `root_phys` under PCID `tag`, keeping the PCID's
+/// entries when `keep`.
+#[must_use]
+pub const fn cr3(root_phys: u64, tag: u16, keep: bool) -> u64 {
+    let keep = if keep { CR3_KEEP } else { 0 };
+    root_phys | (tag as u64 & CR3_PCID) | keep
+}
+
+/// Turn PCIDs on for the calling CPU when it has them, and record whether
+/// every CPU does.
+///
+/// # Safety
+///
+/// CPL 0 on the CPU being brought up, interrupts disabled, its root loaded
+/// under PCID `0`, as setting `CR4.PCIDE` requires.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) unsafe fn enable_pcids() {
+    /// `CR4.PCIDE`: `CR3` carries a process-context identifier.
+    const CR4_PCIDE: u64 = 1 << 17;
+    /// CPUID leaf 1 `ECX` bit 17: the CPU has process-context identifiers.
+    const LEAF1_ECX_PCID: u32 = 1 << 17;
+    let has = core::arch::x86_64::__cpuid(1).ecx & LEAF1_ECX_PCID != 0;
+    if has {
+        // SAFETY: CPUID advertises PCIDs and `CR3`'s PCID field is `0`, so
+        // setting `CR4.PCIDE` changes no translation and cannot fault.
+        unsafe {
+            core::arch::asm!(
+                "mov {t}, cr4",
+                "or {t}, {bit}",
+                "mov cr4, {t}",
+                t = out(reg) _,
+                bit = in(reg) CR4_PCIDE,
+                options(nostack, preserves_flags),
+            );
+        }
+        let _ =
+            PCIDS.compare_exchange(PCIDS_UNKNOWN, PCIDS_ON, Ordering::AcqRel, Ordering::Acquire);
+    } else {
+        PCIDS.store(PCIDS_OFF, Ordering::Release);
+    }
+}
+
+/// Whether `CR3` writes carry a PCID on every CPU.
+fn pcids_on() -> bool {
+    PCIDS.load(Ordering::Acquire) == PCIDS_ON
+}
+
+/// The port's address-space tags: a PCID in `CR3` beside each root, on a CPU
+/// that has them.
+pub struct X86_64Tags;
+
+/// The x86_64 port's tags, which the kernel loads user roots and parks by.
+pub static TAGS: X86_64Tags = X86_64Tags;
+
+impl AddressTags for X86_64Tags {
+    /// Every PCID but `0`, the park root's, once every CPU has them on.
+    fn user_tags(&self) -> u16 {
+        if pcids_on() {
+            u16::try_from(CR3_PCID).unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    fn root_register(&self, root_phys: u64, tag: u16) -> u64 {
+        cr3(root_phys, tag, false)
+    }
+
+    /// `invlpg` and a `CR3` reload discard only the loaded PCID's entries,
+    /// and a user space's shootdown reaches only the CPUs running it.
+    fn invalidation_reaches_every_tag(&self) -> bool {
+        false
+    }
+
+    fn kernel_epoch(&self) -> u64 {
+        KERNEL_EPOCH.load(Ordering::SeqCst)
+    }
+
+    unsafe fn flush_current_tag(&self) {
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        invalidate_all_local();
+    }
+
+    unsafe fn park(&self, flush: bool) -> bool {
+        park_kernel_root(flush)
+    }
 }
 
 /// Publish the calling CPU's *current* translation root — the boot
@@ -1293,7 +1397,7 @@ pub fn park_kernel_root() -> bool {
 /// the slot.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn publish_boot_park_root() {
-    let _ = PARK_ROOT.compare_exchange(0, active_root_phys(), Ordering::AcqRel, Ordering::Relaxed);
+    PARK_ROOT.publish(active_root_phys());
 }
 
 /// Host substitute: there is no boot trampoline `CR3` on the host; the
@@ -1313,7 +1417,7 @@ fn active_root_phys() -> u64 {
         unsafe {
             core::arch::asm!("mov {v}, cr3", v = out(reg) cr3, options(nostack, preserves_flags, nomem));
         }
-        cr3 & !0xFFF
+        cr3 & !CR3_PCID
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
@@ -1321,23 +1425,17 @@ fn active_root_phys() -> u64 {
     }
 }
 
-/// Reactivate `root_phys` as the active top-level translation root (load
-/// `CR3`) on a CPU whose paging is already enabled.
+/// Reactivate `root_phys` as the active top-level translation root under
+/// `tag`'s PCID (load `CR3`) on a CPU whose paging is already enabled,
+/// discarding that PCID's entries as it loads when the tag says so.
 ///
 /// This is the X1 user-kthread `pre_resume` primitive (`plans/PI.md` §X),
 /// the x86_64 sibling of the aarch64 `activate_user_root`: immediately
 /// before the kernel returns into a user task's ring 3, that task's own
 /// PML4 must be installed so its translations — and only its — are in
-/// force, keeping sibling processes hardware-isolated. It
-/// takes only the `u64` root, so the per-task hook that calls it captures a
-/// plain word and stays `Send`.
-///
-/// Unlike a full mode switch this only reloads `CR3`: the rest of the
-/// paging configuration (`EFER.NXE`, `CR0`/`CR4` paging controls) is
-/// already in force and identical across user spaces, and only the
-/// top-level root changes between them. Loading `CR3` flushes the
-/// non-global TLB entries as a side effect (Intel SDM Vol 3A §4.10.4), so
-/// no explicit invalidation is needed.
+/// force, keeping sibling processes hardware-isolated. With PCIDs on, every
+/// other PCID's entries stay in the TLB unseen; without them every load
+/// discards the non-global entries (Intel SDM Vol 3A §4.10.4).
 ///
 /// # Safety
 ///
@@ -1348,15 +1446,21 @@ fn active_root_phys() -> u64 {
 /// the higher-half kernel window, so this holds for any task root, but a
 /// `root_phys` that does not faults the CPU on its next access.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub unsafe fn activate_user_root(root_phys: u64) {
-    // SAFETY: `mov cr3, _` swaps the active translation root and flushes the
-    // non-global TLB entries; it touches no memory and no Rust spelling
-    // exists for `CR3`. The caller's contract guarantees the new root covers
-    // the running kernel context (see the `# Safety` paragraph above).
+pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
+    let value = if pcids_on() {
+        cr3(root_phys, tag.tag, !tag.flush)
+    } else {
+        root_phys
+    };
+    // SAFETY: `mov cr3, _` swaps the active translation root, discarding the
+    // loaded PCID's entries unless the keep bit is set, which only a CPU with
+    // PCIDs on is given; it touches no memory and no Rust spelling exists for
+    // `CR3`. The caller's contract guarantees the new root covers the running
+    // kernel context (see the `# Safety` paragraph above).
     unsafe {
         core::arch::asm!(
-            "mov cr3, {root}",
-            root = in(reg) root_phys,
+            "mov cr3, {value}",
+            value = in(reg) value,
             options(nostack, preserves_flags),
         );
     }
@@ -1372,8 +1476,8 @@ pub unsafe fn activate_user_root(root_phys: u64) {
 /// enabled; `root_phys` maps the running kernel context), so the two `cfg`
 /// arms present one `unsafe` API. The host body is inert.
 #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-pub unsafe fn activate_user_root(root_phys: u64) {
-    let _ = root_phys;
+pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
+    let _ = (root_phys, tag);
 }
 
 impl MmuAddressSpace for AddressSpace {
@@ -1593,7 +1697,7 @@ impl MmuAddressSpace for AddressSpace {
         // bare-metal target has a `CR3` to compare: a host space is no
         // CPU's active translation.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        if active_root_phys() == self.pml4_phys && !park_kernel_root() {
+        if active_root_phys() == self.pml4_phys && !park_kernel_root(true) {
             return;
         }
         let Some(root) = self.root_table() else {
@@ -1821,6 +1925,20 @@ mod tests {
         static POOL: PageTablePool = PageTablePool::new();
         let mut space = AddressSpace::new_bookkeeping_identity_32mib(&POOL).expect("a root");
         mmu::conformance::run_all(&mut space, FINE_VA, FINE_PA);
+    }
+
+    /// The PCID sits in `CR3`'s low twelve bits under the table base, and the
+    /// keep bit rides only on a write that asks to keep the PCID's entries.
+    #[test]
+    fn cr3_carries_the_pcid_under_the_table_base_and_keeps_only_when_asked() {
+        assert_eq!(cr3(0x4123_4000, 0, false), 0x4123_4000);
+        assert_eq!(cr3(0x4123_4000, 0x7FF, false), 0x4123_47FF);
+        assert_eq!(cr3(0x4123_4000, 9, true), 0x4123_4009 | (1 << 63));
+        assert_eq!(cr3(0x4123_4000, u16::MAX, false) & !CR3_PCID, 0x4123_4000);
+        let widest = u16::try_from(CR3_PCID).expect("twelve bits");
+        tairix_arch_api::tags_conformance::run_all(&TAGS, widest, 0x4123_4000, 0x4124_4000);
+        assert!(!TAGS.invalidation_reaches_every_tag());
+        assert_eq!(TAGS.user_tags(), 0, "no CPU turned PCIDs on on the host");
     }
 
     /// A parent entry whose address the frame source never handed out is

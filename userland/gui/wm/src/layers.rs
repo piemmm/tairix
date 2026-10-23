@@ -241,6 +241,20 @@ impl Layer {
         }
     }
 
+    /// [`dirty`](Self::dirty) for every pixel of `region`, worked out in
+    /// `local`.
+    fn dirty_region(&mut self, region: &Region, local: &mut Region) {
+        local.clone_from(region);
+        local.clip(self.at);
+        local.translate(
+            self.at.left().saturating_neg(),
+            self.at.top().saturating_neg(),
+        );
+        for held in &mut self.held {
+            held.stale.add_region(local);
+        }
+    }
+
     fn dirty_all(&mut self) {
         let whole = Rect::new(0, 0, self.at.width, self.at.height);
         for held in &mut self.held {
@@ -371,9 +385,11 @@ pub(super) struct PlaneShown {
 
 /// What changed about a window a free layer shows.
 #[derive(Copy, Clone)]
-pub(super) enum Change {
+pub(super) enum Change<'a> {
     /// Its pixels, within a screen rectangle.
     Pixels(Rect),
+    /// Its pixels, within a screen region.
+    Region(&'a Region),
     /// Anything that may reach all of them.
     Whole,
     /// Its place, and nothing else.
@@ -387,7 +403,7 @@ impl Compositor {
     pub(super) fn route_to_layer(
         &mut self,
         id: WindowId,
-        change: Change,
+        change: Change<'_>,
         footprints: [Rect; 2],
     ) -> bool {
         let Some(stack) = self.layers.as_mut() else {
@@ -415,6 +431,7 @@ impl Compositor {
         if let Some(layer) = stack.layers.get_mut(at) {
             match change {
                 Change::Pixels(rect) => layer.dirty(rect),
+                Change::Region(region) => layer.dirty_region(region, &mut self.routed),
                 Change::Whole => layer.dirty_all(),
                 Change::Moved => {}
             }
@@ -424,6 +441,16 @@ impl Compositor {
             }
         }
         let from = self.index_of(id).map_or(0, |index| index.saturating_add(1));
+        if let Change::Region(region) = change {
+            let mut hit = core::mem::take(&mut self.routed);
+            for zone in zones {
+                hit.clone_from(region);
+                hit.clip(zone);
+                self.mark_region_from(&hit, from);
+            }
+            self.routed = hit;
+            return true;
+        }
         for zone in zones {
             for rect in footprints {
                 let hit = rect.intersection(&zone);
@@ -515,9 +542,7 @@ impl Compositor {
         for layer in &stack.layers {
             self.mark_left(layer, screen);
         }
-        for &rect in stack.hidden.rects() {
-            self.damage.add(rect);
-        }
+        self.damage.add_region(&stack.hidden);
         stack.hidden.clear();
         if scaled {
             // The frame was never resampled while the engine scaled.
@@ -661,9 +686,7 @@ impl Compositor {
             self.recompose_damage(&mut composed);
             let mut owed = core::mem::take(&mut self.undelivered);
             owed.clip(self.output_rect());
-            for &rect in owed.rects() {
-                composed.add(rect);
-            }
+            composed.add_region(&owed);
             owed.clear();
             self.undelivered = owed;
         }
@@ -904,9 +927,7 @@ impl Compositor {
             layer.free(engine);
         }
         if stack.shape == Shape::Promoted && plan.shape != Shape::Promoted {
-            for &rect in stack.hidden.rects() {
-                self.damage.add(rect);
-            }
+            self.damage.add_region(&stack.hidden);
             stack.hidden.clear();
         }
         // Taken top down; the stack holds them bottom up, the pointer's last.
@@ -937,13 +958,11 @@ impl Compositor {
         let mut undelivered = core::mem::take(&mut self.undelivered);
         let mut rescan = core::mem::take(&mut self.scanout);
         if let Some(stack) = self.layers.as_mut() {
-            for &rect in owed
-                .rects()
-                .iter()
-                .chain(undelivered.rects())
-                .chain(rescan.rects())
-                .chain(&settled)
-            {
+            for owing in [&mut owed, &mut undelivered, &mut rescan] {
+                owing.clip(screen);
+                stack.hidden.add_region(owing);
+            }
+            for rect in &settled {
                 stack.hidden.add(rect.intersection(&screen));
             }
         }
@@ -964,6 +983,7 @@ impl Compositor {
             back,
             order,
             runner,
+            routed,
             ..
         } = self;
         for layer in layers.iter_mut().flat_map(|stack| &mut stack.layers) {
@@ -973,9 +993,7 @@ impl Compositor {
             ) {
                 continue;
             }
-            for &rect in composed.rects() {
-                layer.dirty(rect);
-            }
+            layer.dirty_region(composed, routed);
             let Some(target) = layer.target() else {
                 continue;
             };

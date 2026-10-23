@@ -18,9 +18,7 @@ use crate::bounded_text::BoundedText;
 use crate::desktop::{
     decode_text, encode_text, Appearance, Contrast, Density, DesktopText, TEXT_WIRE_LEN,
 };
-use crate::driver::display::{
-    DamageList, DamageRect, DisplayFormat, DisplayMode, RefreshRate, MAX_DAMAGE_RECTS,
-};
+use crate::driver::display::{DamageRect, DamageRects, DisplayFormat, DisplayMode, RefreshRate};
 use crate::font_ipc::{
     FontRequest, FONT_MAX_FAMILIES_REPLY, FONT_MAX_GLYPH_REPLY, FONT_MAX_OUTLINE_REPLY,
     FONT_METRICS_REPLY_LEN,
@@ -38,6 +36,15 @@ use crate::Errno;
 /// The protocol a saver and its host speak; a `Start` naming another is
 /// refused.
 pub const SAVER_PROTOCOL_VERSION: u16 = 1;
+
+/// The most rectangles one frame's damage names, and the most its host passes
+/// on, in band form, whatever a saver sent: as many as a compositor merges into
+/// its own damage for less than the pixels they spare cost, so a change
+/// scattered in whole tiles reaches it as those tiles.
+pub const SAVER_DAMAGE_RECTS: usize = 128;
+
+/// One frame's damage, as a `Presented` names it.
+pub type SaverDamage = DamageRects<SAVER_DAMAGE_RECTS>;
 
 /// How long a saver has from its spawn to its `Ready` before its host ends it.
 pub const SAVER_START_DEADLINE_NS: u64 = 10_000_000_000;
@@ -319,6 +326,9 @@ pub struct Start {
     pub threads: u32,
     /// The bytes of address space the saver may map.
     pub memory: u64,
+    /// The machine's usable memory, which the saver's caches are sized from
+    /// as every desktop program's are: never its own ceiling.
+    pub installed_memory: u64,
     /// The account's login name; empty when unknown.
     pub account: BoundedText<0, SESSION_LOGIN_NAME_MAX>,
     /// The machine's name; empty when unknown.
@@ -350,7 +360,8 @@ const START_PRESSURE: usize = 45;
 const START_CONTRAST: usize = 46;
 const START_DENSITY: usize = 47;
 const START_NOW: usize = 48;
-const START_SEED: usize = 56;
+const START_INSTALLED: usize = 56;
+const START_SEED: usize = 64;
 const START_TEXT: usize = START_SEED + SAVER_SEED_LEN;
 const START_ACCOUNT: usize = START_TEXT + TEXT_WIRE_LEN;
 const START_MACHINE: usize = START_ACCOUNT + SESSION_LOGIN_NAME_MAX;
@@ -378,6 +389,7 @@ impl Start {
             cores: 1,
             threads: 1,
             memory: 0,
+            installed_memory: 0,
             account: BoundedText::EMPTY,
             machine: BoundedText::EMPTY,
             feeds: SaverFeeds::NONE,
@@ -426,7 +438,8 @@ impl Start {
         out[START_HEIGHT..START_HEIGHT + 4].copy_from_slice(&self.region.height.to_le_bytes());
         out[START_SCALE..START_SCALE + 4].copy_from_slice(&self.scale_percent.to_le_bytes());
         out[START_REFRESH..START_REFRESH + 4].copy_from_slice(&self.refresh.mhz().to_le_bytes());
-        out[START_NOW..START_SEED].copy_from_slice(&self.now_ns.to_le_bytes());
+        out[START_NOW..START_INSTALLED].copy_from_slice(&self.now_ns.to_le_bytes());
+        out[START_INSTALLED..START_SEED].copy_from_slice(&self.installed_memory.to_le_bytes());
         out[START_SEED..START_TEXT].copy_from_slice(&self.seed);
         encode_text(self.text, &mut out[START_TEXT..START_ACCOUNT]);
         out[START_PRESSURE] = self.pressure.depth();
@@ -487,6 +500,7 @@ impl Start {
             cores: read_u16(bytes, START_CORES),
             threads: read_u32(bytes, START_THREADS),
             memory: read_u64(bytes, START_MEMORY),
+            installed_memory: read_u64(bytes, START_INSTALLED),
             account: BoundedText::from_wire(
                 bytes[START_ACCOUNT_LEN],
                 &array(bytes, START_ACCOUNT),
@@ -640,6 +654,9 @@ pub enum HostMessage<'a> {
 }
 
 /// What a saver says to its host.
+// Decoded once a frame and handled at once; boxing a frame's damage would cost
+// the desktop an allocation a frame.
+#[allow(clippy::large_enum_variant)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SaverMessage {
     /// The region is mapped and the first frame may be asked for.
@@ -649,7 +666,7 @@ pub enum SaverMessage {
         /// The `Frame` it answers.
         serial: u32,
         /// What changed; `None` when nothing did.
-        damage: Option<DamageList>,
+        damage: Option<SaverDamage>,
         /// When the next frame is wanted.
         next: NextFrame,
     },
@@ -675,7 +692,7 @@ const FRAME_WIRE_LEN: usize = 1 + 3 + 4 + 8 + WALL_LEN;
 const SLIDE_WIRE_LEN: usize = 4;
 const KEPT_WIRE_LEN: usize = 2;
 const FONT_REPLY_PREFIX: usize = 8;
-const PRESENTED_WIRE_LEN: usize = 1 + 1 + 1 + 1 + 4 + 8 + MAX_DAMAGE_RECTS * 16;
+const PRESENTED_WIRE_LEN: usize = 1 + 1 + 1 + 1 + 4 + 8 + SAVER_DAMAGE_RECTS * 16;
 const KEEP_WIRE_LEN: usize = 4 + 4 + 4 + SAVER_KEEP_TITLE_MAX;
 const UNSTARTED_WIRE_LEN: usize = 8;
 
@@ -683,9 +700,16 @@ const UNSTARTED_WIRE_LEN: usize = 8;
 pub const SAVER_HOST_MESSAGE_MAX: usize = FONT_REPLY_PREFIX + SAVER_FONT_REPLY_MAX;
 
 /// The longest message a saver sends.
-pub const SAVER_MESSAGE_MAX: usize = 1 + FontRequest::WIRE_LEN;
-const _: () =
-    assert!(SAVER_MESSAGE_MAX >= PRESENTED_WIRE_LEN && SAVER_MESSAGE_MAX >= KEEP_WIRE_LEN);
+pub const SAVER_MESSAGE_MAX: usize = {
+    let mut most = PRESENTED_WIRE_LEN;
+    if 1 + FontRequest::WIRE_LEN > most {
+        most = 1 + FontRequest::WIRE_LEN;
+    }
+    if KEEP_WIRE_LEN > most {
+        most = KEEP_WIRE_LEN;
+    }
+    most
+};
 const _: () = assert!(SAVER_HOST_MESSAGE_MAX >= START_WIRE_LEN);
 
 impl<'a> HostMessage<'a> {
@@ -880,7 +904,7 @@ impl SaverMessage {
                 next,
             } => {
                 out[0] = OP_PRESENTED;
-                let rects = damage.as_ref().map_or(&[][..], DamageList::rects);
+                let rects = damage.as_ref().map_or(&[][..], SaverDamage::rects);
                 out[1] = u8::try_from(rects.len()).unwrap_or(0);
                 let (tag, at) = match next {
                     NextFrame::Soon => (NEXT_SOON, 0),
@@ -947,7 +971,7 @@ impl SaverMessage {
             OP_PRESENTED => {
                 let bytes: &[u8; PRESENTED_WIRE_LEN] = exact(bytes)?;
                 let count = usize::from(bytes[1]);
-                if count > MAX_DAMAGE_RECTS {
+                if count > SAVER_DAMAGE_RECTS {
                     return Err(Errno::LengthOutOfRange);
                 }
                 if bytes[3] != 0 || !zero(&bytes[16 + count * 16..]) {
@@ -965,7 +989,7 @@ impl SaverMessage {
                     y: 0,
                     width_px: 0,
                     height_px: 0,
-                }; MAX_DAMAGE_RECTS];
+                }; SAVER_DAMAGE_RECTS];
                 for (index, rect) in rects.iter_mut().enumerate().take(count) {
                     let base = 16 + index * 16;
                     *rect = DamageRect {
@@ -978,7 +1002,7 @@ impl SaverMessage {
                 let damage = if count == 0 {
                     None
                 } else {
-                    Some(DamageList::new(&rects[..count])?)
+                    Some(SaverDamage::new(&rects[..count])?)
                 };
                 Ok(Self::Presented {
                     serial: read_u32(bytes, 4),

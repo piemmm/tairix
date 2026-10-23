@@ -658,6 +658,35 @@ fn choosing_a_closed_category_lists_its_panes_and_goes_nowhere() {
     }
 }
 
+/// Leaving a pane for one with no action band reports where the band was, so
+/// none of its buttons outlives the switch on screen.
+#[test]
+fn a_switch_reports_the_action_band_it_leaves() {
+    let theme = theme();
+    for from in [
+        Pane::LoginStartup,
+        Pane::Caching,
+        Pane::TcpIp,
+        Pane::RaspberryPi,
+    ] {
+        let mut shell =
+            Shell::new(DesktopSettings::default(), Board::RASPBERRY_PI).expect("a shell");
+        assert!(shell.go_to(from, WIDE, Scale::ONE, &theme, &mut damage()));
+        shell.lay_out(WIDE, Scale::ONE, &theme);
+        let band = shell
+            .frame(WIDE, Scale::ONE, &theme)
+            .footer
+            .expect("the pane's action band");
+        let mut drew = damage();
+        assert!(shell.go_to(Pane::Power, WIDE, Scale::ONE, &theme, &mut drew));
+        assert!(shell.frame(WIDE, Scale::ONE, &theme).footer.is_none());
+        assert!(
+            covers(&drew, band),
+            "{from:?}'s band at {band:?} left unreported"
+        );
+    }
+}
+
 /// Pressing an open category's row closes its list and nothing else, and a
 /// pane on show whose row went with it is stood for by its category's row.
 #[test]

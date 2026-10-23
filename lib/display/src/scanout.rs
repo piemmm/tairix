@@ -90,6 +90,76 @@ impl ChannelOrder {
         }
     }
 
+    /// Decode a run of four-byte pixels a client wrote into `out`, every one
+    /// opaque whatever alpha it carries: the bulk form of
+    /// [`decode`](Self::decode) for a picture that may not show what it
+    /// covers. With alpha full the clamp leaves every channel as it is, so
+    /// this is a byte-order copy.
+    ///
+    /// Writes `min(bytes.len() / 4, out.len())` pixels and reports that
+    /// count; a trailing group of fewer than four bytes is left alone.
+    #[must_use]
+    pub fn decode_opaque_run(self, bytes: &[u8], out: &mut [Pixel]) -> usize {
+        let (groups, _trailing) = bytes.as_chunks::<4>();
+        let count = groups.len().min(out.len());
+        let (groups, out) = (&groups[..count], &mut out[..count]);
+        // Whole lanes of eight, so the optimiser sees a fixed-width body.
+        let (lanes, tail) = groups.as_chunks::<8>();
+        let (lanes_out, tail_out) = out.as_chunks_mut::<8>();
+        for (lane, slots) in lanes.iter().zip(lanes_out) {
+            for (bytes, slot) in lane.iter().zip(slots) {
+                *slot = self.decode_opaque(*bytes);
+            }
+        }
+        for (bytes, slot) in tail.iter().zip(tail_out) {
+            *slot = self.decode_opaque(*bytes);
+        }
+        count
+    }
+
+    /// Lay a run of four-byte pixels written in `from`'s order into `out` in
+    /// this order, every one opaque whatever alpha it carries: what
+    /// [`decode_opaque_run`](Self::decode_opaque_run) then
+    /// [`encode_run`](Self::encode_run) make of it, with no pixel between.
+    ///
+    /// Writes and reports `min(bytes.len(), out.len()) / 4` pixels.
+    #[must_use]
+    pub fn transcode_opaque_run(self, from: Self, bytes: &[u8], out: &mut [u8]) -> usize {
+        let (groups, _trailing) = bytes.as_chunks::<4>();
+        let (slots, _) = out.as_chunks_mut::<4>();
+        let count = groups.len().min(slots.len());
+        let (groups, slots) = (&groups[..count], &mut slots[..count]);
+        // Each pixel a word, in whole lanes of eight, so the optimiser sees a
+        // fixed-width body of shifts and masks.
+        let swap = from != self;
+        let relay = |&bytes: &[u8; 4]| {
+            let word = u32::from_le_bytes(bytes);
+            let word = if swap {
+                (word & 0xFF00) | (word << 16 & 0xFF_0000) | (word >> 16 & 0xFF)
+            } else {
+                word
+            };
+            (word | 0xFF00_0000).to_le_bytes()
+        };
+        let (lanes, tail) = groups.as_chunks::<8>();
+        let (lanes_out, tail_out) = slots.as_chunks_mut::<8>();
+        for (lane, out) in lanes.iter().zip(lanes_out) {
+            for (bytes, slot) in lane.iter().zip(out) {
+                *slot = relay(bytes);
+            }
+        }
+        for (bytes, slot) in tail.iter().zip(tail_out) {
+            *slot = relay(bytes);
+        }
+        count
+    }
+
+    /// [`decode`](Self::decode) with alpha taken as full.
+    #[inline]
+    fn decode_opaque(self, [b0, b1, b2, _]: [u8; 4]) -> Pixel {
+        self.decode([b0, b1, b2, u8::MAX])
+    }
+
     /// Encode a run of premultiplied pixels into `out`, returning the number
     /// of whole pixels written.
     ///
@@ -155,7 +225,7 @@ pub fn sub_screen_damage(bounds: &Rect, mode: &DisplayMode) -> Option<DamageRect
 
 /// One screen rectangle as the wire's damage rectangle, or `None` when it is
 /// empty or has an edge the wire's unsigned fields cannot express.
-fn as_damage(rect: &Rect) -> Option<DamageRect> {
+pub(crate) fn as_damage(rect: &Rect) -> Option<DamageRect> {
     let (x, y) = rect.surface_origin()?;
     Some(DamageRect {
         x,

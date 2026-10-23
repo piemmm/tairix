@@ -13,11 +13,12 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::Errno;
-use tairix_geometry::Rect;
+use tairix_geometry::{Rect, Region};
 use tairix_parallel::{JobRunner, Reversed, SERIAL};
 use tairix_raster::{Color, Pixel, Surface};
 
-use super::{decode, decode_list, encode, Alpha};
+use super::{decode, decode_list, encode, lay_opaque, lay_opaque_into, lay_opaque_region};
+use crate::scanout::ChannelOrder;
 
 const WIDTH: u32 = 40;
 const HEIGHT: u32 = 24;
@@ -89,8 +90,7 @@ fn round_trip(source: &Surface, mode: &DisplayMode, runner: &dyn JobRunner) -> (
     let mut frame = frame_for(mode);
     encode(source, &mut frame, mode, whole(), runner).expect("encode");
     let mut target = blank();
-    let changed =
-        decode(&frame, &mut target, mode, whole(), Alpha::AsSent, runner).expect("decode");
+    let changed = decode(&frame, &mut target, mode, whole(), runner).expect("decode");
     (target, changed)
 }
 
@@ -109,26 +109,198 @@ fn a_frame_round_trips_every_pixel_in_both_channel_orders() {
     }
 }
 
-/// An opaque decode fills alpha before it compares, so a transparent frame laid
-/// over a transparent surface changes every pixel, and every one reads opaque.
+/// An opaque lay keeps every colour channel as the frame wrote it in either
+/// order and takes every alpha as full, however faint the frame said it was.
 #[test]
-fn an_opaque_decode_reports_a_transparent_frame_over_a_transparent_surface() {
+fn an_opaque_lay_keeps_the_colour_and_fills_the_alpha_in_both_orders() {
+    let source = painted();
+    for format in [DisplayFormat::Rgba8888, DisplayFormat::Bgra8888] {
+        let mode = packed(format);
+        let mut frame = frame_for(&mode);
+        encode(&source, &mut frame, &mode, whole(), &SERIAL).expect("encode");
+        let mut laid = blank();
+        lay_opaque(&frame, &mut laid, &mode, whole(), &splitting()).expect("lay");
+        for (got, sent) in laid.pixels().iter().zip(source.pixels()) {
+            let want = Pixel {
+                a: u8::MAX,
+                ..*sent
+            };
+            assert_eq!(*got, want, "{format:?}");
+        }
+    }
+}
+
+/// A lay split across bands writes exactly what one pass writes.
+#[test]
+fn an_opaque_lay_split_across_bands_matches_one_pass() {
+    // Large enough that a band is worth splitting off.
+    let (width, height) = (600, 240);
+    let mode = DisplayMode {
+        width_px: width,
+        height_px: height,
+        stride_bytes: width * 4,
+        format: DisplayFormat::Bgra8888,
+    };
+    let frame: Vec<u8> = (0..width * height * 4)
+        .map(|at| u8::try_from(at * 31 % 251).unwrap_or(0))
+        .collect();
+    let part = DamageRect {
+        x: 3,
+        y: 2,
+        width_px: width - 5,
+        height_px: height - 3,
+    };
+    let fresh = || Surface::new(width, height).expect("a surface");
+    let (mut serial, mut banded) = (fresh(), fresh());
+    lay_opaque(&frame, &mut serial, &mode, part, &SERIAL).expect("lay");
+    let runner = Reversed::new(8);
+    lay_opaque(&frame, &mut banded, &mode, part, &runner).expect("lay");
+    assert!(runner.widest() > 1, "the lay was split");
+    assert_eq!(serial, banded);
+    assert_eq!(serial.get(2, 2), Some(Pixel::TRANSPARENT), "outside it");
+    assert_eq!(serial.get(3, 2).map(|pixel| pixel.a), Some(u8::MAX));
+}
+
+/// Every rectangle of a region is checked before a pixel moves, so one whose
+/// rows the frame does not hold lays none of them.
+#[test]
+fn an_opaque_region_with_one_bad_rectangle_lays_nothing() {
     let mode = packed(DisplayFormat::Rgba8888);
-    let frame = frame_for(&mode);
-    let mut kept = blank();
-    let as_sent = decode(&frame, &mut kept, &mode, whole(), Alpha::AsSent, &SERIAL);
-    assert_eq!(as_sent, Ok(Rect::EMPTY), "the same transparent pixels");
+    let mut frame = frame_for(&mode);
+    encode(&painted(), &mut frame, &mode, whole(), &SERIAL).expect("encode");
+    let mut damage = Region::new();
+    damage.add(Rect::new(0, 0, 4, 4));
+    damage.add(Rect::new(0, 20, 4, 4));
+    let short = &frame[..frame.len() / 2];
     let mut laid = blank();
-    let opaque = decode(
-        &frame,
-        &mut laid,
-        &mode,
-        whole(),
-        Alpha::Opaque,
-        &splitting(),
+    assert_eq!(
+        lay_opaque_region(short, &mut laid, &mode, &damage, &SERIAL),
+        Err(Errno::OutOfRange)
     );
-    assert_eq!(opaque, Ok(Rect::new(0, 0, WIDTH, HEIGHT)));
-    assert!(laid.pixels().iter().all(|pixel| pixel.a == u8::MAX));
+    assert_eq!(laid, blank());
+    lay_opaque_region(&frame, &mut laid, &mode, &damage, &SERIAL).expect("lays");
+    assert_eq!(laid.get(3, 3).map(|pixel| pixel.a), Some(u8::MAX));
+    assert_eq!(laid.get(3, 23).map(|pixel| pixel.a), Some(u8::MAX));
+    assert_eq!(laid.get(4, 3), Some(Pixel::TRANSPARENT), "outside it");
+}
+
+/// A region laid in one pass of bands writes exactly what laying each of its
+/// rectangles on the surface alone writes, and nothing beside them.
+#[test]
+fn an_opaque_region_laid_in_bands_matches_each_rectangle_laid_alone() {
+    let (width, height) = (600, 480);
+    let mode = DisplayMode {
+        width_px: width,
+        height_px: height,
+        stride_bytes: width * 4,
+        format: DisplayFormat::Bgra8888,
+    };
+    let frame: Vec<u8> = (0..width * height * 4)
+        .map(|at| u8::try_from(at * 31 % 251).unwrap_or(0))
+        .collect();
+    let mut damage = Region::new();
+    for (x, y, w, h) in [
+        (3, 2, 500, 200),
+        (400, 150, 190, 300),
+        (10, 300, 590, 170),
+        (700, 0, 9, 9),
+    ] {
+        damage.add(Rect::new(x, y, w, h));
+    }
+    let fresh = || Surface::new(width, height).expect("a surface");
+    let (mut each, mut banded) = (fresh(), fresh());
+    for named in damage
+        .rects()
+        .iter()
+        .filter_map(|rect| super::damage_in(&mode, *rect))
+    {
+        lay_opaque(&frame, &mut each, &mode, named, &SERIAL).expect("lay");
+    }
+    let runner = Reversed::new(8);
+    lay_opaque_region(&frame, &mut banded, &mode, &damage, &runner).expect("lay");
+    assert!(runner.widest() > 1, "the lay was split");
+    assert_eq!(each, banded);
+    assert_eq!(banded.get(2, 2), Some(Pixel::TRANSPARENT), "outside it");
+}
+
+/// A region laid into a display's own frame, at its stride and in its order,
+/// holds exactly what laying it onto a surface and encoding that holds: every
+/// pixel opaque, nothing between the rectangles or in the stride's padding
+/// touched, the same split into bands as in one pass, and a frame too short
+/// refused whole.
+#[test]
+fn a_region_laid_into_a_display_frame_matches_a_lay_then_an_encode() {
+    let (width, height) = (300u32, 220u32);
+    let mode = DisplayMode {
+        width_px: width,
+        height_px: height,
+        stride_bytes: width * 4,
+        format: DisplayFormat::Rgba8888,
+    };
+    let frame: Vec<u8> = (0..width * height * 4)
+        .map(|at| u8::try_from(at * 29 % 253).unwrap_or(0))
+        .collect();
+    let mut damage = Region::new();
+    for (x, y, w, h) in [(0, 0, 40, 30), (250, 10, 50, 200), (20, 100, 200, 120)] {
+        damage.add(Rect::new(x, y, w, h));
+    }
+    let stride = usize::try_from(width).expect("small") * 4 + 24;
+    let len = stride * usize::try_from(height).expect("small");
+    let mut expected = vec![0x11u8; len];
+    let mut laid = Surface::new(width, height).expect("a surface");
+    lay_opaque_region(&frame, &mut laid, &mode, &damage, &SERIAL).expect("laid");
+    for rect in damage.rects() {
+        for y in rect.top()..rect.bottom() {
+            let row = usize::try_from(y).expect("on screen");
+            let left = usize::try_from(rect.left()).expect("on screen");
+            let pixels: Vec<Pixel> = (rect.left()..rect.right())
+                .map(|x| {
+                    laid.get(x.cast_unsigned(), y.cast_unsigned())
+                        .expect("in bounds")
+                })
+                .collect();
+            let at = row * stride + left * 4;
+            let out = &mut expected[at..at + pixels.len() * 4];
+            assert_eq!(ChannelOrder::Bgra.encode_run(&pixels, out), pixels.len());
+        }
+    }
+    for runner in [&SERIAL as &dyn JobRunner, &Reversed::new(8)] {
+        let mut target = vec![0x11u8; len];
+        lay_opaque_into(
+            &frame,
+            &mode,
+            (&mut target, stride, ChannelOrder::Bgra),
+            &damage,
+            runner,
+        )
+        .expect("laid");
+        assert!(target == expected, "the display frame differs");
+    }
+    let mut short = vec![0x11u8; len - stride];
+    assert_eq!(
+        lay_opaque_into(
+            &frame,
+            &mode,
+            (&mut short, stride, ChannelOrder::Bgra),
+            &damage,
+            &SERIAL
+        ),
+        Err(Errno::OutOfRange)
+    );
+    assert!(short.iter().all(|byte| *byte == 0x11), "nothing written");
+    let mut narrow = vec![0x11u8; len];
+    assert_eq!(
+        lay_opaque_into(
+            &frame,
+            &mode,
+            (&mut narrow, stride - 28, ChannelOrder::Bgra),
+            &damage,
+            &SERIAL
+        ),
+        Err(Errno::OutOfRange),
+        "a row wider than the display's stride"
+    );
+    assert!(narrow.iter().all(|byte| *byte == 0x11), "nothing written");
 }
 
 #[test]
@@ -138,7 +310,7 @@ fn a_channel_a_client_wrote_above_its_alpha_decodes_clamped_to_it() {
     // Brighter than its own coverage, and colour with no coverage at all.
     frame[..8].copy_from_slice(&[200, 90, 255, 100, 255, 255, 255, 0]);
     let mut target = blank();
-    decode(&frame, &mut target, &mode, whole(), Alpha::AsSent, &SERIAL).expect("decode");
+    decode(&frame, &mut target, &mode, whole(), &SERIAL).expect("decode");
     assert_eq!(
         target.get(0, 0),
         Some(Pixel {
@@ -184,7 +356,7 @@ fn a_stride_wider_than_the_row_leaves_its_padding_alone() {
         assert!(padding.iter().all(|&byte| byte == 0), "padding was written");
     }
     let mut target = blank();
-    decode(&frame, &mut target, &mode, whole(), Alpha::AsSent, &SERIAL).expect("decode");
+    decode(&frame, &mut target, &mode, whole(), &SERIAL).expect("decode");
     assert_eq!(target.pixels(), source.pixels());
 }
 
@@ -205,21 +377,13 @@ fn splitting_the_conversion_changes_nothing_it_produces() {
     let mut serial_target = painted();
     serial_target.set(3, 5, Color::rgba(1, 2, 3, 255).premultiply());
     let mut split_target = serial_target.clone();
-    let serial_changed = decode(
-        &serial_frame,
-        &mut serial_target,
-        &mode,
-        whole(),
-        Alpha::AsSent,
-        &SERIAL,
-    )
-    .expect("decode");
+    let serial_changed =
+        decode(&serial_frame, &mut serial_target, &mode, whole(), &SERIAL).expect("decode");
     let split_changed = decode(
         &split_frame,
         &mut split_target,
         &mode,
         whole(),
-        Alpha::AsSent,
         &splitting(),
     )
     .expect("decode");
@@ -236,8 +400,7 @@ fn an_unchanged_frame_reports_no_damage() {
 
     let mut target = painted();
     for runner in [&SERIAL as &dyn JobRunner, &splitting()] {
-        let changed =
-            decode(&frame, &mut target, &mode, whole(), Alpha::AsSent, runner).expect("decode");
+        let changed = decode(&frame, &mut target, &mode, whole(), runner).expect("decode");
         assert_eq!(changed, Rect::EMPTY, "an identical present reported damage");
     }
 }
@@ -256,8 +419,7 @@ fn the_reported_damage_is_the_box_of_the_pixels_that_really_changed() {
     target.set(9, 11, Color::rgba(255, 255, 255, 255).premultiply());
     for runner in [&SERIAL as &dyn JobRunner, &splitting()] {
         let mut probe = target.clone();
-        let changed =
-            decode(&frame, &mut probe, &mode, whole(), Alpha::AsSent, runner).expect("decode");
+        let changed = decode(&frame, &mut probe, &mode, whole(), runner).expect("decode");
         assert_eq!(changed, Rect::new(4, 6, 6, 6));
         assert_eq!(probe.pixels(), source.pixels(), "the frame did not land");
     }
@@ -277,15 +439,7 @@ fn a_sub_rectangle_touches_nothing_outside_itself() {
     let mut frame = frame_for(&mode);
     encode(&source, &mut frame, &mode, damage, &splitting()).expect("encode");
     let mut target = blank();
-    let changed = decode(
-        &frame,
-        &mut target,
-        &mode,
-        damage,
-        Alpha::AsSent,
-        &splitting(),
-    )
-    .expect("decode");
+    let changed = decode(&frame, &mut target, &mode, damage, &splitting()).expect("decode");
     assert_eq!(changed, Rect::new(8, 4, 6, 3));
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
@@ -324,17 +478,9 @@ fn a_list_converts_each_part_and_refused_anywhere_writes_nothing() {
     let mut target = blank();
     let mut reported = Vec::new();
     let both = DamageList::new(&[first, second]).expect("a list");
-    decode_list(
-        &frame,
-        &mut target,
-        &mode,
-        &both,
-        Alpha::AsSent,
-        &splitting(),
-        |rect| {
-            reported.push(rect);
-        },
-    )
+    decode_list(&frame, &mut target, &mode, &both, &splitting(), |rect| {
+        reported.push(rect);
+    })
     .expect("decode");
     assert_eq!(reported, [Rect::new(0, 0, 4, 2), Rect::new(6, 3, 2, 2)]);
 
@@ -353,7 +499,6 @@ fn a_list_converts_each_part_and_refused_anywhere_writes_nothing() {
             &mut untouched,
             &mode,
             &refused,
-            Alpha::AsSent,
             &splitting(),
             |rect| {
                 reported.push(rect);
@@ -413,14 +558,7 @@ fn a_refused_geometry_writes_nothing() {
 
         let mut target = blank();
         assert_eq!(
-            decode(
-                &frame,
-                &mut target,
-                &mode,
-                damage,
-                Alpha::AsSent,
-                &splitting()
-            ),
+            decode(&frame, &mut target, &mode, damage, &splitting()),
             Err(Errno::OutOfRange)
         );
         assert_eq!(target.pixels(), blank().pixels(), "a refusal wrote pixels");

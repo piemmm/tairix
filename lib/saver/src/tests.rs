@@ -1,6 +1,5 @@
 extern crate std;
 
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -9,75 +8,15 @@ use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::saver::{ChoiceValue, OptionKey, SaverFeeds, SaverValue};
 use tairix_abi::saver_ipc::{
     HostMessage, OptionValue, SaverMessage, SaverRegion, SlideOutcome, Start, WallReading,
-    SAVER_HOST_MESSAGE_MAX,
 };
 use tairix_abi::{Errno, APPINFO_FLAG_FEED_KEEP, APPINFO_FLAG_FEED_SLIDES};
 use tairix_geometry::{Rect, Region};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_rt::sync::Mutex;
-use tairix_sandbox::proto::Channel;
 
 use crate::link::Link;
-use crate::{serve, Ended, Frame, Host, NextFrame, RegionBytes, Scene, Setup};
-
-/// A host recorded in advance: what it says, then the end of its pipe; and
-/// everything the saver says back.
-struct Scripted {
-    input: VecDeque<u8>,
-    said: Arc<Mutex<Vec<u8>>>,
-}
-
-impl Channel for Scripted {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-        let n = buf.len().min(self.input.len());
-        for byte in buf.iter_mut().take(n) {
-            *byte = self.input.pop_front().unwrap_or(0);
-        }
-        Ok(n)
-    }
-
-    fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
-        self.said.lock().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-}
-
-fn script(messages: &[HostMessage<'_>]) -> (Scripted, Arc<Mutex<Vec<u8>>>) {
-    let mut input = VecDeque::new();
-    let mut out = vec![0u8; SAVER_HOST_MESSAGE_MAX];
-    for message in messages {
-        let len = message.encode(&mut out).expect("encodes");
-        input.extend(u32::try_from(len).expect("fits").to_le_bytes());
-        input.extend(&out[..len]);
-    }
-    let said = Arc::new(Mutex::new(Vec::new()));
-    (
-        Scripted {
-            input,
-            said: Arc::clone(&said),
-        },
-        said,
-    )
-}
-
-fn replies(said: &[u8]) -> Vec<SaverMessage> {
-    let mut at = 0;
-    let mut out = Vec::new();
-    while at + 4 <= said.len() {
-        let len = u32::from_le_bytes(said[at..at + 4].try_into().expect("four")) as usize;
-        out.push(SaverMessage::decode(&said[at + 4..at + 4 + len]).expect("a message"));
-        at += 4 + len;
-    }
-    out
-}
-
-struct HeapRegion(Vec<u8>);
-
-impl RegionBytes for HeapRegion {
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        &mut self.0
-    }
-}
+use crate::testing::{replies, script, HeapRegion};
+use crate::{serve, Ended, Frame, Host, NextFrame, Scene, Setup};
 
 fn start(width: u32, height: u32, feeds: u32) -> Start {
     let feeds = SaverFeeds::from_bits(feeds).expect("feeds");
@@ -177,7 +116,7 @@ fn a_frame_is_drawn_written_into_the_region_and_presented() {
         channel,
         |layout| {
             region = Some(layout.len());
-            Ok(HeapRegion(vec![0; layout.len()]))
+            Ok(HeapRegion::new(vec![0; layout.len()]))
         },
         |_| {
             drawn += 1;
@@ -203,26 +142,8 @@ fn a_frame_is_drawn_written_into_the_region_and_presented() {
     assert_eq!(rects.rects()[0].width_px, 2);
 }
 
-/// A region whose bytes the test reads back once the loop ends.
-struct Recorded {
-    bytes: Vec<u8>,
-    out: Arc<Mutex<Vec<u8>>>,
-}
-
-impl RegionBytes for Recorded {
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        &mut self.bytes
-    }
-}
-
-impl Drop for Recorded {
-    fn drop(&mut self) {
-        *self.out.lock() = core::mem::take(&mut self.bytes);
-    }
-}
-
-/// The frame area opens on the whole opaque-black picture, so the host may
-/// read any of it; a frame then writes only what it changed.
+/// The scene draws straight into the frame area, which holds the whole
+/// opaque-black picture from the start; a frame changes only what it draws.
 #[test]
 fn the_region_holds_the_whole_picture_from_the_start() {
     let (channel, _) = script(&[HostMessage::Start(start(4, 4, 0)), frame(1)]);
@@ -230,12 +151,7 @@ fn the_region_holds_the_whole_picture_from_the_start() {
     let recorded = Arc::clone(&out);
     let ended = serve(
         channel,
-        |layout| {
-            Ok(Recorded {
-                bytes: vec![0x55; layout.len()],
-                out: recorded,
-            })
-        },
+        |layout| Ok(HeapRegion::recorded(vec![0x55; layout.len()], recorded)),
         |_| Ok(Square::default()),
     );
     assert_eq!(ended, Ended::Dismissed);
@@ -258,7 +174,7 @@ fn a_scene_refused_by_its_maker_starts_nothing() {
     let (channel, said) = script(&[HostMessage::Start(start(4, 4, 0)), frame(1)]);
     let ended = serve(
         channel,
-        |layout| Ok(HeapRegion(vec![0; layout.len()])),
+        |layout| Ok(HeapRegion::new(vec![0; layout.len()])),
         |setup: &Setup<'_>| setup.switch("warp").map(|_| Square::default()),
     );
     assert_eq!(ended, Ended::Unstarted(Errno::NotFound));
@@ -334,7 +250,7 @@ fn the_first_message_must_be_a_start() {
     let (channel, _) = script(&[frame(1)]);
     let ended = serve(
         channel,
-        |layout| Ok(HeapRegion(vec![0; layout.len()])),
+        |layout| Ok(HeapRegion::new(vec![0; layout.len()])),
         |_| Ok(Square::default()),
     );
     assert_eq!(ended, Ended::Broken(Errno::BadMagic));
@@ -355,7 +271,7 @@ fn a_message_out_of_turn_ends_the_saver() {
         let (channel, _) = script(&[HostMessage::Start(start(4, 4, 0)), out_of_turn]);
         let ended = serve(
             channel,
-            |layout| Ok(HeapRegion(vec![0; layout.len()])),
+            |layout| Ok(HeapRegion::new(vec![0; layout.len()])),
             |_| Ok(Square::default()),
         );
         assert_eq!(ended, Ended::Broken(Errno::BadMagic));
@@ -373,7 +289,7 @@ fn a_lost_machine_feed_reaches_the_scene() {
     let out = Arc::clone(&scene);
     let ended = serve(
         channel,
-        |layout| Ok(HeapRegion(vec![0; layout.len()])),
+        |layout| Ok(HeapRegion::new(vec![0; layout.len()])),
         |_| {
             Ok(Watched {
                 inner: Square::default(),
@@ -390,7 +306,7 @@ fn a_region_smaller_than_its_layout_or_an_unusable_scale_starts_nothing() {
     let (channel, said) = script(&[HostMessage::Start(start(4, 4, 0))]);
     let ended = serve(
         channel,
-        |_| Ok(HeapRegion(vec![0; 8])),
+        |_| Ok(HeapRegion::new(vec![0; 8])),
         |_| Ok(Square::default()),
     );
     assert_eq!(ended, Ended::Unstarted(Errno::LengthOutOfRange));
@@ -403,7 +319,7 @@ fn a_region_smaller_than_its_layout_or_an_unusable_scale_starts_nothing() {
     let (channel, _) = script(&[HostMessage::Start(scaled)]);
     let ended = serve(
         channel,
-        |layout| Ok(HeapRegion(vec![0; layout.len()])),
+        |layout| Ok(HeapRegion::new(vec![0; layout.len()])),
         |_: &Setup<'_>| Ok(Square::default()),
     );
     assert_eq!(ended, Ended::Broken(Errno::OutOfRange));
@@ -428,7 +344,7 @@ fn a_slide_is_wanted_once_and_read_from_the_feed_area() {
             let mut bytes = vec![0; layout.len()];
             let feed = layout.feed_range().expect("a feed area");
             bytes[feed.start..feed.start + 4].copy_from_slice(&[9, 8, 7, 255]);
-            Ok(HeapRegion(bytes))
+            Ok(HeapRegion::new(bytes))
         },
         |_| {
             Ok(Watched {
@@ -473,7 +389,7 @@ fn a_kept_picture_is_written_into_the_feed_area_and_answered() {
     let kept = Arc::clone(&scene);
     let ended = serve(
         channel,
-        |layout| Ok(HeapRegion(vec![0xAA; layout.len()])),
+        |layout| Ok(HeapRegion::new(vec![0xAA; layout.len()])),
         |_| {
             Ok(Watched {
                 inner: Square {

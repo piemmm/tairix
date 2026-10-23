@@ -24,7 +24,6 @@ mod crossfade;
 mod engine;
 mod preview;
 mod readout;
-mod tiles;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -36,7 +35,7 @@ use tairix_geometry::{Rect, Region};
 use tairix_parallel::{JobRunner, Pool};
 use tairix_raster::{DitherRow, Surface};
 use tairix_raytrace::{Detail, Setting};
-use tairix_saver::{Frame, Host, NextFrame, Scene, Setup};
+use tairix_saver::{Frame, Host, NextFrame, Scene, Setup, DAMAGE_TILE as TILE};
 use tairix_theme::motion::{work_slice_ns, SceneClock};
 use tairix_theme::{Fade, Timeline};
 
@@ -49,7 +48,8 @@ use readout::{Doing, Readout};
 /// How much of the machine the tracing takes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CpuUse {
-    /// One thread, leaving the rest of the machine free.
+    /// One thread, leaving the rest of the machine free; the frames paint each
+    /// change across the threads it leaves.
     Idle,
     /// Every thread the host granted, so each picture is finished sooner.
     Performance,
@@ -118,12 +118,10 @@ enum Phase {
               allocation that cannot fail gracefully beside the two it already makes fallibly"
 )]
 enum Laying {
-    /// Nothing painted yet: the first change is faded in where the heap and
-    /// the memory band hold the room.
-    Unbegun,
     /// Each change faded in over the wait until the next paint.
     Fading(Crossfade),
-    /// Each change laid straight on.
+    /// The last change laid straight on: the next is faded in where the heap
+    /// and the memory band hold the room.
     Straight,
 }
 
@@ -134,8 +132,12 @@ enum Laying {
               once; boxing it would trade that for an allocation that cannot fail gracefully"
 )]
 enum Feed {
-    /// On a thread of its own.
-    Crew(Box<dyn TraceLink>),
+    /// On a thread of its own, the frames painting across `painter` where
+    /// the tracing leaves threads free.
+    Crew {
+        link: Box<dyn TraceLink>,
+        painter: Option<Pool>,
+    },
     /// On the frames themselves, a slice each paced by `clock`, across
     /// `runner` under performance and serially otherwise.
     Inline {
@@ -150,7 +152,7 @@ impl Feed {
     /// `into`, tracing a slice first on the frames' own feed.
     fn collect(&mut self, into: &mut Vec<Traced>) -> Status {
         match self {
-            Self::Crew(link) => link.collect(into),
+            Self::Crew { link, .. } => link.collect(into),
             Self::Inline {
                 engine,
                 runner,
@@ -168,7 +170,7 @@ impl Feed {
     /// Ask for a scene set elsewhere, dropping what was traced of this one.
     fn next(&mut self) {
         match self {
-            Self::Crew(link) => link.next(),
+            Self::Crew { link, .. } => link.next(),
             Self::Inline { engine, .. } => engine.next(),
         }
     }
@@ -178,18 +180,22 @@ impl Feed {
     /// at the latest, to trace the next slice.
     fn due(&self, now_ns: u64, wanted_ns: u64, frame_ns: u64) -> u64 {
         match self {
-            Self::Crew(_) => wanted_ns,
+            Self::Crew { .. } => wanted_ns,
             Self::Inline { .. } => wanted_ns.min(now_ns.saturating_add(frame_ns)),
         }
     }
 
     /// The runner the frames paint across: the frames' own pool where they
-    /// trace across one, and serially beside a tracing thread, which holds
-    /// the threads.
+    /// trace across one, the threads a tracing crew leaves free beside it, and
+    /// serially otherwise.
     fn painter(&self) -> &dyn JobRunner {
         match self {
             Self::Inline {
                 runner: Some(pool), ..
+            }
+            | Self::Crew {
+                painter: Some(pool),
+                ..
             } => pool,
             _ => &tairix_parallel::SERIAL,
         }
@@ -239,7 +245,7 @@ impl Raytrace {
     /// did not send as the manifest declares it, [`Errno::OutOfMemory`] when
     /// the heap will not hold the reveal.
     pub fn new(setup: &Setup<'_>) -> Result<Self, Errno> {
-        let threads = setup.start.threads.min(u32::from(setup.start.cores));
+        let threads = setup.threads();
         let host = ThreadHost {
             participants: usize::try_from(threads.saturating_sub(1)).unwrap_or(0),
         };
@@ -287,7 +293,12 @@ impl Raytrace {
         };
         let feed = match host {
             Some(host) => match host.launch(engine, cpu) {
-                Ok(link) => Feed::Crew(link),
+                // Made once the crew holds its threads, so the painters never
+                // take one the tracing needed.
+                Ok(link) => Feed::Crew {
+                    link,
+                    painter: crew_painter(setup, cpu),
+                },
                 Err(engine) => inline(engine),
             },
             None => inline(engine),
@@ -300,7 +311,7 @@ impl Raytrace {
             drawn: Vec::new(),
             cover: Region::new(),
             preview,
-            laying: unbegun(start.reduced_motion),
+            laying: Laying::Straight,
             readout: Readout::new(&setup.theme(), setup.scale, size).ok_or_else(oom)?,
             calm: start.reduced_motion,
             memory,
@@ -380,7 +391,7 @@ impl Raytrace {
     fn next(&mut self, now_ns: u64) -> Phase {
         self.feed.next();
         self.preview.reset();
-        self.laying = unbegun(self.calm);
+        self.laying = Laying::Straight;
         self.drawn.clear();
         self.shown = 0;
         self.paint_due_ns = now_ns;
@@ -393,11 +404,13 @@ impl Raytrace {
     fn reveal(&mut self, now_ns: u64, surface: &mut Surface, damage: &mut Region) -> Phase {
         let status = self.feed.collect(&mut self.drawn);
         let whole = matches!(status, Status::Whole(_));
-        // A picture's last steps cannot wait.
-        if whole || now_ns >= self.paint_due_ns {
-            self.paint(now_ns, (surface, damage), whole);
-        } else {
+        if !whole {
             self.fade_in(now_ns, surface, damage);
+        }
+        // A picture's last steps cannot wait; any other paint waits for the
+        // change fading in to be shown whole.
+        if whole || (now_ns >= self.paint_due_ns && self.settled()) {
+            self.paint(now_ns, (surface, damage), whole);
         }
         match status {
             Status::Preparing(done) => {
@@ -428,13 +441,25 @@ impl Raytrace {
     }
 
     /// When the reveal wants the frames back after `now_ns`: at the next
-    /// paint, and a scene frame on while a change is fading in.
+    /// paint, and a scene frame on while a change is fading in, the paint it
+    /// holds back included.
     fn wanted_ns(&self, now_ns: u64) -> u64 {
+        if self.settled() {
+            return self.paint_due_ns;
+        }
+        let frame_on = now_ns.saturating_add(self.frame_ns);
+        if self.paint_due_ns > now_ns {
+            self.paint_due_ns.min(frame_on)
+        } else {
+            frame_on
+        }
+    }
+
+    /// Whether the screen shows all of the last change.
+    fn settled(&self) -> bool {
         match &self.laying {
-            Laying::Fading(fade) if !fade.settled() => {
-                self.paint_due_ns.min(now_ns.saturating_add(self.frame_ns))
-            }
-            _ => self.paint_due_ns,
+            Laying::Fading(fade) => fade.settled(),
+            Laying::Straight => true,
         }
     }
 
@@ -454,46 +479,38 @@ impl Raytrace {
 
     /// Put what the steps collected since the last paint change on screen:
     /// faded in over the wait until the next paint while a twentieth of the
-    /// picture is yet to be shown, and laid straight on from there and once
-    /// the picture is `whole`.
+    /// picture is yet to be shown, the heap and the memory band hold the room
+    /// and motion is not reduced, and laid straight on otherwise and once the
+    /// picture is `whole`.
     fn paint(&mut self, now_ns: u64, (surface, damage): (&mut Surface, &mut Region), whole: bool) {
         let fading = !whole
+            && !self.calm
             && self.shown < self.faded_until
             && self.memory.holds_disposable(Crossfade::bytes(self.size));
         let laying = match core::mem::replace(&mut self.laying, Laying::Straight) {
-            // The first paint with something to show decides for the reveal.
-            Laying::Unbegun if self.drawn.is_empty() => Laying::Unbegun,
-            Laying::Unbegun if fading => match Crossfade::new(self.size) {
-                Some(fade) => self.paint_faded(fade, now_ns, (surface, damage)),
-                None => self.paint_straight(surface, damage),
-            },
-            Laying::Fading(fade) if fading => self.paint_faded(fade, now_ns, (surface, damage)),
+            Laying::Fading(fade) if fading => self.paint_faded(fade, now_ns),
+            Laying::Straight if fading && !self.drawn.is_empty() => {
+                match Crossfade::over(surface) {
+                    Some(fade) => self.paint_faded(fade, now_ns),
+                    None => self.paint_straight(surface, damage),
+                }
+            }
             // Its change goes on whole, and its room with it.
             Laying::Fading(mut fade) if !fade.settled() => {
                 fade.show(u8::MAX, (surface, damage), self.feed.painter());
                 self.paint_straight(surface, damage)
             }
-            Laying::Unbegun | Laying::Fading(_) | Laying::Straight => {
-                self.paint_straight(surface, damage)
-            }
+            Laying::Fading(_) | Laying::Straight => self.paint_straight(surface, damage),
         };
         self.laying = laying;
         self.paint_due_ns =
             now_ns.saturating_add(paint_wait(self.shown, self.detail_from, self.frame_ns));
     }
 
-    /// Settle `fade`'s change under way, then begin fading in what the steps
-    /// collected since the last paint change, over the wait until the next
-    /// paint: how the reveal's changes are then laid.
-    fn paint_faded(
-        &mut self,
-        mut fade: Crossfade,
-        now_ns: u64,
-        (surface, damage): (&mut Surface, &mut Region),
-    ) -> Laying {
-        if !fade.settled() {
-            fade.show(u8::MAX, (surface, damage), self.feed.painter());
-        }
+    /// Begin fading in what the steps collected since the last paint change,
+    /// over the wait until the next paint, `fade`'s last change having
+    /// settled: how the reveal's changes are then laid.
+    fn paint_faded(&mut self, mut fade: Crossfade, now_ns: u64) -> Laying {
         if !self.drawn.is_empty() {
             self.take_drawn();
             let wait_ms = paint_wait(self.shown, self.detail_from, self.frame_ns) / NANOS_PER_MILLI;
@@ -511,9 +528,7 @@ impl Raytrace {
         if !self.drawn.is_empty() {
             self.take_drawn();
             self.preview.paint(surface, self.feed.painter());
-            for rect in self.cover.rects() {
-                damage.add(*rect);
-            }
+            damage.add_region(&self.cover);
         }
         Laying::Straight
     }
@@ -582,16 +597,6 @@ impl Raytrace {
     }
 }
 
-/// How a reveal begins laying its changes on: straight on under reduced
-/// motion, which `calm` is.
-fn unbegun(calm: bool) -> Laying {
-    if calm {
-        Laying::Straight
-    } else {
-        Laying::Unbegun
-    }
-}
-
 /// The wait after a paint leaving `shown` steps of a reveal on screen,
 /// `detail_from` coming before its fine detail: a scene frame of `frame_ns`
 /// while none is, so the first are shown as soon as they are traced, then in
@@ -604,6 +609,23 @@ fn paint_wait(shown: u64, detail_from: u64, frame_ns: u64) -> u64 {
     }
     let wait = u128::from(shown) * u128::from(DETAIL_WAIT_NS) / u128::from(detail_from.max(1));
     u64::try_from(wait).map_or(MOST_WAIT_NS, |wait| wait.clamp(FIRST_WAIT_NS, MOST_WAIT_NS))
+}
+
+/// The frames' pool beside a crew tracing at `cpu`: a worker for each of
+/// [`painter_workers`].
+fn crew_painter(setup: &Setup<'_>, cpu: CpuUse) -> Option<Pool> {
+    let workers = painter_workers(setup.threads(), cpu);
+    (workers > 0).then(|| Pool::with_workers(workers))
+}
+
+/// How many workers the frames paint across beside a crew tracing at `cpu`,
+/// of `threads` granted: every one past the frames' own and the tracer's
+/// under idle, none under performance, whose workers hold them.
+fn painter_workers(threads: u32, cpu: CpuUse) -> usize {
+    match cpu {
+        CpuUse::Idle => usize::try_from(threads.saturating_sub(2)).unwrap_or(0),
+        CpuUse::Performance => 0,
+    }
 }
 
 /// Scale the whole of `surface` by `share` of 255, dithered, the rows spread

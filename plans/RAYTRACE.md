@@ -17,7 +17,7 @@ D505, D514–D518 and D1140 (the tracer's open defects).
 
 | ID | Item | Status |
 |---|---|---|
-| RT1 | Smooth reveal: a cubic B-spline over the reveal's grids, a blur coming into focus with no point a peak or a cross; each paint repaints and marks only what its steps change, the paints half a second apart while the picture forms and slowing with the share shown to at most 3 s, each change crossfaded in over the wait until the next, only the tiles it touches, until a twentieth of the picture is shown; the finished picture is every pixel's own trace | done |
+| RT1 | Smooth reveal: a cubic B-spline over the reveal's grids, a blur coming into focus with no point a peak or a cross; each paint repaints and marks only what its steps change, the paints half a second apart while the picture forms and slowing with the share shown to at most 3 s, each change crossfaded in over the wait until the next and over at least eight frames however slowly they come, only the tiles it touches, until a twentieth of the picture is shown; the finished picture is every pixel's own trace | done |
 | RT2 | Progress readout: *Generating scene... N%* while a scene is prepared, then *Rendering... N%*, small and mid-grey in the lower right, gone once the picture is whole | done |
 | RT3 | Saving finished pictures: the Ray Tracer's `save` option has the desktop keep each whole picture as a PNG in the user's `Home/Pictures/Ray Tracer/`, with no limit on how many | done |
 | RT4 | Highest quality, always: no sample governor; a reconstruction filter and sampling rounds that leave no jagged or noisy edge | done |
@@ -168,18 +168,25 @@ those of a refused scene go with it.
 Each paint's change is crossfaded in over the wait until the next
 (`crossfade`), so the picture moves on continuously rather
 than in steps, until a twentieth of the picture is shown: past it a change is
-dots too small for a fade to show, and each paint is laid straight on. The
+dots too small for a fade to show, and each paint is laid straight on. A fade
+moves at most 32 of its 255 levels in a frame, so at a frame rate too
+slow for its timeline it takes its frames rather than its time, and the next
+paint waits until the change under way is shown whole: a slow screen lengthens
+the fades rather than losing them. The
 painter paints into a picture of the crossfade's own; a fade keeps what the
 screen showed over the 16-pixel tiles its change touches and blends only
 those, a scene frame at a time (`lib/raster`'s `mix_span`, one pass, about
 half the cost of a copy and a composite), marking their cover. Its two
 screen-sized pictures are taken only where the heap and the memory band let a
-disposable cache of the memory the desktop granted hold them, and let go once
+disposable cache of the memory the desktop granted hold them, the first of
+them a copy of what the screen shows, and let go once
 the twentieth is passed or the band wants the memory back, the change under
-way first laid on whole, and with a refused scene, whose rest is black.
+way first laid on whole, and with a refused scene, whose rest is black. A
+paint laid straight on for want of the room fades the next change in once the
+band lets it be taken again.
 Under reduced motion every change is laid straight on. Measured, a
-fade frame blends about 2 ns a pixel on one core, 4.5 ms for a whole 1080p
-screen before the pool shares it out.
+fade frame mixes about 0.4 ns a pixel on one core with the vector kernel,
+under a millisecond for a whole 1080p screen before the pool shares it out.
 
 ## RT2 — Progress readout
 

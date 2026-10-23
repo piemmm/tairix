@@ -88,6 +88,7 @@ the burn-down is complete.
 | `SchedulerArch` impl              |   ✓    |    ✓    |    ✓    |   ✓    |
 | Paging / MMU primitives (`AddressSpace` HAL) | ✓ | ✓ | ✓ | n/a |
 | Cross-CPU TLB shootdown HAL (`CrossCpuTlbShootdown`) | ✓ IPI+ack | ✓ TLBI bcast | ✓ SBI RFENCE | n/a |
+| Address-space tags HAL (`AddressTags`) | ✓ PCID | ✓ 8-bit ASID | ✓ probed ASID | n/a |
 | Memory isolation QEMU vertical    |   ✓    |    ✓    |    ✓    | ✓ browser |
 | Context switch (`ContextSwitch`)  |   ✓    |    ✓    |    ✓    |  n/a   |
 | Timer + preemption HAL (`Timer`)  |   ✓    |    ✓    |    ✓    |   ✓    |
@@ -141,11 +142,10 @@ else fail-closed `CpuQuiesceTimeout`), mask interrupts (`sstatus.SIE`/`sie`;
 `DAIF` + `CNTV_CTL_EL0`; `cli`), switch to a reserved `.bss` stack, run the
 arch-neutral whole-RAM sweep continuously (cycling every pattern over all of
 RAM until reset), then relocate a register-only stub into a swept usable page
-to test the kernel-image region and reset. riscv64/aarch64 **flatten paging**
-(bare mode `satp = 0`; MMU-off `SCTLR_EL1` after a cache clean+invalidate —
-both ports are identity-mapped so `virt==phys` survives); x86_64 cannot drop
-paging (long mode requires it), so it instead switches `%cr3` to the
-**reserved** boot page tables (`boot_pml4` in `.boot.bss`) for the sweep and
+to test the kernel-image region and reset. riscv64/aarch64 park on the
+**reserved** boot root, whose tables lie in the kernel image, and keep paging
+on (both ports are identity-mapped, so `virt==phys`); x86_64 switches `%cr3`
+to the **reserved** boot page tables (`boot_pml4` in `.boot.bss`) for the sweep and
 builds a minimal identity page table in the swept arena for the stub, testing
 `[__boot_phys_start, __kernel_phys_end)` and resetting through the legacy 8042 /
 `0xCF9` hardware. Each is proven end-to-end by
@@ -233,7 +233,9 @@ docs + §17.2 of `AGENTS.md` when each lands):
   into `kernel/mem` (map/translate/unmap + per-page local invalidation —
   ✅ W5b-2); allocator-backed port tables via the `PageTableFrames`
   frame-source seam (✅ W5b-3); cross-CPU TLB invalidation via the
-  `CrossCpuTlbShootdown` slice (✅ W13).
+  `CrossCpuTlbShootdown` slice (✅ W13); address-space tags via the
+  `AddressTags` slice (✅), so a switch between user spaces discards no
+  other space's entries — the tag is chosen in `kernel/mem::tags`.
 - `SecondaryBringup` — secondary-CPU start (INIT-SIPI-SIPI / PSCI
   `CPU_ON` / SBI HSM `hart_start` / Web Worker spawn); the directed IPI
   is already `SchedulerArch::send_ipi`, so this slice is start-only

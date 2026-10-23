@@ -7,28 +7,33 @@
 //! `(x + 1 + (x >> 8)) >> 8` the portable blend's rounding is exactly.
 //!
 //! Memory is reached only through the structure loads and stores (`LD4`,
-//! `ST4`), which need no more than their element's alignment: under the
-//! target's strict alignment a plain vector load of a pixel or a sum is split
-//! into its bytes, which costs more than the arithmetic it feeds.
+//! `ST4`) and byte loads of coverage (`LD1`), which need no more than their
+//! element's alignment: under the target's strict alignment a plain vector
+//! load of a pixel or a sum is split into its bytes, which costs more than the
+//! arithmetic it feeds.
 
 use core::arch::aarch64::{
     uint16x8_t, uint32x4_t, uint32x4x4_t, uint8x16_t, uint8x16x4_t, uint8x8_t, vaddhn_u16,
-    vaddq_u16, vaddq_u32, vbslq_u8, vceqq_u8, vcombine_u16, vcombine_u32, vcombine_u8, vcreate_u16,
-    vcreate_u32, vdup_n_u32, vdup_n_u8, vdupq_n_s64, vdupq_n_u16, vdupq_n_u32, vdupq_n_u8,
-    veorq_u8, vget_lane_u32, vget_lane_u64, vget_low_u16, vget_low_u32, vget_low_u8,
-    vgetq_lane_u32, vld4q_u32, vld4q_u8, vminvq_u8, vmovl_high_u16, vmovl_high_u8, vmovl_u16,
-    vmovl_u8, vmull_high_u32, vmull_high_u8, vmull_u32, vmull_u8, vmvnq_u8, vqaddq_u8, vqmovn_u16,
-    vqmovn_u32, vreinterpret_u32_u8, vreinterpret_u64_u8, vreinterpret_u8_u32,
-    vreinterpretq_u16_u8, vreinterpretq_u32_u64, vshlq_u64, vshrn_n_u16, vsraq_n_u16, vst4q_u32,
-    vst4q_u8, vsubq_u32, vuzp1q_u32,
+    vaddq_u16, vaddq_u32, vaddq_u64, vandq_u64, vbicq_u64, vbslq_u8, vceqq_u8, vcombine_u16,
+    vcombine_u32, vcombine_u64, vcombine_u8, vcreate_u16, vcreate_u32, vcreate_u64, vdup_n_u32,
+    vdupq_n_s64, vdupq_n_u16, vdupq_n_u32, vdupq_n_u64, vdupq_n_u8, veorq_u64, veorq_u8,
+    vget_lane_u32, vget_lane_u64, vget_low_u16, vget_low_u32, vget_low_u8, vgetq_lane_u32,
+    vld1q_u64, vld1q_u8, vld4q_u32, vld4q_u8, vminvq_u8, vmlal_high_u8, vmlal_u8, vmovl_high_u16,
+    vmovl_high_u8, vmovl_u16, vmovl_u8, vmull_high_u32, vmull_high_u8, vmull_u32, vmull_u8,
+    vmvnq_u8, vorrq_u32, vqaddq_u8, vqmovn_u16, vqmovn_u32, vreinterpret_u32_u8,
+    vreinterpret_u64_u8, vreinterpret_u8_u32, vreinterpretq_u16_u64, vreinterpretq_u16_u8,
+    vreinterpretq_u32_u64, vreinterpretq_u32_u8, vreinterpretq_u8_u32, vshlq_u64, vshrn_n_u16,
+    vshrq_n_u64, vsraq_n_u16, vst1q_u8, vst4q_u32, vst4q_u8, vsubq_u32, vuzp1q_u32, vzip1q_u64,
+    vzip2q_u64,
 };
 use core::ops::Range;
 
 use crate::blur::{
     blur_span, line_portable, mean_portable, LaneDivisor, PixelSum, Reciprocal, Window,
 };
-use crate::color::{blend_solid_portable, blend_span_portable, Pixel};
+use crate::color::{blend_solid_portable, blend_span_portable, mix_span_portable, Color, Pixel};
 use crate::dither::DitherRow;
+use crate::wide::{onto_sample, widen_portable, LANE_ONES};
 
 /// The blend candidate's log and pin name.
 pub(super) const BLEND_NAME: &str = "raster-blend-neon";
@@ -68,6 +73,226 @@ pub(super) fn blend_solid(dst: &mut [Pixel], src: Pixel, factor: u8, tile: &[u32
     // SAFETY: as `blend_span`'s.
     unsafe { solid_steps(steps, src, factor, tile) };
     blend_solid_portable(rest, src, factor, tile);
+}
+
+/// [`super::SpanMix`] over NEON.
+pub(super) fn mix_span(
+    dst: &mut [Pixel],
+    from: &[Pixel],
+    to: &[Pixel],
+    weight: u8,
+    tile: &[u32; TILE],
+) {
+    let paired = dst.len().min(from.len()).min(to.len());
+    let (Some(dst), Some(from), Some(to)) =
+        (dst.get_mut(..paired), from.get(..paired), to.get(..paired))
+    else {
+        return;
+    };
+    let (dst_steps, dst_rest) = dst.as_chunks_mut::<STEP>();
+    let (from_steps, from_rest) = from.as_chunks::<STEP>();
+    let (to_steps, to_rest) = to.as_chunks::<STEP>();
+    // SAFETY: as `blend_span`'s.
+    unsafe { mix_steps(dst_steps, from_steps, to_steps, weight, tile) };
+    mix_span_portable(dst_rest, from_rest, to_rest, weight, tile);
+}
+
+/// [`super::SolidCover`] over NEON.
+pub(super) fn cover_span(dst: &mut [Pixel], src: Pixel, coverage: &[u8], tile: &[u32; TILE]) {
+    if src.a == 0 {
+        return;
+    }
+    let paired = dst.len().min(coverage.len());
+    let (Some(dst), Some(coverage)) = (dst.get_mut(..paired), coverage.get(..paired)) else {
+        return;
+    };
+    let (dst_steps, dst_rest) = dst.as_chunks_mut::<STEP>();
+    let (level_steps, level_rest) = coverage.as_chunks::<STEP>();
+    // SAFETY: as `blend_span`'s.
+    unsafe { cover_steps(dst_steps, src, level_steps, tile) };
+    super::padded(dst_rest, level_rest, |dst, levels| {
+        // SAFETY: as `blend_span`'s.
+        unsafe { cover_steps(dst, src, levels, tile) };
+    });
+}
+
+/// [`super::SolidWash`] over NEON.
+/// [`widen`](crate::wide::widen) four pixels a step, from two samples and the
+/// one after them.
+pub(super) fn widen_samples(
+    span: &mut [Pixel],
+    (start, samples): (u32, &[u64]),
+    biases: &[u64; 8],
+) {
+    let (span, start, samples) = onto_sample(span, (start, samples), biases);
+    let (quads, _) = span.as_chunks_mut::<4>();
+    // SAFETY: the build enables NEON for this target.
+    let laid = unsafe { widen_quads(quads, samples, start, biases) };
+    let (Some(rest), Some(after)) = (span.get_mut(4 * laid..), samples.get(2 * laid..)) else {
+        return;
+    };
+    let start = start.saturating_add(u32::try_from(4 * laid).unwrap_or(u32::MAX));
+    widen_portable(rest, (start, after), biases);
+}
+
+/// Lay `quads` from `samples`, the first quad's first pixel on sample `0` at
+/// even surface column `start`, while a sample remains past each pair: the
+/// pixels on two samples and the two between them and the next, rounded at
+/// their columns' biases. Answers how many quads it laid.
+///
+/// # Safety
+///
+/// The CPU must implement NEON.
+#[target_feature(enable = "neon")]
+unsafe fn widen_quads(
+    quads: &mut [[Pixel; 4]],
+    samples: &[u64],
+    start: u32,
+    biases: &[u64; 8],
+) -> usize {
+    let ones = vdupq_n_u64(LANE_ONES);
+    let alpha = vdupq_n_u32(0xFF00_0000);
+    let bias = |x: u32| vcreate_u64(biases[(x & 7) as usize]);
+    // The biases repeat every eight pixels: two quads.
+    let phases = [0u32, 4].map(|step| {
+        let x = start.wrapping_add(step);
+        (
+            vcombine_u64(bias(x), bias(x.wrapping_add(2))),
+            vcombine_u64(bias(x.wrapping_add(1)), bias(x.wrapping_add(3))),
+        )
+    });
+    let mut laid = 0;
+    for (quad, window) in quads.iter_mut().zip(samples.windows(3).step_by(2)) {
+        let (on_bias, between_bias) = phases[laid & 1];
+        // SAFETY: `window` holds three samples, so each load reads two inside
+        // it at a sample's own alignment.
+        let (here, next) = unsafe {
+            (
+                vld1q_u64(window.as_ptr()),
+                vld1q_u64(window.as_ptr().add(1)),
+            )
+        };
+        let mean = vaddq_u64(
+            vandq_u64(here, next),
+            vshrq_n_u64::<1>(vbicq_u64(veorq_u64(here, next), ones)),
+        );
+        let on = vaddq_u64(here, on_bias);
+        let between = vaddq_u64(mean, between_bias);
+        // Each sixteen-bit lane's high byte, the four pixels in column order.
+        let first = vshrn_n_u16::<8>(vreinterpretq_u16_u64(vzip1q_u64(on, between)));
+        let second = vshrn_n_u16::<8>(vreinterpretq_u16_u64(vzip2q_u64(on, between)));
+        let pixels = vorrq_u32(vreinterpretq_u32_u8(vcombine_u8(first, second)), alpha);
+        // SAFETY: the byte store writes the quad's sixteen bytes and needs no
+        // more than a byte's alignment, which the target's strict alignment
+        // asks of a pixel.
+        unsafe { vst1q_u8(quad.as_mut_ptr().cast::<u8>(), vreinterpretq_u8_u32(pixels)) };
+        laid += 1;
+    }
+    laid
+}
+
+pub(super) fn wash_weighted(dst: &mut [Pixel], ink: Color, weights: &[u8], tile: &[u32; TILE]) {
+    let paired = dst.len().min(weights.len());
+    let (Some(dst), Some(weights)) = (dst.get_mut(..paired), weights.get(..paired)) else {
+        return;
+    };
+    let (dst_steps, dst_rest) = dst.as_chunks_mut::<STEP>();
+    let (weight_steps, weight_rest) = weights.as_chunks::<STEP>();
+    // SAFETY: as `blend_span`'s.
+    unsafe { wash_steps(dst_steps, ink, weight_steps, tile) };
+    super::padded(dst_rest, weight_rest, |dst, weights| {
+        // SAFETY: as `blend_span`'s.
+        unsafe { wash_steps(dst, ink, weights, tile) };
+    });
+}
+
+#[inline]
+#[target_feature(enable = "neon")]
+fn mix_steps(
+    dst: &mut [[Pixel; STEP]],
+    from: &[[Pixel; STEP]],
+    to: &[[Pixel; STEP]],
+    weight: u8,
+    tile: &[u32; TILE],
+) {
+    let bias = biases(tile);
+    let weights = (vdupq_n_u8(u8::MAX - weight), vdupq_n_u8(weight));
+    let mixed = |f: uint8x16_t, t: uint8x16_t| mix16(f, t, weights, bias);
+    for ((dst, from), to) in dst.iter_mut().zip(from).zip(to) {
+        // SAFETY: sixteen `#[repr(C)]` four-byte pixels are the sixty-four
+        // bytes `LD4` reads through `from` and `to` and `ST4` writes through
+        // `dst`, which overlaps neither.
+        let (f, t) = unsafe {
+            (
+                vld4q_u8(from.as_ptr().cast::<u8>()),
+                vld4q_u8(to.as_ptr().cast::<u8>()),
+            )
+        };
+        let out = uint8x16x4_t(
+            mixed(f.0, t.0),
+            mixed(f.1, t.1),
+            mixed(f.2, t.2),
+            mixed(f.3, t.3),
+        );
+        // SAFETY: as the loads above.
+        unsafe { vst4q_u8(dst.as_mut_ptr().cast::<u8>(), out) };
+    }
+}
+
+#[inline]
+#[target_feature(enable = "neon")]
+fn cover_steps(dst: &mut [[Pixel; STEP]], src: Pixel, coverage: &[[u8; STEP]], tile: &[u32; TILE]) {
+    let bias = biases(tile);
+    let scaled = |levels: uint8x16_t, channel: u8| product16(levels, vdupq_n_u8(channel), bias);
+    for (dst, levels) in dst.iter_mut().zip(coverage) {
+        if u128::from_le_bytes(*levels) == 0 {
+            continue;
+        }
+        // SAFETY: a step's sixteen coverage bytes are what `LD1` reads; a
+        // byte load needs no more than a byte's alignment.
+        let levels = unsafe { vld1q_u8(levels.as_ptr()) };
+        let source = uint8x16x4_t(
+            scaled(levels, src.r),
+            scaled(levels, src.g),
+            scaled(levels, src.b),
+            scaled(levels, src.a),
+        );
+        // SAFETY: sixteen `#[repr(C)]` four-byte pixels are the sixty-four
+        // bytes `LD4` reads and `ST4` writes, all through `dst`.
+        let d = unsafe { vld4q_u8(dst.as_ptr().cast::<u8>()) };
+        let out = blend16(source, d, bias);
+        // SAFETY: as the load from the same address above.
+        unsafe { vst4q_u8(dst.as_mut_ptr().cast::<u8>(), out) };
+    }
+}
+
+#[inline]
+#[target_feature(enable = "neon")]
+fn wash_steps(dst: &mut [[Pixel; STEP]], ink: Color, weights: &[[u8; STEP]], tile: &[u32; TILE]) {
+    let bias = biases(tile);
+    let toward = |d: uint8x16_t, channel: u8, weights: (uint8x16_t, uint8x16_t)| {
+        mix16(d, vdupq_n_u8(channel), weights, bias)
+    };
+    for (dst, levels) in dst.iter_mut().zip(weights) {
+        if u128::from_le_bytes(*levels) == 0 {
+            continue;
+        }
+        // SAFETY: a step's sixteen weight bytes are what `LD1` reads; a byte
+        // load needs no more than a byte's alignment.
+        let take = unsafe { vld1q_u8(levels.as_ptr()) };
+        let weights = (vmvnq_u8(take), take);
+        // SAFETY: sixteen `#[repr(C)]` four-byte pixels are the sixty-four
+        // bytes `LD4` reads and `ST4` writes, all through `dst`.
+        let d = unsafe { vld4q_u8(dst.as_ptr().cast::<u8>()) };
+        let out = uint8x16x4_t(
+            toward(d.0, ink.r, weights),
+            toward(d.1, ink.g, weights),
+            toward(d.2, ink.b, weights),
+            toward(d.3, u8::MAX, weights),
+        );
+        // SAFETY: as the load from the same address above.
+        unsafe { vst4q_u8(dst.as_mut_ptr().cast::<u8>(), out) };
+    }
 }
 
 #[inline]
@@ -148,12 +373,38 @@ fn biases(tile: &[u32; TILE]) -> uint16x8_t {
 #[inline]
 #[target_feature(enable = "neon")]
 fn scaled(s: uint8x16x4_t, factor: u8, bias: uint16x8_t) -> uint8x16x4_t {
-    let scale = |channel: uint8x16_t| {
-        let low = vaddq_u16(vmull_u8(vget_low_u8(channel), vdup_n_u8(factor)), bias);
-        let high = vaddq_u16(vmull_high_u8(channel, vdupq_n_u8(factor)), bias);
-        vcombine_u8(div255(low), div255(high))
-    };
+    let factor = vdupq_n_u8(factor);
+    let scale = |channel: uint8x16_t| product16(channel, factor, bias);
     uint8x16x4_t(scale(s.0), scale(s.1), scale(s.2), scale(s.3))
+}
+
+/// `a * b / 255` lane by lane, rounded at each lane's bias.
+#[inline]
+#[target_feature(enable = "neon")]
+fn product16(a: uint8x16_t, b: uint8x16_t, bias: uint16x8_t) -> uint8x16_t {
+    let low = vaddq_u16(vmull_u8(vget_low_u8(a), vget_low_u8(b)), bias);
+    let high = vaddq_u16(vmull_high_u8(a, b), bias);
+    vcombine_u8(div255(low), div255(high))
+}
+
+/// `(f * keep + t * take) / 255` lane by lane, rounded at each lane's bias:
+/// `take` of the way from `f` to `t`, `keep` being `255 - take`, so the sum of
+/// the two products stays within one product's range.
+#[inline]
+#[target_feature(enable = "neon")]
+fn mix16(
+    f: uint8x16_t,
+    t: uint8x16_t,
+    (keep, take): (uint8x16_t, uint8x16_t),
+    bias: uint16x8_t,
+) -> uint8x16_t {
+    let low = vmlal_u8(
+        vmull_u8(vget_low_u8(f), vget_low_u8(keep)),
+        vget_low_u8(t),
+        vget_low_u8(take),
+    );
+    let high = vmlal_high_u8(vmull_high_u8(f, keep), t, take);
+    vcombine_u8(div255(vaddq_u16(low, bias)), div255(vaddq_u16(high, bias)))
 }
 
 /// `s` over `d`, every channel `s + d * (255 - s.a) / 255` at each lane's

@@ -100,11 +100,7 @@ impl Repaint {
         match (&mut *self, other) {
             (Self::Whole, _) => {}
             (_, Self::Whole) => *self = Self::Whole,
-            (Self::Parts(parts), Self::Parts(more)) => {
-                for rect in more.rects() {
-                    parts.add(*rect);
-                }
-            }
+            (Self::Parts(parts), Self::Parts(more)) => parts.add_region(&more),
         }
     }
 

@@ -513,7 +513,7 @@ fn paint_series(
             a: AREA_ALPHA,
             ..color
         },
-        |_, y| area_ramp(y, top, height, rising_up),
+        |y, _, strengths| strengths.fill(area_ramp(y, top, height, rising_up)),
     );
     surface.stroke_polyline(trace, weight, color);
 }

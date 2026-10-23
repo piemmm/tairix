@@ -51,7 +51,7 @@ pub mod winframe;
 pub use client::{BufferMapper, DisplayClient, DisplayTransport, RemoteDisplay};
 pub use framebuffer::{Framebuffer, FramebufferConfig};
 pub use memory::{copy_rows, frames_budget, BufferIds, BufferMemory, DeviceBuffer, SharedBuffer};
-pub use presenter::{Base, CursorPlane, LayerPresenter, Presenter};
+pub use presenter::{Base, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
 pub use region::{FrameRegion, ShmMapper};
 #[cfg(feature = "rt")]
 pub use rt::{

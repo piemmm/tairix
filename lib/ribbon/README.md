@@ -18,8 +18,10 @@ It has two embedders, and neither may depend on the other:
 - `Light` — the ribbon at an instant. `Light::new(size, exclusion, t)` places it
   on a screen around a clear space; `step(t, exclusion, damage)` moves it to a
   new time, adding every pixel whose light may have changed to `damage`;
-  `paint_moved` repaints exactly those strips and `paint` any area at all. A
-  part painted on its own matches the whole painted at once, pixel for pixel.
+  `paint_moved` repaints exactly those strips, which share no pixel, and
+  `paint` any area at all, each in bands of whole columns across a runner
+  (`spread_over` holds a room for each of its participants). A part painted on
+  its own, or in bands, matches the whole painted at once, pixel for pixel.
 - `SKY` — the black wherever its light does not reach. Text over the ribbon is
   set against it.
 
@@ -39,7 +41,8 @@ Every buffer a frame needs is reserved when the ribbon is made, so a frame
 allocates nothing; a heap that refuses one is `None`, never a panic. The light
 is summed at every other pixel each way and blended up as it is toned and
 dithered, and a frame repaints only the rows its light reaches and reached —
-under half the screen.
+under half the screen. A paint's bands are whole columns, since the light is
+summed down them, so no band repeats another's sums.
 
 ## Tests
 
@@ -47,6 +50,6 @@ under half the screen.
 smooth curve across the width, the strands roaming freely and moving
 independently, the clear space kept `SKY` with no light that shows beneath it,
 the ribbon rising nearer the text than its glow's whole tail allows, strips
-matching the whole, and the
-light soft everywhere. The clock that paces it is tested with
+matching the whole and sharing no pixel, a paint in bands matching one band,
+and the light soft everywhere. The clock that paces it is tested with
 `tairix_theme::motion::SceneClock`.

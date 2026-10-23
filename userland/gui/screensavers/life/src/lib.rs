@@ -15,9 +15,9 @@
 //! dead or blinking pattern.
 //!
 //! A frame repaints only the cells whose look is still changing: one being
-//! born or dying, or one ageing into its next shade — however coarsely the
-//! damage the host is told about is kept. Under reduced motion a cell is born
-//! and dies at once rather than fading.
+//! born or dying, or one ageing into its next shade, spread across the
+//! saver's cores in bands of rows, and tells the host the tiles they lie in.
+//! Under reduced motion a cell is born and dies at once rather than fading.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -25,12 +25,15 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
+use tairix_abi::saver_ipc::SAVER_DAMAGE_RECTS;
 use tairix_abi::Errno;
-use tairix_geometry::{Rect, Region};
-use tairix_raster::{Color, Surface};
+use tairix_geometry::{Rect, Region, Tiles};
+use tairix_parallel::{JobRunner, Pool};
+use tairix_raster::{Canvas, Color, RowBand, Surface};
 use tairix_rng::{NonCryptoRng, RandU64};
-use tairix_saver::{erase, Frame, Host, NextFrame, Scene, Setup};
+use tairix_saver::{erase, Frame, Host, NextFrame, Scene, Setup, DAMAGE_TILE};
 use tairix_theme::motion::SceneClock;
 use tairix_util::fallible;
 
@@ -80,6 +83,10 @@ const QUIET_LIMIT: u32 = 120;
 /// Generations a settled world is left before it is reseeded.
 const SETTLED_GRACE: u32 = 40;
 
+/// The fewest changing cells worth handing another core: a cell costs a
+/// rounded square's few rows, so a hand-off must carry many.
+const CELLS_PER_BAND: usize = 256;
+
 /// The Game of Life screensaver.
 pub struct Life {
     cols: usize,
@@ -115,6 +122,10 @@ pub struct Life {
     /// than a count of frames, so its speed is the same on every display.
     next_generation_ns: u64,
     cadence: Cadence,
+    /// The tiles the cells a frame repaints lie in, and room to cover them.
+    changed: Tiles,
+    room: Tiles,
+    runner: Pool,
 }
 
 /// How the world is drawn in time: how long a generation and a frame stand,
@@ -221,6 +232,9 @@ impl Life {
                 start.reduced_motion,
                 SceneClock::frame_on(start.refresh),
             ),
+            changed: Tiles::new((width, height), DAMAGE_TILE).ok_or(Errno::OutOfMemory)?,
+            room: Tiles::new((width, height), DAMAGE_TILE).ok_or(Errno::OutOfMemory)?,
+            runner: setup.pool(),
         };
         if !fallible::reserve(&mut life.active, cells) {
             return Err(Errno::OutOfMemory);
@@ -442,8 +456,9 @@ impl Life {
     }
 
     /// Step every changing cell's brightness towards its state and mark
-    /// where it is drawn in `damage`.
-    fn fade(&mut self, damage: &mut Region) {
+    /// the tiles it is drawn in.
+    fn fade(&mut self) {
+        self.changed.clear();
         for index in 0..self.active.len() {
             let cell = self.active[index] as usize;
             let (row, col) = (cell / self.cols, cell % self.cols);
@@ -453,8 +468,39 @@ impl Life {
             } else {
                 level.saturating_sub(self.cadence.steps.1)
             };
-            damage.add(self.cell_rect(row, col));
+            self.changed.mark(self.cell_rect(row, col));
         }
+    }
+
+    /// Repaint every changing cell, in bands of whole cell rows across
+    /// `runner` when there are enough of them, each band finding its own
+    /// cells in the queued bitmap.
+    fn repaint_active(&self, surface: &mut Surface, runner: &dyn JobRunner) {
+        let pieces = tairix_parallel::bands(runner, self.active.len(), CELLS_PER_BAND);
+        if pieces <= 1 {
+            for &cell in &self.active {
+                let cell = cell as usize;
+                self.repaint_cell(surface, cell / self.cols, cell % self.cols);
+            }
+            return;
+        }
+        let top = self.origin.1;
+        let rows = u32::try_from(self.rows).unwrap_or(u32::MAX);
+        let per_band = u32::try_from(self.rows.div_ceil(pieces))
+            .unwrap_or(u32::MAX)
+            .saturating_mul(self.cell);
+        let row_of = |line: u32| usize::try_from((line - top) / self.cell).unwrap_or(usize::MAX);
+        tairix_parallel::for_each_drawn(
+            runner,
+            surface.row_bands_mut(top..top + rows * self.cell, per_band),
+            &|mut band: RowBand<'_>| {
+                let lines = band.rows();
+                let cells = row_of(lines.start) * self.cols..row_of(lines.end) * self.cols;
+                for cell in queued_in(&self.queued, cells) {
+                    self.repaint_cell(&mut band, cell / self.cols, cell % self.cols);
+                }
+            },
+        );
     }
 
     /// Drop from the list every cell whose look has settled: fully born and
@@ -476,13 +522,13 @@ impl Life {
     }
 
     /// Lay the ground over one cell and draw it as it looks now.
-    fn repaint_cell(&self, surface: &mut Surface, row: usize, col: usize) {
-        erase(surface, self.cell_rect(row, col));
-        self.paint_cell(surface, row, col);
+    fn repaint_cell(&self, canvas: &mut impl Canvas, row: usize, col: usize) {
+        erase(canvas, self.cell_rect(row, col));
+        self.paint_cell(canvas, row, col);
     }
 
     /// Draw one cell as the board and its fade say it looks now.
-    fn paint_cell(&self, surface: &mut Surface, row: usize, col: usize) {
+    fn paint_cell(&self, canvas: &mut impl Canvas, row: usize, col: usize) {
         let cell = row * self.cols + col;
         let level = self.level[cell];
         if level == 0 {
@@ -497,7 +543,7 @@ impl Life {
             return;
         };
         let side = self.cell - self.gap;
-        surface.fill_round_rect(
+        canvas.fill_round_rect(
             x + self.gap / 2,
             y + self.gap / 2,
             side,
@@ -519,6 +565,27 @@ impl Life {
             self.cell,
         )
     }
+}
+
+/// The cells of `cells` that `queued` marks, in order.
+fn queued_in(queued: &[u64], cells: Range<usize>) -> impl Iterator<Item = usize> + '_ {
+    let words = if cells.is_empty() {
+        0..0
+    } else {
+        cells.start / 64..cells.end.div_ceil(64)
+    };
+    words.flat_map(move |index| {
+        let base = index * 64;
+        let low = cells.start.saturating_sub(base);
+        let high = (cells.end - base).min(64);
+        let span = (u64::MAX >> (64 - high)) & (u64::MAX << low);
+        let mut word = queued.get(index).copied().unwrap_or(0) & span;
+        core::iter::from_fn(move || {
+            let bit = (word != 0).then(|| word.trailing_zeros() as usize)?;
+            word &= word - 1;
+            Some(base + bit)
+        })
+    })
 }
 
 /// The eight neighbour words summed bit by bit, as the low three bits of each
@@ -598,11 +665,10 @@ impl Scene for Life {
         if self.generation_due(now_ns) {
             self.generation();
         }
-        self.fade(damage);
-        for &cell in &self.active {
-            let cell = cell as usize;
-            self.repaint_cell(surface, cell / self.cols, cell % self.cols);
-        }
+        self.fade();
+        self.repaint_active(surface, &self.runner);
+        self.changed
+            .cover(SAVER_DAMAGE_RECTS, &mut self.room, damage);
         self.retire_settled();
         let next_frame = now_ns.saturating_add(self.cadence.frame_ns);
         NextFrame::At(if self.active.is_empty() {

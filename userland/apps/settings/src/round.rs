@@ -12,8 +12,8 @@ use tairix_window::Repaint;
 /// How one round of the event loop ended, as far as presenting it goes.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Round {
-    /// Every pixel may have changed: the desktop moved, another pane came on
-    /// show, or the client was resized.
+    /// Every pixel may have changed: the desktop moved, sent the window to
+    /// another pane, or the client was resized.
     pub whole: bool,
     /// The event concluded anything at all.
     pub acted: bool,

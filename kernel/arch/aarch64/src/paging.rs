@@ -45,6 +45,7 @@ use tairix_arch_api::frames::{
 use tairix_arch_api::mmu::{
     AccessTracking, AddressSpace as MmuAddressSpace, KernelWindow, MapError, PageFlags,
 };
+use tairix_arch_api::tags::{AddressTag, AddressTags, ParkRoot};
 use tairix_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page): the one system granule.
@@ -68,6 +69,9 @@ pub mod attrs {
     /// Access flag (bit 10). Set eagerly so a platform without hardware
     /// AF management does not fault on first touch.
     pub const AF: u64 = 1 << 10;
+    /// Not global (bit 11): the entry belongs to the ASID its walk ran under,
+    /// so a root loaded under another ASID never sees it.
+    pub const NOT_GLOBAL: u64 = 1 << 11;
     /// Inner-shareable (bits `[9:8] = 0b11`).
     pub const SH_INNER: u64 = 0b11 << 8;
     /// Access permission `0b00` (bits `[7:6]`): read/write at EL1, no EL0
@@ -935,6 +939,15 @@ impl Regime {
             }
         }
     }
+
+    /// The scope bit of a leaf mapped in this regime: a user root's leaves
+    /// belong to the ASID it runs under, the kernel window's to every ASID.
+    const fn leaf_scope(self) -> u64 {
+        match self {
+            Self::User => attrs::NOT_GLOBAL,
+            Self::KernelWindow => 0,
+        }
+    }
 }
 
 /// Publish a translation-table store to the MMU's table walker before
@@ -1688,11 +1701,11 @@ impl Stage1TranslationEnabled {
     /// so the non-cacheable reader observes it. The release words the same
     /// secondary later polls are swept identically in
     /// [`crate::smp::start_secondary_spintable`].
-    fn publish_park_root(self, park_root: &AtomicU64, root_phys: u64) {
+    fn publish_park_root(self, park_root: &ParkRoot, root_phys: u64) {
         let Stage1TranslationEnabled = self;
-        let _ = park_root.compare_exchange(0, root_phys, Ordering::AcqRel, Ordering::Relaxed);
+        park_root.publish(root_phys);
         clean_invalidate_range_to_poc(
-            core::ptr::from_ref::<AtomicU64>(park_root) as u64,
+            core::ptr::from_ref::<AtomicU64>(park_root.word()) as u64,
             core::mem::size_of::<AtomicU64>() as u64,
         );
     }
@@ -1863,10 +1876,9 @@ unsafe fn invalidate_local_dcache_to_poc() {
 /// module, which no sweep can move.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn adopt_boot_translation() -> bool {
-    let root = PARK_ROOT.load(Ordering::Acquire);
-    if root == 0 {
+    let Some(root) = PARK_ROOT.published() else {
         return false;
-    }
+    };
     // A secondary core's caches are in the architecturally-UNKNOWN
     // power-on state: it may hold stale lines (from firmware or a
     // previous life) over the physical addresses TAIRiX now uses for the
@@ -1904,9 +1916,10 @@ impl MmuAddressSpace for AddressSpace {
             return Err(MapError::AlreadyMapped);
         }
         let frames = self.frames;
+        let attrs = Self::leaf_attrs_for(flags) | self.regime.leaf_scope();
         // Alignment and prior-mapping are already ruled out, so the only
         // remaining failure from the walk is frame-source exhaustion.
-        self.map_4k_with_attrs(frames, vaddr, paddr, Self::leaf_attrs_for(flags))
+        self.map_4k_with_attrs(frames, vaddr, paddr, attrs)
             .ok_or(MapError::PoolExhausted)
     }
 
@@ -2105,7 +2118,7 @@ impl MmuAddressSpace for AddressSpace {
         // regime would be catastrophic, so verify and re-park first. With
         // no park root published the frames are retired unreclaimed
         // rather than dismantling the active translation (fail closed).
-        if active_root_phys() == self.root_phys && !park_kernel_root() {
+        if active_root_phys() == self.root_phys && !park_kernel_root(true) {
             return;
         }
         let frames = self.frames;
@@ -2273,33 +2286,102 @@ pub(crate) fn invalidate_all_inner_shareable() {
     }
 }
 
-/// The permanent kernel translation root a CPU parks on whenever it must
-/// leave a user root — published set-once by the first
-/// `AddressSpace::switch` (the boot space, whose tables live for the
-/// image's lifetime), read by [`park_kernel_root`]. `0` means "not yet
-/// published" (the boot space's root table is never at physical 0).
-static PARK_ROOT: AtomicU64 = AtomicU64::new(0);
+/// The boot space's root, which [`park_kernel_root`] parks on.
+static PARK_ROOT: ParkRoot = ParkRoot::new();
 
 /// Park the calling CPU's low translation regime on the published boot
-/// kernel root, so no user space's root remains active after its task
-/// suspends or exits. Returns `false`, changing nothing, when no park
-/// root has been published yet (fail closed).
+/// kernel root under ASID `0`, discarding that ASID's entries first when
+/// `flush`, so no user space's root remains active after its task suspends
+/// or exits. Returns `false`, changing nothing, when no park root has been
+/// published yet (fail closed).
 ///
 /// The dispatcher calls this after every switch-back from a user task;
-/// address-space teardown calls it defensively before dismantling a root
-/// that is somehow still active.
-pub fn park_kernel_root() -> bool {
-    let root = PARK_ROOT.load(Ordering::Acquire);
-    if root == 0 {
-        return false;
-    }
+/// address-space teardown and the machine takeover call it, flushing,
+/// before dismantling a root that is somehow still active.
+pub fn park_kernel_root(flush: bool) -> bool {
     // SAFETY: the published root is the boot space's, which identity-maps
     // the kernel window and the board MMIO for the image's lifetime —
     // exactly `activate_user_root`'s contract (inert on the host, where
     // the root is never published anyway).
-    unsafe { activate_user_root(root) };
-    true
+    unsafe { PARK_ROOT.park(flush, activate_user_root) }
 }
+
+/// Where `TTBR0_EL1` holds the ASID (`TCR_EL1.A1` clear).
+const TTBR_ASID_SHIFT: u32 = 48;
+
+/// The ASID field of `TTBR0_EL1`.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+const TTBR_ASID_MASK: u64 = !(u64::MAX >> (64 - TTBR_ASID_SHIFT));
+
+/// The Common-not-Private bit of `TTBR0_EL1`.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+const TTBR_CNP: u64 = 1;
+
+/// The `TTBR0_EL1` value loading `root_phys` under ASID `tag`.
+#[must_use]
+pub const fn ttbr0(root_phys: u64, tag: u16) -> u64 {
+    root_phys | ((tag as u64) << TTBR_ASID_SHIFT)
+}
+
+/// The port's address-space tags: an ASID in `TTBR0_EL1` beside each root,
+/// and a non-global bit on each of a root's own leaves.
+pub struct Aarch64Tags;
+
+/// The aarch64 port's tags, which the kernel loads user roots and parks by.
+pub static TAGS: Aarch64Tags = Aarch64Tags;
+
+impl AddressTags for Aarch64Tags {
+    /// Every implementation has at least 8-bit ASIDs, which `TCR_EL1.AS`
+    /// clear selects; `0` is the park root's.
+    fn user_tags(&self) -> u16 {
+        u16::from(u8::MAX)
+    }
+
+    fn root_register(&self, root_phys: u64, tag: u16) -> u64 {
+        ttbr0(root_phys, tag)
+    }
+
+    /// A user space is invalidated by `tlbi vaae1is` or `tlbi vmalle1is`:
+    /// every ASID, broadcast to every PE in the inner-shareable domain.
+    fn invalidation_reaches_every_tag(&self) -> bool {
+        true
+    }
+
+    unsafe fn flush_current_tag(&self) {
+        // SAFETY: the caller runs in kernel mode on the dispatcher's context.
+        unsafe { flush_current_asid() };
+    }
+
+    unsafe fn park(&self, flush: bool) -> bool {
+        park_kernel_root(flush)
+    }
+}
+
+/// Discard every non-global entry of the ASID `TTBR0_EL1` is loaded under,
+/// on this PE alone.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+unsafe fn flush_current_asid() {
+    // SAFETY: `tlbi aside1` takes the ASID in bits [63:48], exactly where
+    // `TTBR0_EL1` holds it; it invalidates only this PE's entries of that
+    // ASID, and the `dsb nsh`/`isb` pair completes it before the next access.
+    // No memory is touched and no Rust spelling exists for these.
+    unsafe {
+        core::arch::asm!(
+            "mrs {ttbr}, TTBR0_EL1",
+            "and {ttbr}, {ttbr}, {asid}",
+            "tlbi aside1, {ttbr}",
+            "dsb nsh",
+            "isb",
+            ttbr = out(reg) _,
+            asid = in(reg) TTBR_ASID_MASK,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Host substitute: there are no TLBs to discard.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+unsafe fn flush_current_asid() {}
 
 /// The physical root of the calling CPU's active low translation regime
 /// (`TTBR0_EL1`'s base address), or `0` on the host, which has no
@@ -2313,8 +2395,8 @@ fn active_root_phys() -> u64 {
         unsafe {
             core::arch::asm!("mrs {v}, TTBR0_EL1", v = out(reg) ttbr, options(nostack, preserves_flags, nomem));
         }
-        // Mask the ASID ([63:48]) and CnP ([0]) fields to the table base.
-        ttbr & 0x0000_FFFF_FFFF_FFFE
+        // The table base, without the ASID or the CnP bit ([0]).
+        ttbr & !(TTBR_ASID_MASK | TTBR_CNP)
     }
     #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
     {
@@ -2440,22 +2522,22 @@ fn set_af_if_clear(leaf: &mut u64, vaddr: u64) -> bool {
     true
 }
 
-/// Reactivate `root_phys` as the active stage-1 EL1&0 translation root
-/// (reprogram `TTBR0_EL1`) on a CPU whose MMU is already enabled.
+/// Reactivate `root_phys` as the active stage-1 EL1&0 translation root under
+/// `tag`'s ASID (reprogram `TTBR0_EL1`) on a CPU whose MMU is already
+/// enabled, discarding that ASID's entries first when the tag says so.
 ///
 /// This is the `SP2b` user-kthread `pre_resume` primitive (`plans/SPAWN.md`
 /// SP2): immediately before the kernel `eret`s back into a user task's
 /// EL0, that task's own page-table root must be installed so its
 /// translations — and only its — are in force, keeping sibling processes
-/// hardware-isolated. It takes only the `u64` root, so
-/// the per-task hook that calls it captures a plain word and stays `Send`.
+/// hardware-isolated. A root's own leaves are not global, so the entries of
+/// every other ASID stay in the TLB unseen, and the space they belong to
+/// finds them again when it next runs.
 ///
 /// Unlike [`AddressSpace::switch`] this does **not** touch `MAIR_EL1` /
 /// `TCR_EL1` / `TTBR1_EL1` / `SCTLR_EL1.M`: the MMU is already on with the
 /// boot translation controls in force, and only the low (`TTBR0_EL1`)
-/// regime changes between user spaces — which is why a process root pays
-/// nothing for the direct map and why a `TTBR0`-only unmap of the kernel
-/// would be a change to this one function.
+/// regime changes between user spaces.
 ///
 /// # Safety
 ///
@@ -2467,23 +2549,27 @@ fn set_af_if_clear(leaf: &mut u64, vaddr: u64) -> bool {
 /// on its next access. The kernel regime is untouched and so cannot be
 /// left behind by a switch.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub unsafe fn activate_user_root(root_phys: u64) {
-    // SAFETY: writing `TTBR0_EL1` swaps the low translation regime; the
-    // `dsb`/`tlbi vmalle1`/`dsb`/`isb` sequence flushes the stale EL1&0
-    // entries and makes the new root in force before the next access. No
-    // memory is touched and no Rust spelling exists for these system
-    // registers. The caller's contract guarantees the new root covers the
-    // running kernel context.
+pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
+    let ttbr = ttbr0(root_phys, tag.tag);
+    // SAFETY: writing `TTBR0_EL1` swaps the low translation regime and its
+    // ASID in one write; the `isb` makes it in force before the next access.
+    // The caller's contract guarantees the new root covers the running kernel
+    // context.
     unsafe {
         core::arch::asm!(
             "msr TTBR0_EL1, {ttbr}",
-            "dsb ish",
-            "tlbi vmalle1",
-            "dsb ish",
             "isb",
-            ttbr = in(reg) root_phys,
+            ttbr = in(reg) ttbr,
             options(nostack, preserves_flags),
         );
+    }
+    if tag.flush {
+        // Only once the ASID is in force: an earlier regime under the same
+        // ASID could otherwise refill it before the switch, and what fills it
+        // now comes from this root.
+        // SAFETY: the dispatcher's context in kernel mode, the root just
+        // loaded under the ASID discarded.
+        unsafe { flush_current_asid() };
     }
 }
 
@@ -2497,8 +2583,8 @@ pub unsafe fn activate_user_root(root_phys: u64) {
 /// enabled; `root_phys` maps the running kernel context), so the two
 /// `cfg` arms present one `unsafe` API. The host body is inert.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub unsafe fn activate_user_root(root_phys: u64) {
-    let _ = root_phys;
+pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
+    let _ = (root_phys, tag);
 }
 
 /// Translate `addr` as an EL1 stage-1 access under the **active** regime and

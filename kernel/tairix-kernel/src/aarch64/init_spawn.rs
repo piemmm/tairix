@@ -33,6 +33,7 @@ use tairix_arch_aarch64::paging::{
     PageTablePool,
 };
 use tairix_arch_aarch64::userentry::USER_MODE;
+use tairix_arch_api::AddressTag;
 use tairix_kernel_core::{
     spawn_image, InitSpawn, InitSpawnCtx, ProcessResume, ProcessSpace, SpawnMode, UserThreadEntry,
 };
@@ -188,13 +189,14 @@ impl InitSpawn for Aarch64InitSpawn {
         // The hook is handed the task's kernel-stack top (the x86_64 port
         // uses it to repoint its per-CPU syscall entry stack); aarch64
         // reuses `SP_EL1` implicitly and so ignores it (`plans/PI.md` §X).
-        let pre_resume: ProcessResume = Arc::new(move |_stack_top: u64, _tls_base: u64| {
-            // SAFETY: the MMU is already enabled and `init_root_phys` is the
-            // L1 root of PID 1's space, which identity-maps the low kernel
-            // window the running kernel executes from — exactly
-            // `activate_user_root`'s contract.
-            unsafe { activate_user_root(init_root_phys) };
-        });
+        let pre_resume: ProcessResume =
+            Arc::new(move |_stack_top: u64, _tls_base: u64, tag: AddressTag| {
+                // SAFETY: the MMU is already enabled and `init_root_phys` is the
+                // L1 root of PID 1's space, which identity-maps the low kernel
+                // window the running kernel executes from — exactly
+                // `activate_user_root`'s contract.
+                unsafe { activate_user_root(init_root_phys, tag) };
+            });
 
         // Freeze the just-built mappings into the registry-storable,
         // `Send + Sync` snapshot the kernel-wide address-space registry

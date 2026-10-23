@@ -150,8 +150,13 @@ const GLYPH_CACHE_RAM_DIVISOR: u64 = 4096;
 /// uncached, not to an unbounded or hand-picked ceiling.
 #[must_use]
 pub fn glyph_cache_budget(total_ram_bytes: u64) -> CacheBudget {
-    CacheBudget::from_ceiling(glyph_cache_ceiling(total_ram_bytes))
-        .with_reserved_floor(UI_CACHE_RESERVE_BYTES)
+    budget_within(glyph_cache_ceiling(total_ram_bytes))
+}
+
+/// [`glyph_cache_budget`] for a cache whose ceiling is already `ceiling`
+/// bytes.
+fn budget_within(ceiling: usize) -> CacheBudget {
+    CacheBudget::from_ceiling(ceiling).with_reserved_floor(UI_CACHE_RESERVE_BYTES)
 }
 
 /// The ceiling both font caches derive from the machine's total usable
@@ -183,7 +188,13 @@ pub(crate) fn glyph_cache_ceiling(total_ram_bytes: u64) -> usize {
 /// genuinely matters more than the round trips.
 #[must_use]
 pub fn client_glyph_cache_budget(total_ram_bytes: u64) -> CacheBudget {
-    let budget = glyph_cache_budget(total_ram_bytes);
+    client_budget_within(glyph_cache_ceiling(total_ram_bytes))
+}
+
+/// [`client_glyph_cache_budget`] for a cache whose ceiling is already
+/// `ceiling` bytes.
+pub(crate) fn client_budget_within(ceiling: usize) -> CacheBudget {
+    let budget = budget_within(ceiling);
     budget.with_working_set_floor(budget.hard())
 }
 

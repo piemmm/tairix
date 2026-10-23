@@ -45,8 +45,8 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use tairix_arch_api::{CrossCpuTlbShootdown, EnterUser, UserEntry};
-use tairix_kernel_mem::{ActiveCpus, AllocError, LiveUserSpace, SpaceTlb};
+use tairix_arch_api::{AddressTag, CrossCpuTlbShootdown, EnterUser, UserEntry};
+use tairix_kernel_mem::{AllocError, LiveUserSpace, SpaceTlb, TlbContext};
 use tairix_sync::SpinLock;
 
 use crate::spawn::{thread_pre_resume, ProcessResume, UserThreadEntry};
@@ -60,9 +60,9 @@ use crate::spawn::{thread_pre_resume, ProcessResume, UserThreadEntry};
 /// stack, anonymous, device and page-table alike — to the allocator.
 pub struct ProcessSpace {
     space: SpinLock<Box<dyn LiveUserSpace + Send>>,
-    /// The CPUs the space is active on, kept outside the lock: the dispatcher
-    /// records every switch in and out, and never takes it.
-    cpus: Arc<ActiveCpus>,
+    /// The space's standing with the TLBs, kept outside the lock: the
+    /// dispatcher records every switch in and out, and never takes it.
+    context: Arc<TlbContext>,
     /// The port's switch-in hook for this process, shared by every thread.
     resume: ProcessResume,
     /// The port's "enter user mode" handle, so a thread created later is
@@ -94,17 +94,17 @@ impl ProcessSpace {
         port: &'static dyn EnterUser,
     ) -> Self {
         Self {
-            cpus: space.active_cpus(),
+            context: space.tlb_context(),
             space: SpinLock::new(space),
             resume,
             port,
         }
     }
 
-    /// The CPUs this space is active on.
+    /// The space's standing with the TLBs.
     #[must_use]
-    pub fn active_cpus(&self) -> &ActiveCpus {
-        &self.cpus
+    pub fn tlb_context(&self) -> &TlbContext {
+        &self.context
     }
 
     /// Run `f` against the space under the lock.
@@ -119,7 +119,7 @@ impl ProcessSpace {
     /// The per-thread switch-in hook for a thread of this process whose
     /// thread pointer is `tls_base`.
     #[must_use]
-    pub fn thread_pre_resume(&self, tls_base: u64) -> Box<dyn FnMut(u64) + Send> {
+    pub fn thread_pre_resume(&self, tls_base: u64) -> Box<dyn FnMut(u64, AddressTag) + Send> {
         thread_pre_resume(&self.resume, tls_base)
     }
 
@@ -134,7 +134,8 @@ impl ProcessSpace {
 }
 
 /// The reach a new user address space discards its cleared translations
-/// through: `remote`, over a set sized to every CPU discovery found.
+/// through: `remote`, over a set sized to every CPU discovery found, crediting
+/// the CPU that made an invalidation with the entries it discarded itself.
 ///
 /// # Errors
 ///
@@ -142,10 +143,10 @@ impl ProcessSpace {
 pub fn new_space_tlb(
     remote: Option<&'static (dyn CrossCpuTlbShootdown + Sync)>,
 ) -> Result<SpaceTlb, AllocError> {
-    Ok(SpaceTlb::new(
-        ActiveCpus::new(crate::cpu_state::states().len())?,
-        remote,
-    ))
+    Ok(
+        SpaceTlb::new(TlbContext::new(crate::cpu_state::states().len())?, remote)
+            .crediting(crate::kthread::credit_own_flush),
+    )
 }
 
 /// A host [`LiveSpace`](tairix_kernel_mem::LiveSpace) over simulated RAM — the

@@ -14,7 +14,8 @@
 //! only in where the mapping came from, and a grant carries no region id
 //! because the holder is not the owner and may not re-grant it.
 //! [`SpawnShare`] is the region a drawing sandbox was handed at spawn, which
-//! stays mapped for the life of the process.
+//! stays mapped for the life of the process; [`SpawnPart`]s are the disjoint
+//! ranges its owner cuts it into and hands out.
 
 use core::ptr::NonNull;
 
@@ -337,15 +338,24 @@ impl SpawnShare {
         self.mapping.len == 0
     }
 
-    /// The share's bytes.
-    #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        self.mapping.bytes()
-    }
-
-    /// The share's bytes, for writing.
-    pub fn bytes_mut(&mut self) -> &mut [u8] {
-        self.mapping.bytes_mut()
+    /// The share cut `at` bytes in: the part before and the part after, each
+    /// the one owner of its own range of the mapping.
+    ///
+    /// # Errors
+    ///
+    /// [`tairix_abi::Errno::LengthOutOfRange`] for a cut past the share's end.
+    pub fn split(self, at: usize) -> Result<(SpawnPart, SpawnPart), tairix_abi::Errno> {
+        let rest = self
+            .mapping
+            .len
+            .checked_sub(at)
+            .ok_or(tairix_abi::Errno::LengthOutOfRange)?;
+        let after = NonNull::new(self.mapping.base.as_ptr().wrapping_add(at))
+            .ok_or(tairix_abi::Errno::LengthOutOfRange)?;
+        let part = |base, len| SpawnPart {
+            mapping: Mapping { base, len },
+        };
+        Ok((part(self.mapping.base, at), part(after, rest)))
     }
 }
 
@@ -355,6 +365,45 @@ unsafe impl Send for SpawnShare {}
 
 // SAFETY: as for `SharedRegion`: only `&mut self` writes.
 unsafe impl Sync for SpawnShare {}
+
+/// One range of a [`SpawnShare`], cut by [`SpawnShare::split`]: mapped for the
+/// rest of the process's life, as the whole share is, and reached only through
+/// this part.
+pub struct SpawnPart {
+    mapping: Mapping,
+}
+
+impl SpawnPart {
+    /// The part's byte length.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.mapping.len
+    }
+
+    /// Whether the part holds no bytes.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.mapping.len == 0
+    }
+
+    /// The part's bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.mapping.bytes()
+    }
+
+    /// The part's bytes, for writing.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        self.mapping.bytes_mut()
+    }
+}
+
+// SAFETY: as for `SpawnShare`: the range is the process's, and nothing of it
+// belongs to the thread that cut it.
+unsafe impl Send for SpawnPart {}
+
+// SAFETY: as for `SharedRegion`: only `&mut self` writes.
+unsafe impl Sync for SpawnPart {}
 
 #[cfg(test)]
 mod tests {
@@ -426,19 +475,41 @@ mod tests {
         assert_eq!(memory[15], 1);
     }
 
+    /// A spawn share is cut into parts, each writing its own range where it
+    /// lies.
     #[test]
-    fn a_spawn_share_s_views_are_its_mapped_bytes() {
+    fn a_spawn_share_s_parts_are_its_mapped_bytes() {
         let mut memory = vec![0u8; 8];
         {
-            let mut share = SpawnShare {
+            let share = SpawnShare {
                 mapping: over(&mut memory),
             };
-            share.bytes_mut()[0] = 4;
-            assert_eq!(share.bytes()[0], 4);
             assert_eq!(share.len(), 8);
             assert!(!share.is_empty());
+            let (mut head, mut tail) = share.split(5).expect("a cut inside");
+            assert_eq!((head.len(), tail.len()), (5, 3));
+            head.bytes_mut()[4] = 4;
+            tail.bytes_mut()[0] = 6;
+            assert_eq!(head.bytes()[4], 4);
+            assert_eq!(tail.bytes(), &[6, 0, 0]);
         }
-        assert_eq!(memory[0], 4, "written where it lies");
+        assert_eq!(memory[4..6], [4, 6], "written where it lies");
+    }
+
+    /// A cut at either end leaves one part empty, and a cut past the end is
+    /// refused.
+    #[test]
+    fn a_spawn_share_cut_at_its_ends_or_past_them() {
+        let mut memory = vec![0u8; 8];
+        let whole = |memory: &mut std::vec::Vec<u8>| SpawnShare {
+            mapping: over(memory),
+        };
+        let (head, tail) = whole(&mut memory).split(8).expect("a cut at the end");
+        assert_eq!((head.len(), tail.is_empty()), (8, true));
+        assert!(tail.bytes().is_empty());
+        let (head, tail) = whole(&mut memory).split(0).expect("a cut at the start");
+        assert_eq!((head.is_empty(), tail.len()), (true, 8));
+        assert!(whole(&mut memory).split(9).is_err());
     }
 
     /// A mapping belongs to the process, so it changes threads with its
@@ -450,6 +521,7 @@ mod tests {
         shareable::<SharedRegion>();
         shareable::<MappedGrant>();
         shareable::<SpawnShare>();
+        shareable::<super::SpawnPart>();
         let mut memory = vec![0u8; 16];
         memory[2] = 5;
         let grant = MappedGrant {

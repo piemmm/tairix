@@ -152,7 +152,7 @@ impl MachineTakeover for Aarch64MachineTakeover {
         //    one step that may refuse: it is the routine park every task
         //    suspend performs, so a refusal leaves the machine exactly as it
         //    was and the caller keeps its REPL.
-        if !crate::paging::park_kernel_root() {
+        if !crate::paging::park_kernel_root(true) {
             // The mechanism reports only failure, so the audit payload is 0.
             return TakeoverError::PrepareFailed(0);
         }

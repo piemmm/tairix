@@ -20,11 +20,11 @@ use alloc::vec::Vec;
 use tairix_geometry::Rect;
 use tairix_parallel::JobRunner;
 use tairix_raster::Surface;
-use tairix_raster::{Canvas, ScanScratch};
+use tairix_raster::{BandScratch, Canvas, ScanScratch};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::{fallible, mathf};
 
-use super::{band, column, draw_bands, opaque, sub, translucent, Rgb, View, CAMERA};
+use super::{band, column, opaque, sub, translucent, Rgb, View, CAMERA};
 
 /// Where the ranges begin and end ahead of the viewer, and the lattice's
 /// spacing, in grid cells.
@@ -178,25 +178,19 @@ impl Mountains {
         &self,
         surface: &mut Surface,
         runner: &dyn JobRunner,
-        scratch: &mut [ScanScratch],
+        scratch: &mut BandScratch,
     ) {
         let width = self.view.width;
-        draw_bands(
-            surface,
-            0..self.view.horizon,
-            runner,
-            scratch,
-            &|band, scratch| {
-                let rows = band.rows();
-                let area = Rect::new(
-                    0,
-                    i32::try_from(rows.start).unwrap_or(i32::MAX),
-                    width,
-                    rows.end - rows.start,
-                );
-                self.draw(band, area, scratch);
-            },
-        );
+        scratch.draw(surface, 0..self.view.horizon, runner, &|band, scratch| {
+            let rows = band.rows();
+            let area = Rect::new(
+                0,
+                i32::try_from(rows.start).unwrap_or(i32::MAX),
+                width,
+                rows.end - rows.start,
+            );
+            self.draw(band, area, scratch);
+        });
     }
 
     /// Draw both ranges onto `canvas`, which holds `area` of the screen and

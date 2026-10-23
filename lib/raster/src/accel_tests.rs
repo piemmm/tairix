@@ -122,12 +122,58 @@ fn assert_matches_portable(ops: BlendOps, name: &str) {
             "{name} span, len {len}, factor {factor}"
         );
         let colour = random_pixel(&mut prng);
-        let (mut by_candidate, mut by_portable) = (dst.clone(), dst);
+        let (mut by_candidate, mut by_portable) = (dst.clone(), dst.clone());
         (ops.solid)(&mut by_candidate, colour, factor, &tile);
         (PORTABLE_BLEND.solid)(&mut by_portable, colour, factor, &tile);
         assert_eq!(
             by_candidate, by_portable,
             "{name} solid, len {len}, factor {factor}"
+        );
+        let longer = len + prng.below(3);
+        let to = random_row(&mut prng, longer);
+        let (mut by_candidate, mut by_portable) = (dst.clone(), dst.clone());
+        (ops.mix)(&mut by_candidate, &src, &to, factor, &tile);
+        (PORTABLE_BLEND.mix)(&mut by_portable, &src, &to, factor, &tile);
+        assert_eq!(
+            by_candidate, by_portable,
+            "{name} mix, len {len}, weight {factor}"
+        );
+        let coverage: alloc::vec::Vec<u8> = (0..len + prng.below(3))
+            .map(|_| prng.edge_biased_u8())
+            .collect();
+        let (mut by_candidate, mut by_portable) = (dst.clone(), dst.clone());
+        (ops.cover)(&mut by_candidate, colour, &coverage, &tile);
+        (PORTABLE_BLEND.cover)(&mut by_portable, colour, &coverage, &tile);
+        assert_eq!(by_candidate, by_portable, "{name} cover, len {len}");
+        let ink = crate::Color {
+            r: prng.next_u8(),
+            g: prng.next_u8(),
+            b: prng.next_u8(),
+            a: prng.next_u8(),
+        };
+        let (mut by_candidate, mut by_portable) = (dst.clone(), dst.clone());
+        (ops.wash)(&mut by_candidate, ink, &coverage, &tile);
+        (PORTABLE_BLEND.wash)(&mut by_portable, ink, &coverage, &tile);
+        assert_eq!(by_candidate, by_portable, "{name} wash, len {len}");
+        // As few samples as one, so a span reaching past the last is widened
+        // from it as well as one with samples to spare.
+        let samples: alloc::vec::Vec<u64> = (0..=prng.below(len / 2 + 3))
+            .map(|_| {
+                let mut lane =
+                    || u64::from(prng.next_u8().min(254)) << 8 | u64::from(prng.next_u8());
+                lane() | lane() << 16 | lane() << 32
+            })
+            .collect();
+        let biases = tile.map(|bias| u64::from(bias) * crate::wide::LANE_ONES);
+        let start = prng.next_u32() % 16;
+        let (mut by_candidate, mut by_portable) = (dst.clone(), dst);
+        (ops.widen)(&mut by_candidate, (start, &samples), &biases);
+        (PORTABLE_BLEND.widen)(&mut by_portable, (start, &samples), &biases);
+        assert_eq!(
+            by_candidate,
+            by_portable,
+            "{name} widen, len {len}, start {start}, {} samples",
+            samples.len()
         );
     }
 }

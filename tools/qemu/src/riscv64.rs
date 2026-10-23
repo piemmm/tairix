@@ -102,7 +102,7 @@ pub fn machine(board: Board) -> (&'static str, &'static [&'static str]) {
 /// (`svade=true,svadu=false`). RISC-V leaves A/D update
 /// implementation-defined; forcing the Svade (fault-on-update) behaviour
 /// makes the `virt` board exercise the kernel's software A/D-setting fault
-/// path (`kernel/arch/riscv64::paging::set_accessed_flag_in_active`) that
+/// path (`kernel/arch/riscv64::paging::retry_granted_fault`) that
 /// silicon without hardware A/D update requires — the path the cold-page
 /// referenced bit (`plans/SWAPSWAPSWAP.md`) depends on. TAIRiX maps every
 /// leaf with A/D already set, so ordinary operation never faults under
@@ -193,7 +193,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // operation never faults under either behaviour; forcing Svade makes
     // the board exercise the *software* A/D-setting fault path the kernel
     // must carry for such silicon (`kernel/arch/riscv64::paging::
-    // set_accessed_flag_in_active`, `plans/SWAPSWAPSWAP.md`), which the
+    // retry_granted_fault`, `plans/SWAPSWAPSWAP.md`), which the
     // cold-page referenced bit depends on — otherwise the path would be
     // dead under the default Svadu CPU. This is the conservative, portable
     // choice and is what the `accessed-bit-qemu-riscv64` vertical relies on.

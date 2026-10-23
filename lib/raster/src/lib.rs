@@ -50,6 +50,7 @@ pub mod artwork;
 pub mod blur;
 pub mod color;
 pub mod dither;
+mod lent;
 pub mod mesh;
 pub mod paint;
 pub mod reorient;
@@ -61,6 +62,7 @@ pub mod shape;
 pub mod surface;
 mod transformed;
 pub mod view;
+pub mod wide;
 
 #[cfg(test)]
 mod tests;
@@ -74,10 +76,11 @@ pub use blur::{
     SOFTEN_PASSES,
 };
 pub use color::{
-    blend_solid_span, blend_span, div255, div255_biased, leading_opaque, leading_translucent,
-    mix_span, Color, Pixel, ROUND_NEAREST,
+    blend_solid_span, blend_span, cover_span, div255, div255_biased, leading_opaque,
+    leading_translucent, mix_span, Color, Pixel, ROUND_NEAREST,
 };
 pub use dither::DitherRow;
+pub use lent::PixelMemory;
 pub use mesh::{
     Depth, DepthBand, DepthBuffer, DepthCompare, DepthPlane, DepthTest, EdgeNear, EdgeRecord,
     Fragment, MeshVertex, Occlusion, Toward, Triangle, Weights, MESH_SUB_UNITS, WEIGHT_ONE,
@@ -95,5 +98,8 @@ pub use ring::{Ring, RingInk};
 pub use round::{round_rect_coverage, round_rect_radius};
 pub use scan::{Coverage, CoverageRows, FillRule, ScanScratch, MAX_DRAWING_EXTENT};
 pub use shape::{Placed, Shape};
-pub use surface::{band_rows, Canvas, RowBand, RowBands, Surface, MAX_SURFACE_PIXELS, SUBPIXEL};
+pub use surface::{
+    band_rows, pointwise, BandScratch, Canvas, ColumnBand, ColumnBands, RowBand, RowBands, Surface,
+    BAND_GRAIN, MAX_SURFACE_PIXELS, SUBPIXEL,
+};
 pub use view::{Clipped, Perspective, Projected, MAX_CLIPPED};

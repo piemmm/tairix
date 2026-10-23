@@ -22,6 +22,8 @@
 | I | A dirty rectangle's rows composed in bands across a worker pool | done |
 | J | One window-frame codec, and the desktop's decode spread across it | done |
 | J.2 | Window frames carry premultiplied alpha: an application's present is a byte-order copy, the session's decode a copy and a coverage clamp | done |
+| K | Damage merged a region at a time: one walk per region folded into another, through the frosts and the layers alike | done |
+| L | The ribbon's light at packed speed: its widening onto pixels on the `raster-blend` kernels, and its gathering summed four columns to a vector | in progress: the widening is done; the gathering is next |
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -1474,7 +1476,12 @@ the delivered set is already the same on every run.
 
 ### F.3 Families, in order
 1. `raster-blend` — `blend_span` and `blend_solid_span`, one source over a
-   span (the one span composite B.6 routed every blended pixel through).
+   span (the one span composite B.6 routed every blended pixel through);
+   `mix_span`, a run dissolving between two (the ray tracer's crossfade);
+   `cover_span`, one colour through a coverage mask (every flat
+   scan-converted fill, glyph and text shadow); and the masked wash's row, one straight
+   colour at a weight a pixel. The two coverage-driven entries finish a tail
+   shorter than a step as one padded step.
 2. `Surface::blit` — src-over-dst row zip. Reaches `blend_span`, so the blend
    family covers it.
 3. `raster-scan` — `leading_opaque` / `leading_translucent`, the alpha scan
@@ -1714,6 +1721,38 @@ passes inside the app; it cannot be the answer for this one.
   refuses the whole conversion rather than leaving a window half-converted.
 
 ---
+
+## Stage K — Merge damage a region at a time
+
+A region folded into another costs one merge walk over both
+(`Region::add_region`, `Region::subtract_region`), where folding it in one
+rectangle at a time walked the destination once a rectangle — the product of
+their sizes, which a saver's 128 rectangles into hundreds of held ones made
+milliseconds. Every place the compositor takes a whole region's change does so
+as a region: a present or a kept repaint (`mark_layer_region`), the desktop
+layer's repaint, the scan-out rescan and its scaled form, the frame's owed and
+hidden damage, and a layer's staleness (`Change::Region`, `dirty_region`), with
+a frost above invalidated once per window the region reaches. Canonical
+rectangles added one by one stay linear too: a band that joined the one above
+is cut again in place when a span lands on its lower rows alone. Per-rectangle
+loops remain only where each rectangle is transformed on its own (an output
+scale's outward rounding, a reach grown around each, a pixel scan of partial
+transparency) or where the destination is a control's eight-rectangle repaint.
+
+## Stage L — The ribbon's light at packed speed
+
+The ribbon (`lib/ribbon`) is the login screen's and its saver's whole cost:
+1.79 ms a 1080p frame on one core when measured. Its samples are toned into
+wide pixels (`tairix_raster::wide`) and blended up to every pixel, dithered,
+by `wide::widen`, a `raster-blend` member with SSE2 and NEON candidates held
+to the portable form by the family's verify cases and digest; a chunk row that
+tones to nothing is one fill. That is 1.54–1.58 ms, bit-identical. What is left
+is the gathering, 45% of a frame: each term's falloff is a chain of multiplies
+down one column, latency-bound, and each strand row a table lookup. Rows
+cannot be regrouped without changing the sums, and interleaving one column's
+terms or finding each row's centre on its own measured slower; summing four
+adjacent columns in a vector's lanes, each lane its own chain under its own
+row mask, keeps every sum's operations and order and is the next step.
 
 ## What this plan refuses
 

@@ -39,7 +39,7 @@ use tairix_reclaim::{
 };
 use tairix_reclaim::{CachedBytes, ReclaimCache};
 
-use crate::glyph_cache::{glyph_cache_ceiling, GLYPH_CACHE_ENTRY_METADATA_BYTES};
+use crate::glyph_cache::GLYPH_CACHE_ENTRY_METADATA_BYTES;
 
 /// What one measurement is retained under: the face's wire bytes, its pixel
 /// height, its wire weight, and the measured text's byte length and CRC-32C.
@@ -91,17 +91,20 @@ pub(crate) fn measure_cache_candidate(owner: ReclaimOwner) -> CacheCandidate {
     }
 }
 
-/// The memo's byte budget, on the same RAM-derived ceiling as the glyph
-/// cache ([`glyph_cache_ceiling`]) and with no floor of any kind.
-///
-/// The memo holds no pixels and rebuilds an entry by walking advances it
-/// already has, so — unlike a glyph bitmap, which costs a rasterisation or
-/// an IPC round trip — there is nothing here worth keeping through pressure:
-/// it is speculation all the way down, and the first tightening may take all
-/// of it.
+/// The memo's byte budget, [`measure_budget_within`] the same RAM-derived
+/// ceiling as the glyph cache
+/// ([`glyph_cache_ceiling`](crate::glyph_cache::glyph_cache_ceiling)).
 #[must_use]
+#[cfg(any(feature = "rt", test))]
 pub(crate) fn measure_cache_budget(total_ram_bytes: u64) -> CacheBudget {
-    CacheBudget::from_ceiling(glyph_cache_ceiling(total_ram_bytes))
+    measure_budget_within(crate::glyph_cache::glyph_cache_ceiling(total_ram_bytes))
+}
+
+/// The memo's byte budget within `ceiling` bytes, with no floor of any kind:
+/// it holds no pixels and rebuilds an entry from advances it already has, so
+/// unlike a glyph bitmap nothing in it is worth keeping through pressure.
+pub(crate) const fn measure_budget_within(ceiling: usize) -> CacheBudget {
+    CacheBudget::from_ceiling(ceiling)
 }
 
 /// One string measured in one face: the bytes measured, and the pen position

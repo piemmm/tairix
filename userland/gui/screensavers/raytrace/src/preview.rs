@@ -22,7 +22,8 @@
 use alloc::vec::Vec;
 use core::ops::{Range, RangeInclusive};
 
-use tairix_geometry::{Rect, Region};
+use tairix_abi::saver_ipc::SAVER_DAMAGE_RECTS;
+use tairix_geometry::{Rect, Region, Tiles};
 use tairix_parallel::JobRunner;
 use tairix_raster::surface::MAX_SURFACE_PIXELS;
 use tairix_raster::Surface;
@@ -31,7 +32,7 @@ use tairix_raytrace::{Reveal, Step};
 use tairix_util::fallible;
 
 use super::engine::Traced;
-use super::tiles::Tiles;
+use super::TILE;
 
 /// Red, green and blue levels, as the B-spline weighs them.
 type Rgb = [f32; 3];
@@ -299,8 +300,8 @@ impl Preview {
             spare: Border::new(size)?,
             weights: fallible::filled(coarsest as usize, [0.0; 4])?,
             dirty: Cells::new(size)?,
-            changed: Tiles::new(size)?,
-            room: Tiles::new(size)?,
+            changed: Tiles::new(size, TILE)?,
+            room: Tiles::new(size, TILE)?,
         };
         preview.load_weights();
         Some(preview)
@@ -329,7 +330,8 @@ impl Preview {
             self.dirty.add(columns.clone(), rows.clone());
             self.changed.mark(self.rect(columns, rows));
         }
-        self.changed.cover(&mut self.room, damage);
+        self.changed
+            .cover(SAVER_DAMAGE_RECTS, &mut self.room, damage);
     }
 
     /// Mark the whole picture for the next [`paint`](Self::paint) to lay

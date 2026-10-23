@@ -310,8 +310,8 @@ fn count_preemption(cpu: CpuId) {
 /// dispatch loop to drain it. A lone runnable task with nothing pending is
 /// left running — the periodic tick still fired, but rescheduling to the
 /// *same* sole task every quantum has no scheduling effect and only churns
-/// the per-dispatch user-address-space switch (and, on an emulated target,
-/// its full TLB flush), which starves the task's own forward progress.
+/// the per-dispatch user-address-space switch, which starves the task's own
+/// forward progress.
 /// This mirrors Linux's `check_preempt_tick`, which preempts only when a
 /// competitor should run.
 ///
@@ -479,7 +479,8 @@ fn mask_interrupts() {
     }
 }
 
-fn current_cpu() -> Option<CpuId> {
+/// The calling CPU, once the wait hook that names it is installed.
+pub(crate) fn current_cpu() -> Option<CpuId> {
     crate::waitq::wait_arch().and_then(crate::waitq::WaitQueueArch::current_cpu)
 }
 

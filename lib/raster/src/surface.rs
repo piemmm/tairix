@@ -20,11 +20,11 @@
 //! blurred in place and mixed back over itself at a caller-supplied
 //! coverage.
 
-use core::mem::size_of;
 use core::num::NonZeroU64;
 use core::ops::Range;
 use core::slice;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_colour::{Hue, Rgb};
@@ -33,8 +33,12 @@ use tairix_reclaim::CachedBytes;
 use tairix_util::{fallible, mathf};
 
 use crate::artwork::{Group, MaskKind, Node, MAX_GROUP_DEPTH};
-use crate::color::{blend_span, blend_span_mapped, dither_tiles, div255, mix, Color, Pixel};
+use crate::color::{
+    blend_solid_span, blend_span, blend_span_mapped, cover_span, dither_tiles, mix, scale8,
+    wash_weighted, Color, Pixel,
+};
 use crate::dither::DitherRow;
+use crate::lent::{PixelMemory, Store};
 use crate::mesh::Occlusion;
 use crate::paint::{Paint, Pattern};
 use crate::resample::{
@@ -72,15 +76,17 @@ struct SpanPaint {
     mode: PaintMode,
 }
 
-/// One pixel a scan-converted fill covers: where it is on the surface, how
-/// much of the shape it holds, and the ordered-dither bias its row rounds
-/// with.
+/// The pixels of a row [`Surface::wash_region`] weighs at a time, in a buffer
+/// on the stack.
+const WASH_RUN: usize = 256;
+
+/// One pixel a scan-converted fill covers: where it is on the surface, and how
+/// much of the shape it holds.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Covered {
     x: u32,
     y: u32,
     coverage: u8,
-    bias: u32,
 }
 
 /// What a rounded-rectangle paint does with the pixels it covers.
@@ -227,7 +233,7 @@ pub struct Surface {
     height: u32,
     clip: ClipRect,
     origin: Origin,
-    pixels: Vec<Pixel>,
+    pixels: Store,
 }
 
 impl PartialEq for Surface {
@@ -236,7 +242,7 @@ impl PartialEq for Surface {
             && self.height == other.height
             && self.clip == other.clip
             && self.origin == other.origin
-            && self.pixels == other.pixels
+            && *self.pixels == *other.pixels
     }
 }
 
@@ -244,9 +250,9 @@ impl Eq for Surface {}
 
 impl CachedBytes for Surface {
     /// The retained heap size of the pixel buffer — the only heap
-    /// allocation a `Surface` owns.
+    /// allocation a `Surface` owns, and none for lent memory.
     fn payload_bytes(&self) -> usize {
-        self.pixels.len() * size_of::<Pixel>()
+        self.pixels.heap_bytes()
     }
 
     /// Overwrite every pixel with fully transparent black, so a reclaimed
@@ -255,7 +261,7 @@ impl CachedBytes for Surface {
     /// Volatile, because the pixels are freed straight afterwards and a plain
     /// fill of memory nobody reads again is a store the optimiser may drop.
     fn wipe(&mut self) {
-        tairix_util::secret::wipe_with(&mut self.pixels, Pixel::TRANSPARENT);
+        self.pixels.wipe();
     }
 }
 
@@ -285,21 +291,48 @@ impl Surface {
             height,
             clip: ClipRect::whole(width, height),
             origin: Origin::default(),
-            pixels: fallible::filled(count, fill)?,
+            pixels: Store::Owned(fallible::filled(count, fill)?),
+        })
+    }
+
+    /// A `width`×`height` surface drawing into `memory`, whose leading pixels
+    /// it takes as they stand: how a picture is drawn straight into a frame
+    /// another process reads, with no copy between.
+    ///
+    /// Returns `None` on the bounds [`new`](Self::new) states, or when the
+    /// memory is shorter than the pixels.
+    #[must_use]
+    pub fn lent(width: u32, height: u32, memory: Box<dyn PixelMemory>) -> Option<Self> {
+        let pixels = Store::lent(memory, pixel_count(width, height)?)?;
+        Some(Self {
+            width,
+            height,
+            clip: ClipRect::whole(width, height),
+            origin: Origin::default(),
+            pixels,
         })
     }
 
     /// This surface's pixel buffer reused as a `width`×`height` surface
     /// cleared to fully transparent, so a buffer redrawn at a changing size
-    /// allocates only when it outgrows what it already holds.
+    /// allocates only when it outgrows what it already holds. A surface over
+    /// lent memory is given a buffer of its own: the lender laid that memory
+    /// out for one shape.
     ///
     /// Returns `None` on either refusal [`new`](Self::new) states.
     #[must_use]
     pub fn reshaped(mut self, width: u32, height: u32) -> Option<Self> {
         let count = pixel_count(width, height)?;
-        self.pixels.clear();
-        if !fallible::grow_to(&mut self.pixels, count, Pixel::TRANSPARENT) {
-            return None;
+        match &mut self.pixels {
+            Store::Owned(pixels) => {
+                pixels.clear();
+                if !fallible::grow_to(pixels, count, Pixel::TRANSPARENT) {
+                    return None;
+                }
+            }
+            Store::Lent { .. } => {
+                self.pixels = Store::Owned(fallible::filled(count, Pixel::TRANSPARENT)?);
+            }
         }
         self.width = width;
         self.height = height;
@@ -503,13 +536,11 @@ impl Surface {
     /// rather than drawing part of a picture.
     #[must_use]
     pub fn write_rgba8(&mut self, rgba: &[u8]) -> bool {
-        let Some(expected_len) = pixel_count(self.width, self.height)
-            .and_then(|count| count.checked_mul(4))
-            .filter(|len| *len == rgba.len())
-        else {
+        let whole = pixel_count(self.width, self.height)
+            .filter(|count| count.checked_mul(4) == Some(rgba.len()));
+        if whole.is_none() {
             return false;
-        };
-        debug_assert_eq!(expected_len / 4, self.pixels.len());
+        }
         let (quads, _remainder) = rgba.as_chunks::<4>();
         for (slot, &[r, g, b, a]) in self.pixels.iter_mut().zip(quads) {
             *slot = Color::rgba(r, g, b, a).premultiply();
@@ -627,6 +658,21 @@ impl Surface {
         &self.pixels
     }
 
+    /// A copy of this surface in memory of its own, or `None` when the heap
+    /// will not give it: [`Clone`] for a caller that must not abort on a
+    /// refused allocation, copying the pixels in one pass.
+    #[must_use]
+    pub fn try_clone(&self) -> Option<Self> {
+        let count = self.pixels.len();
+        Some(Self {
+            width: self.width,
+            height: self.height,
+            clip: self.clip,
+            origin: self.origin,
+            pixels: Store::Owned(fallible::collected(count, self.pixels.iter().copied())?),
+        })
+    }
+
     /// Borrow the pixels mutably, in row-major order.
     ///
     /// For a renderer that produces a whole surface itself — a software
@@ -649,7 +695,7 @@ impl Surface {
     /// The premultiplied pixel at `(x, y)`, or `None` if out of bounds.
     #[must_use]
     pub fn get(&self, x: u32, y: u32) -> Option<Pixel> {
-        self.index(x, y).map(|i| self.pixels[i])
+        self.index(x, y).and_then(|i| self.pixels.get(i).copied())
     }
 
     /// Overwrite the pixel at `(x, y)` with a premultiplied `pixel`.
@@ -768,61 +814,7 @@ impl Surface {
         color: Color,
         mode: PaintMode,
     ) {
-        let (x, y, w, h) = area;
-        if w == 0 || h == 0 {
-            return;
-        }
-        let source = color.premultiply();
-        // The clamp `round_rect_coverage` applies internally, applied here
-        // too so the bands below name exactly the pixels it does not answer
-        // 255 for. Being at most half the shorter side, the radius never
-        // exceeds `w`, so neither subtraction can wrap.
-        let radius = radius.min(w / 2).min(h / 2);
-        let right_band = w - radius;
-        for row in self.admitted_rows(y, h) {
-            let local_y = row - y;
-            let Some((first, span)) = self.row_span_mut(row, x, w) else {
-                continue;
-            };
-            if !in_corner_band(local_y, h, radius) {
-                paint_span(span, SpanPaint { first, row, mode }, source);
-                continue;
-            }
-            // The drawn columns as the rectangle sees them: `lead` is the
-            // first, and a span never reaches past the rectangle's width, so
-            // `lead + drawn <= w` and the band arithmetic cannot wrap.
-            let lead = first - x;
-            let Ok(drawn) = u32::try_from(span.len()) else {
-                continue;
-            };
-            let left_end = radius.saturating_sub(lead).min(drawn);
-            let right_start = right_band.saturating_sub(lead).min(drawn).max(left_end);
-            let (left, rest) = span.split_at_mut(left_end as usize);
-            let (middle, right) = rest.split_at_mut((right_start - left_end) as usize);
-            let shape = (w, h, radius);
-            let at = |column| SpanPaint {
-                first: column,
-                row,
-                mode,
-            };
-            paint_coverage_span(
-                left,
-                lead..lead + left_end,
-                local_y,
-                shape,
-                source,
-                at(first),
-            );
-            paint_span(middle, at(first + left_end), source);
-            paint_coverage_span(
-                right,
-                lead + right_start..lead + drawn,
-                local_y,
-                shape,
-                source,
-                at(first + right_start),
-            );
-        }
+        round_rect_into(self, area, radius, color, mode);
     }
 
     /// Composite a vertical linear gradient over `[x, x+w) × [y, y+h)`,
@@ -878,8 +870,10 @@ impl Surface {
     }
 
     /// Composite `color` over `[x, x+w) × [y, y+h)`, scaling its alpha by the
-    /// coverage `mask` reports for each pixel at that pixel's own coordinates
-    /// within the rectangle.
+    /// strength `mask` reports for each pixel at that pixel's own coordinates
+    /// within the rectangle, a run of a row at a time: `mask(y, x, strengths)`
+    /// writes the strengths of the rectangle's row `y` from its column `x` on,
+    /// as [`wash_polygon_subpixel`](Self::wash_polygon_subpixel)'s mask does.
     ///
     /// The masked sibling of
     /// [`fill_vertical_gradient`](Self::fill_vertical_gradient), for a field
@@ -890,11 +884,9 @@ impl Surface {
     /// and no consumer grows coverage arithmetic of its own —
     /// [`round_rect_coverage`] is the one place an arc's comes from.
     ///
-    /// A fully uncovered pixel is left bit-identical rather than blended with a
-    /// transparent source, so a mask that answers `0` over most of its
-    /// rectangle costs only the pixels it actually paints. Like every
-    /// translucent composite here the rounding is the surface row's own
-    /// ordered-dither bias, so a smooth ramp cannot contour into flat bands.
+    /// A fully uncovered pixel is left bit-identical. Like every translucent
+    /// composite here the rounding is the surface row's own ordered-dither
+    /// bias, so a smooth ramp cannot contour into flat bands.
     pub fn wash_region(
         &mut self,
         x: u32,
@@ -902,11 +894,12 @@ impl Surface {
         w: u32,
         h: u32,
         color: Color,
-        mask: impl Fn(u32, u32) -> u8,
+        mask: impl Fn(u32, u32, &mut [u8]),
     ) {
         if w == 0 || h == 0 || color.a == 0 {
             return;
         }
+        let mut weights = [0u8; WASH_RUN];
         for row in self.admitted_rows(y, h) {
             let local_y = row - y;
             let dither = DitherRow::at(row);
@@ -915,18 +908,18 @@ impl Surface {
             };
             // A clipped span never starts left of the rectangle, so the local
             // column cannot wrap.
-            for (column, dst) in (first..).zip(span.iter_mut()) {
-                let coverage = mask(column - x, local_y);
-                if coverage == 0 {
+            let mut column = first;
+            for run in span.chunks_mut(WASH_RUN) {
+                let Some(strengths) = weights.get_mut(..run.len()) else {
                     continue;
+                };
+                strengths.fill(0);
+                mask(local_y, column - x, strengths);
+                for weight in strengths.iter_mut() {
+                    *weight = scale8(color.a, *weight);
                 }
-                let source = Color::rgba(
-                    color.r,
-                    color.g,
-                    color.b,
-                    div255(u32::from(color.a) * u32::from(coverage)),
-                );
-                *dst = source.over_biased(*dst, dither.bias(column));
+                wash_weighted(run, color, strengths, dither, column);
+                column = column.saturating_add(u32::try_from(run.len()).unwrap_or(u32::MAX));
             }
         }
     }
@@ -1187,7 +1180,7 @@ impl Surface {
         match paint {
             Paint::Solid(color) => {
                 let source = color.premultiply();
-                fill_coverage(self, fill, |_, _| source);
+                fill_flat(self, fill, source);
                 true
             }
             Paint::Gradient(gradient) => {
@@ -1359,8 +1352,13 @@ impl Surface {
 
     /// Fill an anti-aliased polygon whose vertices are in *device* sub-pixel
     /// units ([`fill_polygon_subpixel`](Self::fill_polygon_subpixel)) with
-    /// `color`, scaling its alpha by the coverage `mask` reports for each
+    /// `color`, scaling its alpha by the strength `mask` reports for each
     /// pixel at that pixel's own surface coordinates.
+    ///
+    /// The mask answers a row at a time: `mask(y, x, strengths)` writes the
+    /// strength of row `y`'s pixels from column `x` on, one entry each, so a
+    /// field that varies smoothly is stepped along the row rather than worked
+    /// out afresh at every pixel. It must depend on the position alone.
     ///
     /// The polygon sibling of [`wash_region`](Self::wash_region), for a field
     /// whose strength varies across a *shape* rather than a rectangle: a
@@ -1383,7 +1381,7 @@ impl Surface {
         &mut self,
         polygon: &[(i32, i32)],
         color: Color,
-        mask: impl Fn(u32, u32) -> u8,
+        mask: impl Fn(u32, u32, &mut [u8]),
     ) {
         self.wash_polygon_subpixel_in(polygon, color, mask, &mut ScanScratch::new());
     }
@@ -1395,7 +1393,7 @@ impl Surface {
         &mut self,
         polygon: &[(i32, i32)],
         color: Color,
-        mask: impl Fn(u32, u32) -> u8,
+        mask: impl Fn(u32, u32, &mut [u8]),
         scratch: &mut ScanScratch,
     ) {
         wash_placed(self, polygon, color, mask, scratch);
@@ -1469,7 +1467,7 @@ impl Surface {
     ) {
         if let Some(fill) = ScanFill::new(contours, space, rule, &mut ScanScratch::new()) {
             let source = color.premultiply();
-            fill_coverage(self, fill, |_, _| source);
+            fill_flat(self, fill, source);
         }
     }
 
@@ -1856,6 +1854,31 @@ impl Surface {
         }
     }
 
+    /// Paint rows `rows` across `runner` in bands of whole rows, at most `most`
+    /// of them and each worth `grain` pixels or more: `ready` makes each band
+    /// what `paint` is handed. Rows too few to split are one band, painted on
+    /// the calling thread.
+    pub fn paint_bands<'s, T: Send>(
+        &'s mut self,
+        rows: Range<u32>,
+        runner: &dyn JobRunner,
+        (most, grain): (usize, usize),
+        ready: impl FnMut(RowBand<'s>) -> T,
+        paint: &(dyn Fn(&mut T) + Sync),
+    ) {
+        let count = usize::try_from(rows.end.saturating_sub(rows.start)).unwrap_or(0);
+        let wide = usize::try_from(self.width).unwrap_or(1).max(1);
+        let pieces = tairix_parallel::bands(runner, count, grain.div_ceil(wide))
+            .min(most)
+            .max(1);
+        tairix_parallel::for_each_drawn(
+            runner,
+            self.row_bands_mut(rows, band_rows(count, pieces))
+                .map(ready),
+            &|mut piece| paint(&mut piece),
+        );
+    }
+
     /// The part of `[x, x+w) × [y, y+h)` a write reaches — the rectangle
     /// intersected with the surface bounds and the active clip window — as
     /// its admitted columns and rows in the paint's own coordinates, or
@@ -1965,6 +1988,10 @@ impl Rows for RowBand<'_> {
 /// of a frame drawn on several cores at once, rather than keeping a second
 /// paint order for the second target.
 pub trait Canvas {
+    /// Composite `color` over the rounded rectangle `[x, x+w) × [y, y+h)`, as
+    /// [`Surface::fill_round_rect`] does.
+    fn fill_round_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32, color: Color);
+
     /// Fill an anti-aliased polygon whose vertices are in device
     /// [`SUBPIXEL`] units with `color`, as
     /// [`Surface::fill_polygon_subpixel`] does, scan-converting it in
@@ -1983,7 +2010,7 @@ pub trait Canvas {
         &mut self,
         polygon: &[(i32, i32)],
         color: Color,
-        mask: impl Fn(u32, u32) -> u8,
+        mask: impl Fn(u32, u32, &mut [u8]),
         scratch: &mut ScanScratch,
     ) where
         Self: Sized;
@@ -2001,6 +2028,10 @@ pub trait Canvas {
 }
 
 impl Canvas for Surface {
+    fn fill_round_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32, color: Color) {
+        Self::fill_round_rect(self, x, y, w, h, radius, color);
+    }
+
     fn fill_polygon_subpixel(
         &mut self,
         polygon: &[(i32, i32)],
@@ -2014,7 +2045,7 @@ impl Canvas for Surface {
         &mut self,
         polygon: &[(i32, i32)],
         color: Color,
-        mask: impl Fn(u32, u32) -> u8,
+        mask: impl Fn(u32, u32, &mut [u8]),
         scratch: &mut ScanScratch,
     ) {
         wash_placed(self, polygon, color, mask, scratch);
@@ -2032,6 +2063,10 @@ impl Canvas for Surface {
 }
 
 impl Canvas for RowBand<'_> {
+    fn fill_round_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32, color: Color) {
+        round_rect_into(self, (x, y, w, h), radius, color, PaintMode::Over);
+    }
+
     fn fill_polygon_subpixel(
         &mut self,
         polygon: &[(i32, i32)],
@@ -2045,7 +2080,7 @@ impl Canvas for RowBand<'_> {
         &mut self,
         polygon: &[(i32, i32)],
         color: Color,
-        mask: impl Fn(u32, u32) -> u8,
+        mask: impl Fn(u32, u32, &mut [u8]),
         scratch: &mut ScanScratch,
     ) {
         wash_placed(self, polygon, color, mask, scratch);
@@ -2059,6 +2094,72 @@ impl Canvas for RowBand<'_> {
         scratch: &mut ScanScratch,
     ) {
         fill_occluded(self, polygon, color, occlusion, scratch);
+    }
+}
+
+/// The one rounded-rectangle walk, whole surface or band, painting each span
+/// in `mode`.
+fn round_rect_into<R: Rows + ?Sized>(
+    target: &mut R,
+    area: (u32, u32, u32, u32),
+    radius: u32,
+    color: Color,
+    mode: PaintMode,
+) {
+    let (x, y, w, h) = area;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let source = color.premultiply();
+    // The clamp `round_rect_coverage` applies internally, applied here
+    // too so the bands below name exactly the pixels it does not answer
+    // 255 for. Being at most half the shorter side, the radius never
+    // exceeds `w`, so neither subtraction can wrap.
+    let radius = radius.min(w / 2).min(h / 2);
+    let right_band = w - radius;
+    for row in target.admitted_rows(y, h) {
+        let local_y = row - y;
+        let Some((first, span)) = target.row_span_mut(row, x, w) else {
+            continue;
+        };
+        if !in_corner_band(local_y, h, radius) {
+            paint_span(span, SpanPaint { first, row, mode }, source);
+            continue;
+        }
+        // The drawn columns as the rectangle sees them: `lead` is the
+        // first, and a span never reaches past the rectangle's width, so
+        // `lead + drawn <= w` and the band arithmetic cannot wrap.
+        let lead = first - x;
+        let Ok(drawn) = u32::try_from(span.len()) else {
+            continue;
+        };
+        let left_end = radius.saturating_sub(lead).min(drawn);
+        let right_start = right_band.saturating_sub(lead).min(drawn).max(left_end);
+        let (left, rest) = span.split_at_mut(left_end as usize);
+        let (middle, right) = rest.split_at_mut((right_start - left_end) as usize);
+        let shape = (w, h, radius);
+        let at = |column| SpanPaint {
+            first: column,
+            row,
+            mode,
+        };
+        paint_coverage_span(
+            left,
+            lead..lead + left_end,
+            local_y,
+            shape,
+            source,
+            at(first),
+        );
+        paint_span(middle, at(first + left_end), source);
+        paint_coverage_span(
+            right,
+            lead + right_start..lead + drawn,
+            local_y,
+            shape,
+            source,
+            at(first + right_start),
+        );
     }
 }
 
@@ -2076,7 +2177,7 @@ fn fill_placed<R: Rows + ?Sized>(
         scratch,
     ) {
         let source = color.premultiply();
-        fill_coverage(target, fill, |_, _| source);
+        fill_flat(target, fill, source);
     }
 }
 
@@ -2109,11 +2210,15 @@ fn fill_occluded<R: Rows + ?Sized>(
 /// The one body of the masked wash, whole surface or band: `color`'s alpha
 /// scaled by each pixel's coverage and `mask`'s strength there, composited
 /// through the row's own dither bias.
+///
+/// The three are multiplied into one weight a pixel and the row laid by one
+/// vector kernel, which rounds each pixel exactly as laying `color` at its
+/// weight over it would.
 fn wash_placed<R: Rows + ?Sized>(
     target: &mut R,
     polygon: &[(i32, i32)],
     color: Color,
-    mask: impl Fn(u32, u32) -> u8,
+    mask: impl Fn(u32, u32, &mut [u8]),
     scratch: &mut ScanScratch,
 ) {
     if color.a == 0 {
@@ -2127,29 +2232,27 @@ fn wash_placed<R: Rows + ?Sized>(
     ) else {
         return;
     };
-    scan_rows(target, &mut fill, |pixel, dst| {
-        let strength = mask(pixel.x, pixel.y);
-        if strength == 0 {
+    scan_row_fills(target, &mut fill, |py, first, fill, reached, row| {
+        let Some((covered, weights)) = fill.weighed(reached) else {
             return;
+        };
+        // A mask that leaves an entry unwritten paints nothing there.
+        weights.fill(0);
+        mask(py, first, weights);
+        for (weight, &coverage) in weights.iter_mut().zip(covered) {
+            *weight = scale8(color.a, scale8(coverage, *weight));
         }
-        let held = div255(u32::from(pixel.coverage) * u32::from(strength));
-        let source = Color::rgba(
-            color.r,
-            color.g,
-            color.b,
-            div255(u32::from(color.a) * u32::from(held)),
-        );
-        *dst = source.over_biased(*dst, pixel.bias);
+        wash_weighted(row, color, weights, DitherRow::at(py), first);
     });
 }
 
 /// Composite the premultiplied pixel `source` reports for each covered
 /// pixel's surface position, scaled by that pixel's own coverage.
 ///
-/// One walk whatever the paint: a flat colour hands back a constant, a
-/// gradient samples its ramp, a pattern reads its tile — so the fill's
-/// plumbing never learns which it is drawing, and the flat case pays no
-/// per-pixel branch for the others.
+/// One walk for every paint whose colour varies with position: a gradient
+/// samples its ramp, a pattern reads its tile, an occluded fill answers its
+/// colour or nothing, so the fill's plumbing never learns which it is
+/// drawing. A flat colour takes [`fill_flat`] instead, a row at a time.
 fn fill_coverage<R: Rows + ?Sized>(
     target: &mut R,
     mut fill: ScanFill<'_>,
@@ -2165,22 +2268,66 @@ fn fill_coverage<R: Rows + ?Sized>(
     });
 }
 
-/// Walk every pixel `fill` covers, handing each one's position, coverage,
-/// and row dither bias to `paint`.
-///
-/// The whole of the scan-converted compositing plumbing — the clipped
-/// bounds, the one row of coverage, and the advance past columns the clip
-/// window cut — so a flat fill, a gradient, and a masked wash differ only
-/// in what they do with a covered pixel rather than each carrying its own
-/// copy of the walk.
-///
-/// A fill whose one row of coverage the allocator refuses paints nothing,
-/// exactly as one the clip window admits nothing of does — the entry
-/// points report no outcome, and an undrawn shape beats a dead process.
+/// Walk every pixel `fill` covers, handing each one's position and coverage
+/// to `paint`: the walk of a fill whose colour is worked out pixel by pixel.
 fn scan_rows<R: Rows + ?Sized>(
     target: &mut R,
     fill: &mut ScanFill<'_>,
     mut paint: impl FnMut(Covered, &mut Pixel),
+) {
+    scan_row_spans(target, fill, |py, first, covered, row| {
+        for ((px, coverage), dst) in (first..).zip(covered.iter().copied()).zip(row.iter_mut()) {
+            if coverage != 0 {
+                paint(
+                    Covered {
+                        x: px,
+                        y: py,
+                        coverage,
+                    },
+                    dst,
+                );
+            }
+        }
+    });
+}
+
+/// Composite `ink`, scaled by each pixel's coverage, over every pixel `fill`
+/// covers, a row at a time.
+fn fill_flat<R: Rows + ?Sized>(target: &mut R, mut fill: ScanFill<'_>, ink: Pixel) {
+    scan_row_spans(target, &mut fill, |_, first, covered, row| {
+        cover_span(row, ink, covered, DitherRow::NEAREST, first);
+    });
+}
+
+/// Walk every row `fill` covers, handing `lay` the row, the drawing column
+/// its first covered pixel is at, that row's coverage and the pixels beneath
+/// it, paired by position.
+fn scan_row_spans<R: Rows + ?Sized>(
+    target: &mut R,
+    fill: &mut ScanFill<'_>,
+    mut lay: impl FnMut(u32, u32, &[u8], &mut [Pixel]),
+) {
+    scan_row_fills(target, fill, |py, first, fill, reached, row| {
+        if let Some(covered) = fill.alphas().get(reached) {
+            lay(py, first, covered, row);
+        }
+    });
+}
+
+/// Walk every row `fill` covers, handing `lay` the row, the drawing column
+/// its first covered pixel is at, the fill itself with the entries of its
+/// row that coverage reached, and the pixels beneath them, paired by
+/// position.
+///
+/// The whole of the scan-converted compositing plumbing — the clipped
+/// bounds, the one row of coverage, and the advance past columns the clip
+/// window cut. A fill whose one row of coverage the allocator refuses paints
+/// nothing, exactly as one the clip window admits nothing of does — the entry
+/// points report no outcome, and an undrawn shape beats a dead process.
+fn scan_row_fills<R: Rows + ?Sized>(
+    target: &mut R,
+    fill: &mut ScanFill<'_>,
+    mut lay: impl FnMut(u32, u32, &mut ScanFill<'_>, Range<usize>, &mut [Pixel]),
 ) {
     let Some((x_start, x_end, y_start, y_end)) = fill.bounds(target.space_rect()) else {
         return;
@@ -2193,37 +2340,17 @@ fn scan_rows<R: Rows + ?Sized>(
         return;
     }
     for py in target.admitted_rows(y_start, y_end - y_start) {
-        let dither = DitherRow::at(py);
         let Some((first, row)) = target.row_span_mut(py, x_start, span_w) else {
             continue;
         };
         // Coverage is worked out only across the columns the row admits, which
         // the clip window may have narrowed from the shape's own extent.
         let reached = fill.coverage_row(py, first, row.len());
-        let (Some(covered), Some(row), Ok(offset)) = (
-            fill.alphas().get(reached.clone()),
-            row.get_mut(reached.clone()),
-            u32::try_from(reached.start),
-        ) else {
+        let (Some(row), Ok(offset)) = (row.get_mut(reached.clone()), u32::try_from(reached.start))
+        else {
             continue;
         };
-        for ((px, coverage), dst) in (first + offset..)
-            .zip(covered.iter().copied())
-            .zip(row.iter_mut())
-        {
-            if coverage == 0 {
-                continue;
-            }
-            paint(
-                Covered {
-                    x: px,
-                    y: py,
-                    coverage,
-                    bias: dither.bias(px),
-                },
-                dst,
-            );
-        }
+        lay(py, first + offset, fill, reached, row);
     }
 }
 
@@ -2272,12 +2399,92 @@ fn span_offsets(
     })
 }
 
+/// A wash mask answering `strength(x, y)` at each pixel: for a field with no
+/// cheaper way along a row than working out each pixel afresh.
+pub fn pointwise(strength: impl Fn(u32, u32) -> u8) -> impl Fn(u32, u32, &mut [u8]) {
+    move |y, x, strengths| {
+        for (column, slot) in (x..=u32::MAX).zip(strengths.iter_mut()) {
+            *slot = strength(column, y);
+        }
+    }
+}
+
 /// The band size that splits `rows` rows into `bands` bands through
 /// [`Surface::row_bands_mut`].
 #[must_use]
 pub fn band_rows(rows: usize, bands: usize) -> u32 {
     u32::try_from(tairix_parallel::piece_len(rows, bands)).unwrap_or(u32::MAX)
 }
+
+/// The fewest pixels a band of a surface's rows is worth handing to another
+/// core: a hand-off costs a wake and a join, so a band must carry thousands of
+/// pixels' work.
+pub const BAND_GRAIN: usize = 32_768;
+
+/// A scan converter's scratch for each band a surface's rows are drawn in
+/// across a runner, so the bands of one paint never share one.
+#[derive(Debug, Default)]
+pub struct BandScratch {
+    held: Vec<ScanScratch>,
+    /// The one band's scratch when none could be held, kept so a paint under
+    /// memory pressure does not allocate one afresh each time.
+    fallback: ScanScratch,
+}
+
+impl BandScratch {
+    /// No scratch held yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            held: Vec::new(),
+            fallback: ScanScratch::new(),
+        }
+    }
+
+    /// Hold a scratch for each band `runner` may split a paint into. A refusal
+    /// keeps the ones held, and a paint is split no finer than they are.
+    pub fn spread_over(&mut self, runner: &dyn JobRunner) {
+        let wanted = tairix_parallel::bands(runner, usize::MAX, 1);
+        if let Some(more) = wanted.checked_sub(self.held.len()) {
+            if fallible::reserve(&mut self.held, more) {
+                self.held.resize_with(wanted, ScanScratch::new);
+            }
+        }
+    }
+
+    /// Draw rows `rows` of `surface` across `runner` in bands of whole rows,
+    /// each worth [`BAND_GRAIN`] pixels or more and each drawn by `paint` with a
+    /// scratch of its own.
+    pub fn draw(
+        &mut self,
+        surface: &mut Surface,
+        rows: Range<u32>,
+        runner: &dyn JobRunner,
+        paint: &(dyn Fn(&mut RowBand<'_>, &mut ScanScratch) + Sync),
+    ) {
+        // With none held the paint is one band, which takes the fallback.
+        let most = self.held.len().max(1);
+        let mut scratch = self
+            .held
+            .iter_mut()
+            .chain(core::iter::once(&mut self.fallback));
+        surface.paint_bands(
+            rows,
+            runner,
+            (most, BAND_GRAIN),
+            |band| (band, scratch.next()),
+            &|(band, scratch): &mut (RowBand<'_>, Option<&mut ScanScratch>)| {
+                if let Some(scratch) = scratch {
+                    paint(band, scratch);
+                }
+            },
+        );
+    }
+}
+
+#[path = "columns.rs"]
+mod columns;
+pub use columns::{ColumnBand, ColumnBands};
 
 /// One band of [`Surface::row_bands_mut`]: a contiguous block of whole surface
 /// rows, borrowed exclusively.
@@ -2483,7 +2690,7 @@ fn render_tile(
         return None;
     }
     if pattern.opacity != u8::MAX {
-        for pixel in &mut tile.pixels {
+        for pixel in tile.pixels.iter_mut() {
             *pixel = pixel.scale_alpha(pattern.opacity);
         }
     }
@@ -2671,9 +2878,7 @@ fn paint_span(span: &mut [Pixel], paint: SpanPaint, source: Pixel) {
         span.fill(source);
         return;
     }
-    dither_tiles(span, DitherRow::at(row), first, |dst, bias| {
-        *dst = source.over_biased(*dst, bias);
-    });
+    blend_solid_span(span, source, u8::MAX, DitherRow::at(row), first);
 }
 
 /// Composite `source` over every pixel of `span`, spreading the rounding

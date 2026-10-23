@@ -10,6 +10,7 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
@@ -298,7 +299,7 @@ const STACK_POISON: u8 = 0xA5;
 
 /// Admit a built space as a resumable user kthread.
 fn admit(sched: &Scheduler<X86_64Arch>, cs: ContextSwitchHal, root_phys: u64, entry: UserEntry) {
-    let pre_resume = move |kernel_stack_top: u64| {
+    let pre_resume = move |kernel_stack_top: u64, tag: AddressTag| {
         if syscall_entry::set_kernel_rsp0(BOOT_CPU as usize, kernel_stack_top).is_err() {
             note(
                 TEST_FAIL,
@@ -309,7 +310,7 @@ fn admit(sched: &Scheduler<X86_64Arch>, cs: ContextSwitchHal, root_phys: u64, en
         // SAFETY: paging is enabled and `root_phys` is the PML4 of the task's
         // space, which maps the low identity + higher-half kernel window the
         // running dispatcher executes from — `activate_user_root`'s contract.
-        unsafe { activate_user_root(root_phys) };
+        unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so

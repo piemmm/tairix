@@ -8,6 +8,7 @@
 use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use alloc::sync::Arc;
 
@@ -265,11 +266,11 @@ fn admit(
     root_phys: u64,
     entry: UserEntry,
 ) {
-    let pre_resume = move |_stack_top: u64| {
+    let pre_resume = move |_stack_top: u64, tag: AddressTag| {
         // SAFETY: the MMU is enabled and `root_phys` is the L1 root of a space
         // that identity-maps the low kernel window the running kernel executes
         // from — `activate_user_root`'s contract.
-        unsafe { activate_user_root(root_phys) };
+        unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: the entered space is active and the EL1 trap vector + dispatch

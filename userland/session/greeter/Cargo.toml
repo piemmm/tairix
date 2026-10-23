@@ -23,6 +23,7 @@ program = [
     "dep:tairix-procinfo",
     "dep:tairix-font",
     "tairix-display/rt",
+    "tairix-parallel/pool",
     "tairix-tz/rt",
 ]
 
@@ -88,6 +89,10 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # its text is shadowed in: the minimal-clock screensaver's scene, which this
 # crate may not reach into the desktop session for.
 tairix-ribbon = { path = "../../../lib/ribbon", version = "=0.0.0" }
+# What the ribbon is painted and the frame composed across: the engine names
+# the contract alone, and the program's `pool` feature brings the worker pool
+# it hands in.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false }
 # Structured audit records with stable event ids.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
@@ -133,6 +138,9 @@ tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 # The capability set an authenticated identity carries, for the fixture
 # authenticator the end-to-end test injects.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The shared test runners a banded compose is proven against: `Reversed` for
+# bit-identity whichever band runs first, `Threaded` for bands run at once.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false, features = ["test-util"] }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -36,7 +36,6 @@
 use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_log::Sink;
 use tairix_reclaim::MemoryPressure;
@@ -54,25 +53,10 @@ use crate::ramzip::{
     FaultError, PageCandidate, Ramzip, RamzipFaultOutcome, RamzipReclaimSummary, VmContext,
     WarmOutcome,
 };
-use crate::retire::{ActiveCpus, Retire, Retiring, SpaceTlb, Unpublished};
+use crate::retire::{Retire, Retiring, SpaceTlb, TlbContext, Unpublished};
 use crate::vmm::{
     AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr,
 };
-
-/// Monotonic allocator of the stable per-address-space id the global
-/// [`Ramzip`] tier keys a space's compressed entries on and the audit
-/// log records.
-///
-/// A live space is minted with the next id here, exactly as a process
-/// id is allocated: ids are never reused within a boot, so a space's
-/// entries can never be confused with a later space's. `u64` never
-/// wraps in any realistic boot (2^64 spawns).
-static NEXT_SPACE_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Mint the next unique live-address-space id.
-fn next_space_id() -> u64 {
-    NEXT_SPACE_ID.fetch_add(1, Ordering::Relaxed)
-}
 
 /// Why a [`LiveUserSpace`] operation failed.
 ///
@@ -135,9 +119,10 @@ pub struct DmaMapping {
 /// thread's syscall path through the per-CPU publication. Every method takes
 /// `&mut self`; that lock is what makes the access exclusive.
 pub trait LiveUserSpace: Send {
-    /// The CPUs this space is active on, for the dispatcher to keep current:
-    /// an unmap discards its translations on exactly these.
-    fn active_cpus(&self) -> Arc<ActiveCpus>;
+    /// The space's standing with the TLBs, for the dispatcher to keep
+    /// current: an unmap reaches the CPUs running it at once, and the rest
+    /// catch up on its generation when they return.
+    fn tlb_context(&self) -> Arc<TlbContext>;
 
     /// Map `page_count` fresh, zeroed `RW|USER` pages at the page-aligned
     /// `base_va` into this space, returning `base_va` on success.
@@ -656,14 +641,15 @@ pub trait LiveUserSpace: Send {
 ///   ([`crate::filemap`]). `None` on a degenerate configuration whose user
 ///   address space has no room above the heap window (file mapping then
 ///   fails closed as a deterministic OOM).
-/// * `space_id` — the stable, monotonically minted id the process-global
+/// * `space_id` — the space's [`TlbContext`] id, which the process-global
 ///   [`Ramzip`] tier keys this space's compressed entries on;
 /// * `scanner` — this space's own second-chance [`ColdPageScanner`], so
 ///   the reclaim clock hand rotates independently per space.
 pub struct LiveSpace<P: PageTable, M: PhysMap> {
     space: AddressSpace<P>,
-    /// The CPUs `space` is active on: the set its attached reach targets.
-    cpus: Arc<ActiveCpus>,
+    /// `space`'s standing with the TLBs: the context its attached reach
+    /// targets.
+    context: Arc<TlbContext>,
     physmap: M,
     frames: &'static FrameAllocator,
     mmio: MmioWindowMap,
@@ -766,11 +752,12 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
                     .map_err(|_| MmioError::InvalidMapConfig)?,
             )
         };
-        let cpus = Arc::clone(tlb.active_cpus());
+        let context = Arc::clone(tlb.context());
         space.attach_tlb(tlb);
         Ok(Self {
+            space_id: context.id(),
             space,
-            cpus,
+            context,
             physmap,
             frames,
             mmio,
@@ -779,7 +766,6 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             dma_custodian: None,
             shared,
             file,
-            space_id: next_space_id(),
             scanner: ColdPageScanner::new(),
             committed_unbacked: 0,
             growable: BTreeSet::new(),
@@ -825,8 +811,8 @@ where
     P: PageTable + Send,
     M: PhysMap + Send,
 {
-    fn active_cpus(&self) -> Arc<ActiveCpus> {
-        Arc::clone(&self.cpus)
+    fn tlb_context(&self) -> Arc<TlbContext> {
+        Arc::clone(&self.context)
     }
 
     fn map_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<u64, LiveSpaceError> {
@@ -1423,9 +1409,10 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
         //    The walk allocates nothing, so a teardown under memory pressure
         //    cannot fail for want of the memory it is about to return.
         //
-        //    A space active nowhere needs no flush at all: every CPU that ran
-        //    it discarded its translations when it switched away.
-        let quiet = self.cpus.is_idle();
+        //    A space no CPU runs needs no flush at all: a CPU that ran it
+        //    keeps its entries only under a tag it discards before it gives
+        //    the tag to another space, and this one never runs again.
+        let quiet = self.context.is_idle();
         let frames = self.frames;
         let mut release = |frame| {
             let _ = frames.free(frame);
@@ -1439,9 +1426,9 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
         let mut retiring = Retiring::new(reach, &mut unpublished, &self.physmap, &mut release);
         loop {
             let next = if quiet {
-                // SAFETY: the set is idle and nothing can enter it again —
-                // the last handle a thread could run the space through is
-                // gone — so no CPU holds or can come to hold a translation.
+                // SAFETY: no CPU runs the space and none can come to — the
+                // last handle a thread could run it through is gone — so no
+                // CPU can use a translation of it again.
                 unsafe { self.space.clear_lowest() }
             } else {
                 self.space.unmap_lowest()
@@ -1496,7 +1483,7 @@ mod tests {
     use crate::frame::{FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
     use crate::mmio::SharedMemory;
     use crate::phys::SimPhysMap;
-    use crate::retire::{ActiveCpus, SpaceTlb, Unpublished};
+    use crate::retire::{SpaceTlb, TlbContext, Unpublished};
     use crate::test_fixture::{custody, frame_backing};
     use crate::uaccess::{copy_in, copy_out};
     use crate::vmm::{AddressSpace, HostPageTable, Page, VirtAddr};
@@ -1531,7 +1518,7 @@ mod tests {
 
     /// A reach for a space no dispatcher runs: the host has no other CPU.
     fn host_tlb() -> SpaceTlb {
-        SpaceTlb::new(ActiveCpus::new(1).expect("one word allocates"), None)
+        SpaceTlb::new(TlbContext::new(1).expect("one word allocates"), None)
     }
 
     /// The node and admission generation the tests' carves are made for.
@@ -3316,7 +3303,7 @@ mod tests {
         use crate::frame::{Frame, FrameAllocator, PhysAddr, PAGE_SIZE};
         use crate::live::{LiveSpace, LiveUserSpace};
         use crate::phys::SimPhysMap;
-        use crate::retire::{ActiveCpus, RecordedRemote, Retire, SpaceTlb};
+        use crate::retire::{RecordedRemote, Retire, SpaceTlb, TlbContext};
         use crate::test_fixture::{custody, frame_backing};
         use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, VirtAddr};
         use tairix_arch_api::mmu::{
@@ -3358,7 +3345,7 @@ mod tests {
 
         /// A reach whose space runs on another CPU too.
         fn shared_reach() -> SpaceTlb {
-            let cpus = ActiveCpus::new(2).expect("one word allocates");
+            let cpus = TlbContext::new(2).expect("one word allocates");
             cpus.enter(OTHER_CPU);
             SpaceTlb::new(cpus, Some(&REMOTE))
         }
@@ -3620,7 +3607,7 @@ mod tests {
             let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
             let free_before = frames.free_frames();
             let live = {
-                let cpus = ActiveCpus::new(2).expect("one word allocates");
+                let cpus = TlbContext::new(2).expect("one word allocates");
                 let mut live = counting_space(
                     frames,
                     simmap,

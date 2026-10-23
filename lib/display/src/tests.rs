@@ -23,6 +23,7 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::seat::{DisplayLease, ReleaseSurface};
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, DriverError, Errno, ProcId, PROC_ID_LEN};
+use tairix_geometry::{Rect, Region};
 
 use crate::client::{BufferMapper, DisplayClient, DisplayTransport, RemoteDisplay};
 use crate::driver_error_from_errno;
@@ -1150,6 +1151,122 @@ fn a_remote_display_refreshes_what_each_frame_missed_across_the_ring() {
         &frame[..],
         "the frame-0 change was owed to it"
     );
+}
+
+/// A frame drawn in place is handed the back frame and what it owes: the
+/// damage, and what that frame missed while the other was shown, and is then
+/// shown with the damage it named.
+#[test]
+fn a_frame_drawn_in_place_is_handed_what_the_back_frame_owes() {
+    let (rig, mut remote) = remote(Rig::new());
+    let mut owed = alloc::vec::Vec::new();
+    let mut draw = |memory: &mut [u8], stride: u32, refresh: &Region| {
+        owed.push((refresh.rects().to_vec(), stride));
+        for rect in refresh.rects() {
+            for row in rect.top()..rect.bottom() {
+                let at = usize::try_from(row).expect("on screen") * stride as usize
+                    + usize::try_from(rect.left()).expect("on screen") * 4;
+                memory[at..at + rect.width as usize * 4].fill(0x5A);
+            }
+        }
+        Ok(())
+    };
+    let whole = Region::from(Rect::new(0, 0, 4, 3));
+    remote.present_drawn(&whole, &mut draw).expect("frame 0");
+    let corner = Region::from(Rect::new(1, 1, 2, 1));
+    remote.present_drawn(&corner, &mut draw).expect("frame 1");
+    remote
+        .present_drawn(&corner, &mut draw)
+        .expect("frame 0 again");
+    assert_eq!(owed[0], (whole.rects().to_vec(), 16));
+    assert_eq!(
+        owed[1],
+        (whole.rects().to_vec(), 16),
+        "frame 1 missed frame 0's"
+    );
+    assert_eq!(
+        owed[2],
+        (corner.rects().to_vec(), 16),
+        "frame 0 missed frame 1's"
+    );
+    assert!(remote.frame(1).iter().all(|byte| *byte == 0x5A));
+    let shown = rig.borrow().display.shown.clone();
+    assert_eq!(shown.len(), 3);
+    assert_eq!(shown[2].1, vec![rect(1, 1, 2, 1)]);
+}
+
+/// A draw that refuses shows nothing and hands its refusal back, and the
+/// frame it was handed owes the whole region still, where no other frame owes
+/// what was never shown.
+#[test]
+fn a_refused_draw_shows_nothing_and_its_frame_stays_owed() {
+    let (rig, mut remote) = remote(Rig::new());
+    let mut owed = Vec::new();
+    let refusing = core::cell::Cell::new(false);
+    let mut draw = |_: &mut [u8], _: u32, refresh: &Region| {
+        owed.push(refresh.rects().to_vec());
+        if refusing.get() {
+            Err(DriverError::OutOfRange)
+        } else {
+            Ok(())
+        }
+    };
+    let whole = Region::from(Rect::new(0, 0, 4, 3));
+    let (a, b, c) = (
+        Region::from(Rect::new(0, 0, 1, 1)),
+        Region::from(Rect::new(2, 1, 1, 1)),
+        Region::from(Rect::new(3, 2, 1, 1)),
+    );
+    for damage in [&whole, &whole, &a, &a] {
+        remote.present_drawn(damage, &mut draw).expect("shown");
+    }
+    refusing.set(true);
+    assert_eq!(
+        remote.present_drawn(&b, &mut draw).err(),
+        Some(DriverError::OutOfRange)
+    );
+    refusing.set(false);
+    assert_eq!(
+        rig.borrow().display.shown.len(),
+        4,
+        "the refused frame never shown"
+    );
+    remote.present_drawn(&c, &mut draw).expect("frame 0");
+    remote.present_drawn(&c, &mut draw).expect("frame 1");
+    let mut kept = a.clone();
+    kept.add_region(&b);
+    kept.add_region(&c);
+    assert_eq!(owed[5], kept.rects(), "frame 0 still owes what it refused");
+    assert_eq!(owed[6], c.rects(), "frame 1 owes nothing never shown");
+    let shown = rig.borrow().display.shown.clone();
+    assert_eq!(shown.len(), 6);
+    assert_eq!(shown[4].1, vec![rect(3, 2, 1, 1)]);
+}
+
+/// A present still waiting for its latch refuses one drawn in place without
+/// handing out a frame the display may yet be reading, and nothing changed
+/// shows nothing.
+#[test]
+fn a_frame_drawn_in_place_waits_for_the_latch_and_nothing_shows_nothing() {
+    let mut rig = Rig::new();
+    rig.display.queues = true;
+    let (rig, mut remote) = remote(rig);
+    let mut drawn = 0;
+    let mut draw = |_: &mut [u8], _: u32, _: &Region| {
+        drawn += 1;
+        Ok(())
+    };
+    remote
+        .present_drawn(&Region::new(), &mut draw)
+        .expect("nothing to show");
+    assert_eq!(rig.borrow().display.shown.len(), 0);
+    let whole = Region::from(Rect::new(0, 0, 4, 3));
+    remote.present_drawn(&whole, &mut draw).expect("queued");
+    assert_eq!(
+        remote.present_drawn(&whole, &mut draw).err(),
+        Some(DriverError::Busy)
+    );
+    assert_eq!(drawn, 1, "the frame being read is never handed out");
 }
 
 #[test]

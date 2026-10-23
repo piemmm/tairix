@@ -36,7 +36,8 @@ use tairix_inline::ArrayVec;
 
 use crate::driver_error_from_errno;
 use crate::memory::copy_rows;
-use crate::presenter::{Base, CursorPlane, LayerPresenter, Presenter};
+use crate::presenter::{Base, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
+use crate::scanout::as_damage;
 
 /// One request/reply exchange with the display service.
 pub trait DisplayTransport {
@@ -308,6 +309,8 @@ pub struct RemoteDisplay<M: BufferMapper, T: DisplayTransport> {
     cursor_shown: bool,
     /// The frame the device shows, once one was presented.
     shown: Option<usize>,
+    /// What a present changed, kept for its buffer.
+    changed: Region,
 }
 
 impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
@@ -369,6 +372,7 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
             cursor: None,
             cursor_shown: false,
             shown: None,
+            changed: Region::new(),
         })
     }
 
@@ -400,20 +404,40 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
         if frame.len() < source_len {
             return Err(DriverError::BufferTooSmall);
         }
-        let (surface, back) = (self.surface, self.back);
-        let mut refresh = core::mem::take(&mut self.frames[back].stale);
-        mark(&mut refresh, damage, surface);
+        let mut changed = core::mem::take(&mut self.changed);
+        changed.clear();
+        mark(&mut changed, damage, self.surface);
+        let refresh = self.refresh_back(&changed);
         for &rect in refresh.rects() {
-            self.copy_rect(frame, back, rect);
+            self.copy_rect(frame, self.back, rect);
         }
+        let id = self.settle_back(refresh, &changed);
+        self.changed = changed;
+        Ok(id)
+    }
+
+    /// What the back frame needs brought up to date for a present of which
+    /// `changed` changed: that, and what the frame missed since it was shown.
+    fn refresh_back(&mut self, changed: &Region) -> Region {
+        let mut refresh = core::mem::take(&mut self.frames[self.back].stale);
+        refresh.add_region(changed);
+        refresh.clip(self.surface);
+        refresh
+    }
+
+    /// The back frame is up to date: give it back its emptied `refresh`, owe
+    /// `changed` to every other frame, and name the back frame.
+    fn settle_back(&mut self, mut refresh: Region, changed: &Region) -> BufferId {
+        let (surface, back) = (self.surface, self.back);
         refresh.clear();
         self.frames[back].stale = refresh;
         for (index, other) in self.frames.iter_mut().enumerate() {
             if index != back {
-                mark(&mut other.stale, damage, surface);
+                other.stale.add_region(changed);
+                other.stale.clip(surface);
             }
         }
-        Ok(self.frames[back].id)
+        self.frames[back].id
     }
 
     /// The staged back frame went to the display, so the next is drawn into.
@@ -545,6 +569,40 @@ impl<M: BufferMapper, T: DisplayTransport> Presenter for RemoteDisplay<M, T> {
         let reply = self
             .client
             .present(id, damage)
+            .map_err(driver_error_from_errno)?;
+        self.rotate(reply);
+        Ok(())
+    }
+
+    fn present_drawn(
+        &mut self,
+        damage: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<(), DriverError> {
+        if self.in_flight.is_some() {
+            return Err(DriverError::Busy);
+        }
+        let mut changed = core::mem::take(&mut self.changed);
+        changed.clone_from(damage);
+        changed.clip(self.surface);
+        let listed = DamageList::fitted(changed.rects().iter().filter_map(as_damage));
+        let Some(listed) = listed else {
+            self.changed = changed;
+            return Ok(());
+        };
+        let refresh = self.refresh_back(&changed);
+        let back = &mut self.frames[self.back];
+        if let Err(refused) = draw(back.memory.as_mut(), self.stride, &refresh) {
+            // What the draw left is unknown, so all of it stays owed.
+            back.stale = refresh;
+            self.changed = changed;
+            return Err(refused);
+        }
+        let id = self.settle_back(refresh, &changed);
+        self.changed = changed;
+        let reply = self
+            .client
+            .present(id, listed.rects())
             .map_err(driver_error_from_errno)?;
         self.rotate(reply);
         Ok(())

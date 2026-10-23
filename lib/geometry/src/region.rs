@@ -106,6 +106,11 @@ impl Region {
 
     /// Add every pixel of `rect`. Empty rectangles cover nothing and are
     /// ignored.
+    ///
+    /// A rectangle past the end of the band form — below every band, or right
+    /// of the last band's last span on its rows — is appended in place, so a
+    /// list added in band order, as another region's rectangles are, costs one
+    /// pass rather than a walk of the region per rectangle.
     pub fn add(&mut self, rect: Rect) {
         if rect.is_empty() {
             return;
@@ -115,7 +120,117 @@ impl Region {
             self.bounds = rect;
             return;
         }
-        self.apply(rect, Op::Union);
+        if !self.append(rect) {
+            self.apply(&[rect], Op::Union);
+        }
+    }
+
+    /// Add `rect` past the end of the band form, answering `false`, having
+    /// changed nothing, for a rectangle that is not.
+    fn append(&mut self, rect: Rect) -> bool {
+        let Some(&last) = self.rects.last() else {
+            return false;
+        };
+        let len = self.rects.len();
+        if rect.top() >= last.bottom() {
+            let alone = len
+                .checked_sub(2)
+                .and_then(|before| self.rects.get(before))
+                .is_none_or(|before| before.top() != last.top());
+            let continues = alone
+                && rect.top() == last.bottom()
+                && rect.left() == last.left()
+                && rect.width == last.width;
+            match self.rects.last_mut() {
+                Some(band) if continues => band.height = span(band.top(), rect.bottom()),
+                _ => self.rects.push(rect),
+            }
+        } else if (last.top()..last.bottom()).contains(&rect.top())
+            && rect.bottom() == last.bottom()
+            && rect.left() > last.right()
+        {
+            let mut start = band_start(&self.rects, len);
+            if rect.top() > last.top() {
+                start = self.split_last_band(start, rect.top());
+            }
+            self.rects.push(rect);
+            self.join_last_band(start);
+        } else {
+            return false;
+        }
+        self.bounds = self.bounds.union(&rect);
+        self.hold_to_budget();
+        true
+    }
+
+    /// Cut the last band, which begins at `start`, at row `at` inside it, into
+    /// a band above holding its spans and one below holding them again,
+    /// answering where the lower one begins. A band reaches above a rectangle
+    /// added to its lower rows only by having joined the band above.
+    fn split_last_band(&mut self, start: usize, at: i32) -> usize {
+        let lower = self.rects.len();
+        for index in start..lower {
+            let Some(&rect) = self.rects.get(index) else {
+                continue;
+            };
+            self.rects.push(Rect::new(
+                rect.left(),
+                at,
+                rect.width,
+                span(at, rect.bottom()),
+            ));
+            if let Some(upper) = self.rects.get_mut(index) {
+                upper.height = span(rect.top(), at);
+            }
+        }
+        lower
+    }
+
+    /// Merge the last band, which begins at `start`, into the band above it
+    /// when that band ends on the row the last begins and holds its spans.
+    fn join_last_band(&mut self, start: usize) {
+        let above = band_start(&self.rects, start);
+        let len = self.rects.len() - start;
+        let joins = start - above == len
+            && self
+                .rects
+                .get(above)
+                .zip(self.rects.get(start))
+                .is_some_and(|(upper, lower)| upper.bottom() == lower.top())
+            && same_spans(&self.rects, above, start, len);
+        if !joins {
+            return;
+        }
+        let bottom = self.rects.last().map_or(0, Rect::bottom);
+        if let Some(band) = self.rects.get_mut(above..start) {
+            for rect in band {
+                rect.height = span(rect.top(), bottom);
+            }
+        }
+        self.rects.truncate(start);
+    }
+
+    /// Add every pixel of `other`, in one merge walk over both regions, where
+    /// adding its rectangles one at a time walks this region once each.
+    pub fn add_region(&mut self, other: &Self) {
+        if other.rects.is_empty() {
+            return;
+        }
+        if self.rects.is_empty() {
+            self.rects.clone_from(&other.rects);
+            self.bounds = other.bounds;
+            self.hold_to_budget();
+            return;
+        }
+        self.apply(&other.rects, Op::Union);
+    }
+
+    /// Remove every pixel of `other`, in one merge walk over both regions.
+    pub fn subtract_region(&mut self, other: &Self) {
+        if self.rects.is_empty() || other.bounds.intersection(&self.bounds).is_empty() {
+            return;
+        }
+        self.apply(&other.rects, Op::Subtract);
     }
 
     /// Remove every pixel of `rect`.
@@ -126,7 +241,7 @@ impl Region {
         if rect.intersection(&self.bounds).is_empty() {
             return;
         }
-        self.apply(rect, Op::Subtract);
+        self.apply(&[rect], Op::Subtract);
     }
 
     /// Keep only the pixels inside `rect`.
@@ -138,7 +253,7 @@ impl Region {
             self.clear();
             return;
         }
-        self.apply(rect, Op::Intersect);
+        self.apply(&[rect], Op::Intersect);
     }
 
     /// Shift every pixel by `(dx, dy)`.
@@ -184,16 +299,21 @@ impl Region {
             && self.rects.iter().any(|r| !r.intersection(&rect).is_empty())
     }
 
-    /// Combine `rect` into the canonical rectangles under `op`, reusing the
-    /// buffer the previous mutation left behind.
-    fn apply(&mut self, rect: Rect, op: Op) {
+    /// Combine the canonical `rects` into this region's under `op`, reusing
+    /// the buffer the previous mutation left behind.
+    fn apply(&mut self, rects: &[Rect], op: Op) {
         let mut out = core::mem::take(&mut self.scratch);
-        combine(&self.rects, &[rect], op, &mut out);
+        combine(&self.rects, rects, op, &mut out);
         self.scratch = core::mem::replace(&mut self.rects, out);
         self.bounds = self
             .rects
             .iter()
             .fold(Rect::EMPTY, |acc, rect| acc.union(rect));
+        self.hold_to_budget();
+    }
+
+    /// Degrade to the bounding box once past the budget.
+    fn hold_to_budget(&mut self) {
         if self.budget.is_some_and(|max| self.rects.len() > max) {
             self.rects.clear();
             self.rects.push(self.bounds);
@@ -257,6 +377,23 @@ fn shift_fits(bounds: Rect, dx: i32, dy: i32) -> bool {
         && fits(bounds.right(), dx)
         && fits(bounds.top(), dy)
         && fits(bounds.bottom(), dy)
+}
+
+/// The index the band ending just before `end` starts at: the run of
+/// rectangles sharing its top edge. `end` itself when it is `0`.
+fn band_start(rects: &[Rect], end: usize) -> usize {
+    let Some(top) = end
+        .checked_sub(1)
+        .and_then(|last| rects.get(last))
+        .map(Rect::top)
+    else {
+        return end;
+    };
+    let mut start = end - 1;
+    while start > 0 && rects.get(start - 1).is_some_and(|r| r.top() == top) {
+        start -= 1;
+    }
+    start
 }
 
 /// The index one past the band that starts at `start`: the run of rectangles

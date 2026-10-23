@@ -692,23 +692,12 @@ unsafe fn trap_body(
         // Not frame-resident, and every path below can take a nested trap
         // that rewrites it, so each consumer is handed this one reading.
         let stval = read_stval();
-        // Software A/D update (the cold-page referenced bit,
-        // `plans/SWAPSWAPSWAP.md`): under Svade an access to a valid leaf
-        // whose Accessed (or, for a store, Dirty) bit is clear raises a
-        // page fault rather than updating the bit in the walk. Set the
-        // bit(s) back on the faulting leaf and return so the epilogue's
-        // `sret` retries the access (the saved `sepc` still points at the
-        // faulting instruction — the hart does not advance it for a page
-        // fault). All three page-fault classes and both privilege modes
-        // are handled here — the cleared-A leaf may be the running task's
-        // own page (U-mode) or one the kernel touches on its behalf
-        // (S-mode). A leaf that does not permit the access (a genuine
-        // permission fault shares the same `scause`) or is absent leaves
-        // `set_accessed_flag_in_active` returning `false`, so the fault
-        // falls through to the resolver / fatal path unchanged (fail
-        // closed). On a Svadu part the hardware sets A/D in the walk and
-        // this fault never fires, so the branch is inert there.
-        let ad_kind = if crate::fault::is_store_page_fault(scause) {
+        // A fault on a leaf that grants the access is not the access's: its
+        // A/D bit was clear under Svade, or this hart cached the translation
+        // before the leaf was made valid. The bits are set and the entry
+        // discarded, and returning retries the access (`sepc` still names
+        // it); anything else falls through to the resolver and the fatal path.
+        let kind = if crate::fault::is_store_page_fault(scause) {
             Some(crate::paging::AccessKind::Store)
         } else if crate::fault::is_load_page_fault(scause) {
             Some(crate::paging::AccessKind::Load)
@@ -717,8 +706,16 @@ unsafe fn trap_body(
         } else {
             None
         };
-        if let Some(kind) = ad_kind {
-            if crate::paging::set_accessed_flag_in_active(stval, kind) {
+        if let Some(kind) = kind {
+            // SAFETY: `frame` is the live saved-register frame; reading its
+            // saved `sstatus` is sound.
+            let sstatus = unsafe { (*frame).sstatus };
+            let access = crate::paging::FaultingAccess {
+                kind,
+                from_user: trap_came_from_user(sstatus),
+                user_memory: (sstatus & crate::userentry::SSTATUS_SUM) != 0,
+            };
+            if crate::paging::retry_granted_fault(stval, access) {
                 return;
             }
         }

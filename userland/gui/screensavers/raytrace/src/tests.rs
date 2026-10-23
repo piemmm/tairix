@@ -26,14 +26,17 @@ use tairix_reclaim::PressureBand;
 use tairix_saver::testing::{self, Screen, FRAME_NS as TEST_SCENE_FRAME_NS};
 use tairix_saver::{NextFrame, SaverValue};
 
-use super::crossfade::Crossfade;
+use super::crossfade::{self, Crossfade};
 #[cfg(feature = "scene-tests")]
 use super::engine::PLAIN;
-use super::tiles::Tiles;
+use tairix_abi::saver_ipc::SAVER_DAMAGE_RECTS;
+use tairix_geometry::Tiles;
+
+use super::TILE;
 use super::{
-    paint_wait, CpuUse, Engine, Feed, Laying, Memory, Phase, Raytrace, Status, TraceHost,
-    TraceLink, Traced, DETAIL_WAIT_NS, FADE_MS, FIRST_WAIT_NS, HOLD_NS, MOST_WAIT_NS,
-    READOUT_WAIT_NS,
+    crew_painter, paint_wait, painter_workers, CpuUse, Engine, Feed, Laying, Memory, Phase,
+    Raytrace, Status, TraceHost, TraceLink, Traced, DETAIL_WAIT_NS, FADE_MS, FIRST_WAIT_NS,
+    HOLD_NS, MOST_WAIT_NS, READOUT_WAIT_NS,
 };
 
 const SIZE: (u32, u32) = (48, 27);
@@ -330,8 +333,11 @@ fn a_change_marks_the_tiles_about_its_steps_and_only_them() {
         draw(&mut screen, &mut saver, 0);
         assert_eq!(fading(&saver).is_some(), !calm, "faded in unless calm");
         let mut marked = Region::new();
-        let mut room = Tiles::new(SCREEN).expect("room");
-        saver.preview.changed().cover(&mut room, &mut marked);
+        let mut room = Tiles::new(SCREEN, TILE).expect("room");
+        saver
+            .preview
+            .changed()
+            .cover(SAVER_DAMAGE_RECTS, &mut room, &mut marked);
         let covered: u32 = marked
             .rects()
             .iter()
@@ -747,6 +753,67 @@ fn a_band_wanting_the_memory_back_ends_the_crossfade() {
     );
 }
 
+/// Frames coming slower than a change's fade runs still show it a step at a
+/// time, brighter each frame, and the next paint waits until it is shown
+/// whole: a slow frame rate lengthens the fade rather than losing it.
+#[test]
+fn a_fade_shown_at_a_slow_frame_rate_takes_its_frames_and_holds_the_next_paint() {
+    let first = first_pass_lit();
+    let painted = u64::try_from(first.len()).expect("small");
+    let second = screen_steps(first.len().try_into().expect("small")..1_200);
+    let script = Script::shared([(first, Status::Tracing(0)), (second, Status::Tracing(0))]);
+    let (mut saver, mut screen) = scripted(&script, SCREEN, false);
+    draw(&mut screen, &mut saver, 0);
+    assert_eq!(saver.shown, painted);
+    let slow = 3 * FIRST_WAIT_NS / 4;
+    let (mut now, mut frames, mut last) = (0, 0u32, 0);
+    while saver.shown == painted {
+        now += slow;
+        draw(&mut screen, &mut saver, now);
+        frames += 1;
+        assert!(frames < 100, "the next paint never came");
+        if saver.shown == painted {
+            assert!(fading(&saver).is_some(), "still fading in at {now}");
+            let lit = brightness(&saver, &screen);
+            assert!(lit > last, "brighter at {now}");
+            last = lit;
+        }
+    }
+    assert!(now > 2 * FIRST_WAIT_NS, "the paint was held past its wait");
+    assert!(
+        frames >= u32::from(crossfade::FADE_FRAMES),
+        "{frames} frames"
+    );
+}
+
+/// A reveal that could not hold a crossfade's room when its first change
+/// came fades its next change in once the band lets the room go.
+#[test]
+fn a_reveal_fades_again_once_the_band_lets_the_room_go() {
+    static EASING: ReportedPressure = ReportedPressure::unknown();
+    EASING.report(PressureBand::Mild);
+    let first = first_pass_lit();
+    let second = screen_steps(first.len().try_into().expect("small")..1_200);
+    let script = Script::shared([(first, Status::Tracing(0))]);
+    let (mut saver, mut screen) = scripted(&script, SCREEN, false);
+    saver.memory = Memory {
+        total: u64::MAX,
+        gauge: &EASING,
+    };
+    draw(&mut screen, &mut saver, 0);
+    assert!(matches!(saver.laying, Laying::Straight), "laid straight on");
+    let before = screen.surface.clone();
+    EASING.report(PressureBand::Normal);
+    script
+        .borrow_mut()
+        .frames
+        .push_back((second, Status::Tracing(0)));
+    let due = saver.paint_due_ns;
+    draw(&mut screen, &mut saver, due);
+    assert!(fading(&saver).is_some(), "the next change fades in");
+    assert!(screen.surface == before, "nothing of it at once");
+}
+
 /// A saver whose share of memory cannot hold a crossfade's room lays every
 /// change straight on.
 #[test]
@@ -1030,4 +1097,35 @@ fn a_reveal_on_the_frames_ends_as_the_reveal_traced_alone() {
         expected.set(traced.step.x, traced.step.y, traced.pixel);
     }
     assert_eq!(screen.surface.pixels(), expected.pixels());
+}
+
+/// Beside a tracing crew the frames paint across the threads it leaves them:
+/// under idle every one granted past the frames' and the tracer's, under
+/// performance none, and never more than were granted.
+#[test]
+fn a_crew_leaves_the_frames_the_threads_it_does_not_trace_on() {
+    assert_eq!(
+        painter_workers(4, CpuUse::Idle),
+        2,
+        "the tracer's thread is left to it"
+    );
+    assert_eq!(painter_workers(16, CpuUse::Idle), 14);
+    assert_eq!(painter_workers(4, CpuUse::Performance), 0);
+    assert_eq!(
+        painter_workers(2, CpuUse::Idle),
+        0,
+        "the frames and the tracer hold both"
+    );
+    assert_eq!(painter_workers(1, CpuUse::Idle), 0);
+    let mut given = start(SIZE, false, IDLE);
+    (given.threads, given.cores) = (8, 3);
+    let setup = testing::setup(&given, 0);
+    assert_eq!(
+        painter_workers(setup.threads(), CpuUse::Idle),
+        1,
+        "never more than the machine's cores"
+    );
+    given.threads = 2;
+    let setup = testing::setup(&given, 0);
+    assert!(crew_painter(&setup, CpuUse::Idle).is_none());
 }

@@ -25,7 +25,7 @@ use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{div255, round_rect_coverage, Color, Ring, RingInk, Surface};
+use tairix_raster::{div255, pointwise, round_rect_coverage, Color, Ring, RingInk, Surface};
 use tairix_theme::motion::ease_out;
 use tairix_theme::{MotionInteraction, MotionTheme, TextRole, Theme, Timeline};
 use tairix_util::mathf;
@@ -803,12 +803,20 @@ fn paint_comet(
         };
         u8::try_from(weight * u64::from(u8::MAX) / full).unwrap_or(u8::MAX)
     };
-    surface.wash_region(ix + first, iy, last - first, ih, colour, |x, y| {
-        let column = first + x;
-        div255(
-            u32::from(weight(column)) * u32::from(round_rect_coverage(column, y, iw, ih, radius)),
-        )
-    });
+    surface.wash_region(
+        ix + first,
+        iy,
+        last - first,
+        ih,
+        colour,
+        pointwise(|x, y| {
+            let column = first + x;
+            div255(
+                u32::from(weight(column))
+                    * u32::from(round_rect_coverage(column, y, iw, ih, radius)),
+            )
+        }),
+    );
 }
 
 impl Default for Progress {

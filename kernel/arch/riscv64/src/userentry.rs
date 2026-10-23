@@ -42,6 +42,8 @@
 
 use tairix_arch_api::{EnterUser, UserEntry};
 
+use crate::trap::{SSTATUS_SIE, SSTATUS_SPP};
+
 /// riscv64 implementation of the Arch HAL "enter user mode" surface.
 ///
 /// Zero-sized: the `sret` transition needs no per-instance state.
@@ -76,14 +78,10 @@ impl EnterUser for UserMode {
     }
 }
 
-/// `sstatus.SIE` — S-mode interrupt enable (bit 1).
-const SSTATUS_SIE: u64 = 1 << 1;
 /// `sstatus.SPIE` — the S-mode interrupt enable `sret` restores (bit 5).
 const SSTATUS_SPIE: u64 = 1 << 5;
-/// `sstatus.SPP` — the privilege `sret` returns to; clear means U (bit 8).
-const SSTATUS_SPP: u64 = 1 << 8;
 /// `sstatus.SUM` — permit S-mode data access to U-bit pages (bit 18).
-const SSTATUS_SUM: u64 = 1 << 18;
+pub(crate) const SSTATUS_SUM: u64 = 1 << 18;
 /// `sstatus.VS` — vector-unit enablement (bits 10:9). Firmware leaves it on
 /// where the hart has one.
 const SSTATUS_VS: u64 = 0b11 << 9;

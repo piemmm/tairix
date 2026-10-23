@@ -570,7 +570,10 @@ impl CrossCpuTlbShootdown for X86_64Arch {
             });
             // One IPI round-trip covers the whole range: `invlpg` is
             // per-page but the acknowledge protocol is what costs, so a
-            // large teardown must not pay it once per leaf.
+            // large teardown must not pay it once per leaf. It reaches each
+            // CPU under the PCID it has loaded; the epoch, advanced first,
+            // has every other PCID discarded before its next use.
+            crate::paging::advance_kernel_epoch();
             crate::tlb_shootdown::shootdown(start_vaddr, page_count, targets);
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]

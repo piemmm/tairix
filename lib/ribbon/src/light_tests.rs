@@ -3,9 +3,12 @@
 //! a clock's text, how soft it is, and that a frame repaints exactly what
 //! changed.
 
+use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::Ordering::Relaxed;
 
 use tairix_geometry::{Rect, Region};
+use tairix_parallel::{Reversed, SERIAL};
 use tairix_raster::{DitherRow, Pixel, Surface};
 
 use crate::SKY;
@@ -15,9 +18,9 @@ use tairix_util::mathf::single;
 
 use super::{
     along, bernstein, curtain, falloff_reach, index_of, monotone, needed_pushes, sample_across,
-    tone_entry, tone_index, Fall, Light, Rows, Tally, CHUNK, CONTROLS, DITHER_LANES, EDGE_MARGIN,
-    EMBER, EMBER_TOP, LANE_ONES, LEAST_GIVE, LEAST_LIGHT, LEAST_SEEN, PIXELS_PER_SAMPLE,
-    QUIET_LIGHT, STRANDS, STRAND_COUNT, TERM_CUT, TONE_LEN,
+    tone_entry, tone_index, Fall, Light, Rows, Scratch, Tally, CHUNK, CHUNK_LANES, CONTROLS,
+    DITHER_LANES, EDGE_MARGIN, EMBER, EMBER_TOP, LANE_ONES, LEAST_GIVE, LEAST_LIGHT, LEAST_SEEN,
+    PIXELS_PER_SAMPLE, QUIET_LIGHT, STRANDS, STRAND_COUNT, TERM_CUT, TONE_LEN,
 };
 
 const WIDE: (u32, u32) = (640, 360);
@@ -42,7 +45,7 @@ const LAYOUTS: [((u32, u32), Rect); 5] = [
 fn painted(light: &mut Light) -> Surface {
     let (width, height) = light.size;
     let mut surface = Surface::new(width, height).expect("a surface");
-    light.paint(&mut surface, Rect::new(0, 0, width, height));
+    light.paint(&mut surface, Rect::new(0, 0, width, height), &SERIAL);
     surface
 }
 
@@ -340,7 +343,7 @@ fn the_ribbon_never_reaches_the_clocks_clear_space() {
                     "{size:?}: sample {sample} repaints {lit:?}"
                 );
             }
-            light.paint(&mut edge, rows);
+            light.paint(&mut edge, rows, &SERIAL);
             for x in left..right {
                 assert_eq!(
                     edge.get(x, bottom - 1),
@@ -562,7 +565,7 @@ fn a_frame_repainted_in_strips_matches_the_frame_painted_whole() {
             let t = 3.0 + f64::from(step) * 0.7;
             damage.clear();
             light.step(t, clock, &mut damage);
-            light.paint_moved(&mut surface, |_, _| {});
+            light.paint_moved(&mut surface, &SERIAL);
             let whole = painted(&mut Light::new(WIDE, clock, t).expect("a ribbon"));
             assert!(
                 surface.pixels() == whole.pixels(),
@@ -587,7 +590,7 @@ fn any_area_paints_the_same_pixels_as_the_whole() {
         Rect::new(333, 40, 20, 20),
     ] {
         let mut part = Surface::new(640, 360).expect("a surface");
-        light.paint(&mut part, area);
+        light.paint(&mut part, area, &SERIAL);
         let (Ok(left), Ok(top)) = (u32::try_from(area.left()), u32::try_from(area.top())) else {
             panic!("a positive area");
         };
@@ -611,7 +614,7 @@ fn an_area_reaching_off_the_screen_paints_its_part_on_it() {
         (Rect::new(100, -20, 60, 400), (100..160, 0..360)),
     ] {
         let mut part = Surface::new(640, 360).expect("a surface");
-        light.paint(&mut part, area);
+        light.paint(&mut part, area, &SERIAL);
         assert!(part.pixels() != blank.pixels(), "{area:?} painted nothing");
         for y in 0..360 {
             for x in 0..640 {
@@ -630,7 +633,7 @@ fn an_unlit_area_lays_the_sky_over_itself_alone() {
     let mut light = Light::new(WIDE, Rect::EMPTY, 5.0).expect("a ribbon");
     let mut part = Surface::new(640, 360).expect("a surface");
     let area = Rect::new(0, 0, 640, 4);
-    light.paint(&mut part, area);
+    light.paint(&mut part, area, &SERIAL);
     let black = SKY.premultiply();
     for y in 0..360 {
         for x in 0..640 {
@@ -653,22 +656,16 @@ fn a_paint_sums_only_what_the_light_reaches_and_a_strip_is_two_chunks() {
     let _ = painted(&mut light);
     let (columns, rows) = light.grid;
     let every = index_of(columns) * index_of(rows);
-    assert!(
-        light.tally.summed * 2 < every,
-        "{} of {every} sample rows summed",
-        light.tally.summed
-    );
+    let summed = light.tally.summed.load(Relaxed);
+    assert!(summed * 2 < every, "{summed} of {every} sample rows summed");
     let mut damage = Region::new();
     light.step(5.7, Rect::EMPTY, &mut damage);
     let strips = light.strips.len();
     assert!(strips > 1, "the frame moved more than one strip");
     light.tally = Tally::default();
-    light.paint_moved(&mut Surface::new(640, 360).expect("a surface"), |_, _| {});
-    assert!(
-        light.tally.chunks <= 2 * strips,
-        "{} chunks for {strips} strips",
-        light.tally.chunks
-    );
+    light.paint_moved(&mut Surface::new(640, 360).expect("a surface"), &SERIAL);
+    let chunks = light.tally.chunks.load(Relaxed);
+    assert!(chunks <= 2 * strips, "{chunks} chunks for {strips} strips");
 }
 
 /// The text's clear space is not toned to be covered by the sky after: only
@@ -679,29 +676,86 @@ fn a_paint_tones_the_clear_space_only_beside_its_edges() {
     let mut light = Light::new(WIDE, CLOCK, 3.0).expect("a ribbon");
     let _ = painted(&mut light);
     let edges = 2 * u64::from((CHUNK + 1) * PIXELS_PER_SAMPLE) * u64::from(CLOCK.height);
+    let over_clear = light.tally.over_clear.load(Relaxed);
     assert!(
-        light.tally.over_clear <= edges,
-        "{} pixels of the clear space toned",
-        light.tally.over_clear
+        over_clear <= edges,
+        "{over_clear} pixels of the clear space toned"
     );
 }
 
-/// A strip repaints the pixel before its first sample, which blends it, and
-/// stops at the next strip's first sample, which is that strip's alone.
+/// No two strips share a pixel, so whatever is laid over a strip once it is
+/// painted lands on each pixel once.
 #[test]
-fn neighbouring_strips_share_only_the_pixel_between_them() {
+fn neighbouring_strips_share_no_pixel() {
     let mut light = Light::new(WIDE, Rect::EMPTY, 3.0).expect("a ribbon");
     let mut damage = Region::new();
     light.step(3.7, Rect::EMPTY, &mut damage);
-    let mut strips = light.strips.clone();
+    let mut strips = light.strips().to_vec();
     strips.sort_by_key(Rect::left);
     assert!(strips.len() > 1, "the frame moved more than one strip");
     for pair in strips.windows(2) {
         assert!(
-            pair[0].right() <= pair[1].left() + 1,
-            "{:?} repaints past {:?}'s first pixel",
+            pair[0].right() <= pair[1].left(),
+            "{:?} repaints {:?}'s first pixel",
             pair[0],
             pair[1]
+        );
+    }
+}
+
+/// Frames painted in bands, whole and in strips, around a clock and at a size
+/// no band divides, are the very pixels painted in one band.
+#[test]
+fn a_frame_painted_in_bands_matches_one_painted_in_one() {
+    let runner = Reversed::new(8);
+    for (size, clock) in [(WIDE, CLOCK), ((641, 361), Rect::EMPTY)] {
+        let mut banded = Light::new(size, clock, 3.0).expect("a ribbon");
+        banded.spread_over(&runner);
+        let mut serial = Light::new(size, clock, 3.0).expect("a ribbon");
+        let whole = Rect::new(0, 0, size.0, size.1);
+        let mut across = Surface::new(size.0, size.1).expect("a surface");
+        let mut alone = Surface::new(size.0, size.1).expect("a surface");
+        banded.paint(&mut across, whole, &runner);
+        serial.paint(&mut alone, whole, &SERIAL);
+        assert!(across.pixels() == alone.pixels(), "{size:?} whole");
+        let mut damage = Region::new();
+        for step in 1..=12 {
+            let t = 3.0 + f64::from(step) * 0.7;
+            banded.step(t, clock, &mut damage);
+            serial.step(t, clock, &mut damage);
+            banded.paint_moved(&mut across, &runner);
+            serial.paint_moved(&mut alone, &SERIAL);
+            assert!(across.pixels() == alone.pixels(), "{size:?} at {t}s");
+        }
+    }
+    assert!(runner.widest() > 1, "the paints were split");
+}
+
+/// The scratch hands out as many rooms as it holds, each a whole column
+/// deep, and refuses to be split into more.
+#[test]
+fn the_scratch_hands_out_a_whole_column_of_room_for_every_band_it_holds() {
+    for depth in [1usize, 2, 7, 180] {
+        let mut scratch = Scratch::new(depth).expect("scratch");
+        assert!(scratch.split(1).is_some());
+        assert!(scratch.split(2).is_none(), "one room until more are held");
+        scratch.hold(5);
+        for count in 1..=5 {
+            let rooms: Vec<_> = scratch
+                .split(count)
+                .expect("rooms")
+                .map(|room| (room.sums.len(), room.toned.len(), room.between.len()))
+                .collect();
+            assert_eq!(
+                rooms,
+                vec![(depth, depth * CHUNK_LANES, CHUNK_LANES); count]
+            );
+        }
+        assert!(scratch.split(6).is_none());
+        scratch.hold(3);
+        assert!(
+            scratch.split(5).is_some(),
+            "holding fewer keeps what was held"
         );
     }
 }
@@ -718,7 +772,7 @@ fn a_frame_repainted_in_strips_matches_the_whole_at_an_odd_size() {
         let t = 3.0 + f64::from(step) * 0.7;
         damage.clear();
         light.step(t, Rect::EMPTY, &mut damage);
-        light.paint_moved(&mut surface, |_, _| {});
+        light.paint_moved(&mut surface, &SERIAL);
         let whole = painted(&mut Light::new(size, Rect::EMPTY, t).expect("a ribbon"));
         assert!(surface.pixels() == whole.pixels(), "frame at {t}s");
     }

@@ -31,6 +31,24 @@ This crate owns:
   maintain. `Surface::reshaped` hands a surface's buffer back as a cleared one
   of another size, so a picture redrawn at a changing size every frame — a
   shaken pointer growing — allocates only when it outgrows what it holds.
+- `Surface::lent` — a surface drawing into memory it does not own
+  (`PixelMemory`): a frame mapped from a region another process reads, kept
+  alive by the surface and drawn straight into with no copy between. The lender
+  is asked for its bytes once, as the surface is built, so a borrow of a lent
+  surface's pixels costs what an owned one's does. Every drawing method works on
+  it unchanged; a clone or `reshaped` takes a buffer of its own, and a lent
+  surface's pixels are the lender's to clear. The one view of those bytes as
+  pixels lives in `lent`.
+- `wide` — a colour at 8.8 fixed point, three sixteen-bit lanes of one word,
+  while it is worked on: `halve`, and `widen`, which blends a row of such
+  samples two pixels apart up to every pixel, dithered, on the `raster-blend`
+  kernels.
+- `Surface::column_bands_mut` — bands of whole columns of a block of rows, each
+  borrowed exclusively: `row_bands_mut` turned on its side, for a paint whose
+  work runs down its columns, so several cores each sum their own columns once.
+  A `ColumnBand` honours the clip window and the stated origin as the surface
+  does; its pixels are not contiguous, so the one view of them lives in
+  `columns`.
 - `Surface::with_clip` — the scoped clip window every write is confined to, so a
   view bounds what it paints to the area it owns even when it hands the surface
   to code that does not know it is clipped (see below).
@@ -142,9 +160,20 @@ This crate owns:
   surface or one band — so one paint routine draws a picture band by band
   that is bit-identical to the picture drawn whole. `RowBand::narrowed` confines a fill to fewer rows than its band holds
   (a figure standing in water is drawn only above the surface), with no window
-  to set and restore.
+  to set and restore. `Surface::paint_bands` hands a runner those bands, at
+  most so many and each worth a grain of pixels, and `BandScratch` holds a
+  `ScanScratch` for each band a runner may split a paint into, so a scene's
+  fills run on every core with no two bands sharing a converter.
+- `wash_polygon_subpixel` — a placed polygon whose colour's alpha is scaled by
+  a strength field. The mask answers a row at a time (`mask(y, x, strengths)`),
+  so a smoothly varying field — a ramp, a glow — is stepped along the row
+  rather than worked out afresh per pixel; coverage, strength and alpha are
+  multiplied into one weight a pixel and the row laid by the `raster-blend`
+  family's `wash` kernel, which rounds each pixel exactly as laying the colour
+  at its weight over it would.
 - `ScanScratch` — the scan converter's working memory: its edge table, one row
-  of accumulators and that row's alphas. A caller that fills many shapes holds
+  of accumulators, that row's alphas and the weights a wash multiplies them
+  into. A caller that fills many shapes holds
   one and hands it to `Canvas::fill_polygon_subpixel`, so the fills allocate
   nothing once it has grown to the largest; on a frame that fills thousands of
   strips across several cores, that is thousands of allocations a frame not
@@ -301,6 +330,9 @@ This crate owns:
   over it walks the destination twice and rounds twice: measured, it is about
   half the cost. Its two ends are copies, so a dissolve's first and last
   frames are exactly its pictures (`color_tests`).
+- `cover_span` — one colour laid over a run through a mask, each pixel's
+  coverage its factor: what a scan-converted fill, a glyph and a text shadow
+  lay on a row.
 - `Surface::blit` — composite one surface over another through `blend_span`,
   clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the
@@ -529,7 +561,7 @@ Three per-pixel families have packed candidates, each chosen per process by
 
 | Family | Entry points | Candidates |
 |---|---|---|
-| `raster-blend` | `blend_span`, `blend_solid_span` | SSE2, NEON |
+| `raster-blend` | `blend_span`, `blend_solid_span`, `mix_span`, `cover_span`, the masked wash's row, and `wide::widen` | SSE2, NEON |
 | `raster-blur` | the box blur's line pass, and the frost's column sums' add, slide and mean | SSE2, NEON |
 | `raster-scan` | `leading_opaque`, `leading_translucent` | SSE2, NEON |
 
@@ -539,11 +571,17 @@ Three per-pixel families have packed candidates, each chosen per process by
   portable kernel over the family's fixed vectors. With nothing delivered — a
   host test — the portable kernels run; `accel::resolve` takes a set of its own.
 - **Exact by construction.** The blend's terms fit sixteen-bit lanes, where
-  `div255` is `(x + 1 + (x >> 8)) >> 8`, exact for every such sum; the blur's
+  `div255` is `(x + 1 + (x >> 8)) >> 8`, exact for every such sum — the masked
+  wash's weights are multiplied in that same form before its kernel runs; the blur's
   mean multiplies by `LaneDivisor`'s 32-bit reciprocal, exact for every window
   sum; the scan compares whole alpha bytes. A window too wide for that
   reciprocal could hold sums past 32 bits, where only the portable kernels'
   saturating arithmetic is defined, so it takes them (`accel::blur_for`).
+- **A short row still takes the packed path.** The coverage-driven kernels
+  (`cover`, `wash`) finish a tail shorter than their step by padding it to one
+  whole step with nought coverage, which leaves a padding pixel as it was, and
+  copying it back: a glyph's or a thin shape's few pixels a row are one vector
+  step rather than a pixel at a time.
 - **No crate source carries a target cfg.** `build.rs` emits `raster_sse2` or
   `raster_neon` from the vector unit the target itself carries
   (`tairix_buildcfg::vector_unit`), so every candidate is a safe function: its
@@ -551,10 +589,13 @@ Three per-pixel families have packed candidates, each chosen per process by
   kernels reach memory only through `LD4`/`ST4`, which need no more than their
   element's alignment; under the target's strict alignment a plain vector load
   is split into its bytes.
-- **`unsafe` lives in the two kernel modules alone.** The crate denies it
-  elsewhere. The `accel::` tests miri interprets reach the SSE2 module; the
-  NEON module is never compiled on the host, so the aarch64 guest vertical is
-  what holds it to the portable kernels.
+- **`unsafe` lives in the two kernel modules, `lent`'s view of bytes as pixels
+  and its one borrow of a lender held until the surface drops, and the column
+  bands' row spans and their hand-off between threads alone.** The crate denies it elsewhere. The
+  `accel::` tests miri interprets reach the SSE2 module, its `lent::` tests the
+  view and its `columns::` tests the bands, written from several threads at
+  once; the NEON module is never compiled on the host, so the aarch64 guest
+  vertical is what holds it to the portable kernels.
 - **One number on every target.** `accel::conformance_digest` (the
   `conformance` feature) folds a fixed workload through the families in force:
   the host holds the portable and SSE2 kernels to `CONFORMANCE_DIGEST`, and the
@@ -770,5 +811,8 @@ layering.
 crates (`userland/gui/wm`, `userland/gui/taskbar`) and by the `lib/*` crates
 that draw through it (text, cursors, icons, controls, the login screen). It is
 `no_std` (with `alloc`).
-No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
+`unsafe` only in the vector kernels, the lent view and the column bands —
+miri interprets the SSE2 kernels, the view and the bands, and the aarch64 guest
+vertical holds the NEON kernels to the portable ones — and no
+`unwrap`/`expect`/`panic!` in production paths
 (`AGENTS.md` §2.9).

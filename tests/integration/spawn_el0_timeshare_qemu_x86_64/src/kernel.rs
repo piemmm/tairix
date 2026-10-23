@@ -9,6 +9,7 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
@@ -351,7 +352,7 @@ fn run_timeshare() -> ! {
     // mid-handler park.
     let cs = ContextSwitchHal::new();
     for (root_phys, entry) in [(root_a, entry_a), (root_b, entry_b)] {
-        let pre_resume = move |kernel_stack_top: u64| {
+        let pre_resume = move |kernel_stack_top: u64, tag: AddressTag| {
             // Repoint the per-CPU syscall entry stack at this task's own kernel
             // stack before the switch-in. A rejected value (it is validated
             // canonical/aligned/kernel-half) leaves the slot unchanged and the
@@ -365,7 +366,7 @@ fn run_timeshare() -> ! {
             // task's space, which maps the low identity + higher-half kernel
             // window the running dispatcher executes from — exactly
             // `activate_user_root`'s contract.
-            unsafe { activate_user_root(root_phys) };
+            unsafe { activate_user_root(root_phys, tag) };
         };
         let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
             // SAFETY: by the time this body runs the task has been dispatched,

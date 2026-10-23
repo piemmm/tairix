@@ -12,9 +12,10 @@ prepared and then traced. It ships as `/System/Screensavers/Raytrace.app`.
 - `src/engine.rs` — composing, preparing and tracing a scene, free of
   threads, paced by the monotonic clock.
 - `src/crew.rs` — the desk between a tracing thread and the frames.
-- `src/preview.rs`, `src/crossfade.rs`, `src/tiles.rs` — the picture out of
-  focus sharpening pass by pass, a change faded in, and the tiles a change
-  touches.
+- `src/preview.rs`, `src/crossfade.rs` — the picture out of focus sharpening
+  pass by pass, and a change faded in over at least eight frames however
+  slowly they come, each tracked in the tiles it touches
+  (`tairix_geometry::Tiles`).
 - `src/readout.rs` — the readout, laid over the picture with what it covers
   kept aside, so the picture never holds a letter.
 - `src/run.rs` — the bundle's `Run`: the scene served by `tairix_saver::run`
@@ -22,7 +23,8 @@ prepared and then traced. It ships as `/System/Screensavers/Raytrace.app`.
 
 It asks for no capability; it declares `threads = "cores"`, `memory =
 "large"` and the keeping feed. Its options are `cpu` (`idle` traces on one
-thread of its own, `performance` on every thread granted), `save` (hand each
+thread of its own and paints its frames across the rest, `performance` traces
+on every thread granted), `save` (hand each
 whole picture to the host to keep under `Home/Pictures/Ray Tracer/`) and
 `detail` (`simple`, `maximum`; a scene whose peak the memory band cannot
 spare is set out simply). Where no thread is granted, each frame traces a

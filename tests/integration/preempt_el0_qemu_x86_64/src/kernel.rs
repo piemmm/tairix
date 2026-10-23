@@ -6,6 +6,7 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
@@ -368,7 +369,7 @@ fn run_preempt() -> ! {
     // interrupt gate, which reads `TSS.RSP0`) land on the spinner's own kernel
     // stack rather than the boot trap stack.
     let cs = ContextSwitchHal::new();
-    let pre_resume = move |kernel_stack_top: u64| {
+    let pre_resume = move |kernel_stack_top: u64, tag: AddressTag| {
         // `set_kernel_rsp0` repoints **both** the spinner's `syscall` entry
         // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at its own
         // kernel stack — the latter is what makes the involuntary LAPIC-timer
@@ -388,7 +389,7 @@ fn run_preempt() -> ! {
         // space, which maps the low identity + higher-half kernel window the
         // running dispatcher executes from — exactly `activate_user_root`'s
         // contract.
-        unsafe { activate_user_root(root_phys) };
+        unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so

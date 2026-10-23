@@ -256,10 +256,11 @@ next dispatch — **no separate EL0-frame save area and no new HAL trait**
 **Done.** PID 1 now reaches EL0 as a resumable user kthread, and the
 producer is wired arch-neutrally:
 
-- `kernel/arch/aarch64/src/paging.rs` gained `activate_user_root(root_phys:
-  u64)` (MMU already on: `msr TTBR0_EL1` + `dsb`/`tlbi vmalle1`/`dsb`/`isb`),
-  with a host no-op `cfg` arm. It takes only the `u64` root, so the
-  `pre_resume` hook stays `Send`.
+- `kernel/arch/aarch64/src/paging.rs` gained `activate_user_root(root_phys,
+  tag)` (MMU already on: `msr TTBR0_EL1` under the tag's ASID + `isb`, after
+  `tlbi aside1` when the tag must be discarded), with a host no-op `cfg` arm.
+  It takes only the `u64` root and the tag, so the `pre_resume` hook stays
+  `Send`.
 - `KernelArch` (`kernel/core`) grew an associated `type Cs: ContextSwitch +
   Copy + Send + 'static` + `context_switch()` accessor; all three bin
   wrappers (`Aarch64BinArch`, x86_64 `BinArch`, riscv64 `RiscvBinArch`) and

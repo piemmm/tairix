@@ -2076,8 +2076,9 @@ region of its own, so none of a saver's code runs in the session:
 - **Starting** a saver gives it a fresh region the size of the screen and the
   `Start` its manifest and the desktop make: every option at the user's value
   or its default, the look, a CSPRNG seed, the account and machine names, the
-  pressure band, and its ceilings — twice its region and 128 MiB of address
-  space (2 GiB more for the large ceiling), never more than half the machine,
+  machine's installed memory (which its font caches are sized from), the
+  pressure band, and its ceilings — its region and 128 MiB of address space
+  (2 GiB more for the large ceiling), never more than half the machine,
   and one thread, or one per core for a saver that asks. A saver the desktop
   does not offer, or one that cannot be started, leaves the screen black, and
   why is said on standard error; a saver that could not be started, or that
@@ -2089,19 +2090,34 @@ region of its own, so none of a saver's code runs in the session:
   presents each frame within `SAVER_FRAME_DEADLINE_NS`, naming damage on the
   screen alone, the time a font call spends being relayed not counted against
   it; it makes at most `SAVER_FONT_CALLS_MAX` font calls while starting or
-  from one frame asked for to the next. A frame is asked for only once the
-  last is presented, after each feed message, and never faster than the
-  display shows frames. A message out of turn or that does not decode, a
+  from one frame asked for to the next. Frames are pipelined: the next is
+  asked for once the last is laid in the screensaver's surface, at the time
+  the saver asked for and never sooner than a display frame after the last
+  ask, so the saver draws one frame while the session composites the one
+  before, and after each feed message too. One presented before the laid
+  frame reaches the screen waits in the region, which the saver may not touch
+  until it is asked for another. A message out of turn or that does not decode, a
   missed deadline, a closed pipe or a pipe the session cannot watch ends the
   saver and the screen goes black, with why on standard error and in the
   record of its end (`SAVER_ENDED`). An ended saver still running is killed
   and reaped when the kernel reports its exit, a child member of the serve
   loop's wait set, never waited for on the loop. Its pipes are watched in the
   directions it wants (`SessionMembers`), on the same wait set.
-- **Presenting** decodes the rectangles a frame names out of the region into
-  the screensaver's surface, every pixel laid opaque so no saver can show
-  what it covers, the alpha filled as each pixel is converted; a surface the
-  compositor has let go is decoded whole. A saver's first frame laid on the
+- **Presenting** lays the rectangles a frame names from the region, held
+  first to band form within `SAVER_DAMAGE_RECTS` however the saver scattered
+  them, so no saver's geometry can fragment the compositor's own damage; one
+  row copy across the composite pool with every pixel's alpha forced opaque,
+  so no saver can show what it covers. Where the saver covers the output,
+  once the screen has settled from the session's arrival, the copy goes
+  straight into the display's own back frame in its byte order
+  (`Presenter::present_drawn`, `winframe::lay_opaque_into`) — the whole frame
+  the first time, then what changed and whatever that frame missed — and the
+  compositor presents nothing until the saver is gone; a frame arriving while
+  the display has not latched the last waits in the region, with no frame
+  asked, until it has. Elsewhere, or once the display refuses one, the copy
+  goes into the screensaver's surface (`winframe::lay_opaque_region`), and a
+  surface the compositor has let go is laid whole. A
+  saver's first frame laid on the
   screen is recorded (`SAVER_SHOWN`, saying whether it is a preview), and a
   saver taken down on purpose — dismissed on input, an output change or the
   session going to the background, or its display switched off — is recorded
@@ -2120,9 +2136,13 @@ region of its own, so none of a saver's code runs in the session:
   held while anything is queued for a saver, so one slow to read is told the
   latest rather than a backlog.
 
-A saver's frame is asked for by the session's frame step, so it is drawn on
-the session's own frame clock; what each saver asks for next is folded into
-the park, and nothing at all is owed while the display is off.
+A saver's next frame is asked for at the time it asked, at most one display
+frame after the last ask, rather than on the session's own animation step, so
+a saver's frame never waits out a frame of the session's pacer: it draws the
+next while the last awaits the display, and one presented before the last
+reached the screen waits in the region until it has, with no further frame
+asked meanwhile. When each asks for its next is folded into the park, and
+nothing at all is owed while the display is off.
 
 The wake that takes the screensaver down is drained into nothing: the gesture
 that wakes the screen reaches nothing behind it, and the next one goes where

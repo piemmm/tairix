@@ -1,7 +1,7 @@
 # Signed-AppInfo manifest source for Ribbon, a desktop screensaver. It runs in
 # the drawing sandbox, so it asks for no capability and no feed: the time it
 # tells is the host's reading, and its text is drawn through the host's font
-# relay.
+# relay. It paints the ribbon across every core it is granted.
 id = "os.tairix.saver.ribbon"
 name = "Ribbon"
 title = "Minimal Clock"
@@ -10,4 +10,5 @@ kind = "screensaver"
 purpose = "The time and date, still, over a ribbon of orange light that slowly undulates beneath them"
 author = "The TAIRiX Project"
 capabilities = []
+threads = "cores"
 option.date = { label = "Show the date", note = "Whether the date is shown beneath the time.", switch = true }

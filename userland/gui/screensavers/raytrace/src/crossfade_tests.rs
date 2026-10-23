@@ -11,7 +11,10 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Timeline;
 
 use super::Crossfade;
-use crate::tiles::Tiles;
+use tairix_abi::saver_ipc::SAVER_DAMAGE_RECTS;
+use tairix_geometry::Tiles;
+
+use crate::TILE;
 
 /// The colour pixel `(x, y)` of a picture under `seed` shows: different from
 /// its neighbours.
@@ -38,13 +41,13 @@ fn filled(size: (u32, u32), fill: Color) -> Surface {
 
 /// The tiles of a `size` picture that `rects` touch, and their cover.
 fn change(size: (u32, u32), rects: &[Rect]) -> (Tiles, Region) {
-    let mut tiles = Tiles::new(size).expect("tiles");
-    let mut room = Tiles::new(size).expect("room");
+    let mut tiles = Tiles::new(size, TILE).expect("tiles");
+    let mut room = Tiles::new(size, TILE).expect("room");
     for rect in rects {
         tiles.mark(*rect);
     }
     let mut cover = Region::new();
-    tiles.cover(&mut room, &mut cover);
+    tiles.cover(SAVER_DAMAGE_RECTS, &mut room, &mut cover);
     (tiles, cover)
 }
 
@@ -64,7 +67,7 @@ fn begun(
     (now_ns, span_ms): (u64, u16),
     (seed, paint): (u32, &dyn Fn(u32, u32) -> bool),
 ) -> Crossfade {
-    let mut fade = Crossfade::new(size).expect("a crossfade");
+    let mut fade = Crossfade::over(&filled(size, Color::rgb(0, 0, 0))).expect("a crossfade");
     let picture = fade.begin((tiles, cover), Timeline::start(now_ns, span_ms), &SERIAL);
     for y in 0..size.1 {
         for x in 0..size.0 {
@@ -190,15 +193,40 @@ fn a_fade_wants_each_weight_once_and_nothing_once_whole() {
     );
     assert!(!fade.settled());
     assert_eq!(fade.due(100 * MS), None, "nothing new at its start");
-    assert_eq!(fade.due(350 * MS), Some(127));
-    fade.shown(127);
+    assert_eq!(fade.due(130 * MS), Some(15));
+    fade.shown(15);
     assert_eq!(
-        fade.due(350 * MS),
+        fade.due(130 * MS),
         None,
         "a weight shown is not wanted again"
     );
+    fade.shown(240);
     assert_eq!(fade.due(600 * MS), Some(u8::MAX));
     fade.shown(u8::MAX);
     assert!(fade.settled());
     assert_eq!(fade.due(700 * MS), None);
+}
+
+/// Frames coming slower than its timeline runs still show a fade a step at a
+/// time, brighter each frame and never by more than one step: it takes its
+/// frames, not its time.
+#[test]
+fn a_fade_takes_its_frames_however_late_they_come() {
+    let size = (32u32, 32u32);
+    let (tiles, mut cover) = change(size, &[Rect::new(0, 0, 8, 8)]);
+    let mut fade = begun(size, (&tiles, &mut cover), (0, 500), (1, &|_, _| false));
+    let (mut frames, mut last) = (0u32, 0u8);
+    let mut now = 0;
+    while !fade.settled() {
+        now += 1_000 * MS;
+        let weight = fade.due(now).expect("a later weight each frame");
+        assert!(
+            weight > last && weight - last <= super::FADE_STEP,
+            "{last} to {weight}"
+        );
+        fade.shown(weight);
+        last = weight;
+        frames += 1;
+    }
+    assert!(frames >= u32::from(super::FADE_FRAMES), "{frames} frames");
 }

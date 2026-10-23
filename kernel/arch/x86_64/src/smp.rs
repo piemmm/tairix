@@ -756,8 +756,15 @@ pub unsafe fn start_secondary(target_apic_id: u32, cpu: CpuId) -> Result<(), Sta
         core::arch::asm!("mov {x}, cr3", x = out(reg) cr3, options(nostack, preserves_flags));
     }
     // `stack_top` is 16-byte aligned by construction; a misalignment would be
-    // an internal invariant break, not a caller error.
-    let Ok(slot) = ApBootSlot::new(cr3, stack_top, entry_addr as u64, cpu) else {
+    // an internal invariant break, not a caller error. The AP loads the table
+    // base alone: a PCID the boot CPU runs under means nothing before the AP
+    // turns PCIDs on.
+    let Ok(slot) = ApBootSlot::new(
+        cr3 & !crate::paging::CR3_PCID,
+        stack_top,
+        entry_addr as u64,
+        cpu,
+    ) else {
         return Err(StartCpuError::CpuIdOutOfRange);
     };
     frame.write_slot(&slot);

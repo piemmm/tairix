@@ -162,7 +162,8 @@ and forth.
   meets can tell a screensaver.
 - The spawn share is the saver's for the rest of its life: a drawing sandbox
   may not unmap, so `tairix_rt::shm::SpawnShare` never tries, and the kernel
-  reclaims it at exit.
+  reclaims it at exit. A saver splits it (`SpawnShare::split`) into its frame
+  area and its feed area, each a part it may hand to the threads drawing it.
 
 ## The user-space seam: `lib/sandbox`
 

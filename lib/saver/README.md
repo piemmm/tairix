@@ -4,7 +4,8 @@
 
 The saver side of a TAIRiX screensaver: the loop a bundle in the drawing
 sandbox runs its scene through — `Start`, the frame region, each `Frame`
-drawn and `Presented`, the font relay, its options and its feeds.
+drawn in place on it and `Presented`, the font relay, its options and its
+feeds.
 
 - `src/lib.rs` — `Scene`, `Setup` (options and their pace, seed, theme,
   pool), `Told` (a wall reading compared with no allocation) and the frame's

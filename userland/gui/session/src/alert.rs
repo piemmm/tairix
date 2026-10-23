@@ -484,9 +484,7 @@ impl AlertWindow {
     }
 
     fn owe(&mut self, damage: &Region) {
-        for &rect in damage.rects() {
-            self.owed.add(rect);
-        }
+        self.owed.add_region(damage);
     }
 
     /// The client surface, drawn whole. The mark is drawn once per scale.

@@ -8,12 +8,12 @@ use alloc::vec::Vec;
 use tairix_abi::bounded_text::BoundedText;
 use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::display::{
-    DamageList, DamageRect, DisplayFormat, DisplayMode, DisplayPower, RefreshRate,
+    DamageRect, DisplayFormat, DisplayMode, DisplayPower, RefreshRate,
 };
 use tairix_abi::saver::{
     Choice, ChoiceValue, Choices, OptionKey, SaverFeeds, SaverOption, SaverOptionKind,
 };
-use tairix_abi::saver_ipc::{SaverMessage, WallReading, SAVER_START_DEADLINE_NS};
+use tairix_abi::saver_ipc::{SaverDamage, SaverMessage, WallReading, SAVER_START_DEADLINE_NS};
 use tairix_abi::sysinfo::MemoryBand;
 use tairix_abi::window_ipc::{SaverOrigin, SaverStanding};
 use tairix_abi::{BundleId, DriverError, Errno, APPINFO_FLAG_FEED_MACHINE};
@@ -279,6 +279,11 @@ fn a_saver_is_started_with_its_options_and_held_to_its_ceilings() {
     assert_eq!(start.threads, 1, "not a parallel saver");
     let (memory, threads) = ceilings(&bundle, start.region.len(), (4, 8 << 30));
     assert_eq!(start.memory, memory);
+    assert_eq!(
+        start.installed_memory,
+        8 << 30,
+        "its caches are sized from the machine, not from its own ceiling"
+    );
     assert_eq!(threads, 1);
     let mut parallel = saver(0);
     parallel.parallel = true;
@@ -331,7 +336,7 @@ fn a_saver_that_misbehaves_or_never_starts_is_ended_and_the_screen_blacked() {
     });
     let mut errands = super::fixtures::Errands::default();
     let ended = saver
-        .on_readable(1, &mut comp, &mut errands)
+        .on_readable(1, (&mut comp, None), &mut errands)
         .expect("ended");
     assert_eq!(ended.ended, Ended::Faulted(Fault::OutOfTurn));
     assert_eq!(ended.code, Some(0), "reaped");
@@ -366,14 +371,18 @@ fn only_a_ready_saver_given_the_machine_feed_wants_reports() {
     let pipes = host(&mut plain, &saver(0), &mut comp, 0);
     pipes.say(&SaverMessage::Ready);
     let mut errands = super::fixtures::Errands::default();
-    assert!(plain.on_readable(0, &mut comp, &mut errands).is_none());
+    assert!(plain
+        .on_readable(0, (&mut comp, None), &mut errands)
+        .is_none());
     assert!(!plain.wants_machine_reports());
 
     let mut fed = Saving::new(DiscardSink);
     let pipes = host(&mut fed, &saver(APPINFO_FLAG_FEED_MACHINE), &mut comp, 0);
     assert!(!fed.wants_machine_reports(), "not before it is ready");
     pipes.say(&SaverMessage::Ready);
-    assert!(fed.on_readable(0, &mut comp, &mut errands).is_none());
+    assert!(fed
+        .on_readable(0, (&mut comp, None), &mut errands)
+        .is_none());
     assert!(fed.wants_machine_reports());
 }
 
@@ -659,11 +668,13 @@ fn present<S: Sink + Clone>(
     };
     pipes.say(&SaverMessage::Presented {
         serial,
-        damage: DamageList::new(&[corner]).ok(),
+        damage: SaverDamage::new(&[corner]).ok(),
         next: tairix_abi::saver_ipc::NextFrame::Soon,
     });
     let mut errands = super::fixtures::Errands::default();
-    assert!(saver.on_readable(now_ns, comp, &mut errands).is_none());
+    assert!(saver
+        .on_readable(now_ns, (comp, None), &mut errands)
+        .is_none());
 }
 
 /// A hosted saver is recorded by its identifier when its first frame reaches
@@ -676,10 +687,18 @@ fn a_saver_is_recorded_when_first_shown_and_when_dismissed() {
     let pipes = host(&mut saver, &saver_bundle(), &mut comp, 0);
     pipes.say(&SaverMessage::Ready);
     let mut errands = super::fixtures::Errands::default();
-    assert!(saver.on_readable(0, &mut comp, &mut errands).is_none());
+    assert!(saver
+        .on_readable(0, (&mut comp, None), &mut errands)
+        .is_none());
     assert!(log.of(SAVER_SHOWN).is_empty(), "nothing presented yet");
     present(&mut saver, &pipes, (1, 1), &mut comp);
+    assert!(
+        log.of(SAVER_SHOWN).is_empty(),
+        "laid, but not yet on the screen"
+    );
+    saver.shown(&mut comp);
     present(&mut saver, &pipes, (2, 1_000_000_000), &mut comp);
+    saver.shown(&mut comp);
     let mut shown = naming("os.tairix.saver.waves");
     shown.push((String::from("preview"), String::from("false")));
     assert_eq!(log.of(SAVER_SHOWN), [shown]);
@@ -703,7 +722,9 @@ fn a_saver_ended_or_refused_is_recorded_with_why() {
         next: tairix_abi::saver_ipc::NextFrame::Idle,
     });
     let mut errands = super::fixtures::Errands::default();
-    assert!(saver.on_readable(1, &mut comp, &mut errands).is_some());
+    assert!(saver
+        .on_readable(1, (&mut comp, None), &mut errands)
+        .is_some());
     assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
 
     let bundle = saver_bundle();

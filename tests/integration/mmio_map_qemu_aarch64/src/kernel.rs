@@ -11,6 +11,7 @@
 use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
+use tairix_arch_api::AddressTag;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -42,9 +43,9 @@ use tairix_kernel_core::{
     ProcessSpace, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{
-    page_count_for, ActiveCpus, AddressSpace, BootMemoryMap, DirectPhysMap, DmaCustodian, Frame,
-    FrameAllocator, LiveSpace, MemoryRegion, PhysAddr, RegionKind, SpaceTlb, Unpublished,
-    UserStack, VirtAddr,
+    page_count_for, AddressSpace, BootMemoryMap, DirectPhysMap, DmaCustodian, Frame,
+    FrameAllocator, LiveSpace, MemoryRegion, PhysAddr, RegionKind, SpaceTlb, TlbContext,
+    Unpublished, UserStack, VirtAddr,
 };
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -609,7 +610,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);
     }
     // One CPU runs this vertical, so no other needs reaching.
-    let Ok(cpus) = ActiveCpus::new(1) else {
+    let Ok(cpus) = TlbContext::new(1) else {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);
     };
     let Ok(live) = LiveSpace::new(
@@ -636,7 +637,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // so the hook only has to be a real, callable no-op.
     let live = Arc::new(ProcessSpace::new(
         Box::new(live),
-        Arc::new(|_stack_top: u64, _tls_base: u64| {}),
+        Arc::new(|_stack_top: u64, _tls_base: u64, _tag: AddressTag| {}),
         &tairix_arch_aarch64::userentry::USER_MODE,
     ));
 
@@ -673,11 +674,11 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // on the per-CPU live-space slot while it runs, and its work body
     // `enter_user`s into EL0.
     let cs = ContextSwitchHal::new();
-    let pre_resume = move |_stack_top: u64| {
+    let pre_resume = move |_stack_top: u64, tag: AddressTag| {
         // SAFETY: the MMU is enabled and `root_phys` is the L1 root of a space
         // that identity-maps the low kernel window — `activate_user_root`'s
         // contract.
-        unsafe { activate_user_root(root_phys) };
+        unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: the entered space is active (the `pre_resume` hook just

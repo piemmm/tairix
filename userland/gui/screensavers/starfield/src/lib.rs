@@ -13,7 +13,8 @@
 //! A frame repaints only where a star was and now is: the footprints drawn
 //! last frame are erased and this frame's drawn, so the pixel work follows
 //! the stars rather than the screen, however coarsely the damage the host is
-//! told about is kept.
+//! told about is kept. That work is spread in bands of rows across every core
+//! the saver is granted, each band erasing and drawing in the one order.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -21,11 +22,13 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::Errno;
 use tairix_geometry::{Rect, Region};
-use tairix_raster::{Canvas, Color, ScanScratch, Surface, SUBPIXEL};
+use tairix_parallel::{JobRunner, Pool};
+use tairix_raster::{BandScratch, Canvas, Color, ScanScratch, Surface, SUBPIXEL};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_saver::{erase, Frame, Host, NextFrame, Scene, Setup};
 use tairix_theme::motion::SceneClock;
@@ -67,7 +70,15 @@ const BASE_WIDTH: f64 = 0.7;
 const NEAR_WIDTH: f64 = 2.3;
 
 /// The fraction of a streak's head brightness its tail keeps, out of 255.
-const TAIL_FLOOR: u32 = 38;
+const TAIL_FLOOR: u8 = 38;
+
+/// The fraction bits of the fixed point a streak's brightness is stepped along
+/// a row in: fine enough that a row of the screen's width gathers well under a
+/// level of error.
+const RAMP_BITS: u32 = 24;
+
+/// One whole streak in that fixed point.
+const RAMP_ONE: u32 = 1 << RAMP_BITS;
 
 /// Star colours by temperature and how common each is, out of 100: blue-white
 /// giants, white, warm white, yellow, and the rare orange.
@@ -103,13 +114,21 @@ struct Streak {
     footprint: Rect,
 }
 
-/// The starfield screensaver.
-pub struct Starfield {
-    stars: Vec<Star>,
+/// What a frame draws, what the last one drew, and the scratch they are drawn
+/// in.
+struct Painted {
     streaks: Vec<Streak>,
     /// The footprints the last frame drew, which this one erases.
     drawn: Vec<Rect>,
-    scratch: ScanScratch,
+    scratch: BandScratch,
+}
+
+/// The starfield screensaver.
+pub struct Starfield {
+    stars: Vec<Star>,
+    painted: Painted,
+    /// The cores a frame is drawn across.
+    runner: Pool,
     rng: NonCryptoRng,
     screen: Rect,
     centre: (f64, f64),
@@ -152,9 +171,12 @@ impl Starfield {
         let aspect = f64::from(width) / f64::from(height);
         let mut field = Self {
             stars: Vec::new(),
-            streaks: Vec::new(),
-            drawn: Vec::new(),
-            scratch: ScanScratch::new(),
+            painted: Painted {
+                streaks: Vec::new(),
+                drawn: Vec::new(),
+                scratch: BandScratch::new(),
+            },
+            runner: setup.pool(),
             rng: NonCryptoRng::seed_from_u64(setup.seed),
             screen: Rect::new(0, 0, width, height),
             centre: (f64::from(width) / 2.0, half_height),
@@ -167,11 +189,12 @@ impl Starfield {
             refresh: start.refresh,
         };
         if !(fallible::reserve(&mut field.stars, count)
-            && fallible::reserve(&mut field.streaks, count)
-            && fallible::reserve(&mut field.drawn, count))
+            && fallible::reserve(&mut field.painted.streaks, count)
+            && fallible::reserve(&mut field.painted.drawn, count))
         {
             return Err(Errno::OutOfMemory);
         }
+        field.painted.scratch.spread_over(&field.runner);
         for _ in 0..count {
             let depth = Z_NEAR + field.rng.next_f64() * (Z_FAR - Z_NEAR);
             let star = field.spawn(depth);
@@ -194,15 +217,20 @@ impl Scene for Starfield {
         frame: &Frame<'_>,
         _host: &mut Host<'_>,
     ) -> NextFrame {
-        let before = self.clock.moved();
-        let flight = self.clock.advance(frame.now_ns, self.refresh);
-        let (speed, roll) = match (self.calm, self.warp) {
-            (true, _) => (CRUISE_SPEED, 0.0),
-            (false, false) => (CRUISE_SPEED, ROLL_RATE * flight),
-            (false, true) => (speed_at(flight), ROLL_RATE * flight),
-        };
-        self.fly(speed * (flight - before), speed, roll);
+        self.fly_to(frame.now_ns);
+        self.painted.redraw(surface, damage, &self.runner);
+        self.clock.due_ns().map_or(NextFrame::Idle, NextFrame::At)
+    }
+}
 
+impl Painted {
+    /// Erase the footprints the last frame drew and draw this frame's
+    /// streaks over `surface`, in bands of rows across `runner`, adding the
+    /// box around both to `damage`.
+    ///
+    /// Every band erases and draws in the one order, so the bands together
+    /// are the frame drawn whole.
+    fn redraw(&mut self, surface: &mut Surface, damage: &mut Region, runner: &dyn JobRunner) {
         // A field this dense has stars all over the screen, so its damage is
         // the box around them: far more rectangles than any present carries.
         let reached = self
@@ -211,26 +239,48 @@ impl Scene for Starfield {
             .chain(self.streaks.iter().map(|streak| &streak.footprint))
             .fold(Rect::EMPTY, |bounds, rect| bounds.union(rect));
         damage.add(reached);
-        for rect in &self.drawn {
-            erase(surface, *rect);
-        }
-        for streak in &self.streaks {
-            draw(surface, streak, &mut self.scratch);
+        if let Some((_, top)) = reached.surface_origin() {
+            let (drawn, streaks) = (&self.drawn, &self.streaks);
+            let rows = top..top.saturating_add(reached.height);
+            self.scratch.draw(surface, rows, runner, &|band, scratch| {
+                let rows = band.rows();
+                for rect in drawn.iter().filter(|rect| crosses(rect, &rows)) {
+                    erase(band, *rect);
+                }
+                let crossing = streaks
+                    .iter()
+                    .filter(|streak| crosses(&streak.footprint, &rows));
+                for streak in crossing {
+                    draw(band, streak, scratch);
+                }
+            });
         }
         self.drawn.clear();
         self.drawn
             .extend(self.streaks.iter().map(|streak| streak.footprint));
-        self.clock.due_ns().map_or(NextFrame::Idle, NextFrame::At)
     }
 }
 
 impl Starfield {
+    /// Carry the flight on to the scene clock's motion at `now_ns` and
+    /// project the field into that instant's streaks.
+    fn fly_to(&mut self, now_ns: u64) {
+        let before = self.clock.moved();
+        let flight = self.clock.advance(now_ns, self.refresh);
+        let (speed, roll) = match (self.calm, self.warp) {
+            (true, _) => (CRUISE_SPEED, 0.0),
+            (false, false) => (CRUISE_SPEED, ROLL_RATE * flight),
+            (false, true) => (speed_at(flight), ROLL_RATE * flight),
+        };
+        self.fly(speed * (flight - before), speed, roll);
+    }
+
     /// Move every star `travel` nearer at `speed` and project it into this
     /// frame's streaks, the field turned `roll` radians.
     fn fly(&mut self, travel: f64, speed: f64, roll: f64) {
         let (sin, cos) = (mathf::sin(roll), mathf::cos(roll));
         let warp = ((speed - CRUISE_SPEED) / (WARP_SPEED - CRUISE_SPEED)).clamp(0.0, 1.0);
-        self.streaks.clear();
+        self.painted.streaks.clear();
         for index in 0..self.stars.len() {
             let mut star = self.stars[index];
             star.z -= travel;
@@ -246,7 +296,7 @@ impl Starfield {
             self.stars[index] = star;
             let tail = self.project(x, y, (star.z + travel).min(Z_FAR));
             if let Some(streak) = self.streak(&star, head, tail, warp) {
-                self.streaks.push(streak);
+                self.painted.streaks.push(streak);
             }
         }
     }
@@ -380,60 +430,115 @@ fn sub(value: f64) -> i32 {
     mathf::round_i32(value * f64::from(SUBPIXEL))
 }
 
-/// Draw one streak, held to its own footprint: a dot while it barely moved,
-/// otherwise a band from tail to head brightening towards the head.
-fn draw(surface: &mut Surface, streak: &Streak, scratch: &mut ScanScratch) {
+/// Whether `rect` reaches any of `rows`.
+fn crosses(rect: &Rect, rows: &Range<u32>) -> bool {
+    let (Ok(start), Ok(end)) = (i32::try_from(rows.start), i32::try_from(rows.end)) else {
+        return true;
+    };
+    rect.top() < end && rect.bottom() > start
+}
+
+/// Draw one streak onto `canvas`: a dot while it barely moved, otherwise a
+/// band from tail to head brightening towards the head. Its footprint holds
+/// every pixel either touches.
+fn draw(canvas: &mut impl Canvas, streak: &Streak, scratch: &mut ScanScratch) {
     let Streak {
         head,
         tail,
         width,
         color,
-        footprint,
+        ..
     } = *streak;
-    let (Ok(fx), Ok(fy)) = (
-        u32::try_from(footprint.left()),
-        u32::try_from(footprint.top()),
-    ) else {
-        return;
-    };
     let (dx, dy) = (head.0 - tail.0, head.1 - tail.1);
     let length = mathf::hypot(dx, dy);
     let half = width / 2.0;
-    surface.with_clip(fx, fy, footprint.width, footprint.height, |surface| {
-        if length < width * 0.75 {
-            let dot = [
-                (sub(head.0 - half), sub(head.1 - half)),
-                (sub(head.0 + half), sub(head.1 - half)),
-                (sub(head.0 + half), sub(head.1 + half)),
-                (sub(head.0 - half), sub(head.1 + half)),
-            ];
-            Canvas::fill_polygon_subpixel(surface, &dot, color, scratch);
-            return;
-        }
-        let (ox, oy) = (-dy / length * half, dx / length * half);
-        let band = [
-            (sub(tail.0 + ox), sub(tail.1 + oy)),
-            (sub(tail.0 - ox), sub(tail.1 - oy)),
-            (sub(head.0 - ox), sub(head.1 - oy)),
-            (sub(head.0 + ox), sub(head.1 + oy)),
+    if length < width * 0.75 {
+        let dot = [
+            (sub(head.0 - half), sub(head.1 - half)),
+            (sub(head.0 + half), sub(head.1 - half)),
+            (sub(head.0 + half), sub(head.1 + half)),
+            (sub(head.0 - half), sub(head.1 + half)),
         ];
-        let reach = length * length;
-        surface.wash_polygon_subpixel_in(
-            &band,
-            color,
-            |x, y| {
-                let along = ((f64::from(x) + 0.5 - tail.0) * dx
-                    + (f64::from(y) + 0.5 - tail.1) * dy)
-                    / reach;
-                let strength = TAIL_FLOOR
-                    + u32::from(to_channel(
-                        along.clamp(0.0, 1.0) * f64::from(255 - TAIL_FLOOR),
-                    ));
-                u8::try_from(strength).unwrap_or(u8::MAX)
-            },
-            scratch,
+        canvas.fill_polygon_subpixel(&dot, color, scratch);
+        return;
+    }
+    let (ox, oy) = (-dy / length * half, dx / length * half);
+    let band = [
+        (sub(tail.0 + ox), sub(tail.1 + oy)),
+        (sub(tail.0 - ox), sub(tail.1 - oy)),
+        (sub(head.0 - ox), sub(head.1 - oy)),
+        (sub(head.0 + ox), sub(head.1 + oy)),
+    ];
+    let ramp = Ramp::new(tail, (dx, dy), length * length);
+    canvas.wash_polygon_subpixel(
+        &band,
+        color,
+        |y, x, strengths| ramp.row(y, x, strengths),
+        scratch,
+    );
+}
+
+/// A streak's strength along it, measured at each pixel's centre:
+/// [`TAIL_FLOOR`] at and behind its tail, full at and past its head, and
+/// straight between.
+///
+/// How far along the streak a pixel's centre lies is affine in its position,
+/// so it is held in fixed point and a row is worked out in whole numbers,
+/// measured from the pixel the tail lies in so no value outgrows the reach of
+/// the screen from the streak.
+#[derive(Copy, Clone)]
+struct Ramp {
+    /// The pixel the tail lies in.
+    corner: (i64, i64),
+    /// How far along the streak that pixel's centre lies.
+    base: i64,
+    /// How far one pixel's step right, and one down, carry along it.
+    step: (i64, i64),
+}
+
+impl Ramp {
+    /// The ramp of a streak running `run` from `tail`, `reach` being its
+    /// length squared.
+    fn new(tail: (f64, f64), run: (f64, f64), reach: f64) -> Self {
+        let per_pixel = (run.0 / reach, run.1 / reach);
+        let corner = (
+            mathf::round_i32(mathf::floor(tail.0)),
+            mathf::round_i32(mathf::floor(tail.1)),
         );
-    });
+        let offset = (
+            f64::from(corner.0) + 0.5 - tail.0,
+            f64::from(corner.1) + 0.5 - tail.1,
+        );
+        Self {
+            corner: (i64::from(corner.0), i64::from(corner.1)),
+            base: fixed(offset.0 * per_pixel.0 + offset.1 * per_pixel.1),
+            step: (fixed(per_pixel.0), fixed(per_pixel.1)),
+        }
+    }
+
+    /// Write the strength of row `y`'s pixels from column `x` into
+    /// `strengths`.
+    fn row(&self, y: u32, x: u32, strengths: &mut [u8]) {
+        let mut at = self.base
+            + (i64::from(x) - self.corner.0) * self.step.0
+            + (i64::from(y) - self.corner.1) * self.step.1;
+        for strength in strengths {
+            *strength = strength_at(at);
+            at += self.step.0;
+        }
+    }
+}
+
+/// `value` in the ramp's fixed point, saturating far outside any streak.
+fn fixed(value: f64) -> i64 {
+    i64::from(mathf::round_i32(value * f64::from(RAMP_ONE)))
+}
+
+/// The strength `at` along a streak, in the ramp's fixed point, gives.
+fn strength_at(at: i64) -> u8 {
+    let along = u64::try_from(at.clamp(0, i64::from(RAMP_ONE))).unwrap_or(0);
+    let rise = (along * u64::from(u8::MAX - TAIL_FLOOR) + u64::from(RAMP_ONE / 2)) >> RAMP_BITS;
+    u8::try_from(u64::from(TAIL_FLOOR) + rise).unwrap_or(u8::MAX)
 }
 
 #[cfg(test)]

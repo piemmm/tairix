@@ -353,14 +353,17 @@ fn secondary_trampoline_addr() -> usize {
 /// Rust side of the secondary trampoline.
 ///
 /// `smp.s` jumps here, once per secondary hart, after seeding `tp` and a
-/// private stack. It runs the installed [`set_secondary_entry`]
-/// callback; with none installed it parks the hart (the
-/// [`start_secondary`] guard makes this branch unreachable in practice,
-/// but a freshly-started hart must never fall through to undefined
-/// instructions, fail closed).
+/// private stack. It joins the boot root, turning translation on, and runs
+/// the installed [`set_secondary_entry`] callback; with no root published or
+/// no callback installed it parks the hart (the [`start_secondary`] guard
+/// makes the latter unreachable in practice, but a freshly-started hart must
+/// never fall through to undefined instructions, fail closed).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_riscv64_secondary_main(hartid: CpuId) -> ! {
+    // SAFETY: this hart runs on the kernel image and its secondary stack,
+    // both inside the identity window the boot root maps.
+    unsafe { crate::paging::join_boot_translation() };
     if let Some(entry) = SECONDARY_ENTRY_FN.load() {
         entry(hartid);
     }

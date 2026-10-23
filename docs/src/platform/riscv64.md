@@ -331,13 +331,20 @@ consumed by the resumable-user-kthread bring-up that follows.
 
 ### Resumable U-mode user kthread (RV-X1)
 
-`paging::activate_user_root(root_phys)` is the per-task `pre_resume`
+`paging::activate_user_root(root_phys, tag)` is the per-task `pre_resume`
 reactivation primitive — the riscv64 sibling of the aarch64/x86_64
 `activate_user_root`. Immediately before the kernel `sret`s back into a
 user task's U-mode, that task's own page-table root must be installed so
 its translations, and only its, are in force (`AGENTS.md` §4). It writes
-`satp` (`satp_sv39(root_phys)` + `sfence.vma`) on a hart whose paging is
-already on. Unlike `AddressSpace::switch` it is a free function over the
+`satp` (`satp_sv39(root_phys, asid)`) on a hart whose paging is already on,
+under the ASID the kernel chose, and discards that ASID's entries
+(`sfence.vma x0, asid`) only when the tag was another space's or went stale.
+Each hart probes how many ASID bits it keeps the first time it turns
+translation on (`asid_bits`): the boot hart on its first switch, a secondary
+as it joins the boot root. Every hart tags by the narrowest, so no `satp`
+truncates one space's ASID onto another's; when a hart keeps none, or starts
+while the boot hart runs untranslated and so has nothing to probe with,
+nothing is tagged and every switch discards. Unlike `AddressSpace::switch` it is a free function over the
 raw `u64` root rather than the owned (`!Send`) `AddressSpace`, so the
 per-task hook captures a plain word and stays `Send`; the `satp` write is
 otherwise identical, because Sv39 has a single translation regime.
@@ -470,7 +477,7 @@ only the CSR/assembly operations to the freestanding riscv64 target.
 - **Sv39 paging (`paging.rs`).** The three-level, 39-bit page-table
   primitives: PTE PPN encode/decode (`pte_from_phys` / `phys_from_pte`),
   per-level VPN extraction (`vpn_index`), the `satp` Sv39 selector
-  (`satp_sv39`), a `.bss` `PageTablePool`, and an `AddressSpace` that
+  (`satp_sv39`, root and ASID), a `.bss` `PageTablePool`, and an `AddressSpace` that
   identity-maps the low gigabytes with 1 GiB leaves, adds 4 KiB mappings
   through `map_4k`, and activates via `satp` + `sfence.vma` in `switch`.
   The `AddressSpace` draws its tables through the Arch HAL

@@ -518,5 +518,5 @@ pub static NEVER_ENTER_USER: NeverEnterUser = NeverEnterUser;
 /// not the port's register program.
 #[must_use]
 pub fn inert_process_resume() -> crate::spawn::ProcessResume {
-    alloc::sync::Arc::new(|_stack_top: u64, _tls_base: u64| {})
+    alloc::sync::Arc::new(|_stack_top: u64, _tls_base: u64, _tag: tairix_arch_api::AddressTag| {})
 }

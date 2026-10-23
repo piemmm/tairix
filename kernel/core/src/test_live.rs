@@ -7,8 +7,8 @@ use std::vec::Vec;
 use alloc::sync::Arc;
 
 use tairix_kernel_mem::{
-    ActiveCpus, AddressSpace, DmaCustodian, DmaMapping, FrozenAddressSpace, HostPageTable,
-    LiveSpaceError, LiveUserSpace, Retire, SharedMemory,
+    AddressSpace, DmaCustodian, DmaMapping, FrozenAddressSpace, HostPageTable, LiveSpaceError,
+    LiveUserSpace, Retire, SharedMemory, TlbContext,
 };
 
 /// A recording [`LiveUserSpace`] double: it logs each call and returns a
@@ -52,8 +52,8 @@ pub(crate) const FILE_BASE: u64 = 0xF000_0000;
 pub(crate) const FILE_RESIDENT: u64 = 3;
 
 impl LiveUserSpace for FakeLive {
-    fn active_cpus(&self) -> Arc<ActiveCpus> {
-        Arc::new(ActiveCpus::new(0).expect("an empty set needs no storage"))
+    fn tlb_context(&self) -> Arc<TlbContext> {
+        Arc::new(TlbContext::new(0).expect("an empty set needs no storage"))
     }
 
     fn map_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<u64, LiveSpaceError> {

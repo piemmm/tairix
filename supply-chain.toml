@@ -131,8 +131,8 @@ sha256 = "baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21"
 
 [[source-pin]]
 name = "ctutils"
-version = "0.4.2"
-sha256 = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+version = "0.4.5"
+sha256 = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 
 [[source-pin]]
 name = "curve25519-dalek"

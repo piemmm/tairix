@@ -25,9 +25,13 @@ use crate::SKY;
 use core::f64::consts::{FRAC_PI_2, TAU};
 use core::iter::successors;
 use core::ops::{Range, RangeInclusive};
+#[cfg(test)]
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 
 use tairix_geometry::{Rect, Region};
-use tairix_raster::{DitherRow, Pixel, Surface};
+use tairix_parallel::JobRunner;
+use tairix_raster::wide::{halve, widen, LANE_ONES, UNLIT};
+use tairix_raster::{ColumnBand, DitherRow, Pixel, Surface};
 use tairix_util::fallible;
 use tairix_util::mathf::{self, single, Phasor};
 
@@ -495,11 +499,6 @@ const EMBER: [(f64, [f64; 3]); 19] = [
 /// The luma an unbounded exposure approaches: the last station's.
 const EMBER_TOP: f64 = EMBER[EMBER.len() - 1].0;
 
-/// A one in each channel's `u16` lane: a value multiplied by it lands in all
-/// three, so one add dithers every channel, and it marks the low bit halving
-/// must not carry into the lane beneath.
-const LANE_ONES: u64 = 0x0000_0001_0001_0001;
-
 /// Pixels between neighbouring samples of the light, each way. Every term is
 /// soft enough to span several samples, so the light is summed at a quarter
 /// of the pixels and blended back up to all of them.
@@ -515,6 +514,14 @@ const CHUNK_LANES: usize = CHUNK as usize + 2;
 
 /// Sample columns whose pixels are repainted as one strip.
 const STRIP: u32 = 32;
+
+/// The pixel columns of a strip, which a band of a paint holds whole strips
+/// of.
+const STRIP_PIXELS: u32 = STRIP * PIXELS_PER_SAMPLE;
+
+/// The fewest pixels worth handing another core to paint: a pixel costs its
+/// share of a column's sums and a toning, so a hand-off must carry many.
+const PAINT_GRAIN: usize = 16_384;
 
 /// What a sample column holds still: where it stands among a path's control
 /// points, its light, and how far each term of it reaches.
@@ -643,6 +650,14 @@ pub struct Light {
     drawn: Vec<(u32, u32)>,
     strips: Vec<Rect>,
     shape: Shape,
+    scratch: Scratch,
+    #[cfg(test)]
+    tally: Tally,
+}
+
+/// What paints sum and tone light in: a room for each band of a paint, every
+/// room a whole column deep, since the light is summed down the columns.
+struct Scratch {
     /// One sample column's light, summed down it.
     sums: Vec<f32>,
     /// A chunk's samples toned, row by row, a chunk and its right neighbour
@@ -650,21 +665,158 @@ pub struct Light {
     toned: Vec<u64>,
     /// A pixel row blended from the two sample rows about it.
     between: Vec<u64>,
-    #[cfg(test)]
-    tally: Tally,
+    /// The sample rows a room holds: the grid's depth.
+    depth: usize,
+    rooms: usize,
 }
 
-/// The work paints have done, which tests measure rather than time.
+/// One band's room in the scratch.
+struct Room<'a> {
+    sums: &'a mut [f32],
+    toned: &'a mut [u64],
+    between: &'a mut [u64],
+}
+
+impl Scratch {
+    /// One room over a grid `depth` sample rows deep, or `None` when the heap
+    /// will not give it.
+    fn new(depth: usize) -> Option<Self> {
+        let mut scratch = Self {
+            sums: Vec::new(),
+            toned: Vec::new(),
+            between: Vec::new(),
+            depth,
+            rooms: 0,
+        };
+        scratch.hold(1);
+        (scratch.rooms == 1 && depth > 0).then_some(scratch)
+    }
+
+    /// Hold `rooms` rooms. A refusal keeps the rooms held before.
+    fn hold(&mut self, rooms: usize) {
+        if rooms <= self.rooms {
+            return;
+        }
+        let (Some(sums), Some(between)) = (
+            self.depth.checked_mul(rooms),
+            CHUNK_LANES.checked_mul(rooms),
+        ) else {
+            return;
+        };
+        let Some(toned) = sums.checked_mul(CHUNK_LANES) else {
+            return;
+        };
+        if fallible::grow_to(&mut self.sums, sums, 0.0)
+            && fallible::grow_to(&mut self.toned, toned, 0)
+            && fallible::grow_to(&mut self.between, between, 0)
+        {
+            self.rooms = rooms;
+        }
+    }
+
+    /// The first room, for a paint in one band.
+    fn whole(&mut self) -> Room<'_> {
+        Room {
+            sums: &mut self.sums,
+            toned: &mut self.toned,
+            between: &mut self.between,
+        }
+    }
+
+    /// `count` rooms, or `None` when fewer are held.
+    fn split(&mut self, count: usize) -> Option<impl Iterator<Item = Room<'_>>> {
+        let lanes = self.depth.checked_mul(CHUNK_LANES)?;
+        (count <= self.rooms && self.depth > 0).then(|| {
+            self.sums
+                .chunks_mut(self.depth)
+                .zip(self.toned.chunks_mut(lanes))
+                .zip(self.between.chunks_mut(CHUNK_LANES))
+                .take(count)
+                .map(|((sums, toned), between)| Room {
+                    sums,
+                    toned,
+                    between,
+                })
+        })
+    }
+}
+
+/// What a paint reads of the ribbon as it stands.
+#[derive(Copy, Clone)]
+struct View<'a> {
+    size: (u32, u32),
+    grid: (u32, u32),
+    exclusion: Rect,
+    columns: &'a [Column],
+    placed: &'a [Placed],
+    shape: &'a Shape,
+    #[cfg(test)]
+    tally: &'a Tally,
+}
+
+/// Where a paint writes: a whole surface, or one band of its columns.
+trait Target {
+    /// The rows this target holds.
+    fn rows(&self) -> Range<u32>;
+
+    /// The columns this target holds.
+    fn columns(&self) -> Range<u32>;
+
+    /// The writable pixels of row `y` from column `x`, for at most `w`
+    /// columns, and the column the span starts at.
+    fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])>;
+
+    /// Lay `pixel` over the part of `[x, x+w) × rows` this target holds.
+    fn fill(&mut self, x: u32, w: u32, rows: Range<u32>, pixel: Pixel) {
+        let held = self.rows();
+        for row in rows.start.max(held.start)..rows.end.min(held.end) {
+            if let Some((_, span)) = self.row_span_mut(row, x, w) {
+                span.fill(pixel);
+            }
+        }
+    }
+}
+
+impl Target for Surface {
+    fn rows(&self) -> Range<u32> {
+        0..self.height()
+    }
+
+    fn columns(&self) -> Range<u32> {
+        0..self.width()
+    }
+
+    fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])> {
+        Self::row_span_mut(self, y, x, w)
+    }
+}
+
+impl Target for ColumnBand<'_> {
+    fn rows(&self) -> Range<u32> {
+        ColumnBand::rows(self)
+    }
+
+    fn columns(&self) -> Range<u32> {
+        ColumnBand::columns(self)
+    }
+
+    fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])> {
+        ColumnBand::row_span_mut(self, y, x, w)
+    }
+}
+
+/// The work paints have done, which tests measure rather than time, counted
+/// by every band at once.
 #[cfg(test)]
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct Tally {
     /// Sample rows summed, one column at a time.
-    summed: usize,
+    summed: AtomicUsize,
     /// Chunks written.
-    chunks: usize,
+    chunks: AtomicUsize,
     /// Pixels written inside the text's clear space, which the sky then
     /// covers.
-    over_clear: u64,
+    over_clear: AtomicU64,
 }
 
 impl Light {
@@ -688,9 +840,6 @@ impl Light {
         let mut placed = Vec::new();
         let mut drawn = Vec::new();
         let mut strips = Vec::new();
-        let mut sums = Vec::new();
-        let mut toned = Vec::new();
-        let mut between = Vec::new();
         let mut tone = Vec::new();
         let mut profile = Vec::new();
         if !(fallible::reserve(&mut columns, count)
@@ -698,14 +847,12 @@ impl Light {
             && fallible::grow_to(&mut placed, count, Placed::default())
             && fallible::grow_to(&mut drawn, count, (0, 0))
             && fallible::reserve(&mut strips, index_of(grid.0.div_ceil(STRIP)))
-            && fallible::grow_to(&mut sums, depth, 0.0)
-            && fallible::grow_to(&mut toned, CHUNK_LANES.checked_mul(depth)?, 0)
-            && fallible::grow_to(&mut between, CHUNK_LANES, 0)
             && fallible::reserve(&mut tone, TONE_LEN)
             && fallible::reserve(&mut profile, PROFILE_LEN))
         {
             return None;
         }
+        let scratch = Scratch::new(depth)?;
         let tall = f64::from(height);
         columns.extend((0..grid.0).map(|column| column_at(sample_across(column, width), tall)));
         tone.extend((0..TONE_LEN).map(tone_entry));
@@ -723,9 +870,7 @@ impl Light {
             drawn,
             strips,
             shape: Shape { profile, tone },
-            sums,
-            toned,
-            between,
+            scratch,
             #[cfg(test)]
             tally: Tally::default(),
         };
@@ -758,7 +903,9 @@ impl Light {
         while start < self.grid.0 {
             let end = start.saturating_add(STRIP).min(self.grid.0);
             let mut rows = (u32::MAX, 0);
-            for index in index_range(start..end) {
+            // A strip's last pixel blends the next strip's first sample, so
+            // that sample's rows are the strip's too.
+            for index in index_range(start..end.saturating_add(1).min(self.grid.0)) {
                 for lit in [self.drawn[index], self.placed[index].lit] {
                     if lit.0 < lit.1 {
                         rows = (rows.0.min(lit.0), rows.1.max(lit.1));
@@ -766,11 +913,10 @@ impl Light {
                 }
             }
             if rows.0 < rows.1 {
-                // The pixel before the strip's first sample blends it, and the
-                // one on the next strip's first sample is that strip's alone.
-                let left = pixel_of(start).saturating_sub(1);
-                let right = pixel_of(end).min(width);
-                let strip = rect(left..right, rows.0..rows.1.min(height));
+                let strip = rect(
+                    pixel_of(start)..pixel_of(end).min(width),
+                    rows.0..rows.1.min(height),
+                );
                 damage.add(strip);
                 self.strips.push(strip);
             }
@@ -780,196 +926,69 @@ impl Light {
         true
     }
 
-    /// Repaint the strips the last [`step`](Self::step) moved, handing each
-    /// to `after` once it is painted.
-    pub fn paint_moved(
-        &mut self,
-        surface: &mut Surface,
-        mut after: impl FnMut(&mut Surface, Rect),
-    ) {
-        for index in 0..self.strips.len() {
-            let strip = self.strips[index];
-            self.paint(surface, strip);
-            after(surface, strip);
-        }
+    /// Hold a room for each of `runner`'s participants, and at most one a
+    /// strip: a room is a whole column deep, so a paint is split no finer than
+    /// the runner is wide. A refusal keeps the rooms held before, which costs
+    /// parallelism and never the paint.
+    pub fn spread_over(&mut self, runner: &dyn JobRunner) {
+        let strips = index_of(self.size.0.div_ceil(STRIP_PIXELS));
+        self.scratch.hold(runner.width().min(strips));
+    }
+
+    /// The strips the last [`step`](Self::step) moved, which
+    /// [`paint_moved`](Self::paint_moved) repaints. No two share a pixel.
+    #[must_use]
+    pub fn strips(&self) -> &[Rect] {
+        &self.strips
+    }
+
+    /// Repaint the strips the last [`step`](Self::step) moved, spread across
+    /// `runner` as [`paint`](Self::paint) is.
+    pub fn paint_moved(&mut self, surface: &mut Surface, runner: &dyn JobRunner) {
+        let (view, strips, scratch) = self.parts();
+        view.paint_across(scratch, surface, strips, runner);
     }
 
     /// Paint the ribbon as it stands over `area` of `surface`, black wherever
-    /// its light does not reach and over the whole of the text's clear space.
+    /// its light does not reach and over the whole of the text's clear space,
+    /// in bands of columns spread across `runner`.
     ///
-    /// Every sample is summed the same way whatever area asks for it, so a
-    /// part repainted matches the whole painted at once pixel for pixel. A
-    /// chunk sums and writes only the rows its columns' light reaches, and
+    /// Every sample is summed the same way whatever area or band asks for it,
+    /// so a part repainted matches the whole painted at once pixel for pixel.
+    /// A chunk sums and writes only the rows its columns' light reaches, and
     /// lays the sky over the rest of it.
-    pub fn paint(&mut self, surface: &mut Surface, area: Rect) {
-        let (width, height) = self.size;
-        let area = on_screen(area, self.size);
-        let Some((left, top)) = area.surface_origin() else {
-            return;
-        };
-        let pixels = (
-            left..left.saturating_add(area.width).min(width),
-            top..top.saturating_add(area.height).min(height),
-        );
-        if pixels.0.is_empty() || pixels.1.is_empty() {
-            return;
-        }
-        // The sample columns those pixels blend: the one at or before each
-        // pixel, and the one after.
-        let samples = pixels.0.start / PIXELS_PER_SAMPLE..pixels.0.end.div_ceil(PIXELS_PER_SAMPLE);
-        let mut first = samples.start;
-        // The sample rows the first lane holds, toned as the last chunk's
-        // neighbour.
-        let mut carried = None;
-        while first < samples.end {
-            let remaining = samples.end - first;
-            let end = first
-                + if remaining == CHUNK + 1 {
-                    remaining
-                } else {
-                    remaining.min(CHUNK)
-                };
-            let owned = pixel_of(first).max(pixels.0.start)..pixel_of(end).min(pixels.0.end);
-            let lit = self.lit_rows(first..=end, &pixels.1);
-            for dark in [pixels.1.start..lit.start, lit.end..pixels.1.end] {
-                surface.fill_rect(
-                    owned.start,
-                    dark.start,
-                    owned.end - owned.start,
-                    dark.end.saturating_sub(dark.start),
-                    SKY,
-                );
-            }
-            if lit.is_empty() {
-                carried = None;
-                first = end;
-                continue;
-            }
-            // The samples the lit pixels blend: the one at or above each
-            // pixel, and the one below.
-            let rows =
-                lit.start / PIXELS_PER_SAMPLE..(lit.end / PIXELS_PER_SAMPLE + 1).min(self.grid.1);
-            let from = u32::from(carried.as_ref() == Some(&rows));
-            for lane in from..=(end - first) {
-                let column = (first + lane).min(self.grid.0 - 1);
-                self.tone_column(column, rows.clone(), index_of(lane));
-            }
-            let depth = index_of(rows.end - rows.start);
-            let used = index_of(end - first) + 1;
-            self.write(surface, (first, owned), (rows.start, depth, lit), used);
-            // The neighbour this chunk blended into is the next chunk's first
-            // column: keep it rather than sum it again where the next chunk
-            // asks for the same rows.
-            for row in self
-                .toned
-                .as_chunks_mut::<CHUNK_LANES>()
-                .0
-                .iter_mut()
-                .take(depth)
-            {
-                row[0] = row[used - 1];
-            }
-            carried = Some(rows);
-            first = end;
-        }
-        let clear = area.intersection(&self.exclusion);
-        if let (Ok(x), Ok(y)) = (u32::try_from(clear.left()), u32::try_from(clear.top())) {
-            surface.fill_rect(x, y, clear.width, clear.height, SKY);
-        }
+    pub fn paint(&mut self, surface: &mut Surface, area: Rect, runner: &dyn JobRunner) {
+        let (view, _, scratch) = self.parts();
+        view.paint_across(scratch, surface, &[area], runner);
     }
 
-    /// The pixel rows of `rows` the light of sample `columns` reaches, as one
-    /// span within them: every other row of them is the sky. Light reaching
-    /// none of them is an empty span at their end.
-    fn lit_rows(&self, columns: RangeInclusive<u32>, rows: &Range<u32>) -> Range<u32> {
-        let last = self.grid.0 - 1;
-        let (high, low) = columns
-            .map(|column| self.placed[index_of(column.min(last))].lit)
-            .filter(|lit| lit.0 < lit.1)
-            .fold((u32::MAX, 0), |(high, low), lit| {
-                (high.min(lit.0), low.max(lit.1))
-            });
-        let start = high.clamp(rows.start, rows.end);
-        start..low.clamp(start, rows.end)
-    }
-
-    /// Sum sample `column`'s light over sample `rows` and tone it into `lane`
-    /// of the chunk.
-    fn tone_column(&mut self, column: u32, rows: Range<u32>, lane: usize) {
-        let depth = index_of(rows.end - rows.start);
-        #[cfg(test)]
-        {
-            self.tally.summed += depth;
-        }
+    /// What a paint reads, the strips the last step moved, and the scratch it
+    /// works in, borrowed apart.
+    fn parts(&mut self) -> (View<'_>, &[Rect], &mut Scratch) {
         let Self {
+            size,
+            grid,
+            exclusion,
             columns,
             placed,
             shape,
-            sums,
-            toned,
+            strips,
+            scratch,
+            #[cfg(test)]
+            tally,
             ..
         } = self;
-        let Some(sums) = sums.get_mut(..depth) else {
-            return;
+        let view = View {
+            size: *size,
+            grid: *grid,
+            exclusion: *exclusion,
+            columns,
+            placed,
+            shape,
+            #[cfg(test)]
+            tally,
         };
-        sums.fill(0.0);
-        let index = index_of(column);
-        gather(&columns[index], &placed[index], shape, rows, sums);
-        for (row, exposure) in toned
-            .as_chunks_mut::<CHUNK_LANES>()
-            .0
-            .iter_mut()
-            .zip(sums.iter())
-        {
-            row[lane] = shape.tone.get(tone_index(*exposure)).copied().unwrap_or(0);
-        }
-    }
-
-    /// Write the pixel `columns` a chunk starting at sample column `first`
-    /// owns, over pixel `rows`, from the chunk's toned samples: `samples` of
-    /// them from sample row `top`, each row `used` lanes wide.
-    fn write(
-        &mut self,
-        surface: &mut Surface,
-        (first, columns): (u32, Range<u32>),
-        (top, samples, rows): (u32, usize, Range<u32>),
-        used: usize,
-    ) {
-        if columns.is_empty() || samples == 0 {
-            return;
-        }
-        #[cfg(test)]
-        {
-            self.tally.chunks += 1;
-            let wasted = rect(columns.clone(), rows.clone()).intersection(&self.exclusion);
-            self.tally.over_clear += u64::from(wasted.width) * u64::from(wasted.height);
-        }
-        let sample_row = |row: usize| row * CHUNK_LANES..row * CHUNK_LANES + used;
-        for row in rows {
-            let upper = index_of(row / PIXELS_PER_SAMPLE - top).min(samples - 1);
-            let above = self.toned.get(sample_row(upper)).unwrap_or_default();
-            let lanes: &[u64] = if row % PIXELS_PER_SAMPLE == 0 {
-                above
-            } else {
-                let below = self
-                    .toned
-                    .get(sample_row((upper + 1).min(samples - 1)))
-                    .unwrap_or_default();
-                let blended = self.between.get_mut(..used).unwrap_or_default();
-                for ((blend, upper), lower) in blended.iter_mut().zip(above).zip(below) {
-                    *blend = halve(*upper, *lower);
-                }
-                blended
-            };
-            let dither = &DITHER_LANES[index_of(row & 7)];
-            let Some((start, span)) =
-                surface.row_span_mut(row, columns.start, columns.end - columns.start)
-            else {
-                continue;
-            };
-            let lane = index_of(start / PIXELS_PER_SAMPLE - first);
-            write_pairs(span, (start, lanes.get(lane..).unwrap_or_default()), dither);
-        }
+        (view, strips, scratch)
     }
 
     /// Lay out how the ribbon roams around the text's clear space
@@ -1196,6 +1215,251 @@ impl Light {
     fn settle(&mut self) {
         for (drawn, placed) in self.drawn.iter_mut().zip(&self.placed) {
             *drawn = placed.lit;
+        }
+    }
+}
+
+impl View<'_> {
+    /// Paint `areas` of `surface` in bands of whole strips' columns spread
+    /// across `runner`, as many as `scratch` holds rooms for at most.
+    ///
+    /// The light is summed down each column, so a band of columns sums each
+    /// once, and the ribbon crosses every column, so the bands share the work
+    /// evenly.
+    fn paint_across(
+        &self,
+        scratch: &mut Scratch,
+        surface: &mut Surface,
+        areas: &[Rect],
+        runner: &dyn JobRunner,
+    ) {
+        let (mut rows, mut columns, mut pixels) = (None, None, 0usize);
+        for area in areas {
+            let area = on_screen(*area, self.size);
+            if let Some((left, top)) = area.surface_origin() {
+                rows = Some(widened(rows, top..top.saturating_add(area.height)));
+                columns = Some(widened(columns, left..left.saturating_add(area.width)));
+                let area = index_of(area.width).saturating_mul(index_of(area.height));
+                pixels = pixels.saturating_add(area);
+            }
+        }
+        let (Some(rows), Some(columns)) = (rows, columns) else {
+            return;
+        };
+        let start = columns.start / STRIP_PIXELS * STRIP_PIXELS;
+        let strips = index_of((columns.end - start).div_ceil(STRIP_PIXELS));
+        let pieces = tairix_parallel::bands(runner, pixels, PAINT_GRAIN)
+            .min(strips)
+            .min(scratch.rooms);
+        if pieces > 1 {
+            let per_band = u32::try_from(strips.div_ceil(pieces))
+                .unwrap_or(u32::MAX)
+                .saturating_mul(STRIP_PIXELS);
+            if let Some(rooms) = scratch.split(pieces) {
+                tairix_parallel::for_each_drawn(
+                    runner,
+                    surface
+                        .column_bands_mut(rows, start..columns.end, per_band)
+                        .zip(rooms),
+                    &|(mut band, mut room)| {
+                        for area in areas {
+                            self.paint(&mut room, &mut band, *area);
+                        }
+                    },
+                );
+                return;
+            }
+        }
+        let mut room = scratch.whole();
+        for area in areas {
+            self.paint(&mut room, surface, *area);
+        }
+    }
+
+    /// Paint the ribbon over the part of `area` that `target` holds, working
+    /// in `room`: the body of [`Light::paint`].
+    fn paint(&self, room: &mut Room<'_>, target: &mut impl Target, area: Rect) {
+        let (width, height) = self.size;
+        let area = on_screen(area, self.size);
+        let Some((left, top)) = area.surface_origin() else {
+            return;
+        };
+        let (rows, columns) = (target.rows(), target.columns());
+        let pixels = (
+            left.max(columns.start)..left.saturating_add(area.width).min(width).min(columns.end),
+            top.max(rows.start)..top.saturating_add(area.height).min(height).min(rows.end),
+        );
+        if pixels.0.is_empty() || pixels.1.is_empty() {
+            return;
+        }
+        // The sample columns those pixels blend: the one at or before each
+        // pixel, and the one after.
+        let samples = pixels.0.start / PIXELS_PER_SAMPLE..pixels.0.end.div_ceil(PIXELS_PER_SAMPLE);
+        let mut first = samples.start;
+        // The sample rows the first lane holds, toned as the last chunk's
+        // neighbour.
+        let mut carried = None;
+        let sky = SKY.premultiply();
+        while first < samples.end {
+            let remaining = samples.end - first;
+            let end = first
+                + if remaining == CHUNK + 1 {
+                    remaining
+                } else {
+                    remaining.min(CHUNK)
+                };
+            let owned = pixel_of(first).max(pixels.0.start)..pixel_of(end).min(pixels.0.end);
+            let lit = self.lit_rows(first..=end, &pixels.1);
+            for dark in [pixels.1.start..lit.start, lit.end..pixels.1.end] {
+                target.fill(owned.start, owned.end - owned.start, dark, sky);
+            }
+            if lit.is_empty() {
+                carried = None;
+                first = end;
+                continue;
+            }
+            // The samples the lit pixels blend: the one at or above each
+            // pixel, and the one below.
+            let rows =
+                lit.start / PIXELS_PER_SAMPLE..(lit.end / PIXELS_PER_SAMPLE + 1).min(self.grid.1);
+            let from = u32::from(carried.as_ref() == Some(&rows));
+            for lane in from..=(end - first) {
+                let column = (first + lane).min(self.grid.0 - 1);
+                self.tone_column(room, column, rows.clone(), index_of(lane));
+            }
+            let depth = index_of(rows.end - rows.start);
+            let used = index_of(end - first) + 1;
+            #[cfg(test)]
+            self.count_chunk(&owned, &lit);
+            write_chunk(room, target, (first, owned), (rows.start, depth, lit), used);
+            // The neighbour this chunk blended into is the next chunk's first
+            // column: keep it rather than sum it again where the next chunk
+            // asks for the same rows.
+            for row in room
+                .toned
+                .as_chunks_mut::<CHUNK_LANES>()
+                .0
+                .iter_mut()
+                .take(depth)
+            {
+                row[0] = row[used - 1];
+            }
+            carried = Some(rows);
+            first = end;
+        }
+        let clear = area.intersection(&self.exclusion);
+        if let (Ok(x), Ok(y)) = (u32::try_from(clear.left()), u32::try_from(clear.top())) {
+            target.fill(x, clear.width, y..y.saturating_add(clear.height), sky);
+        }
+    }
+
+    /// The pixel rows of `rows` the light of sample `columns` reaches, as one
+    /// span within them: every other row of them is the sky. Light reaching
+    /// none of them is an empty span at their end.
+    fn lit_rows(&self, columns: RangeInclusive<u32>, rows: &Range<u32>) -> Range<u32> {
+        let last = self.grid.0 - 1;
+        let (high, low) = columns
+            .map(|column| self.placed[index_of(column.min(last))].lit)
+            .filter(|lit| lit.0 < lit.1)
+            .fold((u32::MAX, 0), |(high, low), lit| {
+                (high.min(lit.0), low.max(lit.1))
+            });
+        let start = high.clamp(rows.start, rows.end);
+        start..low.clamp(start, rows.end)
+    }
+
+    /// Sum sample `column`'s light over sample `rows` and tone it into `lane`
+    /// of the chunk in `room`.
+    fn tone_column(&self, room: &mut Room<'_>, column: u32, rows: Range<u32>, lane: usize) {
+        let depth = index_of(rows.end - rows.start);
+        #[cfg(test)]
+        self.tally.summed.fetch_add(depth, Relaxed);
+        let Some(sums) = room.sums.get_mut(..depth) else {
+            return;
+        };
+        sums.fill(0.0);
+        let index = index_of(column);
+        gather(
+            &self.columns[index],
+            &self.placed[index],
+            self.shape,
+            rows,
+            sums,
+        );
+        for (row, exposure) in room
+            .toned
+            .as_chunks_mut::<CHUNK_LANES>()
+            .0
+            .iter_mut()
+            .zip(sums.iter())
+        {
+            row[lane] = self
+                .shape
+                .tone
+                .get(tone_index(*exposure))
+                .copied()
+                .unwrap_or(0);
+        }
+    }
+
+    /// Count a chunk written over pixel `columns` by `rows`.
+    #[cfg(test)]
+    fn count_chunk(&self, columns: &Range<u32>, rows: &Range<u32>) {
+        if columns.is_empty() {
+            return;
+        }
+        self.tally.chunks.fetch_add(1, Relaxed);
+        let wasted = rect(columns.clone(), rows.clone()).intersection(&self.exclusion);
+        self.tally
+            .over_clear
+            .fetch_add(u64::from(wasted.width) * u64::from(wasted.height), Relaxed);
+    }
+}
+
+/// Write the pixel `columns` a chunk starting at sample column `first` owns,
+/// over pixel `rows`, from the chunk's toned samples in `room`: `samples` of
+/// them from sample row `top`, each row `used` lanes wide.
+fn write_chunk(
+    room: &mut Room<'_>,
+    target: &mut impl Target,
+    (first, columns): (u32, Range<u32>),
+    (top, samples, rows): (u32, usize, Range<u32>),
+    used: usize,
+) {
+    if columns.is_empty() || samples == 0 {
+        return;
+    }
+    let Room { toned, between, .. } = room;
+    let sample_row = |row: usize| row * CHUNK_LANES..row * CHUNK_LANES + used;
+    for row in rows {
+        let upper = index_of(row / PIXELS_PER_SAMPLE - top).min(samples - 1);
+        let above = toned.get(sample_row(upper)).unwrap_or_default();
+        let lanes: &[u64] = if row % PIXELS_PER_SAMPLE == 0 {
+            above
+        } else {
+            let below = toned
+                .get(sample_row((upper + 1).min(samples - 1)))
+                .unwrap_or_default();
+            let blended = between.get_mut(..used).unwrap_or_default();
+            for ((blend, upper), lower) in blended.iter_mut().zip(above).zip(below) {
+                *blend = halve(*upper, *lower);
+            }
+            blended
+        };
+        let dither = &DITHER_LANES[index_of(row & 7)];
+        let Some((start, span)) =
+            target.row_span_mut(row, columns.start, columns.end - columns.start)
+        else {
+            continue;
+        };
+        let lanes = lanes.get(index_of(start / PIXELS_PER_SAMPLE - first)..);
+        let lanes = lanes.unwrap_or_default();
+        // Light that tones to nothing shows no dither: one fill, not a shade a
+        // pixel.
+        if lanes.iter().all(|toned| *toned == 0) {
+            span.fill(UNLIT);
+        } else {
+            widen(span, (start, lanes), dither);
         }
     }
 }
@@ -1663,55 +1927,6 @@ const DITHER_LANES: [[u64; 8]; 8] = {
     table
 };
 
-/// Write `span`, whose first pixel is column `start`, from the toned samples
-/// `lanes` its pixels stand on or between, the first the one at or before
-/// `start`: a pixel on a sample takes it, one between two takes their mean.
-fn write_pairs(span: &mut [Pixel], (start, lanes): (u32, &[u64]), dither: &[u64; 8]) {
-    let bias = |x: u32| dither[index_of(x & 7)];
-    let mut x = start;
-    let mut pixels = span.iter_mut();
-    let mut lanes = lanes.iter().copied();
-    let Some(mut here) = lanes.next() else {
-        return;
-    };
-    if x % PIXELS_PER_SAMPLE == 1 {
-        let next = lanes.next().unwrap_or(here);
-        if let Some(pixel) = pixels.next() {
-            *pixel = shade(halve(here, next), bias(x));
-        }
-        here = next;
-        x += 1;
-    }
-    let (pairs, rest) = pixels.into_slice().as_chunks_mut::<2>();
-    for [on, between] in pairs {
-        let next = lanes.next().unwrap_or(here);
-        *on = shade(here, bias(x));
-        *between = shade(halve(here, next), bias(x + 1));
-        here = next;
-        x += 2;
-    }
-    if let Some(pixel) = rest.first_mut() {
-        *pixel = shade(here, bias(x));
-    }
-}
-
-/// Two toned samples averaged lane by lane, rounding down.
-fn halve(a: u64, b: u64) -> u64 {
-    (a & b) + (((a ^ b) & !LANE_ONES) >> 1)
-}
-
-/// The pixel toned `lanes` show, rounded at the ordered dither's `bias`,
-/// spread across the lanes.
-fn shade(lanes: u64, bias: u64) -> Pixel {
-    let bytes = (lanes + bias).to_le_bytes();
-    Pixel {
-        r: bytes[1],
-        g: bytes[3],
-        b: bytes[5],
-        a: u8::MAX,
-    }
-}
-
 /// The toning table entry `exposure` falls in.
 fn tone_index(exposure: f32) -> usize {
     let knee = f32::from(KNEE);
@@ -1896,6 +2111,13 @@ fn monotone(points: &[(f64, f64)], x: f64) -> f64 {
         + (t3 - 2.0 * t2 + t) * width * tangent(segment)
         + (-2.0 * t3 + 3.0 * t2) * y1
         + (t3 - t2) * width * tangent(segment + 1)
+}
+
+/// `range` widened to take in `more`, or `more` itself where there is none.
+fn widened(range: Option<Range<u32>>, more: Range<u32>) -> Range<u32> {
+    range.map_or(more.clone(), |range| {
+        range.start.min(more.start)..range.end.max(more.end)
+    })
 }
 
 /// `area` held to a `size` screen.

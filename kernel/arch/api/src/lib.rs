@@ -103,7 +103,9 @@
 //! slice: the [`CpuCycles`] trait that reads the per-core cycle count
 //! (`rdtsc` / `PMCCNTR_EL0` / `CNTVCT_EL0` / `rdcycle` /
 //! `performance.now()`) the `lib/cpuops` microbenchmark measures over,
-//! plus its [`cpucycles::conformance`] vertical.
+//! plus its [`cpucycles::conformance`] vertical. The **address-tag** slice,
+//! [`AddressTags`], is how a port tags TLB entries with their address space,
+//! so a switch keeps the outgoing space's entries.
 //!
 //! # Why `no_std` and dependency-light
 //!
@@ -145,6 +147,7 @@ pub mod platform;
 pub mod quiesce;
 pub mod sidechannel;
 pub mod smp;
+pub mod tags;
 pub mod takeover;
 pub mod timer;
 pub mod tlb;
@@ -221,6 +224,7 @@ pub use xtlb::{conformance as xtlb_conformance, CpuMask, CrossCpuTlbShootdown};
 
 pub use smp::{conformance as smp_conformance, SecondaryBringup, SmpError};
 
+pub use tags::{conformance as tags_conformance, AddressTag, AddressTags, ParkRoot, MAX_USER_TAGS};
 pub use takeover::{conformance as takeover_conformance, MachineTakeover, TakeoverError};
 
 pub use quiesce::{

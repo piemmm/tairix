@@ -322,6 +322,9 @@ pub struct Compositor {
     /// What a client's present changed in its window's content, held here and
     /// cleared per present so presenting allocates nothing.
     present_changes: Region,
+    /// A region routed to a layer, clipped and made the layer's own, kept for
+    /// its buffer.
+    routed: Region,
     /// The layers the last layered present left on the display.
     layers: Option<layers::Stack>,
     /// What the display refused of its layers and cursor plane, so a refusal
@@ -550,6 +553,7 @@ impl Compositor {
             presented: None,
             undelivered: Region::new(),
             present_changes: Region::new(),
+            routed: Region::new(),
             layers: None,
             refused: layers::Refusals::NONE,
             plane: None,
@@ -743,10 +747,22 @@ impl Compositor {
         if self.route_to_layer(id, Change::Pixels(rect), [rect, Rect::EMPTY]) {
             return;
         }
-        match self.index_of(id) {
-            Some(index) => self.mark_from(rect, index.saturating_add(1)),
-            None => self.mark(rect),
+        self.mark_from(rect, self.above(id));
+    }
+
+    /// [`mark_layer`](Self::mark_layer) for every pixel of `region`, in one
+    /// merge rather than one a rectangle.
+    fn mark_layer_region(&mut self, id: WindowId, region: &Region) {
+        if region.is_empty() || self.route_to_layer(id, Change::Region(region), [Rect::EMPTY; 2]) {
+            return;
         }
+        self.mark_region_from(region, self.above(id));
+    }
+
+    /// The z-index just above window `id`, where the frosts its change can
+    /// reach begin: every window's for an unknown `id`.
+    fn above(&self, id: WindowId) -> usize {
+        self.index_of(id).map_or(0, |index| index.saturating_add(1))
     }
 
     /// Mark `rect` for recomposition for a change no frost can read: the
@@ -789,6 +805,12 @@ impl Compositor {
         self.invalidate_frosts_from(rect, from);
     }
 
+    /// [`mark_from`](Self::mark_from) for every pixel of `region`.
+    fn mark_region_from(&mut self, region: &Region, from: usize) {
+        self.damage.add_region(region);
+        self.invalidate_frosts_reached(from, |bounds| region.intersects(bounds));
+    }
+
     /// Where the window `id` names sits in the stack, back to front.
     fn index_of(&self, id: WindowId) -> Option<usize> {
         self.windows.iter().position(|window| window.id() == id)
@@ -812,11 +834,17 @@ impl Compositor {
         if rect.is_empty() {
             return;
         }
+        self.invalidate_frosts_reached(from, |bounds| !bounds.intersection(&rect).is_empty());
+    }
+
+    /// [`invalidate_frosts_from`](Self::invalidate_frosts_from) for every
+    /// window from `from` up whose bounds a change `reaches`.
+    fn invalidate_frosts_reached(&mut self, from: usize, reaches: impl Fn(Rect) -> bool) {
         for index in from..self.windows.len() {
             let Some(window) = self.windows.get_mut(index) else {
                 continue;
             };
-            if window.bounds().intersection(&rect).is_empty() {
+            if !reaches(window.bounds()) {
                 continue;
             }
             window.set_backdrop_changed(true);
@@ -1452,9 +1480,7 @@ impl Compositor {
             return Some(out);
         }
         self.chrome.invalidate(&id);
-        for rect in damage.rects() {
-            self.mark_layer(id, *rect);
-        }
+        self.mark_layer_region(id, &damage);
         Some(out)
     }
 
@@ -1638,9 +1664,7 @@ impl Compositor {
             return false;
         };
         paint(surface, painted.rects());
-        for rect in painted.rects() {
-            self.mark(*rect);
-        }
+        self.mark_region_from(painted, 0);
         true
     }
 
@@ -2124,16 +2148,9 @@ impl Compositor {
         if established {
             self.mark_layer(id, client);
         } else {
-            for local in changed.rects() {
-                let screen = Rect::new(
-                    client.left().saturating_add(local.left()),
-                    client.top().saturating_add(local.top()),
-                    local.width,
-                    local.height,
-                )
-                .intersection(&client);
-                self.mark_layer(id, screen);
-            }
+            changed.translate(client.left(), client.top());
+            changed.clip(client);
+            self.mark_layer_region(id, &changed);
         }
         self.present_changes = changed;
         Some(out)
@@ -2235,9 +2252,7 @@ impl Compositor {
         let client = window.client_rect();
         painted.translate(client.left(), client.top());
         painted.clip(client);
-        for rect in painted.rects() {
-            self.mark_layer(id, *rect);
-        }
+        self.mark_layer_region(id, painted);
         true
     }
 
@@ -3660,14 +3675,12 @@ impl Compositor {
     fn rescan_scanout(&mut self, changed: &mut Region, screen: Rect) {
         let mut scanout = core::mem::take(&mut self.scanout);
         scanout.clip(screen);
-        for &done in changed.rects() {
-            scanout.subtract(done);
-        }
+        scanout.subtract_region(changed);
         for &area in scanout.rects() {
             self.stats.add_damaged(area_px(area.width, area.height));
             self.encode_rect(area);
-            changed.add(area);
         }
+        changed.add_region(&scanout);
         // Handed back emptied so the next frame reuses the buffer it grew.
         scanout.clear();
         self.scanout = scanout;
@@ -3687,9 +3700,7 @@ impl Compositor {
     fn scale_out(&mut self, changed: &mut Region, screen: Rect) {
         let mut scanout = core::mem::take(&mut self.scanout);
         scanout.clip(screen);
-        for &done in changed.rects() {
-            scanout.subtract(done);
-        }
+        scanout.subtract_region(changed);
         let Self {
             mode,
             screen: desktop,
@@ -3717,9 +3728,7 @@ impl Compositor {
             stats.add_encoded(area_px(area.width, area.height));
             scaled.encode.add(output_reach(area, *desktop, output));
         }
-        for &rect in scaled.owed.rects() {
-            scaled.resample.add(rect);
-        }
+        scaled.resample.add_region(&scaled.owed);
         scaled.owed.clear();
         for &rect in scaled.resample.rects() {
             let Some(window) = image_region(rect) else {
@@ -4143,9 +4152,7 @@ impl Compositor {
         self.recompose_damage(&mut region);
         let mut owed = core::mem::take(&mut self.undelivered);
         owed.clip(self.output_rect());
-        for &rect in owed.rects() {
-            region.add(rect);
-        }
+        region.add_region(&owed);
         let sent = self.send(presenter, &region);
         if sent.is_err() {
             self.undelivered = region;
@@ -4226,7 +4233,7 @@ impl Compositor {
     fn mutate_as(
         &mut self,
         id: WindowId,
-        kind: Change,
+        kind: Change<'_>,
         change: impl FnOnce(&mut Window) -> bool,
     ) -> bool {
         let reach = self.shadow.reach();

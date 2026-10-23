@@ -325,7 +325,7 @@ static RECORDED: crate::retire::RecordedRemote = crate::retire::RecordedRemote(r
 
 /// A space active on another CPU too, whose remote shootdowns are recorded.
 fn shared_with_another_cpu(env: &mut Env) {
-    let cpus = crate::retire::ActiveCpus::new(2).expect("one word allocates");
+    let cpus = crate::retire::TlbContext::new(2).expect("one word allocates");
     cpus.enter(1);
     env.space
         .attach_tlb(crate::retire::SpaceTlb::new(cpus, Some(&RECORDED)));

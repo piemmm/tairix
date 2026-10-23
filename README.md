@@ -59,6 +59,7 @@ for filesystems, the feature section below.
 | Heterogeneous CPUs (big.LITTLE / hybrid) | ✓ CPUID | ✓ FDT | ▢ | — |
 | Cache-aware scheduling (LLC-aware) | ▢ | ▢ | ▢ | — |
 | Cross-CPU TLB shootdown | ✓ | ✓ | ✓ | — |
+| Address-space tagged TLB (PCID / ASID) | ✓ | ✓ | ✓ | — |
 | Syscall entry | ✓ | ✓ | ✓ | ✓ |
 | User-mode execution (ring 3 / EL0 / U-mode) | ✓ | ✓ | ✓ | — |
 | Threads within a process (`thread_create`, futex) | ✓ | ✓ | ✓ | — |

@@ -7,13 +7,12 @@
 //! only there, so a fade costs what the change touches however much of the
 //! screen stays as it was.
 
-use tairix_geometry::Region;
+use tairix_geometry::{Region, Tiles};
 use tairix_parallel::JobRunner;
-use tairix_raster::{mix_span, DitherRow, Pixel};
-use tairix_raster::{Color, Surface};
+use tairix_raster::{mix_span, DitherRow, Pixel, Surface};
 use tairix_theme::Timeline;
 
-use super::tiles::{Tiles, TILE};
+use super::TILE;
 
 /// The fewest pixels worth handing another core to blend or copy: a pixel
 /// costs a few multiplies, so a hand-off must carry many.
@@ -21,6 +20,13 @@ const GRAIN: usize = 16_384;
 
 /// The pixels of a whole tile.
 const TILE_PIXELS: usize = (TILE * TILE) as usize;
+
+/// The fewest frames a fade is shown over, however slowly they come: cut to a
+/// step or two by a slow frame rate, it would land as a jump.
+pub(super) const FADE_FRAMES: u8 = 8;
+
+/// The furthest in one frame carries a fade.
+const FADE_STEP: u8 = u8::MAX.div_ceil(FADE_FRAMES);
 
 /// One screen's changes faded in, one at a time.
 pub(super) struct Crossfade {
@@ -46,13 +52,14 @@ impl Crossfade {
             .saturating_mul(pixel)
     }
 
-    /// A crossfade over a `size` screen showing black; `None` when the heap
-    /// will not hold it.
-    pub(super) fn new((width, height): (u32, u32)) -> Option<Self> {
+    /// A crossfade over a screen showing `screen`; `None` when the heap will
+    /// not hold it.
+    pub(super) fn over(screen: &Surface) -> Option<Self> {
+        let (width, height) = (screen.width(), screen.height());
         Some(Self {
-            picture: Surface::filled(width, height, Color::rgb(0, 0, 0).premultiply())?,
+            picture: screen.try_clone()?,
             before: Surface::new(width, height)?,
-            tiles: Tiles::new((width, height))?,
+            tiles: Tiles::new((width, height), TILE)?,
             cover: Region::new(),
             timeline: Timeline::SETTLED,
             shown: u8::MAX,
@@ -90,9 +97,14 @@ impl Crossfade {
     }
 
     /// How far in the fade wants the change at `now_ns`, of 255, where the
-    /// screen shows otherwise.
+    /// screen shows otherwise: as far as its timeline has run, and never more
+    /// than [`FADE_STEP`] past the frame before, so a fade shown at a slow
+    /// frame rate takes its frames rather than its time.
     pub(super) fn due(&self, now_ns: u64) -> Option<u8> {
-        let weight = self.timeline.progress(now_ns);
+        let weight = self
+            .timeline
+            .progress(now_ns)
+            .min(self.shown.saturating_add(FADE_STEP));
         (weight != self.shown).then_some(weight)
     }
 
@@ -105,9 +117,7 @@ impl Crossfade {
         runner: &dyn JobRunner,
     ) {
         self.draw(screen, weight, runner);
-        for rect in self.cover.rects() {
-            damage.add(*rect);
-        }
+        damage.add_region(&self.cover);
         self.shown(weight);
     }
 

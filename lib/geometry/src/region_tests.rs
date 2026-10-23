@@ -74,9 +74,19 @@ fn usize_of(v: i32) -> usize {
 }
 
 /// Assert the region's rectangles are canonical: non-empty, band-ordered,
-/// pairwise disjoint, and never adjoining within a band.
+/// pairwise disjoint, never adjoining within a band, and no band holding the
+/// spans of a band it touches.
 fn assert_canonical(region: &Region) {
     let rects = region.rects();
+    let bands: Vec<&[Rect]> = rects.chunk_by(|a, b| a.top() == b.top()).collect();
+    for pair in bands.windows(2) {
+        let [upper, lower] = pair else { continue };
+        let spans = |band: &[Rect]| band.iter().map(|r| (r.left(), r.width)).collect::<Vec<_>>();
+        assert!(
+            upper[0].bottom() != lower[0].top() || spans(upper) != spans(lower),
+            "touching bands holding one span set are one band: {upper:?} {lower:?}"
+        );
+    }
     for rect in rects {
         assert!(
             !rect.is_empty(),
@@ -449,6 +459,176 @@ fn differential_sweep_against_a_pixel_grid() {
             assert_matches(&region, &grid);
         }
     }
+}
+
+/// Rectangles added in band order, as another region's are, append in place
+/// and land on exactly the rectangles the merge walk gives them in any order.
+#[test]
+fn band_ordered_rects_append_to_the_form_any_order_gives() {
+    let mut rng = tairix_fuzzseed::Prng::new(0x0bad_cafe_f00d_d00d);
+    let mut random_rect = || {
+        let draw = rng.next_u64();
+        Rect::new(
+            i32::try_from(draw % 20).unwrap_or(0),
+            i32::try_from((draw >> 8) % 20).unwrap_or(0),
+            u32::try_from((draw >> 16) % 8).unwrap_or(0),
+            u32::try_from((draw >> 24) % 8).unwrap_or(0),
+        )
+    };
+    for _ in 0..400 {
+        let mut source = Region::new();
+        let mut scattered: Vec<Rect> = (0..12).map(|_| random_rect()).collect();
+        for rect in &scattered {
+            source.add(*rect);
+        }
+        let mut appended = Region::new();
+        let mut reversed = Region::new();
+        for rect in source.rects() {
+            appended.add(*rect);
+        }
+        for rect in source.rects().iter().rev() {
+            reversed.add(*rect);
+        }
+        assert_canonical(&appended);
+        assert_eq!(appended.rects(), source.rects());
+        assert_eq!(reversed.rects(), source.rects());
+        scattered.sort_by_key(|rect| (rect.top(), rect.left()));
+        let mut sorted = Region::new();
+        for rect in &scattered {
+            sorted.add(*rect);
+        }
+        assert_matches(&sorted, &Grid::from_region(&source));
+        assert_eq!(sorted.rects(), source.rects());
+    }
+}
+
+/// A whole region added or subtracted in one walk gives exactly the
+/// rectangles its rectangles added or subtracted one at a time give, and the
+/// pixels the grid says.
+#[test]
+fn a_region_added_or_subtracted_whole_matches_one_rectangle_at_a_time() {
+    let mut rng = tairix_fuzzseed::Prng::new(0x5eed_0f0a_110f_1701);
+    let mut random_region = |count: usize| {
+        let mut region = Region::new();
+        for _ in 0..count {
+            let draw = rng.next_u64();
+            region.add(Rect::new(
+                i32::try_from(draw % 20).unwrap_or(0),
+                i32::try_from((draw >> 8) % 20).unwrap_or(0),
+                u32::try_from((draw >> 16) % 8).unwrap_or(0),
+                u32::try_from((draw >> 24) % 8).unwrap_or(0),
+            ));
+        }
+        region
+    };
+    for round in 0..400 {
+        let (base, other) = (random_region(round % 9), random_region(round % 7));
+        let mut whole = base.clone();
+        whole.add_region(&other);
+        let mut each = base.clone();
+        for rect in other.rects() {
+            each.add(*rect);
+        }
+        let mut grid = Grid::from_region(&base);
+        for rect in other.rects() {
+            grid.paint(*rect, true);
+        }
+        assert_matches(&whole, &grid);
+        assert_eq!(whole.rects(), each.rects(), "union, round {round}");
+
+        let mut whole = base.clone();
+        whole.subtract_region(&other);
+        let mut each = base.clone();
+        for rect in other.rects() {
+            each.subtract(*rect);
+        }
+        let mut grid = Grid::from_region(&base);
+        for rect in other.rects() {
+            grid.paint(*rect, false);
+        }
+        assert_matches(&whole, &grid);
+        assert_eq!(whole.rects(), each.rects(), "subtract, round {round}");
+    }
+}
+
+/// A union past the budget degrades to the bounding box of both, never losing
+/// a pixel, and an empty region added changes nothing.
+#[test]
+fn a_union_past_the_budget_keeps_every_pixel_in_its_bounding_box() {
+    let mut scattered = Region::new();
+    for column in 0..6 {
+        scattered.add(Rect::new(column * 3, column, 1, 1));
+    }
+    let mut held = Region::with_budget(4);
+    held.add(Rect::new(20, 20, 2, 2));
+    held.add_region(&Region::new());
+    assert_eq!(held.rects(), &[Rect::new(20, 20, 2, 2)]);
+    held.add_region(&scattered);
+    assert_eq!(held.rects(), &[Rect::new(0, 0, 22, 22)]);
+    let mut fresh = Region::with_budget(4);
+    fresh.add_region(&scattered);
+    assert_eq!(
+        fresh.rects(),
+        &[scattered.bounds()],
+        "past the budget from empty"
+    );
+}
+
+/// A band joined to the one above is cut again in place when a span lands on
+/// its lower rows alone, however many spans it holds.
+#[test]
+fn a_joined_band_splits_in_place_for_a_span_on_its_lower_rows() {
+    let mut single = Region::new();
+    single.add(Rect::new(0, 0, 4, 2));
+    single.add(Rect::new(0, 2, 4, 2));
+    assert_eq!(single.rects(), &[Rect::new(0, 0, 4, 4)], "joined");
+    single.add(Rect::new(6, 2, 3, 2));
+    assert_eq!(
+        single.rects(),
+        &[
+            Rect::new(0, 0, 4, 2),
+            Rect::new(0, 2, 4, 2),
+            Rect::new(6, 2, 3, 2)
+        ]
+    );
+    assert_canonical(&single);
+
+    let mut wide = Region::new();
+    for rect in [
+        Rect::new(0, 0, 4, 2),
+        Rect::new(6, 0, 3, 2),
+        Rect::new(0, 2, 4, 2),
+        Rect::new(6, 2, 3, 2),
+    ] {
+        wide.add(rect);
+    }
+    assert_eq!(
+        wide.rects(),
+        &[Rect::new(0, 0, 4, 4), Rect::new(6, 0, 3, 4)],
+        "joined"
+    );
+    wide.add(Rect::new(11, 2, 2, 2));
+    let mut walked = Region::new();
+    for rect in [
+        Rect::new(11, 2, 2, 2),
+        Rect::new(0, 0, 4, 4),
+        Rect::new(6, 0, 3, 4),
+    ] {
+        walked.add(rect);
+    }
+    assert_eq!(wide.rects(), walked.rects());
+    assert_canonical(&wide);
+}
+
+/// A band-ordered list past the budget degrades to its bounding box, as one
+/// added in any order does.
+#[test]
+fn appending_past_the_budget_degrades_to_the_bounding_box() {
+    let mut region = Region::with_budget(3);
+    for row in 0..4 {
+        region.add(Rect::new(row * 2, row * 3, 1, 1));
+    }
+    assert_eq!(region.rects(), &[Rect::new(0, 0, 7, 10)]);
 }
 
 /// A copy taken into a region a consumer keeps is its source, budget and all,

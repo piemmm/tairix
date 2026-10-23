@@ -42,6 +42,7 @@ fn start() -> Start {
     start.cores = 4;
     start.threads = 4;
     start.memory = 512 << 20;
+    start.installed_memory = 8 << 30;
     start.account = BoundedText::new("ada").expect("a name");
     start.machine = BoundedText::new("lovelace").expect("a name");
     start.feeds = slides();
@@ -178,7 +179,7 @@ fn a_start_reads_its_options_by_key() {
 
 #[test]
 fn every_saver_message_round_trips() {
-    let damage = DamageList::new(&[
+    let damage = SaverDamage::new(&[
         DamageRect {
             x: 0,
             y: 0,
@@ -194,23 +195,19 @@ fn every_saver_message_round_trips() {
     ])
     .expect("disjoint");
     let request = crate::font_ipc::FontRequest::Families.to_le_bytes();
+    for (serial, damage, next) in [
+        (3, Some(damage), NextFrame::At(99)),
+        (4, None, NextFrame::Soon),
+        (5, None, NextFrame::Idle),
+    ] {
+        saver_round_trip(&SaverMessage::Presented {
+            serial,
+            damage,
+            next,
+        });
+    }
     for message in [
         SaverMessage::Ready,
-        SaverMessage::Presented {
-            serial: 3,
-            damage: Some(damage),
-            next: NextFrame::At(99),
-        },
-        SaverMessage::Presented {
-            serial: 4,
-            damage: None,
-            next: NextFrame::Soon,
-        },
-        SaverMessage::Presented {
-            serial: 5,
-            damage: None,
-            next: NextFrame::Idle,
-        },
         SaverMessage::FontCall(request),
         SaverMessage::Keep {
             title: BoundedText::new("Countryside").expect("a title"),
@@ -224,9 +221,34 @@ fn every_saver_message_round_trips() {
     }
 }
 
+/// A frame names as many rectangles as the bound and no more, each disjoint
+/// from the rest.
+#[test]
+fn a_presented_frame_names_up_to_its_damage_bound() {
+    let apart = |i: usize| DamageRect {
+        x: u32::try_from(i).expect("small") * 8,
+        y: 0,
+        width_px: 4,
+        height_px: 4,
+    };
+    let rects: alloc::vec::Vec<_> = (0..SAVER_DAMAGE_RECTS).map(apart).collect();
+    let full = SaverMessage::Presented {
+        serial: 7,
+        damage: Some(SaverDamage::new(&rects).expect("disjoint")),
+        next: NextFrame::Soon,
+    };
+    let mut wire = saver_round_trip(&full);
+    wire[1] = u8::try_from(SAVER_DAMAGE_RECTS + 1).expect("a count byte");
+    assert_eq!(SaverMessage::decode(&wire), Err(Errno::LengthOutOfRange));
+    wire[1] = u8::try_from(SAVER_DAMAGE_RECTS).expect("a count byte");
+    // The second rectangle laid over the first.
+    wire[16 + 16..16 + 20].copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(SaverMessage::decode(&wire), Err(Errno::LengthOutOfRange));
+}
+
 #[test]
 fn a_stray_byte_in_any_saver_message_is_refused_or_read_as_another() {
-    let damage = DamageList::new(&[DamageRect {
+    let damage = SaverDamage::new(&[DamageRect {
         x: 1,
         y: 2,
         width_px: 3,

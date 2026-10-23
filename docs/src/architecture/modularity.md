@@ -71,8 +71,9 @@ below), the per-CPU storage slice (`PerCpu`, below), and the interrupt
 entry/exit slice (`IrqController` + `InterruptEntry`, below), the timer
 slice (`Timer`, below), the context-switch slice (`ContextSwitch`,
 below), the MMU / page-table slice (`AddressSpace`) with its local and
-cross-CPU TLB-shootdown siblings (`TlbShootdown` / `CrossCpuTlbShootdown`)
-and the `PageTableFrames` frame source, and the secondary-CPU bring-up
+cross-CPU TLB-shootdown siblings (`TlbShootdown` / `CrossCpuTlbShootdown`),
+its address-space tags (`AddressTags`, below) and the `PageTableFrames`
+frame source, and the secondary-CPU bring-up
 slice (`SecondaryBringup`, below). With `SecondaryBringup` landed (Stage
 W14) every architecture primitive enumerated by §17.2 now lives behind
 the HAL; the burn-down is complete.
@@ -295,6 +296,25 @@ address, including misaligned and zero) for every port — the real
 instruction is exercised by the spawn / `memory_isolation` QEMU
 verticals.
 
+### Address-space tags
+
+The `AddressTags` slice (`kernel/arch/api::tags`) is how a port tags each TLB
+entry with the space it belongs to, so a switch between user spaces keeps the
+outgoing space's entries: aarch64 an 8-bit ASID in `TTBR0_EL1` beside a
+non-global bit on each user leaf, riscv64 the `satp` ASID as wide as the
+narrowest hart keeps (each probes when it first turns translation on, and one
+starting untranslated turns tagging off), x86_64 a
+PCID in `CR3` once every CPU has `CR4.PCIDE` on. A port names how many tags it
+has (`user_tags`, `0` for none), composes its root register
+(`root_register`), says whether its invalidation of a user space reaches every
+tag on every CPU (`invalidation_reaches_every_tag`: aarch64's broadcast does,
+riscv64's and x86_64's targeted shootdowns do not), and keeps a kernel epoch
+where a kernel invalidation reaches only the tag in use (x86_64). The kernel
+chooses the tag on each CPU and when it is stale (*Address-space tags* in
+[Memory](./memory.md)); the port loads roots under it, parks under tag `0`,
+and discards a tag. `tags::conformance::run_all` holds every port's
+composition to distinct register values per tag and per root.
+
 ### Cross-CPU TLB shootdown
 
 The local `TlbShootdown` only flushes the *calling* CPU; on an SMP
@@ -329,7 +349,7 @@ cores (`plans/WIRING.md` Stage W13).
 A user address space is active on only some CPUs, so its unmaps use the
 targeted form, `shootdown_user_range(cpus, start, pages)`: invalidate on the
 CPUs of the `CpuMask` other than the caller, which has already flushed its
-own. The mask is a borrowed view over the space's `ActiveCpus`
+own. The mask is a borrowed view over the space's `TlbContext`
 (`kernel/mem::retire`), so the HAL allocates nothing. x86_64 raises the IPI at
 those CPUs alone and reloads `CR3` instead of issuing `invlpg` past 33 pages;
 riscv64 folds their harts into one SBI RFENCE call per 64-hart window, turns a

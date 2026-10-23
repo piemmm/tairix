@@ -8,7 +8,9 @@ use crate::paint::Paint;
 use crate::resample::Region;
 use crate::round::round_rect_coverage;
 use crate::scan::{FillRule, MAX_DRAWING_EXTENT};
-use crate::surface::{layered_factor, Surface, LAYERED_TARGET_SIDE, MAX_SURFACE_PIXELS, SUBPIXEL};
+use crate::surface::{
+    layered_factor, pointwise, Surface, LAYERED_TARGET_SIDE, MAX_SURFACE_PIXELS, SUBPIXEL,
+};
 
 const BLUE: Color = Color::rgb(0, 0, 255);
 const RED: Color = Color::rgb(255, 0, 0);
@@ -1068,11 +1070,18 @@ fn wash_region_scales_the_source_by_the_mask_and_spares_bare_pixels() {
     let wash = Color::rgba(255, 0, 0, 255);
 
     // Column 0 uncovered, column 1 half covered, column 2 fully covered.
-    surface.wash_region(0, 0, 3, 4, wash, |lx, _| match lx {
-        0 => 0,
-        1 => 128,
-        _ => 255,
-    });
+    surface.wash_region(
+        0,
+        0,
+        3,
+        4,
+        wash,
+        pointwise(|lx, _| match lx {
+            0 => 0,
+            1 => 128,
+            _ => 255,
+        }),
+    );
 
     assert_eq!(
         surface.get(0, 0),
@@ -1099,15 +1108,25 @@ fn wash_region_takes_the_mask_at_the_rectangles_own_coordinates() {
     // whatever the rectangle's origin is.
     let mut offset = Surface::new(8, 8).expect("allocates");
     offset.fill(BLUE);
-    offset.wash_region(3, 2, 4, 4, RED, |lx, ly| {
-        u8::try_from((lx + ly) * 32).unwrap_or(255)
-    });
+    offset.wash_region(
+        3,
+        2,
+        4,
+        4,
+        RED,
+        pointwise(|lx, ly| u8::try_from((lx + ly) * 32).unwrap_or(255)),
+    );
 
     let mut origin = Surface::new(8, 8).expect("allocates");
     origin.fill(BLUE);
-    origin.wash_region(0, 0, 4, 4, RED, |lx, ly| {
-        u8::try_from((lx + ly) * 32).unwrap_or(255)
-    });
+    origin.wash_region(
+        0,
+        0,
+        4,
+        4,
+        RED,
+        pointwise(|lx, ly| u8::try_from((lx + ly) * 32).unwrap_or(255)),
+    );
 
     // Same mask answers, so the rectangle's own pixels match wherever it sits
     // (bar the dither, which tiles the surface and so differs by origin).
@@ -1138,11 +1157,15 @@ fn wash_polygon_subpixel_multiplies_the_shapes_coverage_by_the_mask() {
         (5 * SUBPIXEL, 4 * SUBPIXEL),
         (SUBPIXEL, 4 * SUBPIXEL),
     ];
-    surface.wash_polygon_subpixel(&square, Color::rgba(255, 0, 0, 255), |_, y| match y {
-        0 => 255,
-        1 => 128,
-        _ => 0,
-    });
+    surface.wash_polygon_subpixel(
+        &square,
+        Color::rgba(255, 0, 0, 255),
+        pointwise(|_, y| match y {
+            0 => 255,
+            1 => 128,
+            _ => 0,
+        }),
+    );
 
     assert_eq!(
         surface.get(2, 0),
@@ -1175,7 +1198,9 @@ fn wash_polygon_subpixel_agrees_with_the_flat_fill_under_a_full_mask() {
     let triangle = [(0, 0), (12 * SUBPIXEL, 0), (0, 9 * SUBPIXEL)];
     let mut washed = Surface::new(12, 9).expect("allocates");
     washed.fill(BLUE);
-    washed.wash_polygon_subpixel(&triangle, Color::rgba(255, 0, 0, 160), |_, _| 255);
+    washed.wash_polygon_subpixel(&triangle, Color::rgba(255, 0, 0, 160), |_, _, row| {
+        row.fill(255);
+    });
 
     let mut filled = Surface::new(12, 9).expect("allocates");
     filled.fill(BLUE);
@@ -1212,17 +1237,104 @@ fn a_reused_wash_scratch_draws_what_a_fresh_one_does() {
             (SUBPIXEL, 11 * SUBPIXEL),
         ],
     ];
-    let mask = |x: u32, y: u32| u8::try_from((x * 13 + y * 7) % 256).unwrap_or(u8::MAX);
+    let mask = pointwise(|x, y| u8::try_from((x * 13 + y * 7) % 256).unwrap_or(u8::MAX));
     let mut reused = Surface::new(16, 12).expect("allocates");
     let mut fresh = Surface::new(16, 12).expect("allocates");
     reused.fill(BLUE);
     fresh.fill(BLUE);
     let mut scratch = crate::scan::ScanScratch::new();
     for shape in shapes {
-        reused.wash_polygon_subpixel_in(shape, Color::rgba(255, 60, 0, 200), mask, &mut scratch);
-        fresh.wash_polygon_subpixel(shape, Color::rgba(255, 60, 0, 200), mask);
+        reused.wash_polygon_subpixel_in(shape, Color::rgba(255, 60, 0, 200), &mask, &mut scratch);
+        fresh.wash_polygon_subpixel(shape, Color::rgba(255, 60, 0, 200), &mask);
     }
     assert_eq!(reused.pixels(), fresh.pixels());
+}
+
+/// The wash lays each pixel exactly as compositing the colour at the alpha
+/// its coverage and its mask leave did, pixel by pixel: multiplying the three
+/// into a weight a row and laying the row at once changes no pixel.
+#[test]
+fn a_washed_row_is_each_pixel_laid_at_its_own_alpha() {
+    use crate::scan::Coverage;
+    let unit = SUBPIXEL;
+    let shapes: [&[(i32, i32)]; 3] = [
+        &[
+            (unit, 2 * unit + 5),
+            (37 * unit + 9, 6 * unit),
+            (8 * unit, 29 * unit + 3),
+        ],
+        &[
+            (3 * unit + 1, unit),
+            (36 * unit, 3 * unit + 7),
+            (35 * unit, 9 * unit),
+            (2 * unit, 7 * unit),
+        ],
+        &[
+            (20 * unit, 0),
+            (21 * unit + 2, 0),
+            (40 * unit, 30 * unit),
+            (38 * unit + 9, 30 * unit),
+        ],
+    ];
+    let strength = |x: u32, y: u32| u8::try_from((x * 29 + y * 53 + x * y) % 256).unwrap_or(0);
+    let ground = |x: u32, y: u32| {
+        let shade = u8::try_from((x * 5 + y * 9) % 256).unwrap_or(0);
+        Color::rgba(shade, shade / 2, 255 - shade, 128 + shade / 2).premultiply()
+    };
+    for (index, shape) in shapes.iter().enumerate() {
+        let color = Color::rgba(240, u8::try_from(index * 90).unwrap_or(0), 30, 211);
+        let mut washed = Surface::new(40, 32).expect("allocates");
+        for y in 0..32 {
+            for x in 0..40 {
+                washed.set(x, y, ground(x, y));
+            }
+        }
+        let mut expected = washed.clone();
+        washed.wash_polygon_subpixel(shape, color, pointwise(strength));
+
+        let mut scratch = crate::ScanScratch::new();
+        let mut rows = scratch
+            .coverage_rows(
+                &[*shape],
+                unit.unsigned_abs(),
+                FillRule::EvenOdd,
+                Coverage::Area,
+            )
+            .expect("a shape");
+        let mut coverage = [0u8; 40];
+        for y in 0..32 {
+            rows.row(y, 0, &mut coverage);
+            for (x, &covered) in (0u32..).zip(&coverage) {
+                let strength = strength(x, y);
+                if covered == 0 || strength == 0 {
+                    continue;
+                }
+                let held = crate::div255(u32::from(covered) * u32::from(strength));
+                let source = Color {
+                    a: crate::div255(u32::from(color.a) * u32::from(held)),
+                    ..color
+                };
+                let under = expected.get(x, y).expect("in bounds");
+                expected.set(x, y, source.over_biased(under, DitherRow::at(y).bias(x)));
+            }
+        }
+        assert_eq!(washed, expected, "shape {index}");
+    }
+}
+
+/// The sixteen-bit product the wash multiplies its weights with is the
+/// rounded division it stands for, for every pair of bytes.
+#[test]
+fn the_sixteen_bit_scale_is_the_rounded_product_for_every_pair() {
+    for a in 0..=u8::MAX {
+        for b in 0..=u8::MAX {
+            assert_eq!(
+                crate::color::scale8(a, b),
+                crate::div255(u32::from(a) * u32::from(b)),
+                "{a} x {b}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1236,9 +1348,10 @@ fn wash_polygon_subpixel_is_a_no_op_for_a_transparent_wash_or_no_shape() {
         (4 * SUBPIXEL, 4 * SUBPIXEL),
         (0, 4 * SUBPIXEL),
     ];
-    surface.wash_polygon_subpixel(&square, Color::rgba(255, 0, 0, 0), |_, _| 255);
+    let full = |_: u32, _: u32, row: &mut [u8]| row.fill(255);
+    surface.wash_polygon_subpixel(&square, Color::rgba(255, 0, 0, 0), full);
     assert_eq!(surface.pixels(), &before[..], "a transparent wash");
-    surface.wash_polygon_subpixel(&[(0, 0), (SUBPIXEL, 0)], RED, |_, _| 255);
+    surface.wash_polygon_subpixel(&[(0, 0), (SUBPIXEL, 0)], RED, full);
     assert_eq!(surface.pixels(), &before[..], "fewer than three vertices");
 }
 
@@ -1247,10 +1360,11 @@ fn wash_region_is_a_no_op_for_a_transparent_or_empty_wash() {
     let mut surface = Surface::new(4, 4).expect("allocates");
     surface.fill(BLUE);
     let before = surface.pixels().to_vec();
-    surface.wash_region(0, 0, 4, 4, Color::rgba(255, 0, 0, 0), |_, _| 255);
+    let full = |_: u32, _: u32, row: &mut [u8]| row.fill(255);
+    surface.wash_region(0, 0, 4, 4, Color::rgba(255, 0, 0, 0), full);
     assert_eq!(surface.pixels(), &before[..], "a transparent wash");
-    surface.wash_region(0, 0, 0, 4, RED, |_, _| 255);
-    surface.wash_region(0, 0, 4, 0, RED, |_, _| 255);
+    surface.wash_region(0, 0, 0, 4, RED, full);
+    surface.wash_region(0, 0, 4, 0, RED, full);
     assert_eq!(surface.pixels(), &before[..], "an empty rectangle");
 }
 
@@ -1616,7 +1730,7 @@ fn furniture_like_drawing(surface: &mut Surface, sprite: &Surface) {
         DRAWING_W,
         DRAWING_H,
         Color::rgba(0, 255, 0, 130),
-        |x, y| u8::try_from((x * 11 + y * 5) % 251).unwrap_or(0),
+        pointwise(|x, y| u8::try_from((x * 11 + y * 5) % 251).unwrap_or(0)),
     );
     surface.blit(19, 15, sprite);
     surface.fill_polygon_subpixel(
@@ -2748,6 +2862,35 @@ fn a_polygon_filled_band_by_band_is_the_polygon_filled_whole() {
     }
 }
 
+/// Rounded rectangles filled into every band draw exactly what filling them
+/// onto the whole surface draws, corners straddling a band edge included.
+#[test]
+fn a_round_rect_filled_band_by_band_is_the_round_rect_filled_whole() {
+    use crate::surface::Canvas;
+    let shapes = [
+        ((2, 1, 20, 15, 6), Color::rgba(200, 40, 10, 180)),
+        ((10, 9, 21, 14, 9), Color::rgba(10, 90, 220, 255)),
+        ((0, 20, 32, 4, 0), Color::rgba(0, 0, 0, 255)),
+    ];
+    let ground = Color::rgb(60, 70, 80).premultiply();
+    let mut whole = Surface::filled(32, 24, ground).expect("allocates");
+    for ((x, y, w, h, radius), color) in shapes {
+        whole.fill_round_rect(x, y, w, h, radius, color);
+    }
+    for rows_per_band in [1, 2, 5, 7, 24] {
+        let mut banded = Surface::filled(32, 24, ground).expect("allocates");
+        for mut band in banded.row_bands_mut(0..24, rows_per_band) {
+            for ((x, y, w, h, radius), color) in shapes {
+                Canvas::fill_round_rect(&mut band, x, y, w, h, radius, color);
+            }
+        }
+        assert_eq!(
+            banded, whole,
+            "bands of {rows_per_band} rows drew a different picture"
+        );
+    }
+}
+
 /// A scratch that has grown for a large fill scan-converts a small one
 /// exactly as a fresh scratch does, and a shape that encloses nothing leaves
 /// it usable.
@@ -2833,6 +2976,63 @@ fn a_narrowed_band_confines_a_fill_to_its_rows() {
     assert!(first.narrowed(8..12).rows().is_empty());
 }
 
+/// A figure drawn in bands across a runner, each band with a scratch of its
+/// own, is the figure drawn whole; the paint splits as far as the scratch it
+/// holds and a band's grain allow, and no further.
+#[test]
+fn a_figure_drawn_in_bands_through_its_scratch_is_the_figure_whole() {
+    use crate::surface::Canvas;
+    use tairix_parallel::{JobRunner, Reversed, Threaded};
+    const SIZE: (u32, u32) = (1024, 512);
+    let (x, y) = (64 * SUBPIXEL, 40 * SUBPIXEL);
+    let figures: [[(i32, i32); 3]; 3] = [
+        [(x, y), (15 * x + 3, 2 * y), (2 * x, 12 * y + 6)],
+        [(8 * x, y / 2), (15 * x, 11 * y), (x / 2 + 9, 8 * y)],
+        [(x, 12 * y), (13 * x, y + 1), (15 * x, 12 * y)],
+    ];
+    let color = Color::rgba(250, 120, 60, 200);
+    let mask = pointwise(|x, y| u8::try_from((x * 3 + y * 5) % 256).unwrap_or(0));
+    let ground = Color::rgb(5, 9, 30).premultiply();
+    let mut whole = Surface::filled(SIZE.0, SIZE.1, ground).expect("allocates");
+    let mut scratch = crate::ScanScratch::new();
+    for figure in &figures {
+        Canvas::fill_polygon_subpixel(&mut whole, figure, color, &mut scratch);
+        Canvas::wash_polygon_subpixel(&mut whole, figure, color, &mask, &mut scratch);
+    }
+    let reversed = Reversed::new(4);
+    let threaded = Threaded::new(4);
+    let runners: [&dyn JobRunner; 2] = [&reversed, &threaded];
+    for runner in runners {
+        let mut held = crate::BandScratch::new();
+        held.spread_over(runner);
+        let mut banded = Surface::filled(SIZE.0, SIZE.1, ground).expect("allocates");
+        held.draw(&mut banded, 0..SIZE.1, runner, &|band, scratch| {
+            for figure in &figures {
+                Canvas::fill_polygon_subpixel(band, figure, color, scratch);
+                Canvas::wash_polygon_subpixel(band, figure, color, &mask, scratch);
+            }
+        });
+        assert_eq!(banded, whole);
+    }
+    assert_eq!(reversed.widest(), 16, "a band for each scratch held");
+
+    let unheld = Reversed::new(4);
+    let mut banded = Surface::filled(SIZE.0, SIZE.1, ground).expect("allocates");
+    crate::BandScratch::new().draw(&mut banded, 0..SIZE.1, &unheld, &|band, scratch| {
+        for figure in &figures {
+            Canvas::fill_polygon_subpixel(band, figure, color, scratch);
+        }
+    });
+    assert_eq!(unheld.dispatches(), 0, "no scratch held, so one band");
+
+    let few = Reversed::new(4);
+    let mut held = crate::BandScratch::new();
+    held.spread_over(&few);
+    let rows = u32::try_from(crate::BAND_GRAIN).expect("small") / SIZE.0;
+    held.draw(&mut banded, 0..rows, &few, &|_, _| {});
+    assert_eq!(few.dispatches(), 0, "one grain's worth of rows is one band");
+}
+
 /// A masked wash through a band is the wash through the whole surface, band
 /// edges and all, with each pixel's mask read at its own surface position.
 #[test]
@@ -2845,18 +3045,18 @@ fn a_wash_band_by_band_is_the_wash_whole() {
         (9 * unit, 22 * unit + 6),
     ];
     let color = Color::rgba(250, 180, 60, 230);
-    let mask = |x: u32, y: u32| u8::try_from((x * 7 + y * 11) % 256).unwrap_or(u8::MAX);
+    let mask = pointwise(|x, y| u8::try_from((x * 7 + y * 11) % 256).unwrap_or(u8::MAX));
     let ground = Color::rgb(5, 9, 30).premultiply();
     let mut whole = Surface::filled(32, 24, ground).expect("allocates");
-    whole.wash_polygon_subpixel(&triangle, color, mask);
+    whole.wash_polygon_subpixel(&triangle, color, &mask);
     let mut through_trait = Surface::filled(32, 24, ground).expect("allocates");
     let mut scratch = crate::ScanScratch::new();
-    Canvas::wash_polygon_subpixel(&mut through_trait, &triangle, color, mask, &mut scratch);
+    Canvas::wash_polygon_subpixel(&mut through_trait, &triangle, color, &mask, &mut scratch);
     assert_eq!(through_trait, whole);
     for rows_per_band in [1, 3, 8, 24] {
         let mut banded = Surface::filled(32, 24, ground).expect("allocates");
         for mut band in banded.row_bands_mut(0..24, rows_per_band) {
-            Canvas::wash_polygon_subpixel(&mut band, &triangle, color, mask, &mut scratch);
+            Canvas::wash_polygon_subpixel(&mut band, &triangle, color, &mask, &mut scratch);
         }
         assert_eq!(banded, whole, "bands of {rows_per_band} rows");
     }

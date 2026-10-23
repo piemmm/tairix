@@ -48,15 +48,13 @@
 //! and the CPU faults the one without the mapping). Inventing a host
 //! stub that "activates" would be a fake primitive.
 //!
-//! # Scope (the burn-down)
+//! # Scope
 //!
-//! This is the `plans/WIRING.md` **Stage W5b-1** slice: the bootstrap
-//! page-table primitive every port already owns, lifted behind one HAL
-//! trait and exercised by the `memory_isolation` verticals through it.
-//! Wiring `kernel/mem`'s allocator-backed per-process address space onto
-//! this trait, and the per-page + cross-CPU TLB shootdown (which depends
-//! on the aarch64 IPI from Stage W6), are the tracked Stage W5b-2 / W6
-//! follow-ups — not silently duplicated here.
+//! The page-table primitive every port owns, behind one HAL trait and
+//! exercised by the `memory_isolation` verticals through it. Its siblings
+//! are the per-CPU and cross-CPU invalidations ([`crate::tlb`],
+//! [`crate::xtlb`]) and the address-space tags a user root is loaded under
+//! ([`crate::tags`]).
 
 use core::ptr::NonNull;
 

@@ -11,16 +11,17 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DamageList, DamageRect};
+use tairix_abi::driver::display::DamageRect;
 use tairix_abi::font_ipc::FontRequest;
 use tairix_abi::saver_ipc::{
-    HostMessage, SaverMessage, SaverRegion, SlideOutcome, Start, WallReading,
-    SAVER_HOST_MESSAGE_MAX, SAVER_MESSAGE_MAX,
+    HostMessage, SaverDamage, SaverMessage, SaverRegion, SlideOutcome, Start, WallReading,
+    SAVER_DAMAGE_RECTS, SAVER_HOST_MESSAGE_MAX, SAVER_MESSAGE_MAX,
 };
 use tairix_abi::switchboard_ipc::MachineReport;
 use tairix_abi::sysinfo::MemoryBand;
-use tairix_abi::Errno;
-use tairix_display::winframe;
+use tairix_abi::{DriverError, Errno};
+use tairix_display::{driver_error_from_errno, winframe, ChannelOrder, Presenter};
+use tairix_geometry::{Rect, Region};
 use tairix_log::Sink;
 use tairix_parallel::JobRunner;
 use tairix_raster::Surface;
@@ -30,7 +31,7 @@ use tairix_wallpaper::TaskNames;
 use tairix_wm::{Compositor, WindowId};
 
 use super::keep::Picture;
-use super::talk::{Fault, FeedHolder, Said, Talk};
+use super::talk::{Fault, FeedHolder, Said, Shown, Talk};
 
 /// The memory a saver's region is held in.
 pub trait SaverMemory {
@@ -107,8 +108,34 @@ pub struct Hosted<T: SessionTransport, S: Sink> {
     /// What to send once nothing is queued: a saver slow to read is told the
     /// latest, never a backlog.
     held: Held,
-    /// Whether it has presented a frame.
-    presented: bool,
+    /// What the frame waiting in the region for the screen changed.
+    waiting: Option<SaverDamage>,
+    /// What a frame laid changed, held to the band form within the protocol's
+    /// rectangle count, so no saver's geometry makes the compositor's own
+    /// unbounded damage fragment.
+    laying: Region,
+    /// How the saver's frames reach the screen.
+    path: Path,
+    /// The display refused a frame drawn in its memory: every frame from then
+    /// on is laid on the window.
+    refused: bool,
+    /// A frame drawn in the display's memory reached the screen as it was
+    /// presented, which a display that latches nothing says no other way.
+    reached: bool,
+    /// The display holds none of the saver's picture yet, so the next frame
+    /// drawn into it is drawn whole.
+    whole_owed: bool,
+}
+
+/// How a hosted saver's frames reach the screen.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Path {
+    /// Laid on the saver window, which the compositor presents.
+    Window,
+    /// Drawn straight into the display's own frames, the compositor
+    /// presenting nothing meanwhile: the window's picture is stale, and is
+    /// owed the whole frame should it show one again.
+    Display,
 }
 
 impl<T: SessionTransport, S: Sink> Hosted<T, S> {
@@ -146,7 +173,12 @@ impl<T: SessionTransport, S: Sink> Hosted<T, S> {
             folder: alloc::string::String::from(folder),
             out,
             held: Held::default(),
-            presented: false,
+            waiting: None,
+            laying: Region::with_budget(SAVER_DAMAGE_RECTS),
+            path: Path::Window,
+            refused: false,
+            reached: false,
+            whole_owed: false,
         };
         hosted.send(&HostMessage::Start(start.clone()))?;
         Ok(hosted)
@@ -197,7 +229,7 @@ impl<T: SessionTransport, S: Sink> Hosted<T, S> {
     pub fn on_readable(
         &mut self,
         now_ns: u64,
-        (compositor, wm): (&mut Compositor, WindowId),
+        (compositor, wm, mut display): (&mut Compositor, WindowId, Option<&mut dyn Presenter>),
         errands: &mut dyn SaverErrands,
     ) -> Result<(), Ended> {
         self.session.on_readable().map_err(|_| Ended::Gone)?;
@@ -210,11 +242,12 @@ impl<T: SessionTransport, S: Sink> Hosted<T, S> {
                 break;
             };
             let message = message.map_err(|_| Ended::Garbled)?;
-            match self.talk.hear(message, now_ns).map_err(Ended::Faulted)? {
+            match self.talk.hear(&message, now_ns).map_err(Ended::Faulted)? {
                 Said::Ready => {}
                 Said::Presented { damage } => {
-                    self.presented |= self.present(damage, compositor, wm);
+                    self.show(damage, (compositor, wm), display.as_deref_mut());
                 }
+                Said::Held(damage) => self.waiting = Some(*damage),
                 Said::FontCall(request) => errands.relay_font(request),
                 Said::KeepRefused => self.kept(false, now_ns)?,
                 Said::Keep { title, size } => {
@@ -307,10 +340,136 @@ impl<T: SessionTransport, S: Sink> Hosted<T, S> {
             .map_err(|_| Ended::Gone)
     }
 
-    /// Whether it has laid a frame on the screen.
+    /// A frame was presented to the display, carrying whatever was laid into
+    /// the saver window `wm`: the frame held behind it is laid now. Answers
+    /// whether a frame of the saver's reached the screen.
+    pub fn shown(&mut self, (compositor, wm): (&mut Compositor, WindowId)) -> bool {
+        match self.talk.shown() {
+            Shown::Nothing => false,
+            Shown::Laid => true,
+            Shown::Next => {
+                let waiting = self.waiting.take();
+                self.lay(waiting.as_ref(), compositor, wm);
+                true
+            }
+        }
+    }
+
+    /// The display latched the frame drawn in its memory: the frame held
+    /// behind it, if one is, goes to the display now. Answers whether a frame
+    /// of the saver's reached the screen.
+    pub fn latched(
+        &mut self,
+        (compositor, wm): (&mut Compositor, WindowId),
+        display: &mut dyn Presenter,
+    ) -> bool {
+        if self.path != Path::Display {
+            return false;
+        }
+        match self.talk.shown() {
+            Shown::Nothing => false,
+            Shown::Laid => true,
+            Shown::Next => {
+                let waiting = self.waiting.take();
+                self.show(waiting.as_ref(), (compositor, wm), Some(display));
+                true
+            }
+        }
+    }
+
+    /// Whether the saver's frames go straight to the display, the compositor
+    /// to present nothing meanwhile.
     #[must_use]
-    pub const fn has_presented(&self) -> bool {
-        self.presented
+    pub fn scans_out(&self) -> bool {
+        self.path == Path::Display
+    }
+
+    /// Show what `damage` names of the frame area: drawn straight into
+    /// `display`'s own frame where the saver covers it and the display draws
+    /// in place, else laid on the saver window.
+    fn show(
+        &mut self,
+        damage: Option<&SaverDamage>,
+        (compositor, wm): (&mut Compositor, WindowId),
+        display: Option<&mut (dyn Presenter + '_)>,
+    ) {
+        if let Some(display) = display.filter(|_| !self.refused) {
+            if self.draw_on(display, damage, compositor.job_runner()) {
+                return;
+            }
+        }
+        self.lay(damage, compositor, wm);
+    }
+
+    /// Draw what `damage` names straight into `display`'s frame, the whole
+    /// frame where the display holds none of the saver's yet, answering
+    /// whether the display took it — or will once it has latched the last.
+    /// A display that refuses sends this and every later frame to the window.
+    fn draw_on(
+        &mut self,
+        display: &mut dyn Presenter,
+        damage: Option<&SaverDamage>,
+        runner: &dyn JobRunner,
+    ) -> bool {
+        let output = display.mode();
+        let size = (self.layout.width(), self.layout.height());
+        let Some(order) = ChannelOrder::for_format(output.format) else {
+            return false;
+        };
+        if (output.width_px, output.height_px) != size {
+            return false;
+        }
+        if self.path == Path::Window {
+            self.path = Path::Display;
+            self.whole_owed = true;
+        }
+        if !display.ready() {
+            self.waiting = damage.copied();
+            self.talk.hold();
+            return true;
+        }
+        self.laying.clear();
+        if self.whole_owed {
+            self.laying.add(Rect::new(0, 0, size.0, size.1));
+        } else {
+            for rect in damage.map_or(&[][..], SaverDamage::rects) {
+                if let (Ok(x), Ok(y)) = (i32::try_from(rect.x), i32::try_from(rect.y)) {
+                    self.laying
+                        .add(Rect::new(x, y, rect.width_px, rect.height_px));
+                }
+            }
+        }
+        if self.laying.is_empty() {
+            return true;
+        }
+        let mode = self.layout.display_mode();
+        let frame = self
+            .region
+            .bytes()
+            .get(..self.layout.frame_len())
+            .unwrap_or(&[]);
+        let drawn = display.present_drawn(&self.laying, &mut |memory, stride, refresh| {
+            let stride = usize::try_from(stride).map_err(|_| DriverError::LengthOutOfRange)?;
+            winframe::lay_opaque_into(frame, &mode, (memory, stride, order), refresh, runner)
+                .map_err(driver_error_from_errno)
+        });
+        if drawn.is_err() {
+            self.refused = true;
+            return false;
+        }
+        self.whole_owed = false;
+        self.talk.laid();
+        if display.ready() {
+            // A display that shows a frame as it is presented posts no latch.
+            self.reached = !matches!(self.talk.shown(), Shown::Nothing);
+        }
+        true
+    }
+
+    /// Whether a frame drawn in the display's memory reached the screen as it
+    /// was presented, since this was last asked.
+    pub fn take_reached(&mut self) -> bool {
+        core::mem::take(&mut self.reached)
     }
 
     /// Whether the saver was given the machine feed.
@@ -401,44 +560,42 @@ impl<T: SessionTransport, S: Sink> Hosted<T, S> {
             .map_err(|_| Errno::BrokenPipe)
     }
 
-    /// Lay what `damage` names of the frame area onto the saver window `wm`:
-    /// the whole frame where the window holds no picture of its own any more.
-    /// Every pixel laid is opaque, so no saver can show what it covers.
-    /// Answers whether a picture was laid.
-    fn present(
-        &self,
-        damage: Option<DamageList>,
-        compositor: &mut Compositor,
-        wm: WindowId,
-    ) -> bool {
+    /// Lay what `damage` names of the frame area onto the saver window `wm`,
+    /// the whole frame where the window holds no picture of its own any more,
+    /// and tell the conversation it waits for the screen. Every pixel laid is
+    /// opaque, so no saver can show what it covers.
+    fn lay(&mut self, damage: Option<&SaverDamage>, compositor: &mut Compositor, wm: WindowId) {
         let mode = self.layout.display_mode();
         let size = (self.layout.width(), self.layout.height());
-        let damage = if compositor.keeps_content(wm, size) {
-            damage
+        self.laying.clear();
+        if compositor.keeps_content(wm, size) && self.path == Path::Window {
+            for rect in damage.map_or(&[][..], SaverDamage::rects) {
+                if let (Ok(x), Ok(y)) = (i32::try_from(rect.x), i32::try_from(rect.y)) {
+                    self.laying
+                        .add(Rect::new(x, y, rect.width_px, rect.height_px));
+                }
+            }
         } else {
-            DamageList::new(&[DamageRect::full(&mode)]).ok()
-        };
-        let Some(damage) = damage else {
-            return false;
-        };
+            self.laying.add(Rect::new(0, 0, size.0, size.1));
+        }
+        if self.laying.is_empty() {
+            return;
+        }
         let frame = self
             .region
             .bytes()
             .get(..self.layout.frame_len())
             .unwrap_or(&[]);
-        let runner = compositor.job_runner();
+        let (laying, runner) = (&self.laying, compositor.job_runner());
         let laid = compositor.present_window_content(wm, size.0, size.1, |content, changed| {
-            winframe::decode_list(
-                frame,
-                content,
-                &mode,
-                &damage,
-                winframe::Alpha::Opaque,
-                runner,
-                |rect| changed.add(rect),
-            )
+            winframe::lay_opaque_region(frame, content, &mode, laying, runner)?;
+            changed.add_region(laying);
+            Ok::<(), Errno>(())
         });
-        matches!(laid, Some(Ok(())))
+        if matches!(laid, Some(Ok(()))) {
+            self.talk.laid();
+            self.path = Path::Window;
+        }
     }
 
     /// The picture of `size` the feed area holds, called `name`, decoded
@@ -458,15 +615,7 @@ impl<T: SessionTransport, S: Sink> Hosted<T, S> {
             width_px: width,
             height_px: height,
         };
-        winframe::decode(
-            feed,
-            &mut surface,
-            &mode,
-            area,
-            winframe::Alpha::Opaque,
-            runner,
-        )
-        .ok()?;
+        winframe::lay_opaque(feed, &mut surface, &mode, area, runner).ok()?;
         Some(Picture {
             folder: self.folder.clone(),
             name: alloc::string::String::from(name),

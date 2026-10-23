@@ -3894,7 +3894,7 @@ fn bevelled(under: tairix_colour::Rgba, wash: tairix_colour::Rgba, local: (u32, 
     let (x, y) = local;
     let mut surface =
         Surface::filled(x + 1, y + 1, Color::from(under).premultiply()).expect("surface");
-    surface.wash_region(x, y, 1, 1, Color::from(wash), |_, _| u8::MAX);
+    surface.wash_region(x, y, 1, 1, Color::from(wash), |_, _, row| row.fill(u8::MAX));
     let pixel = surface.get(x, y).expect("in bounds").unpremultiply();
     [pixel.r, pixel.g, pixel.b, pixel.a]
 }
@@ -3995,6 +3995,38 @@ fn the_frame_rim_is_one_quiet_tone_at_either_activation() {
                 .map(|frame| frame.furniture().activation),
             Some(WindowActivationState::Inactive)
         );
+    }
+}
+
+/// A present scattered across a window marks exactly its rectangles, moved
+/// onto the screen and clipped to the client, merged as one region: nothing
+/// between them, and nothing a rectangle reaching past the client names.
+#[test]
+fn a_scattered_present_marks_exactly_its_rectangles_on_screen() {
+    let (mut c, id) = decorated_compositor();
+    c.composite();
+    let client = c.window_client_rect(id).expect("a client");
+    let (width, height) = (client.width, client.height);
+    let mut scattered = Region::new();
+    for step in 0..40u32 {
+        let left = i32::try_from((step * 37) % width).expect("small");
+        let top = i32::try_from((step * 23) % height).expect("small");
+        scattered.add(Rect::new(left, top, 3, 2));
+    }
+    scattered.add(Rect::new(i32::try_from(width).expect("small") - 2, 0, 9, 1));
+    c.present_window_content(id, width, height, |_surface, changed| {
+        changed.add_region(&scattered);
+    })
+    .expect("presented");
+    let mut expected = scattered.clone();
+    expected.translate(client.left(), client.top());
+    expected.clip(client);
+    let reach = c.window(id).expect("a window").bounds();
+    for y in reach.top()..reach.bottom() {
+        for x in reach.left()..reach.right() {
+            let at = Point::new(x, y);
+            assert_eq!(c.damage_covers(at), expected.contains(at), "({x}, {y})");
+        }
     }
 }
 

@@ -10,7 +10,9 @@ coloured by descent and age, reseeded once it settles. It ships as
 - `src/run.rs` — the bundle's `Run`: the scene served by `tairix_saver::run`
   in the drawing sandbox.
 
-It asks for no capability and no feed. Its options are `cells` (`small`,
+It asks for no capability and no feed; it declares `threads = "cores"`, and
+paints a frame's changing cells a band of rows at a time across them, naming
+the tiles they touch as its damage. Its options are `cells` (`small`,
 `medium`, `large`) and `speed` (`slow`, `normal`, `fast`); under reduced
 motion a cell is born and dies at once. A world whose every cell has settled
 asks for no frame before its next generation.

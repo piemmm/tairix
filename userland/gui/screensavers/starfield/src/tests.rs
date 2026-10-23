@@ -1,20 +1,21 @@
-//! Host tests of the starfield: its density, its flight, and a frame that
-//! repaints only where stars were and are.
+//! Host tests of the starfield: its density, its flight, a frame that
+//! repaints only where stars were and are, and the same frame drawn in bands.
 
 extern crate std;
 
 use alloc::vec::Vec;
 
 use tairix_abi::saver_ipc::Start;
-use tairix_geometry::{Point, Rect};
+use tairix_geometry::{Point, Rect, Region};
 use tairix_raster::{Color, Surface};
 use tairix_saver::testing::{self, Screen, FRAME_NS};
 use tairix_saver::{NextFrame, SaverValue};
 use tairix_theme::motion::{seconds, SceneClock};
+use tairix_util::mathf;
 
 use super::{
-    speed_at, Star, Starfield, CRUISE_S, CRUISE_SPEED, MAX_STARS, MIN_STARS, SETTLE_S, SURGE_S,
-    WARP_S, WARP_SPEED, Z_FAR, Z_NEAR,
+    speed_at, strength_at, Ramp, Star, Starfield, CRUISE_S, CRUISE_SPEED, MAX_STARS, MIN_STARS,
+    RAMP_ONE, SETTLE_S, SURGE_S, TAIL_FLOOR, WARP_S, WARP_SPEED, Z_FAR, Z_NEAR,
 };
 
 const SCREEN: (u32, u32) = (1920, 1080);
@@ -63,6 +64,7 @@ fn fly_until(screen: &mut Screen, stars: &mut Starfield, until: u64) -> u64 {
 
 fn footprints(stars: &Starfield) -> Vec<Rect> {
     stars
+        .painted
         .streaks
         .iter()
         .map(|streak| streak.footprint)
@@ -177,7 +179,7 @@ fn stars_stay_in_the_volume_and_their_footprints_on_the_screen() {
         for star in &stars.stars {
             assert!(star.z > Z_NEAR && star.z <= Z_FAR, "{}", star.z);
         }
-        for streak in &stars.streaks {
+        for streak in &stars.painted.streaks {
             assert_eq!(streak.footprint.intersection(&bounds), streak.footprint);
         }
         now += FRAME_NS * 7;
@@ -320,7 +322,10 @@ fn a_calm_field_only_cruises() {
         flown += 1;
     }
     assert!(flown > 0);
-    assert!(!stars.streaks.is_empty(), "the field is still drawn");
+    assert!(
+        !stars.painted.streaks.is_empty(),
+        "the field is still drawn"
+    );
 }
 
 #[test]
@@ -372,5 +377,77 @@ fn a_field_without_warp_never_surges() {
     let warp = WARP_SPEED * seconds(FRAME_NS);
     for step in steps(&mut screen, &mut warping, warped) {
         assert!((step - warp).abs() < 1e-9, "{step} against {warp}");
+    }
+}
+
+/// A frame drawn in bands of rows across cores is the frame drawn on one,
+/// pixel for pixel and in the damage it reports, whichever band runs first and
+/// when they run at once.
+#[test]
+fn a_frame_drawn_in_bands_is_the_frame_drawn_whole() {
+    use tairix_parallel::{JobRunner, Reversed, Threaded, SERIAL};
+    let reversed = Reversed::new(4);
+    let threaded = Threaded::new(4);
+    let runners: [&dyn JobRunner; 2] = [&reversed, &threaded];
+    for runner in runners {
+        let (mut whole, mut banded) = (screen(), screen());
+        let (mut one, mut split) = (field(), field());
+        let in_warp = fly_until(&mut whole, &mut one, 20 * SEC);
+        fly_until(&mut banded, &mut split, 20 * SEC);
+        let now = in_warp + FRAME_NS;
+        one.fly_to(now);
+        split.fly_to(now);
+        split.painted.scratch.spread_over(runner);
+        let (mut drawn, mut split_drawn) = (Region::new(), Region::new());
+        one.painted.redraw(&mut whole.surface, &mut drawn, &SERIAL);
+        split
+            .painted
+            .redraw(&mut banded.surface, &mut split_drawn, runner);
+        assert!(banded.surface == whole.surface, "the bands drew the frame");
+        assert_eq!(split_drawn, drawn);
+    }
+    assert!(reversed.widest() > 1, "the frame was split");
+}
+
+/// A streak is as bright as its tail's floor behind its tail, full past its
+/// head, and rises straight between, within a level of the exact ramp at
+/// every pixel along a row however the streak lies.
+#[test]
+fn a_streak_brightens_straight_from_its_tail_to_its_head() {
+    assert_eq!(strength_at(i64::MIN), TAIL_FLOOR);
+    assert_eq!(strength_at(0), TAIL_FLOOR);
+    assert_eq!(strength_at(i64::from(RAMP_ONE)), u8::MAX);
+    assert_eq!(strength_at(i64::MAX), u8::MAX);
+    let mut prng = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        prng ^= prng << 13;
+        prng ^= prng >> 7;
+        prng ^= prng << 17;
+        f64::from(u32::try_from(prng >> 40).unwrap_or(0)) / f64::from(1u32 << 24)
+    };
+    for round in 0..400 {
+        let tail = (next() * 1900.0, next() * 1060.0);
+        // Half the streaks barely move: a short streak far from the screen's
+        // corner is where its fixed point is nearest its range.
+        let length = if round % 2 == 0 { 600.0 } else { 6.0 };
+        let run = ((next() - 0.5) * length, (next() - 0.5) * length);
+        let reach = run.0 * run.0 + run.1 * run.1;
+        let ramp = Ramp::new(tail, run, reach);
+        // A row through the streak, from well before it to well past it.
+        let y = u32::try_from(mathf::round_i32(tail.1 + (next() - 0.5) * 4.0)).unwrap_or(0);
+        let x = u32::try_from(mathf::round_i32(tail.0) - 450).unwrap_or(0);
+        let mut strengths = [0u8; 900];
+        ramp.row(y, x, &mut strengths);
+        for (column, &strength) in (x..).zip(&strengths) {
+            let along = ((f64::from(column) + 0.5 - tail.0) * run.0
+                + (f64::from(y) + 0.5 - tail.1) * run.1)
+                / reach;
+            let exact =
+                f64::from(TAIL_FLOOR) + along.clamp(0.0, 1.0) * f64::from(u8::MAX - TAIL_FLOOR);
+            assert!(
+                (f64::from(strength) - exact).abs() <= 1.0,
+                "({column}, {y}) of a streak from {tail:?} by {run:?}: {strength} against {exact}"
+            );
+        }
     }
 }

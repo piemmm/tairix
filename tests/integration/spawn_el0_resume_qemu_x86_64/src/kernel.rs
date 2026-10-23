@@ -7,6 +7,7 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
@@ -322,7 +323,7 @@ fn run_resume() -> ! {
     // `enter_user`s into ring 3. `ContextSwitchHal` is the x86_64
     // context-switch primitive.
     let cs = ContextSwitchHal::new();
-    let pre_resume = move |kernel_stack_top: u64| {
+    let pre_resume = move |kernel_stack_top: u64, tag: AddressTag| {
         // Repoint the per-CPU syscall entry stack at this task's own kernel
         // stack before the switch-in (`plans/PI.md` §X). A rejected value
         // (it is validated canonical/aligned/kernel-half) leaves the slot
@@ -336,7 +337,7 @@ fn run_resume() -> ! {
         // space, which maps the low identity + higher-half kernel window the
         // running dispatcher executes from — exactly `activate_user_root`'s
         // contract.
-        unsafe { activate_user_root(root_phys) };
+        unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so

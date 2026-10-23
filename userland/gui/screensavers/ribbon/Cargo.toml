@@ -23,6 +23,8 @@ tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 # The desktop face the time is set in, relayed through the host.
 tairix-font = { path = "../../../../lib/font", version = "=0.0.0" }
 tairix-geometry = { path = "../../../../lib/geometry", version = "=0.0.0" }
+# The pool the ribbon's bands of columns are painted across.
+tairix-parallel = { path = "../../../../lib/parallel", version = "=0.0.0" }
 tairix-raster = { path = "../../../../lib/raster", version = "=0.0.0" }
 # The ribbon of light, shared with the login screen.
 tairix-ribbon = { path = "../../../../lib/ribbon", version = "=0.0.0" }

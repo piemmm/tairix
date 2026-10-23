@@ -32240,8 +32240,8 @@ mod tests {
     }
 
     impl LiveUserSpace for PublishedLive {
-        fn active_cpus(&self) -> Arc<tairix_kernel_mem::ActiveCpus> {
-            Arc::new(tairix_kernel_mem::ActiveCpus::new(0).expect("an empty set needs no storage"))
+        fn tlb_context(&self) -> Arc<tairix_kernel_mem::TlbContext> {
+            Arc::new(tairix_kernel_mem::TlbContext::new(0).expect("an empty set needs no storage"))
         }
         fn map_anonymous(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))

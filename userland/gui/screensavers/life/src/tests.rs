@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::RefreshRate;
-use tairix_abi::saver_ipc::Start;
+use tairix_abi::saver_ipc::{Start, SAVER_DAMAGE_RECTS};
 use tairix_abi::Errno;
 use tairix_geometry::Point;
 use tairix_raster::Color;
@@ -15,7 +15,9 @@ use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_saver::testing::{self, Screen};
 use tairix_saver::NextFrame;
 
-use super::{Life, FAMILIES, GENERATIONS_PER_SECOND, MAX_CELLS, QUIET_LIMIT, SETTLED_GRACE};
+use super::{
+    queued_in, Life, FAMILIES, GENERATIONS_PER_SECOND, MAX_CELLS, QUIET_LIMIT, SETTLED_GRACE,
+};
 
 /// The start the host would send for a `size` screen with these options.
 fn start(size: (u32, u32), cells: &str, speed: &str) -> Start {
@@ -250,20 +252,19 @@ fn a_calm_world_is_born_and_dies_at_once() {
         life.level[cell.0 * life.cols + cell.1] = u8::MAX;
     }
     life.generation();
-    life.fade(&mut screen.damage);
+    life.fade();
     life.retire_settled();
     assert!(life.active.is_empty(), "no cell is left mid-fade");
 }
 
-/// However coarsely a frame's damage is kept, it repaints the changing cells
-/// alone: with more changing than the damage holds rectangles for, a mark in
-/// a still cell between them survives the frame.
+/// A frame repaints its changing cells alone and names the tiles they lie
+/// in: a mark in a still cell far from them survives the frame, outside the
+/// damage.
 #[test]
 fn a_frame_repaints_only_its_changing_cells() {
     let mut life = world(40, 30);
     let mut screen = Screen::new(world_start(40, 30));
-    // Apart from each other, so each is a rectangle of its own and together
-    // they pass the budget.
+    // Rows of cells at the top and the bottom, a still cell midway between.
     let rows = [0, 2, life.rows - 3, life.rows - 1];
     let changing: Vec<(usize, usize)> = rows
         .iter()
@@ -280,15 +281,16 @@ fn a_frame_repaints_only_its_changing_cells() {
     );
     screen.surface.fill_rect(x, y, 1, 1, Color::rgb(1, 2, 3));
     draw(&mut screen, &mut life, 0);
-    assert_eq!(screen.damage.rects().len(), 1, "past the budget, one box");
+    assert!(screen.damage.rects().len() <= SAVER_DAMAGE_RECTS);
+    for &(row, col) in &changing {
+        let cell = life.cell_rect(row, col);
+        assert!(screen.damage.contains(cell.origin), "{row}, {col} named");
+    }
     let at = Point::new(
         i32::try_from(x).expect("small"),
         i32::try_from(y).expect("small"),
     );
-    assert!(
-        screen.damage.bounds().contains(at),
-        "inside the coarse damage"
-    );
+    assert!(!screen.damage.contains(at), "the still cell is not named");
     let pixel = screen.surface.get(x, y).expect("in bounds");
     assert_eq!(
         (pixel.r, pixel.g, pixel.b),
@@ -386,4 +388,47 @@ fn a_stalled_world_resumes_its_pace_without_a_burst() {
     let (due, frame) = (life.next_generation_ns, life.cadence.frame_ns);
     draw(&mut screen, &mut life, stalled + frame);
     assert_eq!(life.next_generation_ns, due, "the next waits its interval");
+}
+
+/// Changing cells painted in bands of whole cell rows across a runner paint
+/// exactly what one pass paints.
+#[test]
+fn changing_cells_painted_in_bands_match_one_pass() {
+    let mut life = world(64, 48);
+    let mut rng = NonCryptoRng::seed_from_u64(5);
+    let mut changing = Vec::new();
+    for _ in 0..1_500 {
+        let (row, col) = (
+            usize::try_from(rng.next_u64() % 48).expect("small"),
+            usize::try_from(rng.next_u64() % 64).expect("small"),
+        );
+        changing.push((row, col));
+        life.queue(row * life.cols + col);
+    }
+    set(&mut life, &changing);
+    life.fade();
+    let given = world_start(64, 48);
+    let (mut serial, mut banded) = (Screen::new(given.clone()), Screen::new(given));
+    life.repaint_active(&mut serial.surface, &tairix_parallel::SERIAL);
+    let runner = tairix_parallel::Reversed::new(7);
+    life.repaint_active(&mut banded.surface, &runner);
+    assert!(runner.widest() > 1, "the cells were split");
+    assert_eq!(serial.surface, banded.surface);
+}
+
+/// The queued cells of a range are exactly the marked ones a scan of every
+/// cell finds, whichever words the range starts and ends in.
+#[test]
+fn a_ranges_queued_cells_are_its_marked_ones() {
+    let mut rng = NonCryptoRng::seed_from_u64(11);
+    let queued: Vec<u64> = (0..5).map(|_| rng.next_u64()).collect();
+    let marked = |cell: usize| (queued[cell / 64] >> (cell % 64)) & 1 == 1;
+    let edges = [0, 1, 63, 64, 65, 127, 128, 200, 319, 320];
+    for start in edges {
+        for end in edges.into_iter().filter(|end| *end >= start) {
+            let found: Vec<usize> = queued_in(&queued, start..end).collect();
+            let expected: Vec<usize> = (start..end).filter(|cell| marked(*cell)).collect();
+            assert_eq!(found, expected, "{start}..{end}");
+        }
+    }
 }

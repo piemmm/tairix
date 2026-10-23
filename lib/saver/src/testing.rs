@@ -1,18 +1,151 @@
 //! A host for a scene's own tests: what `serve` would hand a scene, with no
-//! pipe, region or host process behind it.
+//! pipe, region or host process behind it; and the scripted host and heap
+//! region `serve`'s own tests run it over.
 
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DamageRect, RefreshRate};
 use tairix_abi::saver::{ChoiceValue, OptionKey, SaverFeeds, SaverValue};
-use tairix_abi::saver_ipc::{OptionValue, SaverMessage, SaverRegion, Start, WallReading};
-use tairix_display::winframe::{decode, encode, Alpha};
+use tairix_abi::saver_ipc::{
+    HostMessage, OptionValue, SaverMessage, SaverRegion, Start, WallReading, SAVER_DAMAGE_RECTS,
+    SAVER_HOST_MESSAGE_MAX,
+};
+use tairix_abi::Errno;
+use tairix_display::winframe::{decode, encode};
 use tairix_geometry::{Region, Scale};
-use tairix_raster::Surface;
+use tairix_raster::{PixelMemory, Surface};
+use tairix_rt::sync::Mutex;
+use tairix_sandbox::proto::Channel;
 use tairix_theme::motion::SceneClock;
 
-use crate::serve::DAMAGE_BUDGET;
-use crate::{FeedArea, Frame, Host, NextFrame, Scene, Setup, GROUND};
+use crate::{FeedArea, Frame, Host, NextFrame, RegionBytes, Scene, Setup, GROUND};
+
+/// A host recorded in advance: what it says, then the end of its pipe; and
+/// everything the saver says back.
+pub struct Scripted {
+    input: VecDeque<u8>,
+    said: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Channel for Scripted {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        let n = buf.len().min(self.input.len());
+        for (slot, byte) in buf.iter_mut().zip(self.input.drain(..n)) {
+            *slot = byte;
+        }
+        Ok(n)
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
+        self.said.lock().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+}
+
+/// A host that says `messages` and closes its pipe, and where what the saver
+/// says back is kept.
+///
+/// # Panics
+///
+/// For a message that does not encode.
+#[must_use]
+pub fn script(messages: &[HostMessage<'_>]) -> (Scripted, Arc<Mutex<Vec<u8>>>) {
+    let mut input = VecDeque::new();
+    let mut out = alloc::vec![0u8; SAVER_HOST_MESSAGE_MAX];
+    for message in messages {
+        let len = message.encode(&mut out).expect("encodes");
+        input.extend(u32::try_from(len).expect("fits").to_le_bytes());
+        input.extend(&out[..len]);
+    }
+    let said = Arc::new(Mutex::new(Vec::new()));
+    (
+        Scripted {
+            input,
+            said: Arc::clone(&said),
+        },
+        said,
+    )
+}
+
+/// The messages `said`, as [`script`] kept them.
+///
+/// # Panics
+///
+/// For bytes that are not whole saver messages.
+#[must_use]
+pub fn replies(said: &[u8]) -> Vec<SaverMessage> {
+    let mut at = 0;
+    let mut out = Vec::new();
+    while at + 4 <= said.len() {
+        let len = u32::from_le_bytes(said[at..at + 4].try_into().expect("four")) as usize;
+        out.push(SaverMessage::decode(&said[at + 4..at + 4 + len]).expect("a message"));
+        at += 4 + len;
+    }
+    out
+}
+
+/// A region held in the test's own memory, its frame area handed to `out`, if
+/// any, once the saver lets it go.
+pub struct HeapRegion {
+    bytes: Vec<u8>,
+    out: Option<Arc<Mutex<Vec<u8>>>>,
+}
+
+impl HeapRegion {
+    /// A region of `bytes`.
+    #[must_use]
+    pub const fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes, out: None }
+    }
+
+    /// A region of `bytes` whose frame area is handed to `out` at the end.
+    #[must_use]
+    pub const fn recorded(bytes: Vec<u8>, out: Arc<Mutex<Vec<u8>>>) -> Self {
+        Self {
+            bytes,
+            out: Some(out),
+        }
+    }
+}
+
+/// A [`HeapRegion`]'s frame area.
+struct HeapFrame {
+    bytes: Vec<u8>,
+    out: Option<Arc<Mutex<Vec<u8>>>>,
+}
+
+impl PixelMemory for HeapFrame {
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+}
+
+impl Drop for HeapFrame {
+    fn drop(&mut self) {
+        if let Some(out) = &self.out {
+            *out.lock() = core::mem::take(&mut self.bytes);
+        }
+    }
+}
+
+impl RegionBytes for HeapRegion {
+    type Rest = Vec<u8>;
+
+    fn into_parts(mut self, frame_len: usize) -> Result<(Box<dyn PixelMemory>, Vec<u8>), Errno> {
+        if self.bytes.len() < frame_len {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let rest = self.bytes.split_off(frame_len);
+        let frame = HeapFrame {
+            bytes: core::mem::take(&mut self.bytes),
+            out: self.out.take(),
+        };
+        Ok((Box::new(frame), rest))
+    }
+}
 
 /// The refresh rate a test's display runs at.
 pub const TEST_REFRESH: RefreshRate = RefreshRate::ASSUMED;
@@ -108,7 +241,7 @@ impl Screen {
         let feed = start.region.feed_range().map_or(0, |range| range.len());
         Self {
             surface,
-            damage: Region::with_budget(DAMAGE_BUDGET),
+            damage: Region::with_budget(SAVER_DAMAGE_RECTS),
             wall: WallReading::unset(0),
             start,
             feed: FeedArea::Saver,
@@ -198,7 +331,6 @@ impl Screen {
             &mut picture,
             &mode,
             area,
-            Alpha::AsSent,
             &tairix_parallel::Serial,
         )
         .expect("the kept picture");

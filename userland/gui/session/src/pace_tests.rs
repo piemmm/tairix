@@ -319,3 +319,46 @@ fn a_flipping_display_takes_the_next_frame_on_its_latch_however_soon() {
         "a display that shows each frame at once is paced by the period again"
     );
 }
+
+/// Damage laid once the frame was admitted is held: the park wakes for it at
+/// the end of the period, and the next admit presents it.
+#[test]
+fn damage_laid_after_the_frame_wakes_the_park_at_the_next_period() {
+    let mut pacer = FramePacer::new();
+    assert!(pacer.admit(0, true, true, RATE));
+    pacer.presented(false);
+    pacer.hold(true, true);
+    assert_eq!(
+        pacer.park_deadline_ns(SAMPLE_NS, WAITSET_TIMEOUT_NONE, RATE),
+        RATE.frame_ns() - SAMPLE_NS
+    );
+    assert!(pacer.admit(RATE.frame_ns(), true, true, RATE));
+    assert_eq!(
+        pacer.park_deadline_ns(RATE.frame_ns(), WAITSET_TIMEOUT_NONE, RATE),
+        WAITSET_TIMEOUT_NONE
+    );
+}
+
+/// On a display still flipping the last frame, late damage waits for the
+/// latch, which wakes the session itself; nothing late holds nothing.
+#[test]
+fn late_damage_waits_for_a_flipping_displays_latch_and_none_holds_nothing() {
+    let mut pacer = FramePacer::new();
+    assert!(pacer.admit(0, true, true, RATE));
+    pacer.presented(true);
+    pacer.hold(false, false);
+    assert_eq!(
+        pacer.park_deadline_ns(SAMPLE_NS, WAITSET_TIMEOUT_NONE, RATE),
+        WAITSET_TIMEOUT_NONE
+    );
+    pacer.hold(true, false);
+    assert_eq!(
+        pacer.park_deadline_ns(SAMPLE_NS, WAITSET_TIMEOUT_NONE, RATE),
+        WAITSET_TIMEOUT_NONE,
+        "the latch wakes it"
+    );
+    assert!(
+        pacer.admit(SAMPLE_NS * 2, true, true, RATE),
+        "admitted at the latch"
+    );
+}

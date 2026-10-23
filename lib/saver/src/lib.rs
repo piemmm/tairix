@@ -5,9 +5,9 @@
 //! and the one region it presents through, and the monotonic clock to pace its
 //! own work by. This crate is everything between that and a [`Scene`]:
 //! it answers the host's `Start`, maps the region, draws each frame the host
-//! asks for into the scene's own surface, writes what changed into the region
-//! and says so, relays the font service so text draws as anywhere else, and
-//! hands the scene the feeds it was given.
+//! asks for straight into the region's frame area and says what changed,
+//! relays the font service so text draws as anywhere else, and hands the scene
+//! the feeds it was given.
 //!
 //! A saver's `Run` is its [`Scene`] and one call to `run`, which builds the
 //! scene from the [`Setup`] the host's `Start` makes.
@@ -21,7 +21,7 @@ mod link;
 #[cfg(all(freestanding, feature = "program"))]
 mod program;
 mod serve;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 #[cfg(test)]
@@ -43,7 +43,7 @@ use tairix_abi::saver_ipc::{
 use tairix_abi::Errno;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_parallel::Pool;
-use tairix_raster::{Color, Surface};
+use tairix_raster::{Canvas, Color, Surface};
 use tairix_theme::{Accessibility, Theme};
 
 /// What a scene is made from: the host's `Start`, and what this crate read
@@ -80,14 +80,19 @@ impl Setup<'_> {
         })
     }
 
-    /// A worker pool for a scene's own work: one participant per thread the
-    /// host granted, up to one per online core, the saver's own thread among
-    /// them. A thread the kernel refuses is not made, so the pool may hold
-    /// fewer.
+    /// The threads the saver may run, its own among them: what the host
+    /// granted, and never more than the machine's online cores.
+    #[must_use]
+    pub fn threads(&self) -> u32 {
+        self.start.threads.min(u32::from(self.start.cores))
+    }
+
+    /// A worker pool for a scene's own work: a participant for each of its
+    /// [`threads`](Self::threads). A thread the kernel refuses is not made, so
+    /// the pool may hold fewer.
     #[must_use]
     pub fn pool(&self) -> Pool {
-        let granted = self.start.threads.min(u32::from(self.start.cores));
-        Pool::for_cpus(usize::try_from(granted).unwrap_or(1))
+        Pool::for_cpus(usize::try_from(self.threads()).unwrap_or(1))
     }
 
     /// The word chosen for choice option `key`.
@@ -382,7 +387,6 @@ impl FeedPicture<'_> {
             surface,
             &self.mode,
             DamageRect::full(&self.mode),
-            tairix_display::winframe::Alpha::AsSent,
             &tairix_parallel::Serial,
         )
         .map(|_| ())
@@ -393,10 +397,17 @@ impl FeedPicture<'_> {
 /// the host's screen shows until the first frame.
 pub const GROUND: Color = Color::rgb(0, 0, 0);
 
-/// Lay the ground over `rect` of `surface`, for a scene to draw on afresh.
-pub fn erase(surface: &mut Surface, rect: Rect) {
+/// The side, in pixels, of the tiles a scene tracks a scattered change in:
+/// covered in whole tiles of this side, at most
+/// [`SAVER_DAMAGE_RECTS`](tairix_abi::saver_ipc::SAVER_DAMAGE_RECTS) of them,
+/// a change costs the compositor little more than its pixels.
+pub const DAMAGE_TILE: u32 = 16;
+
+/// Lay the ground over `rect` of `canvas`, a surface or one band of it, for a
+/// scene to draw on afresh.
+pub fn erase(canvas: &mut impl Canvas, rect: Rect) {
     if let Some((x, y)) = rect.surface_origin() {
-        surface.fill_rect(x, y, rect.width, rect.height, GROUND);
+        canvas.fill_round_rect(x, y, rect.width, rect.height, 0, GROUND);
     }
 }
 
@@ -408,14 +419,10 @@ pub fn footprint(picture: Option<&Surface>, at: Point) -> Rect {
     })
 }
 
-/// The frame area and feed area of `bytes`, laid out as `region` says.
-pub(crate) fn areas<'a>(
-    bytes: &'a mut [u8],
-    region: &SaverRegion,
-) -> (&'a mut [u8], Option<&'a mut [u8]>) {
-    let (frame, rest) = bytes.split_at_mut(region.frame_len().min(bytes.len()));
-    let feed = region
+/// The feed area at the front of `rest`, the region after its frame area, as
+/// `region` lays it out; `None` for a region without one.
+pub(crate) fn feed_of<'a>(rest: &'a mut [u8], region: &SaverRegion) -> Option<&'a mut [u8]> {
+    region
         .feed_range()
-        .and_then(|range| rest.get_mut(..range.len()));
-    (frame, feed)
+        .and_then(|range| rest.get_mut(..range.len()))
 }

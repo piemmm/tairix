@@ -72,7 +72,7 @@ use tairix_abi::font_ipc::{
 };
 use tairix_abi::Errno;
 use tairix_hash::BuildSipHash13;
-use tairix_reclaim::{CachedBytes, ReclaimCache};
+use tairix_reclaim::{CacheBudget, CachedBytes, ReclaimCache};
 use tairix_rt::sync::{Mutex, MutexGuard};
 use tairix_util::utf8::is_hidden;
 use tairix_vt::char_width;
@@ -1438,7 +1438,7 @@ fn connect_font_service() {
 fn default_cache() -> GlyphCache {
     let _ = tairix_procinfo::pressure::refresh();
     let (total, key) = default_budget_inputs();
-    glyph_cache(total, key)
+    glyph_cache(crate::glyph_cache::client_glyph_cache_budget(total), key)
 }
 
 /// Build the client's measurement memo, on the same RAM-derived ceiling the
@@ -1455,7 +1455,7 @@ fn default_cache() -> GlyphCache {
 #[cfg(feature = "rt")]
 fn default_measure_cache() -> MeasureCache {
     let (total, key) = default_budget_inputs();
-    measure_cache(total, key)
+    measure_cache(measure::measure_cache_budget(total), key)
 }
 
 /// The RAM total and hash key the default caches are sized and keyed by. Both
@@ -1473,16 +1473,19 @@ fn default_budget_inputs() -> (u64, tairix_hash::HashSeed) {
     }
 }
 
-/// Install the glyph cache and measurement memo sized for `total_bytes` of
-/// memory and keyed by `key`, in place of the defaults the `rt` feature builds
-/// from the machine's RAM and the kernel's randomness.
+/// Install the glyph cache and measurement memo sized for a machine of
+/// `total_bytes` of memory, never past `most_bytes` each, and keyed by `key`,
+/// in place of the defaults the `rt` feature builds from the machine's RAM and
+/// the kernel's randomness.
 ///
 /// For a program that can ask for neither — a sandboxed screensaver, which
-/// its host tells both. Installed before the first draw, so no default is
-/// built.
-pub fn install_caches(total_bytes: u64, key: tairix_hash::HashSeed) {
-    let glyphs = glyph_cache(total_bytes, key);
-    let measure = measure_cache(total_bytes, key);
+/// its host tells both, and whose own ceiling is `most_bytes`'s bound.
+/// Installed before the first draw, so no default is built.
+pub fn install_caches(total_bytes: u64, most_bytes: u64, key: tairix_hash::HashSeed) {
+    let most = usize::try_from(most_bytes).unwrap_or(usize::MAX);
+    let ceiling = crate::glyph_cache::glyph_cache_ceiling(total_bytes).min(most);
+    let glyphs = glyph_cache(crate::glyph_cache::client_budget_within(ceiling), key);
+    let measure = measure_cache(measure::measure_budget_within(ceiling), key);
     let mut caches = CACHES.lock();
     caches.glyphs = Some(glyphs);
     caches.measure = Some(measure);
@@ -1490,10 +1493,10 @@ pub fn install_caches(total_bytes: u64, key: tairix_hash::HashSeed) {
 
 static CACHE_LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
 
-/// The glyph cache for `total` bytes of memory, keyed by `key`, registered
-/// with the process's cache reporter: this library builds it on the
-/// process's behalf, so it is this library that tells the reporter.
-fn glyph_cache(total: u64, key: tairix_hash::HashSeed) -> GlyphCache {
+/// The glyph cache within `budget`, keyed by `key`, registered with the
+/// process's cache reporter: this library builds it on the process's behalf,
+/// so it is this library that tells the reporter.
+fn glyph_cache(budget: CacheBudget, key: tairix_hash::HashSeed) -> GlyphCache {
     use tairix_reclaim::ReclaimOwner;
 
     let cache = ReclaimCache::new(
@@ -1501,7 +1504,7 @@ fn glyph_cache(total: u64, key: tairix_hash::HashSeed) -> GlyphCache {
         crate::glyph_cache::glyph_cache_candidate(ReclaimOwner::UserlandProcess(
             CLIENT_CACHE_OWNER,
         )),
-        crate::glyph_cache::client_glyph_cache_budget(total),
+        budget,
         tairix_rt::pressure::gauge(),
         &CACHE_LOG_SINK,
         BuildSipHash13::with_seed(key),
@@ -1512,14 +1515,14 @@ fn glyph_cache(total: u64, key: tairix_hash::HashSeed) -> GlyphCache {
     cache
 }
 
-/// The measurement memo for `total` bytes of memory, keyed by `key`.
-fn measure_cache(total: u64, key: tairix_hash::HashSeed) -> MeasureCache {
+/// The measurement memo within `budget`, keyed by `key`.
+fn measure_cache(budget: CacheBudget, key: tairix_hash::HashSeed) -> MeasureCache {
     use tairix_reclaim::ReclaimOwner;
 
     let cache = ReclaimCache::new(
         MEASURE_CACHE_LABEL,
         measure::measure_cache_candidate(ReclaimOwner::UserlandProcess(CLIENT_CACHE_OWNER)),
-        measure::measure_cache_budget(total),
+        budget,
         tairix_rt::pressure::gauge(),
         &CACHE_LOG_SINK,
         BuildSipHash13::with_seed(key),
@@ -2013,6 +2016,19 @@ fn test_families_reply(reply: &mut [u8]) -> Result<usize, Errno> {
 #[cfg(any(test, feature = "test-util"))]
 pub fn install_test_transport() {
     set_font_transport(Box::new(SolidTestTransport));
+}
+
+/// Whether the glyph cache this process installed would hold `payload_bytes`
+/// of glyphs across `entries` of them at the band its gauge reads: how a
+/// consumer's test sees the budget it was sized with.
+#[cfg(any(test, feature = "test-util"))]
+#[must_use]
+pub fn glyph_cache_holds(entries: usize, payload_bytes: usize) -> bool {
+    CACHES
+        .lock()
+        .glyphs
+        .as_ref()
+        .is_some_and(|cache| cache.holds(entries, payload_bytes))
 }
 
 #[cfg(test)]

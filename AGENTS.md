@@ -2436,8 +2436,10 @@ as non-negotiable as §2.
 - The architecture surface is a closed set of traits in
   **`kernel/arch/api/`** — the *Arch HAL*. It enumerates exactly:
   context switch, MMU/page-table primitives, TLB shootdown (local and
-  cross-CPU), IPI, timer, interrupt entry/exit, atomics/fences, per-CPU
-  storage, side-channel mitigation (§19.1), memory tagging (§19.10), user
+  cross-CPU), address-space tags (the ASID/PCID each root is loaded under,
+  the park root, and the local discard of one tag's entries), IPI, timer,
+  interrupt entry/exit, atomics/fences, per-CPU storage, side-channel
+  mitigation (§19.1), memory tagging (§19.10), user
   entry, SMP secondary bring-up, early-boot platform discovery (which
   normalises each target's native source — ACPI / FDT / host query — into
   the `lib/abi` hardware tree, §18.1/§18.2), CPU feature detection (the

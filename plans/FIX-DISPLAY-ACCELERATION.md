@@ -44,7 +44,10 @@ asks (§15.7).
    capability, no new shared-memory class. Apps keep their ordinary,
    app-owned window frames: the session's decode of a frame is the one copy,
    and the session's per-window copy stays the stable snapshot the compositor
-   reads.
+   reads. The one exception is a picture the session itself makes opaque and
+   that covers the output, a screensaver's: its one copy is laid straight into
+   a frame this driver allocated (`Presenter::present_drawn`), never the
+   other way about.
 2. **`gpu_virtio` is an honest 2D driver and reports no layer compositor.**
    virtio-gpu's scanouts are separate monitors, not overlay planes: a device
    has one primary plane per scanout and one cursor. Its zero-copy path is the

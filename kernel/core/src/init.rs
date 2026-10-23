@@ -2281,14 +2281,14 @@ fn run_phases<A: KernelArch>(
         crate::CpuStateInitError::AllocationFailed => InitError::CpuStateAllocationFailed,
         crate::CpuStateInitError::AlreadyInstalled => InitError::CpuStateAlreadyInstalled,
     })?;
-    // Install the port's park-translation hook before any user task can
-    // be dispatched: every user-task suspend then re-parks the CPU on the
+    // Install the port's address-space tags before any user task can be
+    // dispatched: every user-task suspend then re-parks the CPU on the
     // permanent boot root, the invariant a dead task's page-table
     // reclamation (the live-space drop at reap) relies on. A port with no
-    // hardware user address spaces returns `None` and the dispatcher
-    // skips the park.
-    if let Some(park) = arch.park_translation() {
-        crate::kthread::install_park_translation(park);
+    // hardware user address spaces returns `None` and the dispatcher loads
+    // every root untagged and skips the park.
+    if let Some(tags) = arch.address_tags() {
+        crate::kthread::install_address_tags(tags);
     }
     phase_ready(log_sink, Phase::Sched);
 

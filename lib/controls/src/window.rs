@@ -30,7 +30,9 @@ use tairix_font::ELLIPSIS;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{past_drag_slop, InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{div255, round_rect_coverage, Color, Ring, RingInk, Surface, SUBPIXEL};
+use tairix_raster::{
+    div255, pointwise, round_rect_coverage, Color, Ring, RingInk, Surface, SUBPIXEL,
+};
 use tairix_theme::{Palette, TextRole, Theme};
 use tairix_util::utf8::is_hidden;
 
@@ -1601,14 +1603,21 @@ impl TitleBar {
         // two land — concentric with the arc the rim already drew.
         let radius = FrameRim::of(scale, theme).plate().1;
         let shape_h = h.saturating_add(radius);
-        surface.wash_region(x, y, w, h, wash, |lx, ly| {
-            let distance = lx.abs_diff(origin);
-            if distance >= reach {
-                return 0;
-            }
-            let ramp = u8::try_from(255 - (255 * distance / reach)).unwrap_or(255);
-            div255(u32::from(ramp) * u32::from(round_rect_coverage(lx, ly, w, shape_h, radius)))
-        });
+        surface.wash_region(
+            x,
+            y,
+            w,
+            h,
+            wash,
+            pointwise(|lx, ly| {
+                let distance = lx.abs_diff(origin);
+                if distance >= reach {
+                    return 0;
+                }
+                let ramp = u8::try_from(255 - (255 * distance / reach)).unwrap_or(255);
+                div255(u32::from(ramp) * u32::from(round_rect_coverage(lx, ly, w, shape_h, radius)))
+            }),
+        );
     }
 
     /// The identity+title string drawn in the identity group.
@@ -2488,7 +2497,9 @@ impl WindowFrame {
         if let Some((tx, ty, tw, th)) = surface_rect(layout.title_bar) {
             let foot = border.min(th);
             let shade = Color::from(palette.bevel_shade);
-            surface.wash_region(tx, ty + th - foot, tw, foot, shade, |_, _| u8::MAX);
+            surface.wash_region(tx, ty + th - foot, tw, foot, shade, |_, _, row| {
+                row.fill(u8::MAX);
+            });
         }
 
         // A bounded attention dot on the trailing edge of the title bar — never

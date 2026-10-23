@@ -47,12 +47,13 @@ fn mmu_disciplines_share_one_counter() {
 
 #[test]
 fn park_root_publication_requires_live_stage1_and_is_set_once() {
-    let park_root = AtomicU64::new(0);
+    let park_root = ParkRoot::new();
+    assert_eq!(park_root.published(), None);
     Stage1TranslationEnabled.publish_park_root(&park_root, 0x4000_0000);
-    assert_eq!(park_root.load(Ordering::Acquire), 0x4000_0000);
+    assert_eq!(park_root.published(), Some(0x4000_0000));
 
     Stage1TranslationEnabled.publish_park_root(&park_root, 0x8000_0000);
-    assert_eq!(park_root.load(Ordering::Acquire), 0x4000_0000);
+    assert_eq!(park_root.published(), Some(0x4000_0000));
 }
 
 #[test]
@@ -65,9 +66,9 @@ fn park_root_publication_sweeps_the_word_to_point_of_coherency() {
     // and parks with "no boot root" (a real-silicon coherency hazard
     // cache-less QEMU cannot show). Assert the exact word was swept.
     let _ = take_recorded_poc_sweeps();
-    let park_root = AtomicU64::new(0);
+    let park_root = ParkRoot::new();
     Stage1TranslationEnabled.publish_park_root(&park_root, 0x4000_0000);
-    let addr = core::ptr::addr_of!(park_root) as u64;
+    let addr = core::ptr::from_ref(park_root.word()) as u64;
     let expected = (addr, core::mem::size_of::<AtomicU64>() as u64);
     let sweeps = take_recorded_poc_sweeps();
     assert!(
@@ -1321,4 +1322,64 @@ fn par_decoders_read_the_fault_bit_and_rebuild_the_physical_address() {
         par_phys(0xff00_0000_3e40_2000 | 0xf00, 0x10),
         0x0000_0000_3e40_2010
     );
+}
+
+/// Every leaf a user root maps is tagged with the ASID it runs under,
+/// whatever its kind; the kernel window's leaves and the identity gigapages
+/// every root shares are global, so one entry of each serves every ASID.
+#[test]
+fn a_user_roots_leaves_are_not_global_and_the_kernels_are() {
+    use tairix_arch_api::mmu;
+    static POOL: PageTablePool = PageTablePool::new();
+    let page = PAGE_SIZE as u64;
+    let mut user = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let kinds = [
+        PageFlags::READ | PageFlags::USER,
+        PageFlags::READ | PageFlags::WRITE | PageFlags::USER,
+        PageFlags::READ | PageFlags::EXEC | PageFlags::USER,
+        PageFlags::DEVICE | PageFlags::USER | PageFlags::WRITE,
+        PageFlags::DMA_COHERENT | PageFlags::USER | PageFlags::WRITE,
+        PageFlags::WRITE_COMBINE | PageFlags::USER | PageFlags::WRITE,
+        PageFlags::READ | PageFlags::WRITE,
+        PageFlags::DEVICE | PageFlags::WRITE,
+    ];
+    for (index, flags) in (0u64..).zip(kinds) {
+        let va = (64u64 << 30) + index * page;
+        mmu::AddressSpace::map_page(&mut user, va, 0x4100_0000 + index * page, flags)
+            .expect("a user leaf");
+        let leaf = host_leaf_descriptor(&POOL, user.root_phys(), va).expect("mapped");
+        assert_ne!(leaf & attrs::NOT_GLOBAL, 0, "{flags:?} maps a global leaf");
+    }
+
+    let mut kernel = AddressSpace::new_kernel_window(&POOL).expect("kernel window root");
+    let va = kernel_window_base();
+    mmu::AddressSpace::map_page(
+        &mut kernel,
+        va,
+        0x4123_4000,
+        PageFlags::READ | PageFlags::WRITE,
+    )
+    .expect("a window leaf");
+    let leaf = host_leaf_descriptor(&POOL, kernel.root_phys(), va).expect("mapped");
+    assert_eq!(
+        leaf & attrs::NOT_GLOBAL,
+        0,
+        "a kernel window leaf is per-ASID"
+    );
+
+    for device in [false, true] {
+        let leaf = identity_gigapage_leaf(device, true).expect("a kernel gigapage");
+        assert_eq!(leaf & attrs::NOT_GLOBAL, 0, "a shared gigapage is per-ASID");
+    }
+}
+
+/// The ASID rides above the table base, where `TCR_EL1.A1` clear reads it,
+/// and every tag the port offers loads a distinct `TTBR0_EL1` value.
+#[test]
+fn ttbr0_carries_the_asid_above_the_table_base() {
+    assert_eq!(ttbr0(0x4123_4000, 0), 0x4123_4000);
+    assert_eq!(ttbr0(0x4123_4000, 7), 0x4123_4000 | (7 << 48));
+    assert_eq!(ttbr0(0x4123_4000, 255) >> 56, 0, "an 8-bit ASID only");
+    tairix_arch_api::tags_conformance::run_all(&TAGS, u16::from(u8::MAX), 0x4123_4000, 0x4124_4000);
+    assert!(TAGS.invalidation_reaches_every_tag());
 }

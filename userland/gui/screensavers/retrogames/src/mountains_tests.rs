@@ -84,7 +84,8 @@ fn the_ranges_stand_above_the_horizon_alone() {
     for seed in [1, 2, 3] {
         let mut surface = Surface::new(SCREEN.0, SCREEN.1).expect("a surface");
         let runner = tairix_parallel::Reversed::new(4);
-        let mut scratch: Vec<ScanScratch> = (0..4).map(|_| ScanScratch::new()).collect();
+        let mut scratch = tairix_raster::BandScratch::new();
+        scratch.spread_over(&runner);
         Mountains::new(&view, seed)
             .expect("ranges")
             .paint(&mut surface, &runner, &mut scratch);
@@ -108,6 +109,10 @@ struct Recorder {
 }
 
 impl Canvas for Recorder {
+    fn fill_round_rect(&mut self, _: u32, _: u32, _: u32, _: u32, _: u32, _: Color) {
+        unreachable!("the ranges are polygons");
+    }
+
     fn fill_polygon_subpixel(&mut self, polygon: &[(i32, i32)], color: Color, _: &mut ScanScratch) {
         self.fills.push((polygon.to_vec(), color));
     }
@@ -116,7 +121,7 @@ impl Canvas for Recorder {
         &mut self,
         _: &[(i32, i32)],
         _: Color,
-        _: impl Fn(u32, u32) -> u8,
+        _: impl Fn(u32, u32, &mut [u8]),
         _: &mut ScanScratch,
     ) {
         unreachable!("the ranges wash nothing");

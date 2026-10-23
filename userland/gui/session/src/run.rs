@@ -1258,16 +1258,14 @@ mod program {
     /// screen fade, the windows' shadows rising and resting as the focus
     /// moves, the program library rising, arriving and leaving, the pointer
     /// aids, the locked screen's own surface, a credential
-    /// prompt's password marker, the screensaver, and the backdrop dissolving
+    /// prompt's password marker, the bar's clock, and the backdrop dissolving
     /// into another. Between frames only the pointer aids take in
     /// where the pointer is. All of them are idle once nothing is in flight,
     /// which is what leaves an idle desktop's park indefinite; what each owes
     /// next is folded through [`FramePacer::step_deadline_ns`].
-    #[allow(clippy::too_many_arguments)] // Every surface the session animates.
     fn animate<S: DirectorySource>(
         fade: &mut ScreenFade,
         (lock, elevate): (&mut ScreenLock, &mut AuthorisePrompt),
-        saver: &mut DesktopSaver,
         shell: &mut DesktopShell,
         desktop: &Desktop<S>,
         (compositor, pacer): (&mut Compositor, &FramePacer),
@@ -1288,12 +1286,7 @@ mod program {
             // must type into it waits on a real surface.
             log_info(ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, &[]);
         }
-        // The clock first, so a saver drawing the minute that has just turned
-        // is told it.
         tick_clock(shell, compositor, now_ns);
-        if let Some(end) = saver.advance(now_ns, &shell.clock().saver_reading(), compositor) {
-            report_saver_end(&end);
-        }
         // A backdrop dissolving into another is a repaint of the desktop
         // layer rather than a compositor state change, so each frame of it is
         // the layer drawn again. Only a frame that changed the ground costs
@@ -1305,6 +1298,37 @@ mod program {
             shell.present_desktop(compositor, desktop);
             fade.set_awaiting_backdrop(!shell.backdrop_settled());
         }
+    }
+
+    /// Carry the hosted saver on to `now_ns`, on every turn rather than only a
+    /// frame the pacer has due: its frames are asked for at the times it asks,
+    /// whatever the session's own animations are doing, and its deadlines are
+    /// held on every wake. The clock is read first, so a saver drawing the
+    /// minute that has just turned is told it.
+    ///
+    /// What that and the frame just shown laid arrive after this wake's frame
+    /// was decided, so `pacer` holds them for the next: on a display `ready`
+    /// for one, the period's end wakes the park for it.
+    fn advance_saver(
+        (saver, lock): (&mut DesktopSaver, &ScreenLock),
+        (shell, compositor, pacer): (&mut DesktopShell, &mut Compositor, &mut FramePacer),
+        ready: bool,
+        now_ns: u64,
+    ) {
+        tick_clock(shell, compositor, now_ns);
+        if let Some(end) = saver.advance(now_ns, &shell.clock().saver_reading(), compositor) {
+            report_saver_end(&end);
+        }
+        if presentable(saver, lock, compositor) {
+            pacer.hold(compositor.has_damage(), ready);
+        }
+    }
+
+    /// Whether a frame may go to the display: none while the saver holds it
+    /// dark or draws its frames straight into it, nor while the lock does not
+    /// cover the session.
+    fn presentable(saver: &DesktopSaver, lock: &ScreenLock, compositor: &Compositor) -> bool {
+        !saver.is_dark() && !saver.scans_out() && !lock.uncovered(compositor)
     }
 
     /// Read the wall clock once the lines it last produced have gone stale,
@@ -1435,13 +1459,13 @@ mod program {
     /// can make the session wait but never spin.
     ///
     /// A background or dormant session owns no frame ring, presents nothing,
-    /// and answers `Ok`: having no screen to draw on is not a failure.
+    /// and answers `Ok(false)`: having no screen to draw on is not a failure.
     ///
     /// A frame that did reach the display is where the desktop's one-shot
     /// reveal witness is announced, so the record can only follow pixels
     /// this session actually put on the screen, and with it every other
     /// surface this frame was the first to carry
-    /// ([`report_surfaces_shown`]).
+    /// ([`report_surfaces_shown`]). Answers whether one did.
     #[allow(clippy::too_many_arguments)] // Every surface a present may be the first showing of.
     fn present<S: tairix_browse::DirectorySource, F: FnMut() -> S>(
         shell: &mut DesktopShell,
@@ -1454,25 +1478,25 @@ mod program {
         apps: &mut AppBarService,
         suspended: &mut Option<bool>,
         text: TextDrawn<'_>,
-    ) -> Result<(), i32> {
+    ) -> Result<bool, i32> {
         let Some(display) = display.as_mut() else {
-            return Ok(());
+            return Ok(false);
         };
         if suspended.is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let refused = match compositor.present(display) {
             Ok(()) => {
                 fade.presented(&LOG_SINK);
                 report_surfaces_shown(shell, compositor, fade, windows, menu, picker, apps, text);
-                return Ok(());
+                return Ok(true);
             }
             Err(refused) => refused,
         };
         match Refusal::of(refused) {
             Refusal::Follow { forgotten } => {
                 *suspended = Some(forgotten);
-                Ok(())
+                Ok(false)
             }
             Refusal::SeatLost => {
                 shell.teardown(compositor);
@@ -1482,7 +1506,7 @@ mod program {
                     "seat lease lost; tearing the session down",
                 ))
             }
-            Refusal::Owed => Ok(()),
+            Refusal::Owed => Ok(false),
             Refusal::Failed => {
                 shell.teardown(compositor);
                 Err(app::fail(
@@ -4012,7 +4036,7 @@ mod program {
                     u64::MAX
                 };
                 let mut park = tairix_rt::cachereport::fold_wait_deadline_ns(owed);
-                if !saver.is_dark() {
+                if presentable(&saver, &lock, &compositor) {
                     park = pacer.park_deadline_ns(now_ns, park, refresh);
                 }
                 park = frame_stats.park_deadline_ns(now_ns, park);
@@ -4043,8 +4067,8 @@ mod program {
                 step = shell.clock().park_deadline_ns(now_ns, step);
                 step = lock.park_deadline_ns(now_ns, step, refresh);
                 step = elevate.park_deadline_ns(now_ns, step, refresh);
-                step = saver.park_deadline_ns(now_ns, step);
                 park = pacer.step_deadline_ns(now_ns, park, step, refresh);
+                park = saver.park_deadline_ns(now_ns, park);
                 serve_park_ns(&switch, departure.as_ref(), now_ns, park)
             };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
@@ -4161,7 +4185,6 @@ mod program {
                 animate(
                     &mut fade,
                     (&mut lock, &mut elevate),
-                    &mut saver,
                     &mut shell,
                     &desktop,
                     (&mut compositor, &pacer),
@@ -4171,8 +4194,7 @@ mod program {
                 // to it could be seen, and the damage waits for it to wake.
                 // Nor is a frame the lock does not cover, which would show
                 // the session around it.
-                if !saver.is_dark()
-                    && !lock.uncovered(&compositor)
+                if presentable(&saver, &lock, &compositor)
                     && pacer.admit(
                         now_ns,
                         compositor.has_damage(),
@@ -4180,7 +4202,7 @@ mod program {
                         compositor.refresh_rate(),
                     )
                 {
-                    if let Err(code) = present(
+                    match present(
                         &mut shell,
                         &mut compositor,
                         &mut display,
@@ -4195,10 +4217,18 @@ mod program {
                             generation: text_drawn,
                         },
                     ) {
-                        return code;
+                        Ok(true) => saver.shown(&mut compositor),
+                        Ok(false) => {}
+                        Err(code) => return code,
                     }
                     pacer.presented(display.as_ref().is_some_and(|ring| !ring.ready()));
                 }
+                advance_saver(
+                    (&mut saver, &lock),
+                    (&mut shell, &mut compositor, &mut pacer),
+                    display.as_ref().is_none_or(Presenter::ready),
+                    now_ns,
+                );
                 frames.maybe_send(
                     &compositor,
                     switchboard_pid,
@@ -5058,7 +5088,9 @@ mod program {
                 // A latch frees the frame a held present waits for; the
                 // frame path below presents it.
                 if let Some(ring) = display.as_mut() {
-                    ring.take_events();
+                    if ring.take_events() && saver.scans_out() {
+                        saver.latched(&mut compositor, ring);
+                    }
                 }
             } else if token == WAKE_TOKEN {
                 // The session authority speaking to this desktop: it is the
@@ -5232,8 +5264,17 @@ mod program {
                         civil: shell.clock().civil(),
                         owed: OwedErrands::default(),
                     };
-                    let heard =
-                        saver.on_readable(tairix_rt::clock_get(), &mut compositor, &mut errands);
+                    // A saver draws straight into the display once the screen
+                    // has settled from its own arrival, never while dark.
+                    let straight = (fade.settled() && !saver.is_dark())
+                        .then_some(display.as_mut())
+                        .flatten()
+                        .map(|ring| ring as &mut dyn Presenter);
+                    let heard = saver.on_readable(
+                        tairix_rt::clock_get(),
+                        (&mut compositor, straight),
+                        &mut errands,
+                    );
                     let owed = errands.owed;
                     if let Some(end) = heard {
                         report_saver_end(&end);
@@ -5591,7 +5632,6 @@ mod program {
             animate(
                 &mut fade,
                 (&mut lock, &mut elevate),
-                &mut saver,
                 &mut shell,
                 &desktop,
                 (&mut compositor, &pacer),
@@ -5614,8 +5654,7 @@ mod program {
             // damage the pumped events and served presents produced, and the
             // ring copies only that region once the pacer admits the frame.
             // A frame the lock does not cover is never presented.
-            if !saver.is_dark()
-                && !lock.uncovered(&compositor)
+            if presentable(&saver, &lock, &compositor)
                 && pacer.admit(
                     now_ns,
                     compositor.has_damage(),
@@ -5623,7 +5662,7 @@ mod program {
                     compositor.refresh_rate(),
                 )
             {
-                if let Err(code) = present(
+                match present(
                     &mut shell,
                     &mut compositor,
                     &mut display,
@@ -5638,10 +5677,18 @@ mod program {
                         generation: text_drawn,
                     },
                 ) {
-                    return code;
+                    Ok(true) => saver.shown(&mut compositor),
+                    Ok(false) => {}
+                    Err(code) => return code,
                 }
                 pacer.presented(display.as_ref().is_some_and(|ring| !ring.ready()));
             }
+            advance_saver(
+                (&mut saver, &lock),
+                (&mut shell, &mut compositor, &mut pacer),
+                display.as_ref().is_none_or(Presenter::ready),
+                now_ns,
+            );
             // What that frame cost, for the monitor's Resources page. After
             // the present, so the counts describe pixels already on screen,
             // and silent unless they moved, unless the rate limiter is still

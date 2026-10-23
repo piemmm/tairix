@@ -14,17 +14,19 @@ what a saver is and what ships is [Screensavers](../desktop/screensavers.md).
   rest of the saver's life, since a drawing sandbox may not unmap), refusing
   one smaller than the layout `Start` states, and builds the scene; a region
   or a scene it cannot have is said to the host as `Unstarted`, with why. The
-  frame area holds the whole picture from before `Ready` — an opaque black
-  screen, encoded whole — so the host may read any part of it at any time.
-- **Draws each `Frame`** the host asks for into the scene's own surface, which
-  keeps every pixel between frames, writes the rectangles the scene says
-  changed into the region in the window frame format (`lib/display`
-  `winframe`), and answers `Presented` with them and when it next wants a
-  frame: soon, at a time, or only when a feed brings something. More changed
-  rectangles than a frame carries are folded into a covering few.
+  frame area holds the whole picture from before `Ready`, an opaque black
+  screen.
+- **Draws each `Frame`** the host asks for in place: the scene's surface is
+  lent over the region's frame area (`tairix_raster::PixelMemory`), keeps
+  every pixel between frames, and is written only from a `Frame` to its
+  `Presented`, while the host reads it only from a `Presented` to the next
+  `Frame`. `Presented` names the rectangles the scene says changed and when it
+  next wants a frame: soon, at a time, or only when a feed brings something.
 - **Relays text.** Its font transport sends each font request as a
   `FontCall` and waits for the `FontReply`, keeping any other message that
-  arrives meanwhile, so `tairix_font` draws as it does anywhere else. Text is
+  arrives meanwhile, so `tairix_font` draws as it does anywhere else. Its
+  caches are sized from the machine's installed memory, as every desktop
+  program's are, each never past a sixteenth of the saver's memory. Text is
   drawn on the saver's main thread alone, which is the one reading the pipe.
 - **Hands the scene its feeds**: machine readings and their loss, a slide
   laid in the feed area, the answer to a picture it asked to keep, and the
@@ -46,8 +48,10 @@ theme the desktop is drawn in, and the threads it was granted as a pool.
 ## Bounds
 
 The protocol's messages and the region's layout are fixed-size and checked
-on both sides; a message out of turn ends the saver. The damage a frame
-reports is budgeted at eight times what one carries before it is folded.
+on both sides; a message out of turn ends the saver. A frame names at most
+`SAVER_DAMAGE_RECTS` rectangles, and damage past that is kept as its bounding
+box, so a scene with a scattered change marks it in `DAMAGE_TILE` tiles
+(`tairix_geometry::Tiles`) and names their cover, which fits.
 
 ## Tests
 

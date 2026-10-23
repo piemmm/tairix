@@ -55,6 +55,18 @@ pub fn div255(value: u32) -> u8 {
     div255_biased(value, ROUND_NEAREST)
 }
 
+/// `a · b / 255` rounded to nearest: [`div255`] of the product, worked in
+/// sixteen bits so a loop of them vectorises. The rounded quotient of `x` is
+/// `(y + (y >> 8) + 1) >> 8` for `y = x + 127`, exact as the vector kernels'
+/// division is for every `y` up to 65 278, and a product of two bytes plus the
+/// bias is at most 65 152.
+#[must_use]
+#[inline]
+pub(crate) fn scale8(a: u8, b: u8) -> u8 {
+    let y = u16::from(a) * u16::from(b) + 127;
+    u8::try_from((y + (y >> 8) + 1) >> 8).unwrap_or(u8::MAX)
+}
+
 /// The BT.601 luma of three channels, in `0..=255`.
 ///
 /// The 8-bit weights sum to exactly 256, so a grey is its own luma.
@@ -426,6 +438,67 @@ pub fn blend_solid_span(
     (crate::accel::blend().solid)(dst, src, factor, &dither.tile_at(first_x));
 }
 
+/// [`blend_solid_span`] through a mask: `src` scaled by `coverage[i]`/255 on
+/// its way over `dst[i]`, both rounding at the bias `dst[i]`'s own surface
+/// column takes. An uncovered pixel is left as it was, and the shorter of
+/// `dst` and `coverage` ends the walk.
+///
+/// What a scan-converted fill and a glyph lay on a row: one colour through a
+/// shape's coverage, a run at a time.
+pub fn cover_span(dst: &mut [Pixel], src: Pixel, coverage: &[u8], dither: DitherRow, first_x: u32) {
+    if src.a == 0 {
+        return;
+    }
+    (crate::accel::blend().cover)(dst, src, coverage, &dither.tile_at(first_x));
+}
+
+/// The portable [`cover_span`], as [`blend_span_portable`] is.
+pub(crate) fn cover_span_portable(
+    dst: &mut [Pixel],
+    src: Pixel,
+    coverage: &[u8],
+    tile: &[u32; DitherRow::PERIOD],
+) {
+    paired_tiles(dst, coverage, tile, |dst, level, bias| {
+        if level != 0 {
+            blend_one(dst, src, level, bias, &|pixel| pixel);
+        }
+    });
+}
+
+/// One straight colour washed over `dst` at a weight of its own per pixel:
+/// `dst[i]` moves `weights[i]`/255 of the way to `ink` made opaque, rounding
+/// once at the bias `dst[i]`'s own surface column takes — `ink` at that weight
+/// laid over it, exactly as [`Color`]'s own composite lays it. A weight of
+/// nought leaves the pixel as it was, and the shorter of `dst` and `weights`
+/// ends the walk.
+///
+/// What a masked wash lays on a row once its coverage and its mask are
+/// multiplied into one weight a pixel.
+pub(crate) fn wash_weighted(
+    dst: &mut [Pixel],
+    ink: Color,
+    weights: &[u8],
+    dither: DitherRow,
+    first_x: u32,
+) {
+    (crate::accel::blend().wash)(dst, ink, weights, &dither.tile_at(first_x));
+}
+
+/// The portable [`wash_weighted`], as [`blend_span_portable`] is.
+pub(crate) fn wash_weighted_portable(
+    dst: &mut [Pixel],
+    ink: Color,
+    weights: &[u8],
+    tile: &[u32; DitherRow::PERIOD],
+) {
+    paired_tiles(dst, weights, tile, |dst, weight, bias| {
+        if weight != 0 {
+            *dst = Color { a: weight, ..ink }.over_biased(*dst, bias);
+        }
+    });
+}
+
 /// How many pixels lead `span` whose alpha is full: a run that replaces
 /// whatever lies beneath it exactly, which a compositor copies rather than
 /// blends.
@@ -513,22 +586,39 @@ fn blend_tiled(
     tile: &[u32; DitherRow::PERIOD],
     map: &impl Fn(Pixel) -> Pixel,
 ) {
-    let paired = dst.len().min(src.len());
-    let (Some(dst), Some(src)) = (dst.get_mut(..paired), src.get(..paired)) else {
+    paired_tiles(dst, src, tile, |dst, src, bias| {
+        blend_one(dst, src, factor, bias, map);
+    });
+}
+
+/// Walk `dst` beside `with`, pixel for pixel to the shorter's end, handing
+/// `step` each pixel, its partner and the bias its column rounds at: the one
+/// paired walk the portable kernels share.
+///
+/// Whole tiles of the dither's period come first, a constant length the
+/// optimiser unrolls into independent steps at constant biases, then the
+/// remainder, which begins a whole number of periods along and so takes the
+/// same biases from the start of the tile.
+#[inline]
+fn paired_tiles<T: Copy>(
+    dst: &mut [Pixel],
+    with: &[T],
+    tile: &[u32; DitherRow::PERIOD],
+    step: impl Fn(&mut Pixel, T, u32),
+) {
+    let paired = dst.len().min(with.len());
+    let (Some(dst), Some(with)) = (dst.get_mut(..paired), with.get(..paired)) else {
         return;
     };
     let (dst_tiles, dst_rest) = dst.as_chunks_mut::<{ DitherRow::PERIOD }>();
-    let (src_tiles, src_rest) = src.as_chunks::<{ DitherRow::PERIOD }>();
-    // A whole tile's length is a constant, which is what the two loop headers
-    // buy: the optimiser unrolls the first into eight independent blends at
-    // eight constant biases. Both reach the one blend below.
-    for (dst, src) in dst_tiles.iter_mut().zip(src_tiles) {
-        for ((dst, src), &bias) in dst.iter_mut().zip(src).zip(tile) {
-            blend_one(dst, *src, factor, bias, map);
+    let (with_tiles, with_rest) = with.as_chunks::<{ DitherRow::PERIOD }>();
+    for (dst, with) in dst_tiles.iter_mut().zip(with_tiles) {
+        for ((dst, &with), &bias) in dst.iter_mut().zip(with).zip(tile) {
+            step(dst, with, bias);
         }
     }
-    for ((dst, src), &bias) in dst_rest.iter_mut().zip(src_rest).zip(tile) {
-        blend_one(dst, *src, factor, bias, map);
+    for ((dst, &with), &bias) in dst_rest.iter_mut().zip(with_rest).zip(tile) {
+        step(dst, with, bias);
     }
 }
 
@@ -642,22 +732,35 @@ pub fn mix_span(
     match weight {
         0 => dst.copy_from_slice(from),
         u8::MAX => dst.copy_from_slice(to),
-        _ => {
-            let tile = dither.tile_at(first_x);
-            let (dst_tiles, dst_rest) = dst.as_chunks_mut::<{ DitherRow::PERIOD }>();
-            let (from_tiles, from_rest) = from.as_chunks::<{ DitherRow::PERIOD }>();
-            let (to_tiles, to_rest) = to.as_chunks::<{ DitherRow::PERIOD }>();
-            for ((dst, from), to) in dst_tiles.iter_mut().zip(from_tiles).zip(to_tiles) {
-                for (((dst, from), to), &bias) in dst.iter_mut().zip(from).zip(to).zip(&tile) {
-                    *dst = mix(*from, *to, weight, bias);
-                }
-            }
-            for (((dst, from), to), &bias) in
-                dst_rest.iter_mut().zip(from_rest).zip(to_rest).zip(&tile)
-            {
-                *dst = mix(*from, *to, weight, bias);
-            }
+        _ => (crate::accel::blend().mix)(dst, from, to, weight, &dither.tile_at(first_x)),
+    }
+}
+
+/// The portable [`mix_span`] past its two copies, as [`blend_span_portable`]
+/// is.
+pub(crate) fn mix_span_portable(
+    dst: &mut [Pixel],
+    from: &[Pixel],
+    to: &[Pixel],
+    weight: u8,
+    tile: &[u32; DitherRow::PERIOD],
+) {
+    let paired = dst.len().min(from.len()).min(to.len());
+    let (Some(dst), Some(from), Some(to)) =
+        (dst.get_mut(..paired), from.get(..paired), to.get(..paired))
+    else {
+        return;
+    };
+    let (dst_tiles, dst_rest) = dst.as_chunks_mut::<{ DitherRow::PERIOD }>();
+    let (from_tiles, from_rest) = from.as_chunks::<{ DitherRow::PERIOD }>();
+    let (to_tiles, to_rest) = to.as_chunks::<{ DitherRow::PERIOD }>();
+    for ((dst, from), to) in dst_tiles.iter_mut().zip(from_tiles).zip(to_tiles) {
+        for (((dst, from), to), &bias) in dst.iter_mut().zip(from).zip(to).zip(tile) {
+            *dst = mix(*from, *to, weight, bias);
         }
+    }
+    for (((dst, from), to), &bias) in dst_rest.iter_mut().zip(from_rest).zip(to_rest).zip(tile) {
+        *dst = mix(*from, *to, weight, bias);
     }
 }
 

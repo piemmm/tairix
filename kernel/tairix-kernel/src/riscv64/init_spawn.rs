@@ -35,6 +35,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
+use tairix_arch_api::AddressTag;
 use tairix_arch_riscv64::paging::{
     activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
@@ -170,13 +171,14 @@ impl InitSpawn for RiscvInitSpawn {
         // and re-armed by the trap vector from each task's own kernel-stack
         // frame on every U-return, so a trap always lands on *its* kernel stack
         // with no dispatcher-side repointing.
-        let pre_resume: ProcessResume = Arc::new(move |_stack_top: u64, _tls_base: u64| {
-            // SAFETY: paging is enabled and `init_root_phys` is the Sv39 root
-            // of PID 1's space, which identity-maps the low kernel window the
-            // running kernel executes from — exactly `activate_user_root`'s
-            // contract.
-            unsafe { activate_user_root(init_root_phys) };
-        });
+        let pre_resume: ProcessResume =
+            Arc::new(move |_stack_top: u64, _tls_base: u64, tag: AddressTag| {
+                // SAFETY: paging is enabled and `init_root_phys` is the Sv39 root
+                // of PID 1's space, which identity-maps the low kernel window the
+                // running kernel executes from — exactly `activate_user_root`'s
+                // contract.
+                unsafe { activate_user_root(init_root_phys, tag) };
+            });
 
         // Freeze the just-built mappings into the registry-storable,
         // `Send + Sync` snapshot the kernel-wide address-space registry holds

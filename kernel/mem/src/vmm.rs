@@ -500,12 +500,12 @@ impl<P: PageTable> AddressSpace<P> {
     }
 
     /// [`Self::unmap_lowest`] without the TLB flush: the teardown of a space
-    /// that can no longer be cached anywhere.
+    /// no CPU can use a translation of again.
     ///
     /// # Safety
     ///
-    /// No CPU may hold, or come to hold, a translation of this space: it must
-    /// be active on none, and have been discarded by each CPU that ran it.
+    /// No CPU may run the space or come to, so the only entries left of it lie
+    /// under a tag each CPU discards before it gives the tag another space.
     pub(crate) unsafe fn clear_lowest(&mut self) -> Option<(Page, Result<Frame, PageTableError>)> {
         let (page, _) = self.live.pop_first()?;
         let cleared = self

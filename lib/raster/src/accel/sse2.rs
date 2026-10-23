@@ -3,26 +3,30 @@
 //! Compiled only where SSE2 is part of the target's own feature set (the build
 //! script's `raster_sse2`). A register holds four pixels; each is widened to
 //! sixteen-bit lanes, where every term of the blend fits — a product of two
-//! bytes plus a bias below one level is at most 65 278 — and `div255` is
+//! bytes plus a bias below one level is at most 65 278, and so is a mix's sum
+//! of two, whose weights add to 255 — and `div255` is
 //! `(x + 1 + (x >> 8)) >> 8`, exact for every such sum. A pixel therefore
 //! rounds exactly as the portable blend rounds it.
 
 use core::arch::x86_64::{
-    __m128i, _mm_add_epi16, _mm_add_epi32, _mm_and_si128, _mm_andnot_si128, _mm_castsi128_ps,
-    _mm_cmpeq_epi32, _mm_cvtsi128_si32, _mm_cvtsi32_si128, _mm_loadu_si128, _mm_movemask_epi8,
-    _mm_movemask_ps, _mm_mul_epu32, _mm_mullo_epi16, _mm_or_si128, _mm_packs_epi32,
-    _mm_packus_epi16, _mm_set1_epi16, _mm_set1_epi32, _mm_set_epi16, _mm_set_epi32,
-    _mm_setzero_si128, _mm_shufflehi_epi16, _mm_shufflelo_epi16, _mm_slli_epi64, _mm_srl_epi64,
-    _mm_srli_epi16, _mm_srli_epi64, _mm_srli_si128, _mm_storeu_si128, _mm_sub_epi16, _mm_sub_epi32,
-    _mm_unpackhi_epi16, _mm_unpackhi_epi8, _mm_unpacklo_epi16, _mm_unpacklo_epi8, _mm_xor_si128,
+    __m128i, _mm_add_epi16, _mm_add_epi32, _mm_add_epi64, _mm_and_si128, _mm_andnot_si128,
+    _mm_castsi128_ps, _mm_cmpeq_epi32, _mm_cvtsi128_si32, _mm_cvtsi32_si128, _mm_cvtsi64_si128,
+    _mm_loadu_si128, _mm_movemask_epi8, _mm_movemask_ps, _mm_mul_epu32, _mm_mullo_epi16,
+    _mm_or_si128, _mm_packs_epi32, _mm_packus_epi16, _mm_set1_epi16, _mm_set1_epi32,
+    _mm_set1_epi64x, _mm_set_epi16, _mm_set_epi32, _mm_set_epi64x, _mm_setzero_si128,
+    _mm_shufflehi_epi16, _mm_shufflelo_epi16, _mm_slli_epi64, _mm_srl_epi64, _mm_srli_epi16,
+    _mm_srli_epi64, _mm_srli_si128, _mm_storeu_si128, _mm_sub_epi16, _mm_sub_epi32,
+    _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpackhi_epi64, _mm_unpackhi_epi8,
+    _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi64, _mm_unpacklo_epi8, _mm_xor_si128,
 };
 use core::ops::Range;
 
 use crate::blur::{
     blur_span, line_portable, mean_portable, LaneDivisor, PixelSum, Reciprocal, Window,
 };
-use crate::color::{blend_solid_portable, blend_span_portable, Pixel};
+use crate::color::{blend_solid_portable, blend_span_portable, mix_span_portable, Color, Pixel};
 use crate::dither::DitherRow;
+use crate::wide::{onto_sample, widen_portable, LANE_ONES};
 
 /// The blend candidate's log and pin name.
 pub(super) const BLEND_NAME: &str = "raster-blend-sse2";
@@ -65,6 +69,140 @@ pub(super) fn blend_solid(dst: &mut [Pixel], src: Pixel, factor: u8, tile: &[u32
     // SAFETY: as `blend_span`'s.
     unsafe { solid_tiles(tiles, src, factor, tile) };
     blend_solid_portable(rest, src, factor, tile);
+}
+
+/// [`super::SpanMix`] over SSE2.
+pub(super) fn mix_span(
+    dst: &mut [Pixel],
+    from: &[Pixel],
+    to: &[Pixel],
+    weight: u8,
+    tile: &[u32; TILE],
+) {
+    let paired = dst.len().min(from.len()).min(to.len());
+    let (Some(dst), Some(from), Some(to)) =
+        (dst.get_mut(..paired), from.get(..paired), to.get(..paired))
+    else {
+        return;
+    };
+    let (dst_tiles, dst_rest) = dst.as_chunks_mut::<TILE>();
+    let (from_tiles, from_rest) = from.as_chunks::<TILE>();
+    let (to_tiles, to_rest) = to.as_chunks::<TILE>();
+    // SAFETY: as `blend_span`'s.
+    unsafe { mix_tiles(dst_tiles, from_tiles, to_tiles, weight, tile) };
+    mix_span_portable(dst_rest, from_rest, to_rest, weight, tile);
+}
+
+/// [`super::SolidCover`] over SSE2.
+pub(super) fn cover_span(dst: &mut [Pixel], src: Pixel, coverage: &[u8], tile: &[u32; TILE]) {
+    if src.a == 0 {
+        return;
+    }
+    let paired = dst.len().min(coverage.len());
+    let (Some(dst), Some(coverage)) = (dst.get_mut(..paired), coverage.get(..paired)) else {
+        return;
+    };
+    let (dst_tiles, dst_rest) = dst.as_chunks_mut::<TILE>();
+    let (level_tiles, level_rest) = coverage.as_chunks::<TILE>();
+    // SAFETY: as `blend_span`'s.
+    unsafe { cover_tiles(dst_tiles, src, level_tiles, tile) };
+    super::padded(dst_rest, level_rest, |dst, levels| {
+        // SAFETY: as `blend_span`'s.
+        unsafe { cover_tiles(dst, src, levels, tile) };
+    });
+}
+
+/// [`super::SolidWash`] over SSE2.
+pub(super) fn wash_weighted(dst: &mut [Pixel], ink: Color, weights: &[u8], tile: &[u32; TILE]) {
+    let paired = dst.len().min(weights.len());
+    let (Some(dst), Some(weights)) = (dst.get_mut(..paired), weights.get(..paired)) else {
+        return;
+    };
+    let (dst_tiles, dst_rest) = dst.as_chunks_mut::<TILE>();
+    let (weight_tiles, weight_rest) = weights.as_chunks::<TILE>();
+    // SAFETY: as `blend_span`'s.
+    unsafe { wash_tiles(dst_tiles, ink, weight_tiles, tile) };
+    super::padded(dst_rest, weight_rest, |dst, weights| {
+        // SAFETY: as `blend_span`'s.
+        unsafe { wash_tiles(dst, ink, weights, tile) };
+    });
+}
+
+/// [`widen`](crate::wide::widen) four pixels a step, from two samples and the
+/// one after them.
+pub(super) fn widen_samples(
+    span: &mut [Pixel],
+    (start, samples): (u32, &[u64]),
+    biases: &[u64; 8],
+) {
+    let (span, start, samples) = onto_sample(span, (start, samples), biases);
+    let (quads, _) = span.as_chunks_mut::<4>();
+    // SAFETY: the build enables SSE2 for this target.
+    let laid = unsafe { widen_quads(quads, samples, start, biases) };
+    let (Some(rest), Some(after)) = (span.get_mut(4 * laid..), samples.get(2 * laid..)) else {
+        return;
+    };
+    let start = start.saturating_add(u32::try_from(4 * laid).unwrap_or(u32::MAX));
+    widen_portable(rest, (start, after), biases);
+}
+
+/// Lay `quads` from `samples`, the first quad's first pixel on sample `0` at
+/// even surface column `start`, while a sample remains past each pair: the
+/// pixels on two samples and the two between them and the next, rounded at
+/// their columns' biases. Answers how many quads it laid.
+///
+/// # Safety
+///
+/// The CPU must implement SSE2.
+#[target_feature(enable = "sse2")]
+unsafe fn widen_quads(
+    quads: &mut [[Pixel; 4]],
+    samples: &[u64],
+    start: u32,
+    biases: &[u64; 8],
+) -> usize {
+    let ones = _mm_set1_epi64x(LANE_ONES.cast_signed());
+    let alpha = _mm_set1_epi32(0xFF00_0000_u32.cast_signed());
+    let bias = |x: u32| biases[(x & 7) as usize].cast_signed();
+    // The biases repeat every eight pixels: two quads.
+    let phases = [0u32, 4].map(|step| {
+        let x = start.wrapping_add(step);
+        (
+            _mm_set_epi64x(bias(x.wrapping_add(2)), bias(x)),
+            _mm_set_epi64x(bias(x.wrapping_add(3)), bias(x.wrapping_add(1))),
+        )
+    });
+    let mut laid = 0;
+    for (quad, window) in quads.iter_mut().zip(samples.windows(3).step_by(2)) {
+        let (on_bias, between_bias) = phases[laid & 1];
+        // SAFETY: `window` holds three samples, so each load reads two inside
+        // it; the loads and the store are the unaligned forms, and the store
+        // writes the quad's sixteen bytes.
+        #[allow(clippy::cast_ptr_alignment)] // The loads and the store are the unaligned forms.
+        let (here, next) = unsafe {
+            (
+                _mm_loadu_si128(window.as_ptr().cast::<__m128i>()),
+                _mm_loadu_si128(window.as_ptr().add(1).cast::<__m128i>()),
+            )
+        };
+        let mean = _mm_add_epi64(
+            _mm_and_si128(here, next),
+            _mm_srli_epi64(_mm_andnot_si128(ones, _mm_xor_si128(here, next)), 1),
+        );
+        let on = _mm_add_epi64(here, on_bias);
+        let between = _mm_add_epi64(mean, between_bias);
+        // Each sixteen-bit lane's high byte, the four pixels in column order.
+        let first = _mm_srli_epi16(_mm_unpacklo_epi64(on, between), 8);
+        let second = _mm_srli_epi16(_mm_unpackhi_epi64(on, between), 8);
+        let pixels = _mm_or_si128(_mm_packus_epi16(first, second), alpha);
+        #[allow(clippy::cast_ptr_alignment)] // As above.
+        // SAFETY: as above.
+        unsafe {
+            _mm_storeu_si128(quad.as_mut_ptr().cast::<__m128i>(), pixels);
+        }
+        laid += 1;
+    }
+    laid
 }
 
 /// # Safety
@@ -131,6 +269,185 @@ unsafe fn solid_tiles(dst: &mut [[Pixel; TILE]], src: Pixel, factor: u8, tile: &
             unsafe { _mm_storeu_si128(to.add(half), out) };
         }
     }
+}
+
+/// # Safety
+///
+/// The CPU must implement SSE2.
+#[target_feature(enable = "sse2")]
+unsafe fn mix_tiles(
+    dst: &mut [[Pixel; TILE]],
+    from: &[[Pixel; TILE]],
+    to: &[[Pixel; TILE]],
+    weight: u8,
+    tile: &[u32; TILE],
+) {
+    let biases = biases(tile);
+    let take = _mm_set1_epi16(i16::from(weight));
+    let keep = _mm_set1_epi16(i16::from(u8::MAX - weight));
+    for ((dst, from), to) in dst.iter_mut().zip(from).zip(to) {
+        #[allow(clippy::cast_ptr_alignment)] // The loads and stores are the unaligned forms.
+        let (out, from, to) = (
+            dst.as_mut_ptr().cast::<__m128i>(),
+            from.as_ptr().cast::<__m128i>(),
+            to.as_ptr().cast::<__m128i>(),
+        );
+        for (half, &[low, high]) in biases.as_chunks::<2>().0.iter().enumerate() {
+            // SAFETY: `half` is 0 or 1, so each address is one of the tiles'
+            // two sixteen-byte halves, readable through `from` and `to` and
+            // writable through `dst`, which does not overlap either.
+            let (f, t) = unsafe {
+                (
+                    _mm_loadu_si128(from.add(half)),
+                    _mm_loadu_si128(to.add(half)),
+                )
+            };
+            let zero = _mm_setzero_si128();
+            let mixed = _mm_packus_epi16(
+                mix2(
+                    _mm_unpacklo_epi8(f, zero),
+                    _mm_unpacklo_epi8(t, zero),
+                    (keep, take),
+                    low,
+                ),
+                mix2(
+                    _mm_unpackhi_epi8(f, zero),
+                    _mm_unpackhi_epi8(t, zero),
+                    (keep, take),
+                    high,
+                ),
+            );
+            // SAFETY: as the loads from the same tile above.
+            unsafe { _mm_storeu_si128(out.add(half), mixed) };
+        }
+    }
+}
+
+/// # Safety
+///
+/// The CPU must implement SSE2.
+#[target_feature(enable = "sse2")]
+unsafe fn cover_tiles(
+    dst: &mut [[Pixel; TILE]],
+    src: Pixel,
+    coverage: &[[u8; TILE]],
+    tile: &[u32; TILE],
+) {
+    let biases = biases(tile);
+    let colour = _mm_unpacklo_epi8(
+        _mm_set1_epi32(i32::from_le_bytes([src.r, src.g, src.b, src.a])),
+        _mm_setzero_si128(),
+    );
+    for (dst, levels) in dst.iter_mut().zip(coverage) {
+        let Some(factors) = spread(*levels) else {
+            continue;
+        };
+        lay_halves(dst, biases, factors, |d, (low, high), (f_low, f_high)| {
+            let source = (
+                div255(_mm_add_epi16(_mm_mullo_epi16(colour, f_low), low)),
+                div255(_mm_add_epi16(_mm_mullo_epi16(colour, f_high), high)),
+            );
+            over4(source, d, low, high)
+        });
+    }
+}
+
+/// # Safety
+///
+/// The CPU must implement SSE2.
+#[target_feature(enable = "sse2")]
+unsafe fn wash_tiles(
+    dst: &mut [[Pixel; TILE]],
+    ink: Color,
+    weights: &[[u8; TILE]],
+    tile: &[u32; TILE],
+) {
+    let biases = biases(tile);
+    let zero = _mm_setzero_si128();
+    let full = _mm_set1_epi16(255);
+    let colour = _mm_unpacklo_epi8(
+        _mm_set1_epi32(i32::from_le_bytes([ink.r, ink.g, ink.b, u8::MAX])),
+        zero,
+    );
+    for (dst, levels) in dst.iter_mut().zip(weights) {
+        let Some(takes) = spread(*levels) else {
+            continue;
+        };
+        lay_halves(dst, biases, takes, |d, (low, high), (t_low, t_high)| {
+            _mm_packus_epi16(
+                mix2(
+                    _mm_unpacklo_epi8(d, zero),
+                    colour,
+                    (_mm_sub_epi16(full, t_low), t_low),
+                    low,
+                ),
+                mix2(
+                    _mm_unpackhi_epi8(d, zero),
+                    colour,
+                    (_mm_sub_epi16(full, t_high), t_high),
+                    high,
+                ),
+            )
+        });
+    }
+}
+
+/// Each of a tile's eight `levels` in all four lanes of its pixel, two pixels
+/// a register, or `None` when every one is nought.
+#[inline]
+#[target_feature(enable = "sse2")]
+fn spread(levels: [u8; TILE]) -> Option<[__m128i; 4]> {
+    let word = i64::from_le_bytes(levels);
+    if word == 0 {
+        return None;
+    }
+    let levels = _mm_unpacklo_epi8(_mm_cvtsi64_si128(word), _mm_setzero_si128());
+    let (first, last) = (
+        _mm_unpacklo_epi16(levels, levels),
+        _mm_unpackhi_epi16(levels, levels),
+    );
+    Some([
+        _mm_unpacklo_epi32(first, first),
+        _mm_unpackhi_epi32(first, first),
+        _mm_unpacklo_epi32(last, last),
+        _mm_unpackhi_epi32(last, last),
+    ])
+}
+
+/// Lay each half of `dst`, four pixels, through `lay`: its pixels, the biases
+/// of its first and last two, and their levels as [`spread`] answers them.
+#[inline]
+#[target_feature(enable = "sse2")]
+fn lay_halves(
+    dst: &mut [Pixel; TILE],
+    [b0, b1, b2, b3]: [__m128i; 4],
+    levels: [__m128i; 4],
+    lay: impl Fn(__m128i, (__m128i, __m128i), (__m128i, __m128i)) -> __m128i,
+) {
+    #[allow(clippy::cast_ptr_alignment)] // The loads and stores are the unaligned forms.
+    let to = dst.as_mut_ptr().cast::<__m128i>();
+    let halves = [
+        ((b0, b1), (levels[0], levels[1])),
+        ((b2, b3), (levels[2], levels[3])),
+    ];
+    for (half, (biases, levels)) in halves.into_iter().enumerate() {
+        // SAFETY: `half` is 0 or 1, so the address is one of the tile's two
+        // sixteen-byte halves, readable and writable through `dst`.
+        let d = unsafe { _mm_loadu_si128(to.add(half)) };
+        let out = lay(d, biases, levels);
+        // SAFETY: as the load from the same address above.
+        unsafe { _mm_storeu_si128(to.add(half), out) };
+    }
+}
+
+/// Two widened pixels `weight`/255 of the way from `f` to `t`, `(keep,
+/// take)` being `255 - weight` and `weight`: `(f * keep + t * take) / 255`,
+/// rounded at `bias`.
+#[inline]
+#[target_feature(enable = "sse2")]
+fn mix2(f: __m128i, t: __m128i, (keep, take): (__m128i, __m128i), bias: __m128i) -> __m128i {
+    let weighted = _mm_add_epi16(_mm_mullo_epi16(f, keep), _mm_mullo_epi16(t, take));
+    div255(_mm_add_epi16(weighted, bias))
 }
 
 /// The tile's eight biases in the registers four pixels' channels widen into:

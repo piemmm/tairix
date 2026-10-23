@@ -317,17 +317,21 @@ free, a thread stack's release, compress-out, a map undone part-way, and the
 space's teardown — therefore clears the entries (flushing this CPU), shuts
 both views, and only then zeroes and frees the frame:
 
-- **The CPUs.** A space's `ActiveCpus` names the CPUs it is the active root
-  of. The dispatcher enters a CPU before the switch-in hook loads the root
-  (fenced, so an unmap that reads the set after clearing an entry either
-  reaches that CPU or that CPU walks the cleared entry) and removes it once
-  the park has left the root. No port tags TLB entries with an address-space
-  id and each flushes the outgoing regime on a root switch, so the set is
-  exact: a single-threaded process's unmaps interrupt no other CPU at all.
-  The remote half is `CrossCpuTlbShootdown::shootdown_user_range` over that
-  set — x86_64 raises the shootdown IPI at those CPUs alone, riscv64 issues
-  one SBI RFENCE call per 64-hart window, and aarch64 owes nothing because its
-  local flush is already the broadcast `tlbi vaae1is`. A range is invalidated
+- **The CPUs.** A space's `TlbContext` names the CPUs it is the active root
+  of, the generation its translations are at, and an id no other space of
+  the boot bears. The dispatcher enters a CPU before choosing the tag the
+  root is loaded under (fenced, so an unmap that advances the generation and
+  then reads the set either reaches that CPU or that CPU reads the advance)
+  and removes it once the park has left the root. A CPU that left may keep
+  the space's entries under the tag it gave it (see
+  [Address-space tags](#address-space-tags)), so every unmap advances the
+  generation, and a CPU discards the tag before it next runs the space if the
+  generation moved: only the CPUs running the space now are interrupted, and
+  a single-threaded process's unmaps interrupt no other CPU at all. The
+  remote half is `CrossCpuTlbShootdown::shootdown_user_range` over that set —
+  x86_64 raises the shootdown IPI at those CPUs alone, riscv64 issues one SBI
+  RFENCE call per 64-hart window, and aarch64 owes nothing because its local
+  flush is already the broadcast `tlbi vaae1is`, which reaches every ASID. A range is invalidated
   page by page only up to a ceiling — 33 pages on x86_64, 512 on aarch64, 64
   on riscv64, Linux's values — and whole past it, so the span a batch below
   shoots down costs no invalidation per page of its gaps.
@@ -347,8 +351,34 @@ both views, and only then zeroes and frees the frame:
   page of cap and of task share for every page admitted ahead in the batch
   and not yet charged, so a batch admits no more than a page at a time would.
 - **Teardown** of a space active on no CPU issues no TLB maintenance at all
-  (`AddressSpace::clear_lowest`): every CPU that ran it discarded its
-  translations when it switched away.
+  (`AddressSpace::clear_lowest`): a CPU that ran it keeps its entries only
+  under a tag it discards before giving the tag to another space, and the
+  dead space never runs again.
+
+### Address-space tags
+
+A port tags each TLB entry with the space it belongs to — an aarch64 or
+riscv64 ASID, an x86_64 PCID (`tairix_arch_api::AddressTags`) — so a switch
+between spaces keeps the outgoing space's entries rather than discarding
+them. Each CPU keeps its own table of up to `tairix_arch_api::MAX_USER_TAGS`
+(eight) user tags (`tairix_kernel_mem::TagSlots`), tag `0` being the park
+root's: a switch into
+a space loads it under the tag it holds there, discarding the tag first only
+when it was another space's (the one loaded longest ago is reused) or has
+gone stale. A tag goes stale when its space's generation advanced past the
+one the CPU last caught up with, on a port whose invalidations reach only the
+CPUs running the space (riscv64, x86_64), or when the kernel epoch moved, on
+a port whose kernel invalidations reach only the tag in use (x86_64's
+`invlpg`). A CPU catches up when it discards the tag, and when it invalidates
+the space whose root it has loaded: that discard was under the space's own
+tag (`SpaceTlb::crediting`), so a process that unmaps keeps its entries on its
+own CPU. An invalidation made between entering the space's set and loading
+its root, or after the park, earns nothing. The choice is read after the CPU
+entered the space's set, and read again once the root is loaded, so an
+invalidation that raced the switch and reached the CPU only under the tag it
+left is caught there. A CPU that tags nothing discards each root's entries as
+it loads it and as it parks. A CPU's tag `0` is owed a discard when it boots:
+what ran under it before the table existed is not known.
 
 The façade bridges its own `Page` / `Frame` / `MapFlags` currency to the
 HAL's `u64` / `PageFlags` at the boundary. Each arch crate's `paging`
@@ -415,9 +445,9 @@ parents, the root last) through the one shared
 `reclaim_table_frames` drives, so every stage-1 table frame returns to
 the `FrameTableSource` for reuse. Teardown is SMP-safe by an invariant
 the dispatcher maintains: after every switch-back from a user task the
-CPU re-parks its translation on the permanent boot root (published
-set-once at boot; the port's `park_kernel_root`), so a user root is
-active on a CPU only while its task runs there and a dead root can never
+CPU re-parks its translation on the permanent boot root under tag `0`
+(published set-once at boot; the port's `park_kernel_root`), so a user root
+is active on a CPU only while its task runs there and a dead root can never
 be freed under a live walk (the port's reclaim additionally re-parks
 defensively if the calling CPU still holds the dying root, and retires
 the frames unreclaimed rather than dismantling an active translation —

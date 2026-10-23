@@ -727,6 +727,13 @@ collapsing into the bounding box between them. The type is shared
 (`lib/geometry`) because controls report their own repaint rectangles with
 it too.
 
+What a present or a repaint changed reaches the damage as a whole region, not
+one rectangle at a time: one merge walk over both (`Region::add_region`), the
+frosts above invalidated once per window it reaches, and a window on a free
+layer stales that layer's buffers by the same region made the layer's own. A
+saver's 128 rectangles into damage already holding hundreds so cost their
+count, not their product.
+
 A window with a backdrop blur is the one exception to "recompose exactly
 what changed": its pixels are a function of the *whole* backdrop under its
 rectangle, so a strip-sized repaint would spread a clipped neighbourhood and

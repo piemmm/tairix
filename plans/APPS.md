@@ -157,7 +157,7 @@ when convenient), with one staged follow-up below.
   permanent boot translation; aarch64/riscv64 in the boot `switch()`, x86_64
   from the trampoline `CR3` in `try_boot`), and the dispatcher re-parks a
   CPU off a user root at every task suspend
-  (`KernelArch::park_translation` → `install_park_translation` →
+  (`KernelArch::address_tags` → `install_address_tags` →
   `dispatch_step`), so a dead root is never a CPU's active translation when
   its tables are freed (the port reclaim re-parks defensively and retires
   frames unreclaimed rather than dismantling an active regime — fail

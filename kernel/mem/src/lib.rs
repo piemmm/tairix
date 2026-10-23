@@ -74,6 +74,7 @@ pub mod sensitive;
 pub mod slab;
 pub mod spawn;
 pub mod swap;
+pub mod tags;
 #[cfg(all(test, not(loom)))]
 mod test_fixture;
 pub mod uaccess;
@@ -115,7 +116,7 @@ pub use ramzip::{
     PageKind, Ramzip, RamzipCaps, RamzipCounters, RamzipFaultOutcome, RamzipLedger,
     RamzipReclaimSummary, VmContext, WarmOutcome,
 };
-pub use retire::{ActiveCpus, Retire, SpaceTlb, Unpublished};
+pub use retire::{OwnFlush, Retire, SpaceTlb, TlbContext, Unpublished};
 pub use seal::{EntropySource, NonceSequence, SealError, SealKey};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};
@@ -124,6 +125,7 @@ pub use spawn::{
     UserStack,
 };
 pub use swap::{EncryptedSwap, SwapBackend, SwapError, SwapPage, SWAP_RECORD_LEN};
+pub use tags::TagSlots;
 pub use uaccess::{copy_in, copy_out, UaccessError};
 pub use vmm::{
     AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, PageTableError, UserAddressSpace,

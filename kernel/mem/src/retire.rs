@@ -21,20 +21,33 @@ use crate::frame::{Frame, PAGE_SIZE};
 use crate::phys::PhysMap;
 use crate::vmm::{MapFlags, Page};
 
-/// The CPUs on which a user address space is the active translation regime.
+/// Monotonic allocator of the id every user address space is minted with:
+/// never reused within a boot, so neither a CPU's tag for a space, nor the
+/// [`Ramzip`](crate::ramzip) tier's entries, nor the audit log can confuse a
+/// space with a later one. `u64` never wraps in a realistic boot.
+static NEXT_SPACE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A user address space's standing with the TLBs: an id no other space of the
+/// boot bears, the generation its translations are at, and the CPUs running it
+/// now.
 ///
-/// They are the only CPUs whose TLBs can hold its translations: no port tags
-/// entries with an address-space id, and each discards the outgoing regime's
-/// entries when it switches root, so a CPU that has left holds nothing.
-pub struct ActiveCpus {
+/// The CPUs running it are the ones an invalidation must reach at once. A CPU
+/// that left it may still hold its entries under the tag it gave the space,
+/// which it never uses for the space again without first discarding them if
+/// the generation moved past the one it last caught up with: so a CPU that
+/// left need not be reached, only caught up when it returns.
+pub struct TlbContext {
+    id: u64,
+    generation: AtomicU64,
     words: Box<[AtomicU64]>,
     /// A CPU past the set's capacity entered, so the set no longer names
     /// every holder and a shootdown must reach all CPUs. Never cleared.
     overflowed: AtomicBool,
 }
 
-impl ActiveCpus {
-    /// A set with room for dense CPU ids below `cpus`, none of them active.
+impl TlbContext {
+    /// A fresh space's context, with room for dense CPU ids below `cpus`,
+    /// none of them running it.
     ///
     /// # Errors
     ///
@@ -47,15 +60,40 @@ impl ActiveCpus {
             .map_err(|_| AllocError::OutOfMemory)?;
         words.resize_with(len, || AtomicU64::new(0));
         Ok(Self {
+            id: NEXT_SPACE_ID.fetch_add(1, Ordering::Relaxed),
+            generation: AtomicU64::new(0),
             words: words.into_boxed_slice(),
             overflowed: AtomicBool::new(false),
         })
     }
 
+    /// The space's id, which no other space of the boot bears.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The generation the space's translations are at, which every
+    /// invalidation of them advances.
+    ///
+    /// Read after [`enter`](Self::enter)'s fence, so a CPU coming to run the
+    /// space either sees an invalidation's advance or is reached by it.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Advance the generation, before the CPUs that may cache the stale
+    /// translations are read, answering the generation it advanced from.
+    pub(crate) fn advance(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::SeqCst)
+    }
+
     /// Record that `cpu` is about to load this space's root.
     ///
     /// Fenced before the load, so an unmap that clears an entry and then
-    /// reads this set either sees `cpu` or `cpu` walks the cleared entry.
+    /// reads this set either sees `cpu` or `cpu` walks the cleared entry and
+    /// reads the generation the unmap advanced.
     pub fn enter(&self, cpu: CpuId) {
         match self.slot(cpu) {
             Some((word, bit)) => {
@@ -66,16 +104,14 @@ impl ActiveCpus {
         fence(Ordering::SeqCst);
     }
 
-    /// Record that `cpu` has loaded another root, discarding this space's
-    /// translations as it did.
+    /// Record that `cpu` has loaded another root and runs this space no more.
     pub fn leave(&self, cpu: CpuId) {
         if let Some((word, bit)) = self.slot(cpu) {
             word.fetch_and(!bit, Ordering::Release);
         }
     }
 
-    /// Whether no CPU has this space active, so none can hold a translation
-    /// of it.
+    /// Whether no CPU runs this space.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         !self.overflowed.load(Ordering::Acquire) && self.mask().is_empty()
@@ -95,46 +131,70 @@ impl ActiveCpus {
 /// the one that cleared them.
 #[derive(Clone)]
 pub struct SpaceTlb {
-    cpus: Arc<ActiveCpus>,
+    context: Arc<TlbContext>,
     remote: Option<&'static (dyn CrossCpuTlbShootdown + Sync)>,
+    credit: Option<OwnFlush>,
 }
 
+/// Told, on the CPU that cleared and discarded a space's entries itself, the
+/// generation its invalidation advanced the space from.
+pub type OwnFlush = fn(&TlbContext, u64);
+
 impl SpaceTlb {
-    /// A reach over `cpus`, invalidating through `remote`, which is [`None`]
-    /// only on a port with no TLB.
+    /// A reach over `context`'s CPUs, invalidating through `remote`, which is
+    /// [`None`] only on a port with no TLB.
     #[must_use]
     pub fn new(
-        cpus: ActiveCpus,
+        context: TlbContext,
         remote: Option<&'static (dyn CrossCpuTlbShootdown + Sync)>,
     ) -> Self {
         Self {
-            cpus: Arc::new(cpus),
+            context: Arc::new(context),
             remote,
+            credit: None,
         }
     }
 
-    /// The CPUs the space is active on, which the dispatcher keeps current.
+    /// This reach, telling `credit` of every invalidation on the CPU that made
+    /// it, so a CPU that discarded the entries itself need not discard the
+    /// space's tag when it next runs the space.
     #[must_use]
-    pub fn active_cpus(&self) -> &Arc<ActiveCpus> {
-        &self.cpus
+    pub fn crediting(self, credit: OwnFlush) -> Self {
+        Self {
+            credit: Some(credit),
+            ..self
+        }
+    }
+
+    /// The space's standing with the TLBs, which the dispatcher keeps current.
+    #[must_use]
+    pub fn context(&self) -> &Arc<TlbContext> {
+        &self.context
     }
 
     /// Discard `pages` pages from `base` on every other CPU that may cache
-    /// them, returning once none can. The calling CPU has flushed its own.
+    /// them, returning once none running the space can, and advancing the
+    /// space's generation so every CPU that left it discards them before it
+    /// runs the space again. The calling CPU has flushed its own.
     pub(crate) fn shoot_remote(&self, base: u64, pages: u64) {
-        let Some(remote) = self.remote else {
-            return;
-        };
         if pages == 0 {
             return;
         }
-        // Orders the cleared entries before the read of who may cache them.
+        let from = self.context.advance();
+        if let Some(credit) = self.credit {
+            credit(&self.context, from);
+        }
+        let Some(remote) = self.remote else {
+            return;
+        };
+        // Orders the cleared entries and the advance before the read of who
+        // may cache them.
         fence(Ordering::SeqCst);
         let pages = usize::try_from(pages).unwrap_or(usize::MAX);
-        if self.cpus.overflowed.load(Ordering::Acquire) {
+        if self.context.overflowed.load(Ordering::Acquire) {
             remote.shootdown_range(base, pages);
         } else {
-            remote.shootdown_user_range(self.cpus.mask(), base, pages);
+            remote.shootdown_user_range(self.context.mask(), base, pages);
         }
     }
 }
@@ -366,7 +426,7 @@ mod tests {
     static REMOTE_LOG: RecordedRemote = RecordedRemote(record_remote);
 
     fn reach(active: &[CpuId]) -> SpaceTlb {
-        let cpus = ActiveCpus::new(4).expect("a small set allocates");
+        let cpus = TlbContext::new(4).expect("a small set allocates");
         for &cpu in active {
             cpus.enter(cpu);
         }
@@ -484,7 +544,7 @@ mod tests {
 
     #[test]
     fn a_cpu_past_the_capacity_widens_every_shootdown_to_all_cpus() {
-        let cpus = ActiveCpus::new(2).expect("a small set allocates");
+        let cpus = TlbContext::new(2).expect("a small set allocates");
         cpus.enter(7_000);
         assert!(!cpus.is_idle(), "an unrecorded holder is not idle");
         cpus.leave(7_000);
@@ -496,7 +556,7 @@ mod tests {
 
     #[test]
     fn a_cpu_is_active_from_enter_to_leave() {
-        let cpus = ActiveCpus::new(130).expect("three words allocate");
+        let cpus = TlbContext::new(130).expect("three words allocate");
         assert!(cpus.is_idle());
         cpus.enter(129);
         cpus.enter(0);
@@ -506,11 +566,126 @@ mod tests {
         assert!(cpus.is_idle());
     }
 
+    std::thread_local! {
+        static CREDITED: RefCell<Vec<(u64, u64)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn record_credit(context: &TlbContext, from: u64) {
+        CREDITED.with(|credited| credited.borrow_mut().push((context.id(), from)));
+    }
+
+    /// Every invalidation tells the CPU that made it the generation it
+    /// advanced the space from; an empty one tells it nothing.
+    #[test]
+    fn an_invalidation_credits_the_cpu_that_made_it_with_the_generation_it_left() {
+        let tlb =
+            SpaceTlb::new(TlbContext::new(1).expect("a context"), None).crediting(record_credit);
+        let id = tlb.context().id();
+        tlb.shoot_remote(page_va(0), 0);
+        tlb.shoot_remote(page_va(0), 2);
+        tlb.shoot_remote(page_va(4), 1);
+        assert_eq!(CREDITED.with(RefCell::take), [(id, 0), (id, 1)]);
+        assert_eq!(tlb.context().generation(), 2);
+    }
+
     #[test]
     fn a_set_for_no_cpus_allocates_nothing_and_widens_on_any_entry() {
-        let cpus = ActiveCpus::new(0).expect("an empty set needs no storage");
+        let cpus = TlbContext::new(0).expect("an empty set needs no storage");
         assert!(cpus.is_idle());
         cpus.enter(0);
         assert!(!cpus.is_idle());
+    }
+
+    #[test]
+    fn every_context_has_an_id_no_other_bears() {
+        let ids: Vec<u64> = (0..64)
+            .map(|_| TlbContext::new(1).expect("a context allocates").id())
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len());
+        assert!(ids.iter().all(|id| *id != 0), "no space is id nought");
+    }
+
+    /// An invalidation advances the generation whether or not a CPU runs the
+    /// space, so one that left catches up when it returns; an empty one does
+    /// not.
+    #[test]
+    fn a_shootdown_advances_the_generation_every_cpu_that_left_catches_up_on() {
+        let tlb = reach(&[]);
+        let before = tlb.context().generation();
+        tlb.shoot_remote(page_va(0), 0);
+        assert_eq!(
+            tlb.context().generation(),
+            before,
+            "nothing was invalidated"
+        );
+        tlb.shoot_remote(page_va(0), 3);
+        assert_eq!(tlb.context().generation(), before + 1);
+        assert!(
+            remote_events().is_empty(),
+            "no CPU runs it, none is reached"
+        );
+        let unreached = SpaceTlb::new(TlbContext::new(1).expect("a context"), None);
+        unreached.shoot_remote(page_va(0), 1);
+        assert_eq!(
+            unreached.context().generation(),
+            1,
+            "a port with no reach still advances"
+        );
+    }
+
+    /// A CPU coming to run a space while an unmap of it shoots down: the
+    /// unmap reaches the CPU, or the CPU reads the generation the unmap
+    /// advanced and discards its tag on the way in, so no stale entry is
+    /// kept. The store-buffering pairing between `enter` and `shoot_remote`,
+    /// run on real threads because loom cannot build the kernel crate graph.
+    #[test]
+    fn a_cpu_entering_a_space_an_unmap_races_is_reached_or_catches_up() {
+        static REACHED: AtomicU64 = AtomicU64::new(0);
+        fn reached(_base: u64, _pages: usize) {
+            REACHED.fetch_add(1, Ordering::SeqCst);
+        }
+        static RACED: RecordedRemote = RecordedRemote(reached);
+
+        // The interpreter runs a round in the time the host runs thousands.
+        const ROUNDS: u64 = if cfg!(miri) { 64 } else { 400_000 };
+        let tlb = Arc::new(SpaceTlb::new(
+            TlbContext::new(2).expect("a context allocates"),
+            Some(&RACED),
+        ));
+        let round = Arc::new(AtomicU64::new(0));
+        let read = Arc::new(AtomicU64::new(0));
+        let done = Arc::new(AtomicU64::new(0));
+        let switcher = {
+            let (tlb, round, read, done) = (tlb.clone(), round.clone(), read.clone(), done.clone());
+            std::thread::spawn(move || {
+                for r in 1..=ROUNDS {
+                    while round.load(Ordering::Acquire) != r {
+                        core::hint::spin_loop();
+                    }
+                    tlb.context().enter(1);
+                    read.store(tlb.context().generation(), Ordering::Release);
+                    done.fetch_add(1, Ordering::AcqRel);
+                }
+            })
+        };
+        for r in 1..=ROUNDS {
+            let generation = tlb.context().generation();
+            let reaches = REACHED.load(Ordering::SeqCst);
+            round.store(r, Ordering::Release);
+            tlb.shoot_remote(page_va(0), 1);
+            while done.load(Ordering::Acquire) != r {
+                core::hint::spin_loop();
+            }
+            assert!(
+                REACHED.load(Ordering::SeqCst) > reaches
+                    || read.load(Ordering::Acquire) > generation,
+                "round {r}: the unmap missed the CPU and the CPU missed the unmap"
+            );
+            tlb.context().leave(1);
+        }
+        switcher.join().expect("the switcher finished");
     }
 }

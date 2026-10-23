@@ -433,7 +433,8 @@ impl Cells<'_> {
 }
 
 /// The memory a scan conversion works in: its edge table, one row of
-/// accumulators, and that row's alphas.
+/// accumulators, that row's alphas, and a row of weights a wash multiplies
+/// them into.
 ///
 /// Held by a caller that fills many shapes — a scene of figures, a frame of
 /// glyphs — so its fills allocate nothing once the buffers have grown to the
@@ -445,6 +446,7 @@ pub struct ScanScratch {
     cover: Vec<i64>,
     area: Vec<i64>,
     alphas: Vec<u8>,
+    weights: Vec<u8>,
     crossings: Vec<(i64, i32)>,
 }
 
@@ -457,6 +459,7 @@ impl ScanScratch {
             cover: Vec::new(),
             area: Vec::new(),
             alphas: Vec::new(),
+            weights: Vec::new(),
             crossings: Vec::new(),
         }
     }
@@ -532,6 +535,7 @@ pub(crate) struct ScanFill<'s> {
     cover: &'s mut Vec<i64>,
     area: &'s mut Vec<i64>,
     alphas: &'s mut Vec<u8>,
+    weights: &'s mut Vec<u8>,
     crossings: &'s mut Vec<(i64, i32)>,
     rule: FillRule,
     /// The sub-unit bounding box of every vertex.
@@ -565,6 +569,7 @@ impl<'s> ScanFill<'s> {
             cover,
             area,
             alphas,
+            weights,
             crossings,
         } = scratch;
         edges.clear();
@@ -611,6 +616,7 @@ impl<'s> ScanFill<'s> {
             cover,
             area,
             alphas,
+            weights,
             crossings,
             rule,
             extent,
@@ -680,6 +686,17 @@ impl<'s> ScanFill<'s> {
     /// The alphas the last [`Self::coverage_row`] wrote.
     pub(crate) fn alphas(&self) -> &[u8] {
         self.alphas
+    }
+
+    /// The alphas the last [`Self::coverage_row`] wrote over `reached`, and as
+    /// many weights beside them to write, or `None` when the allocator refuses
+    /// the weights a row.
+    pub(crate) fn weighed(&mut self, reached: Range<usize>) -> Option<(&[u8], &mut [u8])> {
+        let covered = self.alphas.get(reached)?;
+        if self.weights.len() < covered.len() && !fit(self.weights, covered.len()) {
+            return None;
+        }
+        Some((covered, self.weights.get_mut(..covered.len())?))
     }
 
     /// The pixel box `(x0, x1, y0, y1)` — half open on both axes — that can

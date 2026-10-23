@@ -5,11 +5,11 @@ extern crate std;
 
 use tairix_abi::bounded_text::BoundedText;
 use tairix_abi::saver_ipc::Start;
-use tairix_raster::Surface;
+use tairix_raster::{Color, Surface};
 use tairix_saver::testing::{self, Screen, FRAME_NS};
-use tairix_saver::{NextFrame, SaverValue, Told, WallReading};
+use tairix_saver::{footprint, NextFrame, SaverValue, Told, WallReading};
 
-use super::{Ribbon, TIME_WEIGHT};
+use super::{letter, Ribbon, TIME_WEIGHT};
 
 const SCREEN: (u32, u32) = (1920, 1080);
 
@@ -131,6 +131,50 @@ fn the_first_frame_letters_the_time_over_a_dark_sky() {
         surface.get(0, 0).map(|pixel| (pixel.r, pixel.g, pixel.b)),
         Some((0, 0, 0))
     );
+}
+
+/// However the ribbon moves past it, the text reads exactly as it was
+/// lettered: every pixel of a translucent block laid over the sky once a
+/// frame, never twice where two strips meet — on a full screen, and on one so
+/// small the text is narrower than two strips.
+#[test]
+fn the_text_reads_the_same_however_the_ribbon_moves() {
+    for size in [SCREEN, (160, 90)] {
+        let (mut face, mut screen, _) = shown(size, true, false);
+        let text = footprint(face.block.as_ref(), face.at);
+        let (Ok(left), Ok(top)) = (u32::try_from(text.left()), u32::try_from(text.top())) else {
+            panic!("the text is on the screen");
+        };
+        let mut veil = Surface::new(text.width, text.height).expect("a block");
+        let ink = Color::rgba(0xF0, 0xE0, 0xD0, 0x80);
+        veil.fill_rect(0, 0, text.width, text.height, ink);
+        face.block = Some(veil);
+        face.light.paint(&mut screen.surface, text, &face.runner);
+        letter(&mut screen.surface, face.block.as_ref(), face.at, text);
+        let pixels = |surface: &Surface| {
+            (top..top + text.height)
+                .flat_map(|y| (left..left + text.width).map(move |x| surface.get(x, y)))
+                .collect::<std::vec::Vec<_>>()
+        };
+        let lettered = pixels(&screen.surface);
+        let mut met = 0;
+        let mut now = 0;
+        for frame in 1..=120 {
+            now += FRAME_NS;
+            draw(&mut screen, &mut face, now, first());
+            let strips = face.light.strips();
+            met += usize::from(
+                strips
+                    .iter()
+                    .any(|strip| !strip.intersection(&text).is_empty()),
+            );
+            assert!(
+                pixels(&screen.surface) == lettered,
+                "{size:?}: frame {frame}"
+            );
+        }
+        assert!(met > 0, "{size:?}: the ribbon never moved past the text");
+    }
 }
 
 /// When the reading changes the time is told anew and the text stays exactly

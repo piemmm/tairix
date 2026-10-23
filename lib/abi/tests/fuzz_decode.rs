@@ -1764,18 +1764,18 @@ fn structured_saver_messages_with_corrupted_fields_never_panic() {
     use tairix_abi::bounded_text::BoundedText;
     use tairix_abi::saver::SaverFeeds;
     use tairix_abi::saver_ipc::{
-        HostMessage, NextFrame, SaverMessage, SaverRegion, SlideOutcome, Start, WallReading,
-        SAVER_HOST_MESSAGE_MAX, SAVER_MESSAGE_MAX,
+        HostMessage, NextFrame, SaverDamage, SaverMessage, SaverRegion, SlideOutcome, Start,
+        WallReading, SAVER_HOST_MESSAGE_MAX, SAVER_MESSAGE_MAX,
     };
     use tairix_abi::Errno;
-    let damage = DamageList::new(&[DamageRect {
+    let damage = SaverDamage::new(&[DamageRect {
         x: 1,
         y: 2,
         width_px: 3,
         height_px: 4,
     }])
     .ok();
-    let saver = [
+    let saver = std::vec![
         SaverMessage::Ready,
         SaverMessage::Presented {
             serial: 9,

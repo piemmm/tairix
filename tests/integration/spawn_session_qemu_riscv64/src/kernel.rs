@@ -9,6 +9,7 @@
 use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -278,11 +279,11 @@ fn build_user_space(
 /// stack with no dispatcher-side repointing. Returns the new task id (its PID)
 /// or `None` on a scheduler-full admission failure.
 fn admit(scheduler: &Scheduler<RiscvArch>, root_phys: u64, entry: UserEntry) -> Option<u64> {
-    let pre_resume = move |_top: u64| {
+    let pre_resume = move |_top: u64, tag: AddressTag| {
         // SAFETY: paging is enabled and `root_phys` is the Sv39 root of a space
         // that maps the low identity window the running dispatcher executes
         // from — exactly `activate_user_root`'s contract.
-        unsafe { activate_user_root(root_phys) };
+        unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so

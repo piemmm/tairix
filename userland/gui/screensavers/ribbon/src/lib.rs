@@ -14,6 +14,7 @@ use tairix_abi::font_ipc::FontWeight;
 use tairix_abi::Errno;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_parallel::Pool;
 use tairix_raster::{Color, Surface};
 use tairix_ribbon::Light;
 use tairix_saver::{footprint, DateShown, Frame, Host, NextFrame, Scene, Setup, Told};
@@ -64,6 +65,8 @@ pub struct Ribbon {
     block: Option<Surface>,
     at: Point,
     light: Light,
+    /// The threads the ribbon is painted across.
+    runner: Pool,
     motion: SceneClock,
     refresh: RefreshRate,
     screen: (u32, u32),
@@ -81,6 +84,10 @@ impl Ribbon {
         let start = setup.start;
         let screen = (start.region.width(), start.region.height());
         let (fonts, baselines) = typeset(&setup.theme(), setup.scale, screen);
+        // Arranged around the text once the first reading is composed.
+        let mut light = Light::new(screen, Rect::EMPTY, 0.0).ok_or(Errno::OutOfMemory)?;
+        let runner = setup.pool();
+        light.spread_over(&runner);
         Ok(Self {
             shown: None,
             date: if setup.switch("date")? {
@@ -93,8 +100,8 @@ impl Ribbon {
             baselines,
             block: None,
             at: Point::ORIGIN,
-            // Arranged around the text once the first reading is composed.
-            light: Light::new(screen, Rect::EMPTY, 0.0).ok_or(Errno::OutOfMemory)?,
+            light,
+            runner,
             motion: SceneClock::new(start.now_ns, start.reduced_motion, start.refresh),
             refresh: start.refresh,
             screen,
@@ -143,15 +150,17 @@ impl Scene for Ribbon {
         if first {
             let whole = Rect::new(0, 0, self.screen.0, self.screen.1);
             damage.add(whole);
-            self.light.paint(surface, whole);
+            self.light.paint(surface, whole, &self.runner);
             letter(surface, block, at, whole);
         } else {
             if moved {
-                self.light
-                    .paint_moved(surface, |surface, strip| letter(surface, block, at, strip));
+                self.light.paint_moved(surface, &self.runner);
+                for strip in self.light.strips() {
+                    letter(surface, block, at, *strip);
+                }
             }
             if let Some(text) = retold {
-                self.light.paint(surface, text);
+                self.light.paint(surface, text, &self.runner);
                 letter(surface, block, at, text);
             }
         }

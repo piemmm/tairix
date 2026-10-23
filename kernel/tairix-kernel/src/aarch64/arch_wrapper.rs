@@ -259,12 +259,8 @@ impl KernelArch for Aarch64BinArch {
         self.arch.ticks_to_ns(ticks)
     }
 
-    fn park_translation(&self) -> Option<fn() -> bool> {
-        // Re-installs the boot space's `TTBR0_EL1` root (published by the
-        // boot `switch()`) so no user root stays active after its task
-        // suspends — the invariant a dead task's page-table reclamation
-        // relies on.
-        Some(tairix_arch_aarch64::paging::park_kernel_root)
+    fn address_tags(&self) -> Option<&'static dyn tairix_arch_api::AddressTags> {
+        Some(&tairix_arch_aarch64::paging::TAGS)
     }
 
     fn wait_for_interrupt(&self) {

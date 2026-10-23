@@ -3,8 +3,10 @@
 //! Every pixel a translucent window shows goes through `blend_span` or
 //! `blend_solid_span`, a frosted one through `frost_region`'s line pass and
 //! column sums as well, and every row of a window is split into the runs it
-//! copies and blends by `leading_opaque` and `leading_translucent`, each
-//! resolved once per process to the fastest kernel the CPU admits. A kernel
+//! copies and blends by `leading_opaque` and `leading_translucent`; a fill
+//! and a glyph lay their rows through `cover_span`, a masked wash through its
+//! own row kernel, and a crossfade through `mix_span`, each resolved once per
+//! process to the fastest kernel the CPU admits. A kernel
 //! that disagreed with
 //! the portable arithmetic anywhere would show as a seam or a colour drift, or
 //! read past a row, so this resolves the public calls to this build's
@@ -22,8 +24,9 @@ use tairix_cpuops::{CpuFeature, CpuFeatureSet};
 use tairix_fuzzseed::Prng;
 use tairix_raster::accel::resolve;
 use tairix_raster::{
-    blend_solid_span, blend_span, box_blur, leading_opaque, leading_translucent, BlurScratch,
-    DitherRow, Pixel, Surface,
+    blend_solid_span, blend_span, box_blur, cover_span, div255, div255_biased, leading_opaque,
+    leading_translucent, mix_span, pointwise, BlurScratch, Color, Coverage, DitherRow, FillRule,
+    Pixel, ScanScratch, Surface, SUBPIXEL,
 };
 
 /// Rounds of each kernel per sweep of the loop below.
@@ -156,6 +159,138 @@ fn fuzz_blend(rng: &mut Prng) {
     );
 }
 
+fn fuzz_mix_and_cover(rng: &mut Prng) {
+    let len = rng.at_most(MAX_SPAN);
+    let longer = len + rng.below(3);
+    let (from, to, dst) = (row(rng, len), row(rng, longer), row(rng, len));
+    let (weight, dither, first_x) = (rng.edge_biased_u8(), dither(rng), rng.next_u32());
+    let mut kernel = dst.clone();
+    mix_span(&mut kernel, &from, &to, weight, dither, first_x);
+    let oracle: Vec<Pixel> = from
+        .iter()
+        .zip(&to)
+        .enumerate()
+        .map(|(index, (&from, &to))| {
+            let bias = dither.bias(column(first_x, index));
+            let (keep, take) = (u32::from(255 - weight), u32::from(weight));
+            let channel =
+                |a: u8, b: u8| div255_biased(u32::from(a) * keep + u32::from(b) * take, bias);
+            Pixel {
+                r: channel(from.r, to.r),
+                g: channel(from.g, to.g),
+                b: channel(from.b, to.b),
+                a: channel(from.a, to.a),
+            }
+        })
+        .collect();
+    assert_eq!(kernel, oracle, "mix of {len} at {first_x}, weight {weight}");
+
+    let colour = pixel(rng);
+    let coverage: Vec<u8> = (0..len + rng.below(3))
+        .map(|_| rng.edge_biased_u8())
+        .collect();
+    let mut kernel = dst.clone();
+    cover_span(&mut kernel, colour, &coverage, dither, first_x);
+    let mut oracle = dst;
+    for (index, (dst, &level)) in oracle.iter_mut().zip(&coverage).enumerate() {
+        if colour.a == 0 || level == 0 {
+            continue;
+        }
+        let bias = dither.bias(column(first_x, index));
+        *dst = colour
+            .scale_alpha_biased(level, bias)
+            .over_biased(*dst, bias);
+    }
+    assert_eq!(kernel, oracle, "cover of {len} at {first_x}");
+}
+
+/// A masked wash of a random triangle over a random picture, against each
+/// pixel laid at the alpha its coverage and its mask leave it.
+fn fuzz_wash(rng: &mut Prng) {
+    let (width, height) = (1 + rng.below(MAX_SPAN), 1 + rng.below(MAX_SIDE));
+    let (w, h) = (
+        u32::try_from(width).expect("small"),
+        u32::try_from(height).expect("small"),
+    );
+    let mut reach = |side: u32| {
+        let span = usize::try_from(side + 4).expect("small") * SUBPIXEL.unsigned_abs() as usize;
+        i32::try_from(rng.below(span)).expect("small") - 2 * SUBPIXEL
+    };
+    let triangle = [
+        (reach(w), reach(h)),
+        (reach(w), reach(h)),
+        (reach(w), reach(h)),
+    ];
+    let ground = row(rng, width * height);
+    let color = Color {
+        r: rng.next_u8(),
+        g: rng.next_u8(),
+        b: rng.next_u8(),
+        a: rng.edge_biased_u8(),
+    };
+    let salt = rng.next_u32();
+    let strength = |x: u32, y: u32| {
+        let mixed =
+            (x.wrapping_mul(0x9E37_79B9) ^ y.wrapping_mul(0x85EB_CA6B) ^ salt).rotate_left(7);
+        match mixed % 5 {
+            0 => 0,
+            1 => u8::MAX,
+            _ => u8::try_from(mixed >> 24).expect("a byte"),
+        }
+    };
+    let mut washed = Surface::new(w, h).expect("a small surface");
+    washed.pixels_mut().copy_from_slice(&ground);
+    washed.wash_polygon_subpixel(&triangle, color, pointwise(strength));
+
+    let mut oracle = ground;
+    let mut scratch = ScanScratch::new();
+    if color.a != 0 {
+        if let Some(mut rows) = scratch.coverage_rows(
+            &[triangle],
+            SUBPIXEL.unsigned_abs(),
+            FillRule::EvenOdd,
+            Coverage::Area,
+        ) {
+            let mut covered = vec![0u8; width];
+            for y in 0..h {
+                rows.row(y, 0, &mut covered);
+                for (x, &level) in (0u32..).zip(&covered) {
+                    let strength = strength(x, y);
+                    if level == 0 || strength == 0 {
+                        continue;
+                    }
+                    let alpha = div255(
+                        u32::from(color.a)
+                            * u32::from(div255(u32::from(level) * u32::from(strength))),
+                    );
+                    let bias = DitherRow::at(y).bias(x);
+                    let index = usize::try_from(y).expect("small") * width
+                        + usize::try_from(x).expect("small");
+                    let under = oracle[index];
+                    let channel = |ink: u8, under: u8| {
+                        div255_biased(
+                            u32::from(ink) * u32::from(alpha)
+                                + u32::from(under) * u32::from(255 - alpha),
+                            bias,
+                        )
+                    };
+                    oracle[index] = Pixel {
+                        r: channel(color.r, under.r),
+                        g: channel(color.g, under.g),
+                        b: channel(color.b, under.b),
+                        a: channel(u8::MAX, under.a),
+                    };
+                }
+            }
+        }
+    }
+    assert_eq!(
+        washed.pixels(),
+        &oracle[..],
+        "a wash of {triangle:?} over {width}x{height}"
+    );
+}
+
 fn fuzz_blur(rng: &mut Prng) {
     let width = 1 + rng.below(MAX_SIDE);
     let height = 1 + rng.below(MAX_SIDE);
@@ -258,6 +393,8 @@ fn the_resolved_kernels_agree_with_the_portable_arithmetic() {
     loop {
         for _ in 0..ROUNDS_PER_SWEEP {
             fuzz_blend(&mut rng);
+            fuzz_mix_and_cover(&mut rng);
+            fuzz_wash(&mut rng);
             fuzz_blur(&mut rng);
             fuzz_frost(&mut rng);
             fuzz_scan(&mut rng);

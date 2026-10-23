@@ -29,13 +29,13 @@ use crate::blur::{
     add_portable, line_portable, mean_portable, slide_portable, PixelSum, Reciprocal,
 };
 use crate::color::{
-    blend_solid_portable, blend_span_portable, leading_opaque_portable,
-    leading_translucent_portable, Pixel,
+    blend_solid_portable, blend_span_portable, cover_span_portable, leading_opaque_portable,
+    leading_translucent_portable, mix_span_portable, wash_weighted_portable, Color, Pixel,
 };
 use crate::dither::DitherRow;
 
-// The vector kernels are the only `unsafe` in the crate: intrinsics carry
-// it, and nothing else may.
+// Intrinsics carry `unsafe`; beside these kernels only the lent-memory view
+// of bytes as pixels and the column bands may.
 #[cfg(raster_neon)]
 #[allow(unsafe_code)]
 mod neon;
@@ -50,12 +50,67 @@ pub(crate) type SpanBlend = fn(&mut [Pixel], &[Pixel], u8, &[u32; DitherRow::PER
 /// One colour over a span, rounding as [`SpanBlend`] does.
 pub(crate) type SolidBlend = fn(&mut [Pixel], Pixel, u8, &[u32; DitherRow::PERIOD]);
 
-/// The span blend family's two entry points, chosen together so a solid run
-/// and the client run beside it can never round differently.
+/// One span dissolving into another: `dst[i]` takes `weight`/255 of the way
+/// from `from[i]` to `to[i]`, rounding at `tile[i % 8]`, for `i` below the
+/// shortest length.
+pub(crate) type SpanMix = fn(&mut [Pixel], &[Pixel], &[Pixel], u8, &[u32; DitherRow::PERIOD]);
+
+/// One colour over a span through a mask: [`SolidBlend`] with `coverage[i]`
+/// as pixel `i`'s factor, for `i` below the shorter length.
+pub(crate) type SolidCover = fn(&mut [Pixel], Pixel, &[u8], &[u32; DitherRow::PERIOD]);
+
+/// One straight colour washed over a span: `dst[i]` moves `weights[i]`/255 of
+/// the way to the colour made opaque, rounding at `tile[i % 8]`, for `i` below
+/// the shorter length.
+pub(crate) type SolidWash = fn(&mut [Pixel], Color, &[u8], &[u32; DitherRow::PERIOD]);
+
+/// Wide samples two pixels apart widened onto a span, as
+/// [`widen`](crate::wide::widen) describes.
+pub(crate) type SampleWiden = fn(&mut [Pixel], (u32, &[u64]), &[u64; 8]);
+
+/// The span blend family's entry points, chosen together so a solid run, a
+/// covered one and the client run beside them can never round differently.
 #[derive(Copy, Clone)]
 pub(crate) struct BlendOps {
     pub(crate) span: SpanBlend,
     pub(crate) solid: SolidBlend,
+    pub(crate) mix: SpanMix,
+    pub(crate) cover: SolidCover,
+    pub(crate) wash: SolidWash,
+    pub(crate) widen: SampleWiden,
+}
+
+/// Lay `dst`, a tail shorter than a candidate's `N`-pixel step, through `lay`
+/// as one whole step: its pixels and their `levels` padded with nought, which
+/// leaves a padding pixel as it was, and copied back. A short row — a glyph's,
+/// a thin shape's — then takes the packed path rather than a pixel at a time.
+#[cfg(any(raster_sse2, raster_neon))]
+fn padded<const N: usize>(
+    dst: &mut [Pixel],
+    levels: &[u8],
+    lay: impl FnOnce(&mut [[Pixel; N]], &[[u8; N]]),
+) {
+    let len = dst.len().min(levels.len()).min(N);
+    if len == 0 {
+        return;
+    }
+    let (mut pixels, mut padded_levels) = ([Pixel::TRANSPARENT; N], [0u8; N]);
+    if let (Some(into), Some(from), Some(levels_into), Some(levels_from)) = (
+        pixels.get_mut(..len),
+        dst.get(..len),
+        padded_levels.get_mut(..len),
+        levels.get(..len),
+    ) {
+        into.copy_from_slice(from);
+        levels_into.copy_from_slice(levels_from);
+    }
+    lay(
+        core::slice::from_mut(&mut pixels),
+        core::slice::from_ref(&padded_levels),
+    );
+    if let (Some(into), Some(from)) = (dst.get_mut(..len), pixels.get(..len)) {
+        into.copy_from_slice(from);
+    }
 }
 
 /// The span blend family's stable id, which its decisions name.
@@ -67,6 +122,10 @@ pub(crate) const BLEND_PORTABLE: &str = "raster-blend-portable";
 const PORTABLE_BLEND: BlendOps = BlendOps {
     span: blend_span_portable,
     solid: blend_solid_portable,
+    mix: mix_span_portable,
+    cover: cover_span_portable,
+    wash: wash_weighted_portable,
+    widen: crate::wide::widen_portable,
 };
 
 #[cfg(raster_sse2)]
@@ -76,6 +135,10 @@ const BLEND_CANDIDATES: &[Candidate<BlendOps>] = &[Candidate {
     impl_: BlendOps {
         span: sse2::blend_span,
         solid: sse2::blend_solid,
+        mix: sse2::mix_span,
+        cover: sse2::cover_span,
+        wash: sse2::wash_weighted,
+        widen: sse2::widen_samples,
     },
 }];
 #[cfg(raster_neon)]
@@ -85,6 +148,10 @@ const BLEND_CANDIDATES: &[Candidate<BlendOps>] = &[Candidate {
     impl_: BlendOps {
         span: neon::blend_span,
         solid: neon::blend_solid,
+        mix: neon::mix_span,
+        cover: neon::cover_span,
+        wash: neon::wash_weighted,
+        widen: neon::widen_samples,
     },
 }];
 #[cfg(not(any(raster_sse2, raster_neon)))]
@@ -322,11 +389,17 @@ fn by_priority<T: Copy, In, Out: PartialEq>(
 /// widest step, so each crosses its whole-step loop into its tail.
 const VERIFY_SPAN: usize = 37;
 
-/// What a verify case blends: a second span, or one colour.
+/// What a verify case blends: a second span, one colour, a dissolve into a
+/// third span, one colour through a mask, or one straight colour washed at a
+/// weight a pixel.
 #[derive(Copy, Clone)]
 enum Source {
     Span,
     Solid,
+    Mix,
+    Cover,
+    Wash,
+    Widen,
 }
 
 /// One self-verify case: its source kind, how many pixels it blends of the
@@ -341,9 +414,10 @@ struct BlendCase {
     seed: u32,
 }
 
-/// Every length across a step boundary, the factor's fast path and its
-/// extremes, and two dither phases, for both sources.
-fn blend_cases() -> [BlendCase; 2 * 7 * 4 * 2] {
+/// Every length across a step boundary, and two dither phases, for every
+/// source; the factor's fast path and its extremes for the sources that take
+/// one, and fresh pixels for those that do not.
+fn blend_cases() -> [BlendCase; 6 * 7 * 4 * 2] {
     const LENS: [usize; 7] = [0, 1, 7, 8, 16, 17, VERIFY_SPAN];
     const FACTORS: [u8; 4] = [255, 200, 1, 0];
     const PHASES: [u32; 2] = [0, 5];
@@ -353,9 +427,17 @@ fn blend_cases() -> [BlendCase; 2 * 7 * 4 * 2] {
         factor: 0,
         phase: 0,
         seed: 0,
-    }; 2 * 7 * 4 * 2];
+    }; 6 * 7 * 4 * 2];
     let mut at = 0;
-    for source in [Source::Span, Source::Solid] {
+    let sources = [
+        Source::Span,
+        Source::Solid,
+        Source::Mix,
+        Source::Cover,
+        Source::Wash,
+        Source::Widen,
+    ];
+    for source in sources {
         for len in LENS {
             for factor in FACTORS {
                 for phase in PHASES {
@@ -418,8 +500,65 @@ fn blend_run(ops: BlendOps, case: &BlendCase) -> [Pixel; VERIFY_SPAN] {
             let colour = pixel(case.seed, 2);
             (ops.solid)(blended, colour, case.factor, &tile);
         }
+        Source::Mix => {
+            let (mut from, mut to) = (
+                [Pixel::TRANSPARENT; VERIFY_SPAN],
+                [Pixel::TRANSPARENT; VERIFY_SPAN],
+            );
+            for (index, (from, to)) in from.iter_mut().zip(&mut to).enumerate() {
+                *from = pixel(case.seed, index);
+                *to = pixel(case.seed ^ 0x3A3, index);
+            }
+            (ops.mix)(blended, &from, &to, case.factor, &tile);
+        }
+        Source::Cover => {
+            let colour = pixel(case.seed, 2);
+            let mut coverage = [0u8; VERIFY_SPAN];
+            for (index, level) in coverage.iter_mut().enumerate() {
+                *level = coverage_level(case.seed, index);
+            }
+            (ops.cover)(blended, colour, &coverage, &tile);
+        }
+        Source::Wash => {
+            let [r, g, b, a] = bytes(case.seed, 3);
+            let mut weights = [0u8; VERIFY_SPAN];
+            for (index, weight) in weights.iter_mut().enumerate() {
+                *weight = coverage_level(case.seed ^ 0x5EED, index);
+            }
+            (ops.wash)(blended, Color { r, g, b, a }, &weights, &tile);
+        }
+        Source::Widen => {
+            let (start, samples, biases) =
+                widen_inputs::<{ VERIFY_SPAN / 2 + 2 }>(case.seed, case.phase);
+            (ops.widen)(blended, (start, &samples), &biases);
+        }
     }
     dst
+}
+
+/// A widen's inputs from `seed`: the start column `phase` names, `N` wide
+/// samples, every lane and its bias below 65 536, and the dither's biases
+/// spread across the lanes.
+fn widen_inputs<const N: usize>(seed: u32, phase: u32) -> (u32, [u64; N], [u64; 8]) {
+    let mut samples = [0u64; N];
+    for (index, sample) in samples.iter_mut().enumerate() {
+        let [r, g, b, fraction] = bytes(seed ^ 0x51DE, index);
+        let lane = |level: u8| u64::from(level.min(254)) << 8 | u64::from(fraction);
+        *sample = lane(r) | lane(g) << 16 | lane(b) << 32;
+    }
+    let tile = DitherRow::at(seed).tile_at(0);
+    let biases = tile.map(|bias| u64::from(bias) * crate::wide::LANE_ONES);
+    (phase, samples, biases)
+}
+
+/// A deterministic coverage level: every fourth uncovered and every fourth
+/// full, the two a mask treats specially; the rest arbitrary.
+fn coverage_level(seed: u32, index: usize) -> u8 {
+    match index % 4 {
+        0 => 0,
+        1 => u8::MAX,
+        _ => bytes(seed ^ 0xC0FE, index)[0],
+    }
 }
 
 fn blend_reference(case: &BlendCase) -> [Pixel; VERIFY_SPAN] {
@@ -623,10 +762,11 @@ fn scan_reference(case: &ScanCase) -> (usize, usize) {
 /// it, and a guest vertical on each architecture with a candidate holds that
 /// candidate to it there, so a candidate the host cannot execute is still
 /// proved bit-identical where it runs.
-pub const CONFORMANCE_DIGEST: u64 = 17_225_447_757_276_372_195;
+pub const CONFORMANCE_DIGEST: u64 = 5_120_574_275_861_883_754;
 
-/// A fixed workload through the families in force — spans blended at every
-/// length, factor and phase; lines blurred whole and in part; column sums
+/// A fixed workload through the families in force — spans blended, laid,
+/// dissolved, covered, washed and widened at every length, factor and phase; lines blurred
+/// whole and in part; column sums
 /// slid and averaged; spans scanned for their leading runs — folded into one
 /// number.
 #[cfg(any(test, feature = "conformance"))]
@@ -637,71 +777,136 @@ pub fn conformance_digest() -> u64 {
 
 #[cfg(any(test, feature = "conformance"))]
 fn digest_with(blend: BlendOps, blur: BlurOps, scan: ScanOps) -> u64 {
-    use tairix_hash::FastHash;
+    scan_digest(scan, blur_digest(blur, blend_digest(blend, 0)))
+}
 
-    const LONGEST: usize = 160;
-    let fold = |digest: u64, pixels: &[Pixel]| {
-        let mut bytes = [0u8; 4 * LONGEST];
-        for (slot, pixel) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(pixels) {
-            *slot = [pixel.r, pixel.g, pixel.b, pixel.a];
-        }
-        FastHash::hash_bytes(digest, bytes.get(..4 * pixels.len()).unwrap_or_default())
-    };
-    let row = |seed: u32| {
-        let mut row = [Pixel::TRANSPARENT; LONGEST];
-        for (index, slot) in row.iter_mut().enumerate() {
-            *slot = pixel(seed, index);
-        }
-        row
-    };
-    let mut digest = 0;
+/// The longest span the conformance workload walks.
+#[cfg(any(test, feature = "conformance"))]
+const DIGEST_SPAN: usize = 160;
+
+/// `digest` with `pixels`' bytes folded in.
+#[cfg(any(test, feature = "conformance"))]
+fn fold_pixels(digest: u64, pixels: &[Pixel]) -> u64 {
+    let mut bytes = [0u8; 4 * DIGEST_SPAN];
+    for (slot, pixel) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(pixels) {
+        *slot = [pixel.r, pixel.g, pixel.b, pixel.a];
+    }
+    tairix_hash::FastHash::hash_bytes(digest, bytes.get(..4 * pixels.len()).unwrap_or_default())
+}
+
+/// A span of the workload's pixels drawn from `seed`.
+#[cfg(any(test, feature = "conformance"))]
+fn digest_row(seed: u32) -> [Pixel; DIGEST_SPAN] {
+    let mut row = [Pixel::TRANSPARENT; DIGEST_SPAN];
+    for (index, slot) in row.iter_mut().enumerate() {
+        *slot = pixel(seed, index);
+    }
+    row
+}
+
+/// `digest` with the blend family's workload folded in: spans blended, laid,
+/// dissolved, covered, washed and widened at every length, factor and phase.
+#[cfg(any(test, feature = "conformance"))]
+fn blend_digest(blend: BlendOps, mut digest: u64) -> u64 {
     for round in 0u32..96 {
-        let len = usize::try_from(round * 7 + 3).unwrap_or(0) % LONGEST;
+        let len = usize::try_from(round * 7 + 3).unwrap_or(0) % DIGEST_SPAN;
         let factor = [255, 200, 128, 1, 0][usize::try_from(round % 5).unwrap_or(0)];
         let tile = DitherRow::at(round).tile_at(round * 3);
-        let source = row(round);
-        let mut target = row(round ^ 0x5A5A);
+        let source = digest_row(round);
+        let mut target = digest_row(round ^ 0x5A5A);
         (blend.span)(
             target.get_mut(..len).unwrap_or_default(),
             &source,
             factor,
             &tile,
         );
-        digest = fold(digest, &target);
+        digest = fold_pixels(digest, &target);
         (blend.solid)(
             target.get_mut(..len).unwrap_or_default(),
             pixel(round, 1),
             factor,
             &tile,
         );
-        digest = fold(digest, &target);
+        digest = fold_pixels(digest, &target);
+        (blend.mix)(
+            target.get_mut(..len).unwrap_or_default(),
+            &source,
+            &digest_row(round ^ 0x6C6C),
+            factor,
+            &tile,
+        );
+        digest = fold_pixels(digest, &target);
+        let mut coverage = [0u8; DIGEST_SPAN];
+        for (index, level) in coverage.iter_mut().enumerate() {
+            *level = coverage_level(round, index);
+        }
+        (blend.cover)(
+            target.get_mut(..len).unwrap_or_default(),
+            pixel(round, 3),
+            &coverage,
+            &tile,
+        );
+        digest = fold_pixels(digest, &target);
+        let [r, g, b, a] = bytes(round, 5);
+        (blend.wash)(
+            target.get_mut(..len).unwrap_or_default(),
+            Color { r, g, b, a },
+            &coverage,
+            &tile,
+        );
+        digest = fold_pixels(digest, &target);
+        let (start, samples, biases) = widen_inputs::<{ DIGEST_SPAN / 2 + 2 }>(round, round % 9);
+        (blend.widen)(
+            target.get_mut(..len).unwrap_or_default(),
+            (start, &samples),
+            &biases,
+        );
+        digest = fold_pixels(digest, &target);
     }
+    digest
+}
+
+/// `digest` with the blur family's workload folded in: lines blurred whole
+/// and in part, column sums slid and averaged.
+#[cfg(any(test, feature = "conformance"))]
+fn blur_digest(blur: BlurOps, mut digest: u64) -> u64 {
     for (round, radius) in (0u32..).zip([1usize, 2, 5, 12, 43, 127, 128, 40_000]) {
         let recip = Reciprocal::new(radius * 2 + 1);
-        let source = row(round ^ 0xB1);
-        for out in [0..LONGEST, 7..90, 120..LONGEST] {
-            let mut target = row(round ^ 0x77);
+        let source = digest_row(round ^ 0xB1);
+        for out in [0..DIGEST_SPAN, 7..90, 120..DIGEST_SPAN] {
+            let mut target = digest_row(round ^ 0x77);
             let written = target.get_mut(..out.len()).unwrap_or_default();
-            (blur.line)(&source, written, LONGEST, radius, recip, out);
-            digest = fold(digest, &target);
+            (blur.line)(&source, written, DIGEST_SPAN, radius, recip, out);
+            digest = fold_pixels(digest, &target);
         }
-        let mut sums = [PixelSum::default(); LONGEST];
+        let mut sums = [PixelSum::default(); DIGEST_SPAN];
         let rows = (radius * 2 + 1).min(5);
         for at in 0..rows {
             (blur.add)(
                 &mut sums,
-                &row(round ^ u32::try_from(at).unwrap_or(0) ^ 0xC3),
+                &digest_row(round ^ u32::try_from(at).unwrap_or(0) ^ 0xC3),
             );
         }
-        (blur.slide)(&mut sums, &row(round ^ 0xE5), &row(round ^ 0xC3));
-        let mut means = [Pixel::TRANSPARENT; LONGEST];
+        (blur.slide)(
+            &mut sums,
+            &digest_row(round ^ 0xE5),
+            &digest_row(round ^ 0xC3),
+        );
+        let mut means = [Pixel::TRANSPARENT; DIGEST_SPAN];
         (blur.mean)(&mut means, &sums, recip);
-        digest = fold(digest, &means);
+        digest = fold_pixels(digest, &means);
     }
+    digest
+}
+
+/// `digest` with the scan family's workload folded in: spans scanned for their
+/// leading runs, broken at every place.
+#[cfg(any(test, feature = "conformance"))]
+fn scan_digest(scan: ScanOps, mut digest: u64) -> u64 {
     for round in 0u32..64 {
-        let breaks = usize::try_from(round * 5 + 1).unwrap_or(0) % LONGEST;
-        let mut opaque = row(round ^ 0x3C);
-        let mut translucent = row(round ^ 0x96);
+        let breaks = usize::try_from(round * 5 + 1).unwrap_or(0) % DIGEST_SPAN;
+        let mut opaque = digest_row(round ^ 0x3C);
+        let mut translucent = digest_row(round ^ 0x96);
         for (index, (opaque, translucent)) in opaque.iter_mut().zip(&mut translucent).enumerate() {
             let broken = index == breaks;
             opaque.a = if broken { 0 } else { u8::MAX };
@@ -713,7 +918,7 @@ fn digest_with(blend: BlendOps, blur: BlurOps, scan: ScanOps) -> u64 {
         }
         for count in [(scan.opaque)(&opaque), (scan.translucent)(&translucent)] {
             let count = u64::try_from(count).unwrap_or(u64::MAX);
-            digest = FastHash::hash_bytes(digest, &count.to_le_bytes());
+            digest = tairix_hash::FastHash::hash_bytes(digest, &count.to_le_bytes());
         }
     }
     digest

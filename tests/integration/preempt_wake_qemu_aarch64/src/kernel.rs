@@ -8,6 +8,7 @@
 use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use tairix_arch_api::AddressTag;
 
 use alloc::sync::Arc;
 
@@ -334,11 +335,11 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // a non-timer interrupt taken on the first EL0 instruction — is the only
     // thing that can drive the return-to-EL0 preempt point.
     let cs = ContextSwitchHal::new();
-    let pre_resume = move |_stack_top: u64| {
+    let pre_resume = move |_stack_top: u64, tag: AddressTag| {
         // SAFETY: the MMU is enabled and `root_phys` is the L1 root of a space
         // that identity-maps the low kernel window the running kernel executes
         // from — exactly `activate_user_root`'s contract.
-        unsafe { activate_user_root(root_phys) };
+        unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // Post a self-directed reschedule SGI while IRQs are masked at EL1: it

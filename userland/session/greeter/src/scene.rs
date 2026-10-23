@@ -6,6 +6,7 @@
 
 use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::{Rect, Region};
+use tairix_parallel::JobRunner;
 use tairix_raster::Surface;
 use tairix_ribbon::Light;
 use tairix_theme::motion::SceneClock;
@@ -23,19 +24,25 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// The ribbon across `screen`, kept clear of `clear`, painted whole as it
-    /// stands at `now_ns` on a display refreshing at `refresh` and holding
-    /// still when `still`; `None` when the heap will not give it.
+    /// The ribbon across `screen`, kept clear of `clear`, painted whole across
+    /// `runner` as it stands at `now_ns` on a display refreshing at `refresh`
+    /// and holding still when `still`; `None` when the heap will not give it.
     #[must_use]
     pub fn new(
         screen: Rect,
         clear: Rect,
         (now_ns, refresh): (u64, RefreshRate),
         still: bool,
+        runner: &dyn JobRunner,
     ) -> Option<Self> {
         let mut light = Light::new((screen.width, screen.height), clear, 0.0)?;
+        light.spread_over(runner);
         let mut layer = Surface::new(screen.width, screen.height)?;
-        light.paint(&mut layer, Rect::new(0, 0, screen.width, screen.height));
+        light.paint(
+            &mut layer,
+            Rect::new(0, 0, screen.width, screen.height),
+            runner,
+        );
         Some(Self {
             light,
             motion: SceneClock::new(now_ns, still, refresh),
@@ -53,9 +60,10 @@ impl Scene {
     }
 
     /// Move the ribbon on to `now_ns` on a display now refreshing at
-    /// `refresh` if a frame is due, repainting what it moved, and answer
-    /// whether anything did; [`damage`](Self::damage) then holds those pixels.
-    pub fn advance(&mut self, now_ns: u64, refresh: RefreshRate) -> bool {
+    /// `refresh` if a frame is due, repainting what it moved across `runner`,
+    /// and answer whether anything did; [`damage`](Self::damage) then holds
+    /// those pixels.
+    pub fn advance(&mut self, now_ns: u64, refresh: RefreshRate, runner: &dyn JobRunner) -> bool {
         if !self.motion.frame_due(now_ns) {
             return false;
         }
@@ -64,7 +72,7 @@ impl Scene {
         if !self.light.step(t, self.clear, &mut self.damage) {
             return false;
         }
-        self.light.paint_moved(&mut self.layer, |_, _| {});
+        self.light.paint_moved(&mut self.layer, runner);
         !self.damage.is_empty()
     }
 

@@ -170,6 +170,7 @@ fn screen_in(accounts: Vec<AccountTile>, authority: Authority, theme: Theme) -> 
         ),
         accounts,
         Inline::new(authority),
+        alloc::boxed::Box::new(tairix_parallel::Serial),
     )
 }
 

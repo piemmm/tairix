@@ -41,6 +41,7 @@ use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
+use tairix_arch_api::AddressTag;
 use tairix_arch_riscv64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
 use tairix_arch_riscv64::userentry::USER_MODE;
 use tairix_kernel_core::{
@@ -307,13 +308,14 @@ impl ArchImageBuilder for RiscvProcessSpawn {
         // its own `satp` root. It captures only the `u64` root, so it is
         // `Send`. The kernel-stack top it is handed is unused on riscv64
         // (`sscratch` is per-task hardware state armed by `enter_user`).
-        let pre_resume: ProcessResume = Arc::new(move |_stack_top: u64, _tls_base: u64| {
-            // SAFETY: paging is enabled and `child_root_phys` is the Sv39 root
-            // of the child's space, which identity-maps the low kernel window
-            // the running kernel executes from — exactly `activate_user_root`'s
-            // contract.
-            unsafe { activate_user_root(child_root_phys) };
-        });
+        let pre_resume: ProcessResume =
+            Arc::new(move |_stack_top: u64, _tls_base: u64, tag: AddressTag| {
+                // SAFETY: paging is enabled and `child_root_phys` is the Sv39 root
+                // of the child's space, which identity-maps the low kernel window
+                // the running kernel executes from — exactly `activate_user_root`'s
+                // contract.
+                unsafe { activate_user_root(child_root_phys, tag) };
+            });
 
         // Freeze the just-built mappings into the registry-storable,
         // `Send + Sync` snapshot, then hand the child's threads the same arch

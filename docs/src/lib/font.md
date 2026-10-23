@@ -322,7 +322,10 @@ The cache is installed rather than built in place — sizing it needs the RAM
 figure and governing it needs the process's pressure gauge and audit sink. A
 program that links `tairix-font/rt` gets one lazily on its first draw; a host
 test installs its own through `set_glyph_cache`, the same seam
-`set_font_transport` uses. Until one is installed, and whenever the RAM
+`set_font_transport` uses. A program that can read neither the RAM figure nor
+the kernel's randomness — a sandboxed screensaver — is told both by its host
+and installs its caches with `install_caches`, sized from the machine's memory
+as anywhere else and never past the share of its own memory it names. Until one is installed, and whenever the RAM
 reading is unavailable (a zero total yields a zero budget), every glyph is
 fetched and served without being retained: correct, merely one call per
 glyph.

@@ -18,7 +18,7 @@ use core::ops::Range;
 
 use tairix_geometry::Rect;
 use tairix_inline::ArrayVec;
-use tairix_raster::{Canvas, Color, ScanScratch, SUBPIXEL};
+use tairix_raster::{pointwise, Canvas, Color, ScanScratch, SUBPIXEL};
 use tairix_util::space::{Frame, Pose, Vec3};
 use tairix_util::{fallible, mathf};
 
@@ -788,10 +788,10 @@ impl Display {
                 } => canvas.wash_polygon_subpixel(
                     polygon,
                     shape.colour,
-                    |x, y| {
+                    pointwise(|x, y| {
                         let at = (f64::from(x) + 0.5, f64::from(y) + 0.5);
                         glow_strength(at, base, axis, length, radius)
-                    },
+                    }),
                     scratch,
                 ),
             }

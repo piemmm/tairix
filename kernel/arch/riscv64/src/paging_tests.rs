@@ -45,9 +45,70 @@ fn vpn_index_splits_the_virtual_address() {
 
 #[test]
 fn satp_selects_sv39_mode_and_root_ppn() {
-    let satp = satp_sv39(0x8000_0000);
+    let satp = satp_sv39(0x8000_0000, 0);
     assert_eq!(satp >> SATP_MODE_SHIFT, SATP_MODE_SV39);
-    assert_eq!(satp & 0x0FFF_FFFF_FFFF, 0x8000_0000 >> 12);
+    assert_eq!(satp & PPN_MASK, 0x8000_0000 >> 12);
+}
+
+/// The ASID lies between the mode and the root's page number, touching
+/// neither, and every tag loads a distinct `satp`.
+#[test]
+fn satp_carries_the_asid_between_the_mode_and_the_root() {
+    let satp = satp_sv39(0x8000_0000, 0xABCD);
+    assert_eq!(satp >> SATP_MODE_SHIFT, SATP_MODE_SV39);
+    assert_eq!((satp >> 44) & 0xFFFF, 0xABCD);
+    assert_eq!(satp & PPN_MASK, 0x8000_0000 >> 12);
+    assert_eq!(
+        satp_sv39(0x8000_0000, u16::MAX) >> SATP_MODE_SHIFT,
+        SATP_MODE_SV39
+    );
+}
+
+/// A hart keeps only the ASID bits it implements, so the readback of an
+/// all-ones write counts them; a hart keeping none tags nothing.
+#[test]
+fn the_asid_probe_counts_the_bits_a_hart_keeps() {
+    let mode = SATP_MODE_SV39 << SATP_MODE_SHIFT;
+    let root = 0x8000_0000 >> 12;
+    assert_eq!(asid_bits(mode | root), 0);
+    assert_eq!(asid_bits(mode | root | (0xFFFF << 44)), 16);
+    assert_eq!(asid_bits(mode | root | (0x01FF << 44)), 9);
+}
+
+/// Every hart tags by the narrowest: a wider hart probing later never raises
+/// the width, and one keeping no ASID bit, or showing none, stops all tagging.
+#[test]
+fn the_narrowest_hart_sets_how_many_tags_every_hart_gives_out() {
+    let keeps = |bits: u32| (SATP_MODE_SV39 << SATP_MODE_SHIFT) | (((1u64 << bits) - 1) << 44);
+    let width = AsidWidth::new();
+    assert_eq!(width.user_tags(), 0, "no hart probed");
+    width.note(keeps(16));
+    assert_eq!(width.user_tags(), u16::MAX);
+    width.note(keeps(9));
+    assert_eq!(width.user_tags(), 511);
+    width.note(keeps(16));
+    assert_eq!(width.user_tags(), 511, "a wider hart does not widen it");
+    width.note(keeps(0));
+    assert_eq!(width.user_tags(), 0, "a hart keeping none tags nothing");
+    let shown = AsidWidth::new();
+    shown.note(keeps(16));
+    shown.note_unprobed();
+    assert_eq!(
+        shown.user_tags(),
+        0,
+        "a hart that never probed tags nothing"
+    );
+}
+
+/// The port's tags hold the conformance vertical, and leave a hart that left
+/// a space to catch up on its return: its remote fences reach only the harts
+/// running the space.
+#[test]
+fn the_ports_tags_hold_the_conformance_vertical() {
+    let widest = u16::try_from((1_u32 << SATP_ASID_BITS) - 1).expect("sixteen bits");
+    tairix_arch_api::tags_conformance::run_all(&TAGS, widest, 0x8000_0000, 0x8100_0000);
+    assert!(!TAGS.invalidation_reaches_every_tag());
+    assert_eq!(TAGS.user_tags(), 0, "no hart probed on the host");
 }
 
 #[test]
@@ -484,7 +545,9 @@ fn a_pte_the_source_cannot_reach_fails_the_walk_closed() {
     );
     // SAFETY: `root_phys` is the live root table of this exclusively-owned
     // space, drawn from `POOL`.
-    assert!(!unsafe { set_accessed_flag_in_root(&POOL, space.root_phys(), va, AccessKind::Load) });
+    assert!(!unsafe {
+        retry_granted_in_root(&POOL, space.root_phys(), va, user(AccessKind::Load))
+    });
     // And a fresh map over the unreachable branch is refused rather than
     // walked into: `leaf_present` reads it as absent, then `ensure_child`
     // refuses the PTE it cannot recover.
@@ -556,7 +619,9 @@ fn test_and_clear_accessed_drives_the_clock_round_trip() {
     // on the leaf.
     // SAFETY: `root_phys` is the live, host-identity-addressed root table
     // of this exclusively-owned space.
-    assert!(unsafe { set_accessed_flag_in_root(pool, space.root_phys(), va, AccessKind::Load) });
+    assert!(unsafe {
+        retry_granted_in_root(pool, space.root_phys(), va, kernel(AccessKind::Load))
+    });
 
     // Probe 3: the page reads accessed again — the full clock/second-chance
     // transition, end to end.
@@ -566,8 +631,26 @@ fn test_and_clear_accessed_drives_the_clock_round_trip() {
     );
 }
 
+/// `kind` from U-mode.
+const fn user(kind: AccessKind) -> FaultingAccess {
+    FaultingAccess {
+        kind,
+        from_user: true,
+        user_memory: false,
+    }
+}
+
+/// `kind` from S-mode with user memory in reach.
+const fn kernel(kind: AccessKind) -> FaultingAccess {
+    FaultingAccess {
+        kind,
+        from_user: false,
+        user_memory: true,
+    }
+}
+
 #[test]
-fn set_accessed_flag_in_root_respects_permission_and_clears() {
+fn a_fault_is_retried_only_where_the_leaf_grants_the_access() {
     use tairix_arch_api::mmu::{self, PageFlags};
     static POOL: PageTablePool = PageTablePool::new();
     let pool = &POOL;
@@ -583,40 +666,78 @@ fn set_accessed_flag_in_root_respects_permission_and_clears() {
     )
     .expect("map ro page");
     let root = space.root_phys();
+    let retry = |va: u64, access: FaultingAccess| {
+        // SAFETY: `root` is the live, host-identity-addressed root table of
+        // this exclusively-owned space.
+        unsafe { retry_granted_in_root(pool, root, va, access) }
+    };
 
-    // An unmapped address: nothing to set (fail closed).
-    // SAFETY: `root` is the live, host-identity-addressed root table.
-    assert!(!unsafe {
-        set_accessed_flag_in_root(pool, root, va + PAGE_SIZE as u64, AccessKind::Load)
-    });
+    assert!(
+        !retry(va + PAGE_SIZE as u64, user(AccessKind::Load)),
+        "unmapped"
+    );
+    assert!(
+        !retry(va, user(AccessKind::Store)),
+        "a store to a read-only page"
+    );
+    assert!(
+        !retry(va, user(AccessKind::Instruction)),
+        "a fetch from data"
+    );
+    assert!(
+        !retry(va | !((1 << 38) - 1) & !(1 << 38), user(AccessKind::Load)),
+        "a non-canonical alias of the page"
+    );
+    let reachless = FaultingAccess {
+        user_memory: false,
+        ..kernel(AccessKind::Load)
+    };
+    assert!(
+        !retry(va, reachless),
+        "the kernel with user memory out of reach"
+    );
 
-    // A store to a read-only leaf is a genuine permission fault, not an
-    // A/D update: the WRITE permission is absent, so nothing is set.
-    // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Store) });
-    // An instruction fetch from a non-executable leaf likewise.
-    // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Instruction) });
-
-    // The eager map already set A, so a load "fault" finds nothing to do.
-    // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Load) });
-
-    // Clear A, then a permitted load access sets it once; a second finds
-    // it already set.
+    // Clear A: a permitted load sets it back and is retried.
     assert_eq!(
         mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
         Ok(true)
     );
-    // SAFETY: as above.
-    assert!(unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Load) });
-    // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Load) });
+    assert!(retry(va, user(AccessKind::Load)));
     assert_ne!(
         leaf_pte(pool, &space, va).expect("mapped").0 & flags::ACCESSED,
         0,
         "A must be set after the fault fix-up"
     );
+    // With A already set the fault came from a translation the hart cached
+    // before the page was made valid: still retried, never fatal.
+    assert!(retry(va, user(AccessKind::Load)));
+    assert!(
+        retry(va, kernel(AccessKind::Load)),
+        "the kernel reaching user memory"
+    );
+}
+
+#[test]
+fn a_user_access_to_a_kernel_page_is_never_retried() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
+    let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
+    let va = 101u64 << 30;
+    mmu::AddressSpace::map_page(
+        &mut space,
+        va,
+        0x8300_0000,
+        PageFlags::READ | PageFlags::WRITE,
+    )
+    .expect("map a kernel page");
+    let root = space.root_phys();
+    // SAFETY: `root` is the live, host-identity-addressed root table of this
+    // exclusively-owned space.
+    let retry = |access| unsafe { retry_granted_in_root(pool, root, va, access) };
+    assert!(!retry(user(AccessKind::Load)), "the user bit is clear");
+    assert!(!retry(user(AccessKind::Store)));
+    assert!(retry(kernel(AccessKind::Store)), "the kernel's own page");
 }
 
 #[test]
